@@ -49,8 +49,14 @@ class LTLFormula:
             args = self.predicate[pred_name]
             return f"{pred_name}({', '.join(args)})"
 
+        if self.operator == TemporalOperator.UNTIL and len(self.sub_formulas) == 2:
+            # Until operator: holding(a) U clear(b)
+            left = self.sub_formulas[0].to_string()
+            right = self.sub_formulas[1].to_string()
+            return f"({left} U {right})"
+
         if self.operator and len(self.sub_formulas) == 1:
-            # Temporal operator: F(on(a, b))
+            # Temporal operator: F(on(a, b)), G(clear(c)), X(holding(a))
             inner = self.sub_formulas[0].to_string()
             return f"{self.operator.value}({inner})"
 
@@ -167,15 +173,35 @@ Predicates:
 - handempty: robot arm is empty
 
 LTL Temporal Operators:
-- F (Finally/Eventually): ◇ - the property will be true at some point
-- G (Globally/Always): □ - the property is always true
-- X (Next): the property is true in the next state
+- F (Finally/Eventually): ◇ - the property will be true at some point in the future
+- G (Globally/Always): □ - the property is always true throughout execution
+- X (Next): ○ - the property is true in the immediate next state
+- U (Until): - property P holds until property Q becomes true
 
 Your task: Convert natural language to LTL formulas.
 
-For "Put A on B", you should generate:
-- F(on(a, b)): Eventually a is on b
-- F(clear(a)): Eventually a is clear
+**Examples:**
+
+1. "Put A on B"
+   → F(on(a, b)): Eventually a is on b
+   → F(clear(a)): Eventually a is clear
+
+2. "Put A on B while keeping C clear"
+   → F(on(a, b)): Eventually a is on b
+   → G(clear(c)): C is always clear
+
+3. "First pick up A, then immediately place it on B"
+   → F(holding(a)): Eventually holding a
+   → X(on(a, b)): In the next state, a is on b
+
+4. "Keep holding A until B is clear"
+   → holding(a) U clear(b): Hold a until b is clear
+
+**Natural Language Patterns:**
+- "always", "throughout", "keep", "maintain" → G (Globally)
+- "eventually", "finally", "at some point" → F (Finally)
+- "next", "immediately after", "then" → X (Next)
+- "until", "while waiting for" → U (Until)
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {
@@ -195,10 +221,18 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
     },
     {
       "type": "temporal",
-      "operator": "F",
-      "formula": {"clear": ["a"]}
+      "operator": "G",
+      "formula": {"clear": ["c"]}
     }
   ]
+}
+
+For U (Until) operator, use this format:
+{
+  "type": "until",
+  "operator": "U",
+  "left_formula": {"holding": ["a"]},
+  "right_formula": {"clear": ["b"]}
 }"""
 
         user_prompt = f"Natural language instruction: {nl_instruction}"
@@ -255,6 +289,38 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
                     operator=operator,
                     predicate=None,
                     sub_formulas=[atomic],
+                    logical_op=None
+                )
+
+                spec.add_formula(formula)
+
+            elif ltl_def["type"] == "until":
+                # U (Until) operator has two sub-formulas
+                operator = TemporalOperator.UNTIL
+                left_predicate = ltl_def["left_formula"]
+                right_predicate = ltl_def["right_formula"]
+
+                # Create left atomic formula
+                left_atomic = LTLFormula(
+                    operator=None,
+                    predicate=left_predicate,
+                    sub_formulas=[],
+                    logical_op=None
+                )
+
+                # Create right atomic formula
+                right_atomic = LTLFormula(
+                    operator=None,
+                    predicate=right_predicate,
+                    sub_formulas=[],
+                    logical_op=None
+                )
+
+                # Wrap in Until operator
+                formula = LTLFormula(
+                    operator=operator,
+                    predicate=None,
+                    sub_formulas=[left_atomic, right_atomic],
                     logical_op=None
                 )
 

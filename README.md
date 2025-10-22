@@ -266,12 +266,12 @@ Plan (2 actions):
 
 ### Temporal Operators
 
-| Operator | Name | Meaning | Example | PDDL Mapping |
-|----------|------|---------|---------|--------------|
-| **F** | Finally/Eventually | True at some future time | `F(on(a, b))` | `:goal (on a b)` |
-| **G** | Globally/Always | True at all times | `G(clear(c))` | Trajectory constraint |
-| **X** | Next | True in next state | `X(holding(a))` | Not yet implemented |
-| **U** | Until | True until another is true | `holding(a) U on(a,b)` | Not yet implemented |
+| Operator | Name | Meaning | Example | Planning Support |
+|----------|------|---------|---------|------------------|
+| **F** | Finally/Eventually | True at some future time | `F(on(a, b))` | Classical + LLM planner |
+| **G** | Globally/Always | True at all times | `G(clear(c))` | LLM planner only |
+| **X** | Next | True in next state | `X(holding(a))` | LLM planner only |
+| **U** | Until | True until another is true | `holding(a) U on(a,b)` | LLM planner only |
 
 ### Logical Operators
 
@@ -654,16 +654,36 @@ llm-bdi-pipeline-dev/
 
 ### ✅ Fully Implemented
 
-**LTL Operators**:
-- **F (Finally)**: Fully supported - maps to PDDL `:goal` predicates
-  - Example: `F(on(a, b))` → `(:goal (on a b))`
-  - Used for achievement goals
+**LTL Operators (with LLM Planner)**:
+- **F (Finally/Eventually)**: Fully supported in both classical and LLM planners
+  - Example: `F(on(a, b))` → "Eventually a is on b"
+  - Classical planner: Maps to PDDL `:goal` predicates
+  - LLM planner: Understands temporal achievement goals
+
+- **G (Globally/Always)**: Fully supported via LLM planner ✨ NEW
+  - Example: `G(clear(c))` → "C is always clear"
+  - Classical planner: ❌ Not supported (PDDL limitation)
+  - LLM planner: ✅ Maintains constraints throughout plan execution
+  - Enable with: `USE_LLM_PLANNER=true` in `.env`
+
+- **X (Next)**: Fully supported via LLM planner ✨ NEW
+  - Example: `X(on(a, b))` → "In the next state, a is on b"
+  - Classical planner: ❌ Not supported
+  - LLM planner: ✅ Handles next-state constraints
+  - Natural language: "immediately", "next", "then"
+
+- **U (Until)**: Fully supported via LLM planner ✨ NEW
+  - Example: `holding(a) U clear(b)` → "Hold a until b is clear"
+  - Classical planner: ❌ Not supported
+  - LLM planner: ✅ Maintains property until condition holds
+  - Natural language: "until", "while waiting for"
 
 **LLM Integration**:
 - **Stage 1 (NL → LTL)**: OpenAI-compatible API for natural language understanding
   - Automatic object extraction
   - Initial state inference
-  - LTL formula generation
+  - LTL formula generation (F, G, X, U operators)
+  - Enhanced prompts with operator examples
   - Mock parser fallback (pattern matching)
 
 - **Stage 2 (LTL → PDDL)**: LLM-based domain-aware PDDL generation
@@ -671,15 +691,25 @@ llm-bdi-pipeline-dev/
   - Domain file analysis
   - Template-based fallback
 
+- **Stage 3 (PDDL → Plan)**: Dual planner support ✨ NEW
+  - **Classical Planner (default)**: pyperplan - fast, deterministic
+    - Supports F operator only
+    - No temporal constraints (G, X, U)
+  - **LLM Planner**: Constraint-aware planning
+    - Supports all LTL operators (F, G, X, U)
+    - Reasons about temporal constraints
+    - Enable with `USE_LLM_PLANNER=true`
+
 **Pipeline Features**:
 - **Timestamped Output**: Each execution creates `output/YYYYMMDD_HHMMSS/` directory
 - **Complete Logging**: Execution logs in `logs/YYYYMMDD_HHMMSS/`
   - JSON format for programmatic access
   - Human-readable text format
-  - Full LLM prompt/response capture (both stages)
+  - Full LLM prompt/response capture (all three stages)
   - Stage-by-stage success/failure tracking
+  - LLM planner interaction logs
 
-- **PDDL Planning**: Classical planner (pyperplan) for plan generation
+- **Configuration-based Planner Selection**: Choose planner per execution
 - **Multi-case Support**: No file overwriting, unique directories per run
 
 **Supported Domains**:
@@ -687,25 +717,42 @@ llm-bdi-pipeline-dev/
   - `pickup`, `putdown`, `stack`, `unstack`
   - Predicates: `on`, `ontable`, `clear`, `holding`, `handempty`
 
-### ⚠️ Partial Support
+### 📋 Usage Examples by Operator
 
-**LTL Operators**:
-- **G (Globally)**: Recognized in parsing, extracted as constraints
-  - Not converted to PDDL goals (classical PDDL limitation)
-  - Available via `get_constraints()` method for verification
-  - Stored in logs but not used in planning
+**F (Finally) - Classical or LLM Planner**:
+```bash
+uv run python src/main.py "Put block A on block B"
+# LTL: F(on(a, b))
+```
+
+**G (Globally) - Requires LLM Planner**:
+```bash
+# Set USE_LLM_PLANNER=true in .env first
+uv run python src/main.py "Put A on B while keeping C clear"
+# LTL: F(on(a, b)) ∧ G(clear(c))
+```
+
+**X (Next) - Requires LLM Planner**:
+```bash
+# Set USE_LLM_PLANNER=true in .env first
+uv run python src/main.py "Pick up A, then immediately place it on B"
+# LTL: F(holding(a)) ∧ X(on(a, b))
+```
+
+**U (Until) - Requires LLM Planner**:
+```bash
+# Set USE_LLM_PLANNER=true in .env first
+uv run python src/main.py "Keep holding A until B is clear"
+# LTL: holding(a) U clear(b)
+```
 
 ### ❌ Not Yet Implemented
 
-**LTL Operators**:
-- **X (Next)**: Next-state operator - defined but not implemented
-- **U (Until)**: Until operator - defined but not implemented
-
 **Additional Features**:
 - **Multi-domain support**: Mars Rover, Logistics domains (planned)
-- **Advanced LTL**: Nested operators, complex temporal formulas
+- **Nested LTL operators**: F(G(φ)), G(F(φ)) - complex temporal formulas
 - **Code Generation**: AgentSpeak/Jason code output (out of scope)
-- **Plan Verification**: Runtime plan validation (moved to legacy)
+- **Plan Verification**: Runtime plan validation against LTL formulas
 - **Plan Execution**: Actual execution framework (out of scope)
 
 ---
