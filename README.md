@@ -2,14 +2,72 @@
 
 **Linear Temporal Logic Integration for Intelligent Agent Planning**
 
-> **Quick Start**: See [QUICKSTART.md](QUICKSTART.md) or run `uv run python src/main.py "Put A on B"`
+---
+
+## 🚀 Quick Start
+
+Get the LTL pipeline running in 2 minutes.
+
+### Installation
+
+```bash
+# Install uv if needed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install dependencies
+cd llm-bdi-pipeline
+uv sync
+```
+
+### Run Your First Test
+
+```bash
+uv run python src/main.py "Put block A on block B"
+```
+
+**Expected Output**:
+```
+Stage 1: Natural Language → LTL
+  Objects: ['a', 'b']
+  LTL Formulas:
+    1. F(on(a, b))      # Eventually a is on b
+    2. F(clear(a))      # Eventually a is clear
+
+Stage 2: LTL → PDDL Problem
+  Generated: output/20251022_170921/problem.pddl
+
+Stage 3: PDDL → Action Plan
+  Plan:
+    1. pickup(a)
+    2. stack(a, b)
+
+✓ Pipeline Complete
+```
+
+**What Happened**:
+1. Natural Language → LTL formulas (`F(on(a,b))`)
+2. LTL → PDDL problem file
+3. PDDL → Action plan (`pickup(a)`, `stack(a,b)`)
+
+Check `output/YYYYMMDD_HHMMSS/` for generated files.
+
+### Use with LLM (Optional)
+
+```bash
+# 1. Configure API key
+cp .env.example .env
+# Edit .env: OPENAI_API_KEY=your-key-here
+
+# 2. Run with real LLM
+uv run python src/main.py "Build a tower with C on B on A"
+```
 
 ---
 
 ## Table of Contents
 
+- [Quick Start](#-quick-start) *(Installation & First Test)*
 - [Overview](#overview)
-- [Installation](#installation)
 - [Quick Example](#quick-example)
 - [Architecture](#architecture)
 - [LTL Operators](#ltl-operators)
@@ -45,29 +103,6 @@ Natural Language → LTL Specification → PDDL Problem → Action Plan
 - ✅ Express temporal requirements: "eventually X", "always Y", "X until Y"
 - ✅ Formal verification: LTL formulas can be verified and monitored
 - ✅ Natural mapping: LTL goals map cleanly to PDDL planning problems
-
----
-
-## Installation
-
-### Prerequisites
-- Python 3.12+
-- `uv` package manager ([install](https://astral.sh/uv/install.sh))
-- OpenAI API key (optional, for LLM features)
-
-### Setup
-
-```bash
-# 1. Install dependencies
-uv sync
-
-# 2. Configure API key (optional)
-cp .env.example .env
-# Edit .env: OPENAI_API_KEY=your-key-here
-
-# 3. Test the pipeline
-uv run python src/main.py "Put block A on block B"
-```
 
 ---
 
@@ -680,7 +715,3 @@ llm-bdi-pipeline-dev/
 ## License
 
 Academic research project - University of Nottingham Ningbo China
-
----
-
-**For quick start, see [QUICKSTART.md](QUICKSTART.md)**
