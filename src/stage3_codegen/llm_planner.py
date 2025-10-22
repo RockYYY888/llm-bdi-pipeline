@@ -92,6 +92,7 @@ class LLMPlanner:
             g_constraints = self._extract_g_constraints(ltl_spec)
             x_constraints = self._extract_x_constraints(ltl_spec)
             u_constraints = self._extract_u_constraints(ltl_spec)
+            nested_constraints = self._extract_nested_constraints(ltl_spec)
 
             if g_constraints:
                 constraints_info += "\n**CRITICAL: Globally (G) Constraints - MUST hold at EVERY step:**\n"
@@ -108,6 +109,12 @@ class LLMPlanner:
                 constraints_info += "\n**Until (U) Constraints:**\n"
                 for c in u_constraints:
                     constraints_info += f"  - {c['left']} U {c['right']}: {c['left']} must hold until {c['right']} becomes true\n"
+
+            if nested_constraints:
+                constraints_info += "\n**Nested Temporal Constraints:**\n"
+                for c in nested_constraints:
+                    constraints_info += f"  - {c}: This nested temporal formula must be satisfied\n"
+                constraints_info += "\nNested operators require careful reasoning about temporal dependencies.\n"
 
         system_prompt = f"""You are an expert PDDL planner with deep understanding of Linear Temporal Logic (LTL).
 
@@ -230,6 +237,24 @@ Return ONLY the JSON array (no explanation, no markdown, no code blocks)."""
                     left = formula.sub_formulas[0].to_string()
                     right = formula.sub_formulas[1].to_string()
                     constraints.append({"left": left, "right": right})
+        return constraints
+
+    def _extract_nested_constraints(self, ltl_spec: LTLSpecification) -> List[str]:
+        """
+        Extract nested temporal constraints from LTL spec
+
+        Detects patterns like F(G(φ)), G(F(φ)), etc.
+        """
+        constraints = []
+        for formula in ltl_spec.formulas:
+            # Check if this is a nested operator
+            # A nested operator has a temporal operator at top level
+            # and its sub-formula also has a temporal operator
+            if formula.operator and len(formula.sub_formulas) > 0:
+                sub_formula = formula.sub_formulas[0]
+                # If sub-formula also has a temporal operator, it's nested
+                if sub_formula.operator:
+                    constraints.append(formula.to_string())
         return constraints
 
 

@@ -57,6 +57,7 @@ class LTLFormula:
 
         if self.operator and len(self.sub_formulas) == 1:
             # Temporal operator: F(on(a, b)), G(clear(c)), X(holding(a))
+            # Also handles nested: F(G(on(a, b))) where inner is G(on(a, b))
             inner = self.sub_formulas[0].to_string()
             return f"{self.operator.value}({inner})"
 
@@ -197,11 +198,19 @@ Your task: Convert natural language to LTL formulas.
 4. "Keep holding A until B is clear"
    → holding(a) U clear(b): Hold a until b is clear
 
+5. "Eventually ensure A is always on B" (nested operators)
+   → F(G(on(a, b))): Eventually reach a state where A is always on B
+
+6. "Keep trying to clear C" (nested operators)
+   → G(F(clear(c))): Always eventually make progress toward clearing C
+
 **Natural Language Patterns:**
 - "always", "throughout", "keep", "maintain" → G (Globally)
 - "eventually", "finally", "at some point" → F (Finally)
 - "next", "immediately after", "then" → X (Next)
 - "until", "while waiting for" → U (Until)
+- "eventually ensure always", "finally maintain" → F(G(φ)) (nested)
+- "keep trying", "always eventually" → G(F(φ)) (nested)
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {
@@ -233,7 +242,22 @@ For U (Until) operator, use this format:
   "operator": "U",
   "left_formula": {"holding": ["a"]},
   "right_formula": {"clear": ["b"]}
-}"""
+}
+
+For NESTED operators (e.g., F(G(φ)), G(F(φ))), use this format:
+{
+  "type": "nested",
+  "outer_operator": "F",
+  "inner_operator": "G",
+  "formula": {"on": ["a", "b"]}
+}
+
+Examples of nested operators:
+- F(G(on(a, b))): Eventually A is always on B
+  → {"type": "nested", "outer_operator": "F", "inner_operator": "G", "formula": {"on": ["a", "b"]}}
+
+- G(F(clear(c))): Always eventually C is clear
+  → {"type": "nested", "outer_operator": "G", "inner_operator": "F", "formula": {"clear": ["c"]}}"""
 
         user_prompt = f"Natural language instruction: {nl_instruction}"
 
@@ -325,6 +349,38 @@ For U (Until) operator, use this format:
                 )
 
                 spec.add_formula(formula)
+
+            elif ltl_def["type"] == "nested":
+                # Nested operator: e.g., F(G(φ)) or G(F(φ))
+                outer_op = TemporalOperator(ltl_def["outer_operator"])
+                inner_op = TemporalOperator(ltl_def["inner_operator"])
+                predicate = ltl_def["formula"]
+
+                # Create innermost atomic formula
+                atomic = LTLFormula(
+                    operator=None,
+                    predicate=predicate,
+                    sub_formulas=[],
+                    logical_op=None
+                )
+
+                # Wrap in inner temporal operator
+                inner_formula = LTLFormula(
+                    operator=inner_op,
+                    predicate=None,
+                    sub_formulas=[atomic],
+                    logical_op=None
+                )
+
+                # Wrap in outer temporal operator
+                outer_formula = LTLFormula(
+                    operator=outer_op,
+                    predicate=None,
+                    sub_formulas=[inner_formula],
+                    logical_op=None
+                )
+
+                spec.add_formula(outer_formula)
 
         return (spec, prompt_dict, result_text)
 

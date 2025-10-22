@@ -746,11 +746,30 @@ uv run python src/main.py "Keep holding A until B is clear"
 # LTL: holding(a) U clear(b)
 ```
 
+**Nested Operators - Requires LLM Planner** ✨ NEW:
+```bash
+# Set USE_LLM_PLANNER=true in .env first
+
+# F(G(φ)) - Eventually always
+uv run python src/main.py "Eventually ensure A is always on B"
+# LTL: F(G(on(a, b)))
+
+# G(F(φ)) - Always eventually
+uv run python src/main.py "Keep trying to clear C"
+# LTL: G(F(clear(c)))
+```
+
+**Supported Nested Patterns**:
+- **F(G(φ))**: Eventually reach a state where φ is always true
+- **G(F(φ))**: Always eventually achieve φ (keep making progress)
+- **F(X(φ))**: Eventually in next state φ holds
+- **G(X(φ))**: Always in next state φ holds
+- Other combinations supported via LLM reasoning
+
 ### ❌ Not Yet Implemented
 
 **Additional Features**:
 - **Multi-domain support**: Mars Rover, Logistics domains (planned)
-- **Nested LTL operators**: F(G(φ)), G(F(φ)) - complex temporal formulas
 - **Code Generation**: AgentSpeak/Jason code output (out of scope)
 - **Plan Verification**: Runtime plan validation against LTL formulas
 - **Plan Execution**: Actual execution framework (out of scope)
