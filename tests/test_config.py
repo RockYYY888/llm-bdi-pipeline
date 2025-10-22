@@ -35,13 +35,13 @@ class TestConfig:
         config = Config()
         assert config.openai_model == "gpt-4o-mini"
 
-    def test_config_custom_model(self, monkeypatch):
+    def test_config_custom_model(self, monkeypatch, mock_env_no_api_key):
         """Test configuration uses custom model from environment"""
         monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
         config = Config()
         assert config.openai_model == "gpt-4o"
 
-    def test_config_base_url(self, monkeypatch):
+    def test_config_base_url(self, monkeypatch, mock_env_no_api_key):
         """Test configuration loads custom base URL"""
         monkeypatch.setenv("OPENAI_BASE_URL", "https://custom.api.url")
         config = Config()
@@ -119,24 +119,22 @@ class TestEnvironmentVariables:
 
     def test_missing_all_env_vars(self, mock_env_no_api_key):
         """Test configuration with all environment variables missing"""
-        config = PipelineConfig()
+        config = Config()
         assert config.openai_api_key is None
         assert config.openai_model == "gpt-4o-mini"  # Default
         assert config.openai_base_url is None
         assert config.use_llm_planner is False  # Default
 
-    def test_partial_env_vars(self, monkeypatch):
+    def test_partial_env_vars(self, monkeypatch, mock_env_no_api_key):
         """Test configuration with partial environment variables"""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-partial-test")
-        monkeypatch.delenv("OPENAI_MODEL", raising=False)
-        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
         config = Config()
         assert config.openai_api_key == "sk-partial-test"
         assert config.openai_model == "gpt-4o-mini"  # Default
         assert config.openai_base_url is None
 
-    def test_all_env_vars_set(self, monkeypatch):
+    def test_all_env_vars_set(self, monkeypatch, mock_env_no_api_key):
         """Test configuration with all environment variables set"""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-full-test")
         monkeypatch.setenv("OPENAI_MODEL", "gpt-4")
@@ -155,7 +153,7 @@ class TestEnvironmentVariables:
 class TestConfigEdgeCases:
     """Test configuration edge cases and error handling"""
 
-    def test_empty_api_key(self, monkeypatch):
+    def test_empty_api_key(self, monkeypatch, mock_env_no_api_key):
         """Test configuration with empty API key string"""
         monkeypatch.setenv("OPENAI_API_KEY", "")
         config = Config()
@@ -163,20 +161,20 @@ class TestConfigEdgeCases:
         assert config.openai_api_key == ""
         assert config.validate() is False
 
-    def test_whitespace_api_key(self, monkeypatch):
+    def test_whitespace_api_key(self, monkeypatch, mock_env_no_api_key):
         """Test configuration with whitespace API key"""
         monkeypatch.setenv("OPENAI_API_KEY", "   ")
         config = Config()
         assert config.validate() is False
 
-    def test_api_key_with_spaces(self, monkeypatch):
+    def test_api_key_with_spaces(self, monkeypatch, mock_env_no_api_key):
         """Test configuration preserves API key with internal spaces"""
         key_with_spaces = "sk-test key with spaces"
         monkeypatch.setenv("OPENAI_API_KEY", key_with_spaces)
         config = Config()
         assert config.openai_api_key == key_with_spaces
 
-    def test_model_name_variations(self, monkeypatch):
+    def test_model_name_variations(self, monkeypatch, mock_env_no_api_key):
         """Test configuration handles various model name formats"""
         model_names = [
             "gpt-4o-mini",

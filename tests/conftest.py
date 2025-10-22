@@ -29,18 +29,35 @@ def domain_file(test_data_dir: Path) -> str:
 
 @pytest.fixture
 def mock_env_with_api_key(monkeypatch):
-    """Set up environment with mock API key"""
+    """Set up environment with mock API key - isolated from real .env"""
+    # Prevent Config from loading .env file
+    from config import Config
+    monkeypatch.setattr(Config, '_load_env', lambda self: None)
+
+    # Clear ALL env vars first to isolate from real .env
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("USE_LLM_PLANNER", raising=False)
+
+    # Set test values
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-mock-key-12345")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
     yield
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
 
 
 @pytest.fixture
 def mock_env_no_api_key(monkeypatch):
-    """Set up environment without API key (should trigger errors)"""
+    """Set up environment without API key (should trigger errors) - isolated from real .env"""
+    # Prevent Config from loading .env file
+    from config import Config
+    monkeypatch.setattr(Config, '_load_env', lambda self: None)
+
+    # Clear ALL env vars to isolate from real .env
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("USE_LLM_PLANNER", raising=False)
     yield
 
 

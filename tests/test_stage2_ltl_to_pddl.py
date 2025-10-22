@@ -218,7 +218,7 @@ class TestLTLToPDDLConverter:
             mock_response.choices = [mock_choice]
             mock_client.chat.completions.create.return_value = mock_response
 
-            with pytest.raises(ValueError) as exc_info:
+            with pytest.raises(RuntimeError) as exc_info:
                 converter.convert("test_problem", ltl_spec)
 
             assert "not valid PDDL problem format" in str(exc_info.value)
