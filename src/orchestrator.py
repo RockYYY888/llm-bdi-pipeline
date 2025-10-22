@@ -17,6 +17,7 @@ from config import get_config
 from stage1_interpretation.ltl_parser import NLToLTLParser
 from stage2_translation.ltl_to_pddl import LTLToPDDLConverter
 from stage3_codegen.pddl_planner import PDDLPlanner
+from stage3_codegen.llm_planner import LLMPlanner
 from pipeline_logger import PipelineLogger
 
 
@@ -61,8 +62,14 @@ class PipelineOrchestrator:
             base_url=base_url
         )
 
-        # Stage 3: PDDL planner
-        self.planner = PDDLPlanner()
+        # Stage 3: Planner (classical or LLM-based)
+        self.use_llm_planner = self.config.use_llm_planner
+        self.classical_planner = PDDLPlanner()
+        self.llm_planner = LLMPlanner(
+            api_key=api_key,
+            model=model,
+            base_url=base_url
+        ) if self.use_llm_planner else None
 
     def execute(self,
                 nl_instruction: str,
@@ -204,9 +211,17 @@ class PipelineOrchestrator:
         try:
             print(f"Domain: {self.domain_file}")
             print(f"Problem: {pddl_file}")
-            print("Running planner...")
 
-            plan = self.planner.solve(self.domain_file, pddl_file)
+            # Choose planner based on configuration
+            if self.use_llm_planner and self.llm_planner:
+                print("Using LLM-based planner (can handle G, X, U constraints)...")
+                plan_result = self.llm_planner.solve(self.domain_file, pddl_file, ltl_spec)
+                plan, stage3_prompt, stage3_response = plan_result
+            else:
+                print("Using classical PDDL planner...")
+                plan = self.classical_planner.solve(self.domain_file, pddl_file)
+                stage3_prompt = None
+                stage3_response = None
 
             if plan:
                 print(f"\n✓ Plan found: {len(plan)} actions")
@@ -217,9 +232,20 @@ class PipelineOrchestrator:
                 results["stage3_plan"] = plan
                 pipeline_success = True
 
-                # Log Stage 3 success
+                # Log Stage 3 success with LLM data if available
                 if logger:
-                    logger.log_stage3_success(plan)
+                    if stage3_prompt and stage3_response:
+                        # LLM planner was used
+                        logger.log_stage3_success(
+                            plan,
+                            used_llm=True,
+                            model=self.llm_planner.model,
+                            prompt=stage3_prompt,
+                            response=stage3_response
+                        )
+                    else:
+                        # Classical planner was used
+                        logger.log_stage3_success(plan)
 
                 # Save plan
                 plan_file = timestamped_output_dir / "plan.txt"

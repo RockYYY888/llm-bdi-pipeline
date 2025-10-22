@@ -48,6 +48,10 @@ class PipelineRecord:
     stage3_status: str = "skipped"
     stage3_plan: Optional[List[Tuple[str, List[str]]]] = None
     stage3_error: Optional[str] = None
+    stage3_used_llm: bool = False
+    stage3_model: Optional[str] = None
+    stage3_llm_prompt: Optional[Dict[str, str]] = None  # {"system": "...", "user": "..."}
+    stage3_llm_response: Optional[str] = None
 
     # Metadata
     domain_file: str = "domains/blocksworld/domain.pddl"
@@ -177,18 +181,31 @@ class PipelineLogger:
         self.current_record.stage2_status = "failed"
         self.current_record.stage2_error = str(error)
 
-    def log_stage3_success(self, plan: List[Tuple[str, List[str]]]):
+    def log_stage3_success(self,
+                          plan: List[Tuple[str, List[str]]],
+                          used_llm: bool = False,
+                          model: Optional[str] = None,
+                          prompt: Optional[Dict[str, str]] = None,
+                          response: Optional[str] = None):
         """
         Log successful Stage 3 completion
 
         Args:
             plan: The generated plan as list of (action, params) tuples
+            used_llm: Whether LLM planner was used (vs classical planner)
+            model: Model name if LLM was used
+            prompt: LLM prompt (system + user messages)
+            response: Raw LLM response text
         """
         if not self.current_record:
             return
 
         self.current_record.stage3_status = "success"
         self.current_record.stage3_plan = plan
+        self.current_record.stage3_used_llm = used_llm
+        self.current_record.stage3_model = model
+        self.current_record.stage3_llm_prompt = prompt
+        self.current_record.stage3_llm_response = response
 
     def log_stage3_error(self, error: str):
         """Log Stage 3 failure"""
@@ -370,8 +387,39 @@ class PipelineLogger:
             f.write("-"*80 + "\n")
             f.write(f"Status: {record['stage3_status'].upper()}\n")
 
+            if record['stage3_used_llm']:
+                f.write(f"Planner: LLM ({record['stage3_model']})\n")
+            else:
+                f.write("Planner: Classical PDDL Planner (pyperplan)\n")
+
+            # LLM Prompt/Response for Stage 3
+            if record['stage3_used_llm'] and record['stage3_llm_prompt']:
+                f.write("\n" + "~"*40 + "\n")
+                f.write("LLM PROMPT (Stage 3)\n")
+                f.write("~"*40 + "\n")
+                prompt = record['stage3_llm_prompt']
+                f.write("\n[SYSTEM MESSAGE]\n")
+                f.write(prompt.get('system', 'N/A')[:500])  # First 500 chars
+                if len(prompt.get('system', '')) > 500:
+                    f.write(f"\n... (truncated, total {len(prompt.get('system', ''))} chars)")
+                f.write("\n\n[USER MESSAGE]\n")
+                f.write(prompt.get('user', 'N/A'))
+                f.write("\n")
+
+            if record['stage3_used_llm'] and record['stage3_llm_response']:
+                f.write("\n" + "~"*40 + "\n")
+                f.write("LLM RESPONSE (Stage 3)\n")
+                f.write("~"*40 + "\n")
+                f.write(record['stage3_llm_response'][:1000])  # First 1000 chars
+                if len(record['stage3_llm_response']) > 1000:
+                    f.write(f"\n... (truncated, total {len(record['stage3_llm_response'])} chars)")
+                f.write("\n")
+
             if record['stage3_status'] == 'success' and record['stage3_plan']:
-                f.write(f"\nGenerated Plan ({len(record['stage3_plan'])} actions):\n")
+                f.write("\n" + "~"*40 + "\n")
+                f.write("GENERATED PLAN (Stage 3)\n")
+                f.write("~"*40 + "\n")
+                f.write(f"Plan ({len(record['stage3_plan'])} actions):\n")
                 for i, (action, params) in enumerate(record['stage3_plan'], 1):
                     f.write(f"  {i}. {action}({', '.join(params)})\n")
 
