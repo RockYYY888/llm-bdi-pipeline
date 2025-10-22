@@ -143,15 +143,19 @@ class NLToLTLParser:
 
         Returns:
             Tuple of (LTLSpecification, prompt_dict, response_text)
-            - prompt_dict: {"system": "...", "user": "..."}  or None if mock
-            - response_text: raw LLM response or None if mock
+            - prompt_dict: {"system": "...", "user": "..."}
+            - response_text: raw LLM response
+
+        Raises:
+            RuntimeError: If no API key is configured
         """
-        if self.client:
-            return self._parse_with_llm(nl_instruction)
-        else:
-            print("⚠️  No API key configured, using mock parser")
-            spec = self._parse_mock(nl_instruction)
-            return (spec, None, None)  # No LLM data for mock
+        if not self.client:
+            raise RuntimeError(
+                "No API key configured. Please set OPENAI_API_KEY in .env file.\n"
+                "Copy .env.example to .env and add your API key."
+            )
+
+        return self._parse_with_llm(nl_instruction)
 
     def _parse_with_llm(self, nl_instruction: str):
         """
@@ -279,15 +283,24 @@ Examples of nested operators:
                 timeout=60.0  # 60 seconds timeout for API call
             )
         except Exception as e:
-            print(f"⚠️  LLM API call failed: {e}")
-            print("⚠️  Falling back to mock parser...")
-            spec = self._parse_mock(nl_instruction)
-            return (spec, None, None)  # No LLM data on fallback
+            raise RuntimeError(
+                f"LLM API call failed: {type(e).__name__}: {str(e)}\n"
+                f"Model: {self.model}\n"
+                f"Instruction: {nl_instruction[:100]}...\n"
+                f"Please check your API key, network connection, and model availability."
+            ) from e
 
         result_text = response.choices[0].message.content.strip()
 
         # Parse JSON response
-        result = json.loads(result_text)
+        try:
+            result = json.loads(result_text)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"Failed to parse LLM response as JSON: {str(e)}\n"
+                f"Response preview: {result_text[:200]}...\n"
+                f"The LLM did not return valid JSON. Please try again or check the prompt."
+            ) from e
 
         # Build LTL specification
         spec = LTLSpecification()
@@ -383,191 +396,6 @@ Examples of nested operators:
                 spec.add_formula(outer_formula)
 
         return (spec, prompt_dict, result_text)
-
-    def _parse_mock(self, nl_instruction: str) -> LTLSpecification:
-        """
-        Mock parser for testing without LLM
-
-        Recognizes common patterns for all LTL operators (F, G, X, U)
-        """
-        spec = LTLSpecification()
-        instruction_lower = nl_instruction.lower()
-
-        # Extract blocks (single letters)
-        words = instruction_lower.split()
-        blocks = [w for w in words if len(w) == 1 and w.isalpha()]
-
-        if len(blocks) < 2:
-            return spec  # Need at least 2 blocks
-
-        # Set objects and default initial state
-        spec.objects = blocks[:3] if len(blocks) >= 3 else blocks[:2]
-        spec.initial_state = []
-        for block in spec.objects:
-            spec.initial_state.append({"ontable": [block]})
-            spec.initial_state.append({"clear": [block]})
-        spec.initial_state.append({"handempty": []})
-
-        # Pattern recognition for different operators
-
-        # G (Globally) patterns: "while keeping", "always", "keep", "maintain", "throughout"
-        g_patterns = ["while keeping", "always", "keep", "maintain", "throughout", "while"]
-        has_globally = any(pattern in instruction_lower for pattern in g_patterns)
-
-        # X (Next) patterns: "then immediately", "next", "immediately after", "then"
-        x_patterns = ["then immediately", "immediately", "next", "then"]
-        has_next = any(pattern in instruction_lower for pattern in x_patterns)
-
-        # U (Until) patterns: "until", "while waiting for"
-        u_patterns = ["until", "while waiting"]
-        has_until = any(pattern in instruction_lower for pattern in u_patterns)
-
-        # F (Finally) is default for achievement goals
-
-        # Parse based on detected patterns
-
-        if has_until and len(blocks) >= 2:
-            # Example: "Keep holding A until B is clear"
-            # Pattern: holding(a) U clear(b)
-            if "holding" in instruction_lower and "clear" in instruction_lower:
-                a = blocks[0]
-                b = blocks[1] if len(blocks) > 1 else blocks[0]
-
-                left_atomic = LTLFormula(
-                    operator=None,
-                    predicate={"holding": [a]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-
-                right_atomic = LTLFormula(
-                    operator=None,
-                    predicate={"clear": [b]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-
-                until_formula = LTLFormula(
-                    operator=TemporalOperator.UNTIL,
-                    predicate=None,
-                    sub_formulas=[left_atomic, right_atomic],
-                    logical_op=None
-                )
-
-                spec.add_formula(until_formula)
-
-        elif has_globally and len(blocks) >= 2:
-            # Example: "Put A on B while keeping C clear"
-            # Pattern: F(on(a,b)) ∧ G(clear(c))
-            if "put" in instruction_lower and "on" in instruction_lower:
-                a, b = blocks[0], blocks[1]
-
-                # F(on(a, b))
-                atomic1 = LTLFormula(
-                    operator=None,
-                    predicate={"on": [a, b]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-                formula1 = LTLFormula(
-                    operator=TemporalOperator.FINALLY,
-                    predicate=None,
-                    sub_formulas=[atomic1],
-                    logical_op=None
-                )
-                spec.add_formula(formula1)
-
-                # G(clear(c)) - if there's a third block
-                if len(blocks) >= 3 and "clear" in instruction_lower:
-                    c = blocks[2]
-                    atomic_g = LTLFormula(
-                        operator=None,
-                        predicate={"clear": [c]},
-                        sub_formulas=[],
-                        logical_op=None
-                    )
-                    formula_g = LTLFormula(
-                        operator=TemporalOperator.GLOBALLY,
-                        predicate=None,
-                        sub_formulas=[atomic_g],
-                        logical_op=None
-                    )
-                    spec.add_formula(formula_g)
-
-        elif has_next and len(blocks) >= 2:
-            # Example: "Pick up A, then immediately place it on B"
-            # Pattern: F(holding(a)) ∧ X(on(a,b))
-            a = blocks[0]
-            b = blocks[1] if len(blocks) > 1 else blocks[0]
-
-            if "pick" in instruction_lower or "holding" in instruction_lower:
-                # F(holding(a))
-                atomic1 = LTLFormula(
-                    operator=None,
-                    predicate={"holding": [a]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-                formula1 = LTLFormula(
-                    operator=TemporalOperator.FINALLY,
-                    predicate=None,
-                    sub_formulas=[atomic1],
-                    logical_op=None
-                )
-                spec.add_formula(formula1)
-
-            if "on" in instruction_lower:
-                # X(on(a, b))
-                atomic_x = LTLFormula(
-                    operator=None,
-                    predicate={"on": [a, b]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-                formula_x = LTLFormula(
-                    operator=TemporalOperator.NEXT,
-                    predicate=None,
-                    sub_formulas=[atomic_x],
-                    logical_op=None
-                )
-                spec.add_formula(formula_x)
-
-        else:
-            # Default: Simple F (Finally) pattern - "Put A on B"
-            if "put" in instruction_lower and "on" in instruction_lower and len(blocks) >= 2:
-                a, b = blocks[0], blocks[1]
-
-                # F(on(a, b))
-                atomic1 = LTLFormula(
-                    operator=None,
-                    predicate={"on": [a, b]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-                formula1 = LTLFormula(
-                    operator=TemporalOperator.FINALLY,
-                    predicate=None,
-                    sub_formulas=[atomic1],
-                    logical_op=None
-                )
-                spec.add_formula(formula1)
-
-                # F(clear(a))
-                atomic2 = LTLFormula(
-                    operator=None,
-                    predicate={"clear": [a]},
-                    sub_formulas=[],
-                    logical_op=None
-                )
-                formula2 = LTLFormula(
-                    operator=TemporalOperator.FINALLY,
-                    predicate=None,
-                    sub_formulas=[atomic2],
-                    logical_op=None
-                )
-                spec.add_formula(formula2)
-
-        return spec
 
 
 def test_ltl_parser():

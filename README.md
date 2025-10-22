@@ -199,7 +199,7 @@ logs/20251022_170921/
 }
 ```
 
-**Fallback**: Mock parser for offline use (pattern matching)
+**Note**: API key required - no offline fallback
 
 ---
 
@@ -490,13 +490,14 @@ OPENAI_BASE_URL=https://api.deepseek.com
 
 **Custom APIs**: Set `OPENAI_BASE_URL` to any OpenAI-compatible endpoint
 
-### Running Without API Key
+### API Key Requirement
 
-Pipeline works in **mock mode** without API key:
-- Uses pattern matching for basic instructions
-- Limited to simple Blocksworld tasks
-- Automatic fallback from LLM to template conversion
-- Good for testing and development
+**IMPORTANT**: The pipeline requires an OpenAI API key to function.
+
+- No offline/mock mode available
+- All stages require LLM for intelligent processing
+- Set `OPENAI_API_KEY` in `.env` file before running
+- Pipeline will fail immediately if no API key is configured
 
 ---
 
@@ -578,7 +579,8 @@ uv sync
 
 **Issue**: API timeout
 - Default: 60 seconds
-- Automatically falls back to mock parser
+- Pipeline will fail with detailed error message
+- Check network connection and API key validity
 
 **Issue**: Planning fails
 - Check PDDL syntax: `cat output/YYYYMMDD_HHMMSS/problem.pddl`
@@ -684,12 +686,12 @@ llm-bdi-pipeline-dev/
   - Initial state inference
   - LTL formula generation (F, G, X, U operators)
   - Enhanced prompts with operator examples
-  - Mock parser fallback (pattern matching)
+  - Comprehensive error handling with detailed messages
 
 - **Stage 2 (LTL → PDDL)**: LLM-based domain-aware PDDL generation
   - Contextual PDDL problem creation
   - Domain file analysis
-  - Template-based fallback
+  - Intelligent PDDL syntax generation
 
 - **Stage 3 (PDDL → Plan)**: Dual planner support ✨ NEW
   - **Classical Planner (default)**: pyperplan - fast, deterministic

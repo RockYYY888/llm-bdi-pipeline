@@ -42,17 +42,15 @@ def main():
         print("="*80)
         print("ERROR: OpenAI API Key Not Configured")
         print("="*80)
+        print("\nThe LTL-BDI pipeline requires an OpenAI API key to function.")
         print("\nPlease follow these steps:")
         print("1. Copy .env.example to .env:")
         print("   cp .env.example .env")
         print("\n2. Edit .env and add your API key:")
         print("   OPENAI_API_KEY=sk-proj-your-actual-key-here")
         print("\n3. Run the pipeline again")
-        print("\nNote: Without API key, mock parser will be used (limited functionality)")
-        print("="*80)
-
-        # Continue with mock parser
-        print("\nContinuing with MOCK parser (no LLM API calls)...\n")
+        print("\n" + "="*80)
+        sys.exit(1)
 
     # Initialize orchestrator and run workflow
     orchestrator = PipelineOrchestrator()

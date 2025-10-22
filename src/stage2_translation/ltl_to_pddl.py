@@ -2,14 +2,13 @@
 LTL to PDDL Converter
 
 Uses LLM to intelligently convert LTL specifications to PDDL problem files.
-Falls back to template-based conversion if LLM is unavailable.
 
 Strategy:
 - Use LLM to understand the LTL specification structure
 - Generate appropriate PDDL problem representation
-- Handle F (Finally) and G (Globally) operators intelligently
+- Handle all LTL operators (F, G, X, U) and nested formulas
 - Support flexible domain adaptation
-- Automatic fallback to template-based conversion
+- Requires API key - no fallback
 """
 
 from typing import Optional, Dict, Any, List
@@ -71,15 +70,19 @@ class LTLToPDDLConverter:
 
         Returns:
             Tuple of (pddl_problem_string, prompt_dict, response_text)
-            - prompt_dict: {"system": "...", "user": "..."}  or None if template
-            - response_text: raw LLM response or None if template
+            - prompt_dict: {"system": "...", "user": "..."}
+            - response_text: raw LLM response
+
+        Raises:
+            RuntimeError: If no API key is configured
         """
-        if self.client:
-            return self._convert_with_llm(problem_name, ltl_spec, domain_file_path)
-        else:
-            print("⚠️  No API key configured, using fallback template converter")
-            pddl = self._convert_template(problem_name, ltl_spec)
-            return (pddl, None, None)  # No LLM data for template
+        if not self.client:
+            raise RuntimeError(
+                "No API key configured. Please set OPENAI_API_KEY in .env file.\n"
+                "LTL to PDDL conversion requires LLM for intelligent domain-aware translation."
+            )
+
+        return self._convert_with_llm(problem_name, ltl_spec, domain_file_path)
 
     def _convert_with_llm(self,
                           problem_name: str,
@@ -189,58 +192,16 @@ Generate a complete PDDL problem file."""
             return (pddl_text, prompt_dict, response_text)
 
         except Exception as e:
-            print(f"⚠️  LLM conversion failed: {e}")
-            print("   Falling back to template converter...")
-            pddl = self._convert_template(problem_name, ltl_spec)
-            return (pddl, None, None)  # No LLM data on fallback
-
-    def _convert_template(self, problem_name: str, ltl_spec: LTLSpecification) -> str:
-        """
-        Fallback template-based conversion
-
-        Uses simple string concatenation when LLM is not available.
-        This is the original implementation logic.
-        """
-        # Extract goal predicates from F operators
-        goal_predicates = []
-
-        for formula in ltl_spec.formulas:
-            from stage1_interpretation.ltl_parser import TemporalOperator
-            if formula.operator == TemporalOperator.FINALLY:
-                if len(formula.sub_formulas) > 0:
-                    atomic = formula.sub_formulas[0]
-                    if atomic.predicate:
-                        goal_predicates.append(atomic.predicate)
-
-        # Generate PDDL problem
-        pddl = f"(define (problem {problem_name})\n"
-        pddl += f"  (:domain {self.domain_name})\n"
-
-        # Objects
-        pddl += "  (:objects "
-        pddl += " ".join(ltl_spec.objects)
-        pddl += ")\n"
-
-        # Initial state
-        pddl += "  (:init\n"
-        for pred_dict in ltl_spec.initial_state:
-            for pred_name, args in pred_dict.items():
-                if args:
-                    pddl += f"    ({pred_name} {' '.join(args)})\n"
-                else:
-                    pddl += f"    ({pred_name})\n"
-        pddl += "  )\n"
-
-        # Goal
-        pddl += "  (:goal (and\n"
-        for pred_dict in goal_predicates:
-            for pred_name, args in pred_dict.items():
-                pddl += f"    ({pred_name} {' '.join(args)})\n"
-        pddl += "  ))\n"
-
-        pddl += ")\n"
-
-        return pddl
+            # Enhanced error information for debugging
+            ltl_formulas = ltl_spec.to_dict().get('formulas_string', [])
+            raise RuntimeError(
+                f"LLM PDDL conversion failed: {type(e).__name__}: {str(e)}\n"
+                f"Problem: {problem_name}\n"
+                f"Domain: {self.domain_name}\n"
+                f"LTL formulas: {ltl_formulas}\n"
+                f"Model: {self.model}\n"
+                f"Please check the LLM response format and PDDL syntax."
+            ) from e
 
     def get_constraints(self, ltl_spec: LTLSpecification) -> List[Dict[str, Any]]:
         """
