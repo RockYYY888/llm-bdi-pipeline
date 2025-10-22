@@ -19,6 +19,14 @@ cd llm-bdi-pipeline
 uv sync
 ```
 
+### Use with LLM
+
+```bash
+# Configure API key
+cp .env.example .env
+# Edit .env: OPENAI_API_KEY=your-key-here
+```
+
 ### Run Your First Test
 
 ```bash
@@ -50,17 +58,6 @@ Stage 3: PDDL → Action Plan
 3. PDDL → Action plan (`pickup(a)`, `stack(a,b)`)
 
 Check `output/YYYYMMDD_HHMMSS/` for generated files.
-
-### Use with LLM
-
-```bash
-# 1. Configure API key
-cp .env.example .env
-# Edit .env: OPENAI_API_KEY=your-key-here
-
-# 2. Run with real LLM
-uv run python src/main.py "Build a tower with C on B on A"
-```
 
 ---
 
