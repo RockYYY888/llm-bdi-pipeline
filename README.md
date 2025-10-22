@@ -653,23 +653,60 @@ llm-bdi-pipeline-dev/
 ## Current Capabilities
 
 ### ✅ Fully Implemented
-- **LTL F Operator**: Finally/Eventually - maps to PDDL goals
-- **LLM Integration**: OpenAI API for NL understanding
-- **LLM PDDL Conversion**: Domain-aware translation
-- **Logging**: Complete execution tracing with LLM interactions
-- **Fallback**: Template-based when LLM unavailable
-- **Timestamped Outputs**: Unique directories per execution
-- **Domain**: Blocksworld with full PDDL support
+
+**LTL Operators**:
+- **F (Finally)**: Fully supported - maps to PDDL `:goal` predicates
+  - Example: `F(on(a, b))` → `(:goal (on a b))`
+  - Used for achievement goals
+
+**LLM Integration**:
+- **Stage 1 (NL → LTL)**: OpenAI-compatible API for natural language understanding
+  - Automatic object extraction
+  - Initial state inference
+  - LTL formula generation
+  - Mock parser fallback (pattern matching)
+
+- **Stage 2 (LTL → PDDL)**: LLM-based domain-aware PDDL generation
+  - Contextual PDDL problem creation
+  - Domain file analysis
+  - Template-based fallback
+
+**Pipeline Features**:
+- **Timestamped Output**: Each execution creates `output/YYYYMMDD_HHMMSS/` directory
+- **Complete Logging**: Execution logs in `logs/YYYYMMDD_HHMMSS/`
+  - JSON format for programmatic access
+  - Human-readable text format
+  - Full LLM prompt/response capture (both stages)
+  - Stage-by-stage success/failure tracking
+
+- **PDDL Planning**: Classical planner (pyperplan) for plan generation
+- **Multi-case Support**: No file overwriting, unique directories per run
+
+**Supported Domains**:
+- **Blocksworld**: Full PDDL domain support with actions:
+  - `pickup`, `putdown`, `stack`, `unstack`
+  - Predicates: `on`, `ontable`, `clear`, `holding`, `handempty`
 
 ### ⚠️ Partial Support
-- **LTL G Operator**: Recognized, used for verification only (not goal generation)
 
-### ❌ Not Implemented
-- **LTL X Operator**: Next-state operator
-- **LTL U Operator**: Until operator
-- **Additional Domains**: Mars Rover, Logistics (planned)
-- **Code Generation**: AgentSpeak/Jason output (pipeline stops at plan)
-- **Plan Verification**: Formal verification module (moved to legacy)
+**LTL Operators**:
+- **G (Globally)**: Recognized in parsing, extracted as constraints
+  - Not converted to PDDL goals (classical PDDL limitation)
+  - Available via `get_constraints()` method for verification
+  - Stored in logs but not used in planning
+
+### ❌ Not Yet Implemented
+
+**LTL Operators**:
+- **X (Next)**: Next-state operator - defined but not implemented
+- **U (Until)**: Until operator - defined but not implemented
+
+**Additional Features**:
+- **Multi-domain support**: Mars Rover, Logistics domains (planned)
+- **Advanced LTL**: Nested operators, complex temporal formulas
+- **Code Generation**: AgentSpeak/Jason code output (out of scope)
+- **Plan Verification**: Runtime plan validation (moved to legacy)
+- **Plan Execution**: Actual execution framework (out of scope)
 
 ---
 
