@@ -266,12 +266,12 @@ Plan (2 actions):
 
 ### Temporal Operators
 
-| Operator | Symbol | Name | Meaning | Example | PDDL Mapping |
-|----------|--------|------|---------|---------|--------------|
-| **F** | ◇ | Finally/Eventually | True at some future time | `F(on(a, b))` | `:goal (on a b)` |
-| **G** | □ | Globally/Always | True at all times | `G(clear(c))` | Trajectory constraint |
-| **X** | ○ | Next | True in next state | `X(holding(a))` | Not yet implemented |
-| **U** | — | Until | True until another is true | `holding(a) U on(a,b)` | Not yet implemented |
+| Operator | Name | Meaning | Example | PDDL Mapping |
+|----------|------|---------|---------|--------------|
+| **F** | Finally/Eventually | True at some future time | `F(on(a, b))` | `:goal (on a b)` |
+| **G** | Globally/Always | True at all times | `G(clear(c))` | Trajectory constraint |
+| **X** | Next | True in next state | `X(holding(a))` | Not yet implemented |
+| **U** | Until | True until another is true | `holding(a) U on(a,b)` | Not yet implemented |
 
 ### Logical Operators
 
