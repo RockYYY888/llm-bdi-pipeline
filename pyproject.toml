@@ -1,0 +1,11 @@
+[project]
+name = "llm-bdi-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=2.6.0",
+    "pddl>=0.4.3",
+    "pyperplan>=2.1",
+]

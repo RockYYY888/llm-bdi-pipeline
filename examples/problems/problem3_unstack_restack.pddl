@@ -1,0 +1,15 @@
+(define (problem unstack-restack)
+  (:domain blocksworld)
+  (:objects a b c)
+  (:init
+    (on a b)
+    (ontable b)
+    (ontable c)
+    (clear a)
+    (clear c)
+    (handempty)
+  )
+  (:goal (and
+    (on a c)
+  ))
+)

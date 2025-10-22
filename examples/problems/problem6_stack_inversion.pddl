@@ -1,0 +1,15 @@
+(define (problem stack-inversion)
+  (:domain blocksworld)
+  (:objects a b c)
+  (:init
+    (on a b)
+    (on b c)
+    (ontable c)
+    (clear a)
+    (handempty)
+  )
+  (:goal (and
+    (on c b)
+    (on b a)
+  ))
+)
