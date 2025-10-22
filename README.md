@@ -51,7 +51,7 @@ Stage 3: PDDL → Action Plan
 
 Check `output/YYYYMMDD_HHMMSS/` for generated files.
 
-### Use with LLM (Optional)
+### Use with LLM
 
 ```bash
 # 1. Configure API key
