@@ -18,7 +18,8 @@ from config import get_config
 from stage1_interpretation.ltl_parser import NLToLTLParser
 from stage3_codegen.llm_policy_generator import LLMPolicyGenerator
 from stage3_codegen.agentspeak_generator import AgentSpeakGenerator
-from stage4_execution.blocksworld_simulator import BlocksworldState
+from stage4_execution.blocksworld_simulator import BlocksworldState, BlocksworldEnvironment, ClassicalPlanExecutor
+from stage4_execution.agentspeak_simulator import AgentSpeakExecutor
 from stage4_execution.comparative_evaluator import ComparativeEvaluator
 from pipeline_logger import PipelineLogger
 
@@ -44,20 +45,24 @@ class DualBranchPipeline:
         self.output_dir = Path(__file__).parent.parent / "output"
         self.output_dir.mkdir(exist_ok=True)
 
-    def execute(self, nl_instruction: str) -> Dict[str, Any]:
+    def execute(self, nl_instruction: str, mode: str = "both") -> Dict[str, Any]:
         """
         Execute complete dual-branch pipeline
 
         Args:
             nl_instruction: Natural language instruction
+            mode: Execution mode - "both", "llm", or "asl"
 
         Returns:
-            Complete results including both branches and comparison
+            Complete results including branch results and comparison (if mode="both")
         """
         print("="*80)
-        print("LTL-BDI PIPELINE - DUAL BRANCH DEMONSTRATION")
+        mode_names = {"both": "DUAL BRANCH DEMONSTRATION", "llm": "LLM POLICY BRANCH", "asl": "AGENTSPEAK BRANCH"}
+        print(f"LTL-BDI PIPELINE - {mode_names.get(mode, 'DUAL BRANCH DEMONSTRATION')}")
         print("="*80)
         print(f"\nNatural Language Instruction: \"{nl_instruction}\"")
+        if mode != "both":
+            print(f"Mode: {mode.upper()} only")
         print("\n" + "-"*80)
 
         # Stage 1: NL -> LTLf
@@ -65,22 +70,34 @@ class DualBranchPipeline:
         if not ltl_spec:
             return {"success": False, "stage": "Stage 1"}
 
-        # Stage 2A: Branch A - LLM Policy Generation
-        llm_plan = self._stage2a_llm_policy(ltl_spec)
-        if not llm_plan:
-            return {"success": False, "stage": "Stage 2A"}
+        # Execute based on mode
+        llm_plan = None
+        asl_code = None
+        comparison_results = None
 
-        # Stage 2B: Branch B - AgentSpeak Generation
-        asl_code = self._stage2b_generate_agentspeak(ltl_spec)
-        if not asl_code:
-            return {"success": False, "stage": "Stage 2B"}
+        if mode in ["both", "llm"]:
+            # Stage 2A: Branch A - LLM Policy Generation
+            llm_plan = self._stage2a_llm_policy(ltl_spec)
+            if not llm_plan and mode == "llm":
+                return {"success": False, "stage": "Stage 2A"}
+
+        if mode in ["both", "asl"]:
+            # Stage 2B: Branch B - AgentSpeak Generation
+            asl_code = self._stage2b_generate_agentspeak(ltl_spec)
+            if not asl_code and mode == "asl":
+                return {"success": False, "stage": "Stage 2B"}
 
         # Stage 3: Execution & Comparison
-        comparison_results = self._stage3_execute_and_compare(
-            ltl_spec,
-            llm_plan,
-            asl_code
-        )
+        if mode == "both":
+            comparison_results = self._stage3_execute_and_compare(
+                ltl_spec,
+                llm_plan,
+                asl_code
+            )
+        elif mode == "llm":
+            comparison_results = self._stage3_execute_single(ltl_spec, llm_plan, "llm")
+        elif mode == "asl":
+            comparison_results = self._stage3_execute_single(ltl_spec, asl_code, "asl")
 
         print("\n" + "="*80)
         print("PIPELINE COMPLETED SUCCESSFULLY")
@@ -88,10 +105,11 @@ class DualBranchPipeline:
 
         return {
             "success": True,
+            "mode": mode,
             "ltl_spec": ltl_spec,
             "llm_plan": llm_plan,
             "agentspeak_code": asl_code,
-            "comparison": comparison_results
+            "results": comparison_results
         }
 
     def _stage1_parse_nl(self, nl_instruction: str):
@@ -194,6 +212,61 @@ class DualBranchPipeline:
             print(f"✗ Stage 3B Failed: {e}")
             return None
 
+    def _stage3_execute_single(self, ltl_spec, plan_or_code, branch_type):
+        """Stage 3: Execute single branch only"""
+        print("\n[STAGE 3] Execution")
+        print("-"*80)
+
+        # Create initial state
+        beliefs = []
+        for pred_dict in ltl_spec.initial_state:
+            for pred_name, args in pred_dict.items():
+                if pred_name == 'ontable' and args:
+                    for block in args:
+                        beliefs.append(f"on({block}, table)")
+                elif args:
+                    beliefs.append(f"{pred_name}({', '.join(args)})")
+                else:
+                    beliefs.append(pred_name)
+
+        init_state = BlocksworldState()
+        init_state.from_beliefs(beliefs)
+
+        formulas_string_list = [f.to_string() for f in ltl_spec.formulas]
+
+        try:
+            if branch_type == "llm":
+                # Execute LLM plan
+                env = BlocksworldEnvironment(init_state.copy())
+                executor = ClassicalPlanExecutor(env)
+                result = executor.execute(plan_or_code)
+                result['branch'] = 'llm'
+                result['plan_length'] = len(plan_or_code)
+            else:  # asl
+                # Execute AgentSpeak
+                env = BlocksworldEnvironment(init_state.copy())
+                agentspeak_goal = self._create_multi_goal_agentspeak_goal(formulas_string_list)
+                executor = AgentSpeakExecutor(env)
+                result = executor.execute(plan_or_code, agentspeak_goal)
+                result['branch'] = 'agentspeak'
+
+            # Check goal satisfaction
+            final_state = result.get('final_state' if branch_type == 'llm' else 'env_final_state', [])
+            goals_satisfied = all(
+                self._check_ltl_satisfaction(final_state, goal)
+                for goal in formulas_string_list
+            )
+
+            print(f"\nExecution: {'Success' if result['success'] else 'Failed'}")
+            print(f"Goal Satisfaction: {'True' if goals_satisfied else 'False'}")
+            print(f"Final State: {final_state}")
+
+            return result
+
+        except Exception as e:
+            print(f"Execution failed: {e}")
+            return {"success": False, "error": str(e)}
+
     def _stage3_execute_and_compare(self, ltl_spec, llm_plan, asl_code):
         """Stage 3: Execution & Comparative Evaluation"""
         print("\n[STAGE 3] Execution & Comparative Evaluation")
@@ -275,3 +348,14 @@ class DualBranchPipeline:
             # Multi-goal: Use the main composite goal that LLM should generate
             # The AgentSpeak generator is instructed to create achieve_ltlf_goals
             return "achieve_ltlf_goals"
+
+    def _check_ltl_satisfaction(self, final_state, ltl_goal: str) -> bool:
+        """Check if final state satisfies LTLf goal"""
+        if ltl_goal.startswith('F(') and ltl_goal.endswith(')'):
+            goal_predicate = ltl_goal[2:-1]
+            goal_normalized = goal_predicate.replace(' ', '')
+            for state_pred in final_state:
+                if state_pred.replace(' ', '') == goal_normalized:
+                    return True
+            return False
+        return True

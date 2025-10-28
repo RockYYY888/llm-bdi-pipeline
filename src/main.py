@@ -4,10 +4,16 @@ Main Entry Point - Dual-Branch MVP Demo
 This is the main entry point for the LTL-BDI pipeline.
 
 Usage:
-    python src/main.py "Stack block C on block B"
+    python src/main.py "Stack block C on block B" [--mode MODE]
+
+Modes:
+    both    - Run both branches and compare (default)
+    llm     - Run only LLM policy branch
+    asl     - Run only AgentSpeak branch
 """
 
 import sys
+import argparse
 from pathlib import Path
 
 # Add src to path
@@ -20,16 +26,23 @@ from dual_branch_pipeline import DualBranchPipeline
 def main():
     """Main entry point"""
     # Parse command line arguments
-    if len(sys.argv) < 2:
-        print("Usage: python src/main.py \"<natural language instruction>\"")
-        print("\nExample:")
-        print('  python src/main.py "Stack block C on block B"')
-        print("\nMake sure to:")
-        print("  1. Copy .env.example to .env")
-        print("  2. Add your OpenAI API key to .env")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='LTL-BDI Pipeline - Dual-Branch Demonstration',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python src/main.py "Stack block C on block B"
+  python src/main.py "Stack block C on block B" --mode llm
+  python src/main.py "Build a tower" --mode both
+        '''
+    )
+    parser.add_argument('instruction', help='Natural language instruction')
+    parser.add_argument('--mode', choices=['both', 'llm', 'asl'], default='both',
+                        help='Execution mode: both (default), llm, or asl')
 
-    nl_instruction = sys.argv[1]
+    args = parser.parse_args()
+    nl_instruction = args.instruction
+    mode = args.mode
 
     # Validate configuration
     config = get_config()
@@ -49,7 +62,7 @@ def main():
 
     # Execute pipeline
     pipeline = DualBranchPipeline()
-    results = pipeline.execute(nl_instruction)
+    results = pipeline.execute(nl_instruction, mode=mode)
 
     # Exit with appropriate code
     sys.exit(0 if results.get("success", False) else 1)
