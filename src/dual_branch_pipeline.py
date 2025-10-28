@@ -248,9 +248,11 @@ class DualBranchPipeline:
         init_state = BlocksworldState()
         init_state.from_beliefs(beliefs)
 
-        # Extract AgentSpeak goal from LTLf formula
+        # Extract AgentSpeak goal from LTLf formula(s)
         formulas_string_list = [f.to_string() for f in ltl_spec.formulas]
-        agentspeak_goal = self._extract_agentspeak_goal(formulas_string_list[0])
+
+        # Multi-goal support: Use composite goal for multiple formulas
+        agentspeak_goal = self._create_multi_goal_agentspeak_goal(formulas_string_list)
 
         try:
             evaluator = ComparativeEvaluator()
@@ -259,7 +261,7 @@ class DualBranchPipeline:
                 classical_plan,
                 asl_code,
                 agentspeak_goal,
-                formulas_string_list[0]
+                formulas_string_list  # Pass ALL formulas for verification
             )
 
             self.logger.log_stage4(results, "Success")
@@ -276,7 +278,7 @@ class DualBranchPipeline:
 
     def _extract_agentspeak_goal(self, ltl_formula: str) -> str:
         """
-        Extract AgentSpeak goal from LTLf formula
+        Extract AgentSpeak goal from single LTLf formula
 
         For MVP: Simple extraction for F(on(X,Y)) -> achieve_on_X_Y or on(X,Y)
         """
@@ -290,3 +292,17 @@ class DualBranchPipeline:
 
         # Default: use formula as-is
         return ltl_formula
+
+    def _create_multi_goal_agentspeak_goal(self, formulas: list) -> str:
+        """
+        Create a composite AgentSpeak goal for multiple LTLf formulas
+
+        Strategy: Create a main goal that achieves all sub-goals sequentially
+        Returns: "achieve_ltlf_goals" (expects LLM to generate this main goal)
+        """
+        if len(formulas) == 1:
+            return self._extract_agentspeak_goal(formulas[0])
+        else:
+            # Multi-goal: Use the main composite goal that LLM should generate
+            # The AgentSpeak generator is instructed to create achieve_ltlf_goals
+            return "achieve_ltlf_goals"

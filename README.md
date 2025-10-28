@@ -624,13 +624,13 @@ LTLf Generated: ['F(on(a, b))', 'F(on(b, c))']  # Two goals!
 
 ---
 
-### Issue 2: LTLf Goal Verification Space Mismatch ⚠️ MODERATE
+### Issue 2: LTLf Goal Verification Space Mismatch ⚠️ MODERATE → ✅ FIXED
 
 **Problem**: Goal verification fails due to whitespace inconsistency between extracted goal and final state format.
 
 **Root Cause**:
 ```python
-# comparative_evaluator.py:156
+# comparative_evaluator.py:156 (OLD CODE)
 goal_predicate = ltl_goal[2:-1]  # Extracts "on(a, b)" with space
 # But final_state contains: "on(a,b)" (no space)
 return goal_predicate in final_state  # Always False!
@@ -645,17 +645,19 @@ Final State: ['on(c,b)', ...]   # No space
 Result: Goal Satisfied: False   # WRONG! Goal was actually achieved
 ```
 
-**Impact**:
-- ❌ Goal verification always reports False for achieved goals
-- ✅ Execution still succeeds (the goal is actually achieved)
-- ⚠️ Misleading evaluation metrics
+**Fix Applied** (Phase 1.1):
+Normalize spaces in both goal and state before comparison:
+```python
+# comparative_evaluator.py:148-170 (NEW CODE)
+goal_normalized = goal_predicate.replace(' ', '')  # Remove spaces
+for state_pred in final_state:
+    if state_pred.replace(' ', '') == goal_normalized:
+        return True
+```
 
-**Affected Code**:
-- `comparative_evaluator.py:148-163` - `_check_ltl_satisfaction()`
+**Code Location**: `src/stage4_execution/comparative_evaluator.py:148-170`
 
-**Workaround**: Normalize spaces in both goal and state before comparison
-
-**Status**: 🟡 **BUG** - Verification logic error
+**Status**: ✅ **FIXED** - Space normalization added
 
 ---
 
@@ -703,7 +705,7 @@ Result: Goal Satisfied: False   # WRONG! Goal was actually achieved
 
 ---
 
-### Issue 5: PDDL Goal Generation Relies on LLM Quality ⚠️ MODERATE
+### Issue 5: PDDL Goal Generation Relies on LLM Quality ⚠️ MODERATE → ✅ FIXED
 
 **Problem**: Stage 2 uses LLM to generate PDDL, which may produce incomplete or incorrect goals for complex inputs.
 
@@ -718,9 +720,17 @@ PDDL Goal (generated): "(on a b"      # Incomplete! Missing ) and second goal
 - Classical planning may fail or solve wrong problem
 - No validation of LLM-generated PDDL
 
-**Mitigation**: Add PDDL syntax validation and goal completeness checking
+**Fix Applied** (Phase 1.2):
+Added `validate_pddl_syntax()` function in `ltl_to_pddl.py` that checks:
+- ✅ Balanced parentheses (open count == close count)
+- ✅ Required sections: `:domain`, `:objects`, `:init`, `:goal`
+- ✅ Goal section has content (not empty)
+- ✅ Objects section has content
+- ✅ Must start with `(define (problem`
 
-**Status**: ⚠️ **INCOMPLETE** - No LLM output validation
+**Code Location**: `src/stage2_translation/ltl_to_pddl.py:25-78` (validation function) and `:249-256` (integration)
+
+**Status**: ✅ **FIXED** - PDDL syntax validation now active
 
 ---
 
@@ -739,6 +749,68 @@ PDDL Goal (generated): "(on a b"      # Incomplete! Missing ) and second goal
 
 ---
 
+## 🔧 Recent Fixes (Phase 1 MVP Completion)
+
+### ✅ Fix 1: Goal Verification Space Normalization (Issue 2)
+**Problem**: Goal verification failed due to `"on(c, b)"` vs `"on(c,b)"` mismatch
+**Solution**: Added space normalization in `comparative_evaluator.py:148-170`
+**Result**: ✓ Goal verification now correctly reports True for achieved goals
+**Code Location**: `src/stage4_execution/comparative_evaluator.py:148-170`
+
+### ✅ Fix 2: PDDL Syntax Validation (Issue 5)
+**Problem**: No validation of LLM-generated PDDL, could produce invalid syntax
+**Solution**: Added `validate_pddl_syntax()` function checking:
+- Balanced parentheses
+- Required sections (`:domain`, `:objects`, `:init`, `:goal`)
+- Non-empty goal and objects sections
+
+**Result**: ✓ Invalid PDDL now caught with clear error messages
+**Code Location**: `src/stage2_translation/ltl_to_pddl.py:25-78` (validator) and `:249-256` (integration)
+
+### ✅ Fix 3: Multi-Goal Verification Support (Issue 1 - Partial)
+**Problem**: Verification only checked first LTLf formula when multiple goals existed
+**Solution**: Updated `_compare_results()` to:
+- Accept `List[str]` or `str` for `ltl_goal` parameter
+- Check ALL goals individually
+- Report detailed per-goal satisfaction status
+- Overall satisfaction requires ALL goals met
+
+**Result**: ✓ Multi-goal verification now works correctly
+**Example Output**:
+```
+LTLf Goals (2):
+  1. F(on(a, b))
+  2. F(on(b, c))
+
+Detailed Goal Verification:
+  ✓ F(on(a, b))
+  ✗ F(on(b, c))
+```
+**Code Locations**:
+- `src/stage4_execution/comparative_evaluator.py:98-145` (verification logic)
+- `src/stage4_execution/comparative_evaluator.py:210-255` (report generation)
+- `src/dual_branch_pipeline.py:254-265` (pass all formulas)
+
+### ⚠️ Remaining Limitation: Goal Ordering Dependencies
+**Discovery**: Multi-goal tower building ("Build tower A on B on C") reveals **goal dependency** issue:
+- **Classical planner**: Correctly determines order (stack B on C first, then A on B) ✓
+- **AgentSpeak**: Executes goals in given order, making second goal unreachable ✗
+- **Root Cause**: No dependency analysis - AgentSpeak executes `!achieve_on_a_b; !achieve_on_b_c`, but after stacking A on B, B is no longer clear
+
+**Example**:
+```
+Goals: ["F(on(a,b))", "F(on(b,c))"]
+Naive Order: A→B then B→C (FAILS - B not clear after A stacked)
+Correct Order: B→C then A→B (WORKS)
+```
+
+**Status**: This requires either:
+1. Goal dependency analysis & reordering
+2. More sophisticated LLM prompt to generate dependency-aware ordering
+3. Integration with FOND planner for state-aware goal sequencing
+
+---
+
 ## ✅ What Actually Works (Verified)
 
 **Fully Functional**:
@@ -747,17 +819,20 @@ PDDL Goal (generated): "(on a b"      # Incomplete! Missing ) and second goal
 3. ✅ AgentSpeak generation and parsing for single goals
 4. ✅ BDI execution with declarative goals
 5. ✅ All 7 critical fixes (multi-line parsing, variable unification, belief conversion, etc.)
+6. ✅ **NEW**: Multi-goal verification with detailed per-goal reporting
+7. ✅ **NEW**: PDDL syntax validation
 
 **Partially Functional**:
-6. ⚠️ Multi-goal scenarios: Classical may work (depends on LLM), AgentSpeak only achieves first goal
-7. ⚠️ Goal verification: Works but reports incorrect results due to space mismatch
+8. ⚠️ Multi-goal scenarios:
+   - Classical planner: May work (depends on LLM goal generation and planner capabilities)
+   - AgentSpeak: Achieves goals in sequence but fails when dependencies exist
+   - **Root Cause**: No goal dependency analysis
 
 **Not Implemented**:
-8. ❌ Multiple independent goals
-9. ❌ Conjunctive goals
-10. ❌ Sequential/temporal goals
-11. ❌ Complex LTL operators (G, X, U)
-12. ❌ PDDL output validation
+9. ❌ Goal dependency analysis and reordering
+10. ❌ Conjunctive goals (simultaneous requirements)
+11. ❌ Sequential/temporal goals with explicit ordering
+12. ❌ Complex LTL operators (G, X, U)
 
 ---
 

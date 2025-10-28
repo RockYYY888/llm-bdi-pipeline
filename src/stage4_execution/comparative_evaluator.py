@@ -5,7 +5,7 @@ Compares Classical PDDL planning (Branch A) with LLM AgentSpeak (Branch B).
 Provides metrics and analysis for research evaluation.
 """
 
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Union
 from .blocksworld_simulator import BlocksworldEnvironment, BlocksworldState, ClassicalPlanExecutor
 from .agentspeak_simulator import AgentSpeakExecutor
 
@@ -23,7 +23,7 @@ class ComparativeEvaluator:
                  classical_plan: List[Tuple[str, List[str]]],
                  agentspeak_code: str,
                  agentspeak_goal: str,
-                 ltl_goal: str) -> Dict[str, Any]:
+                 ltl_goal: Union[str, List[str]]) -> Dict[str, Any]:
         """
         Run both branches and compare results
 
@@ -32,7 +32,9 @@ class ComparativeEvaluator:
             classical_plan: Classical action sequence from PDDL planner
             agentspeak_code: Generated AgentSpeak plan library
             agentspeak_goal: Initial goal for AgentSpeak (e.g., "stack(c,b)")
-            ltl_goal: Original LTLf goal for verification (e.g., "F(on(c,b))")
+            ltl_goal: Original LTLf goal(s) for verification
+                     - Single: "F(on(c,b))"
+                     - Multiple: ["F(on(a,b))", "F(on(b,c))"]
 
         Returns:
             Comparison results with metrics
@@ -109,16 +111,40 @@ class ComparativeEvaluator:
             'both_failed': not classical['success'] and not agentspeak['success']
         }
 
-        # Goal satisfaction check
-        comparison['classical_satisfies_goal'] = self._check_ltl_satisfaction(
-            classical.get('final_state', []),
-            ltl_goal
-        )
+        # Goal satisfaction check - handle both single goal (string) and multiple goals (list)
+        ltl_goals = [ltl_goal] if isinstance(ltl_goal, str) else ltl_goal
 
-        comparison['agentspeak_satisfies_goal'] = self._check_ltl_satisfaction(
-            agentspeak.get('env_final_state', []),
-            ltl_goal
-        )
+        # Check each goal for classical
+        classical_goal_results = []
+        for goal in ltl_goals:
+            satisfied = self._check_ltl_satisfaction(
+                classical.get('final_state', []),
+                goal
+            )
+            classical_goal_results.append({
+                'goal': goal,
+                'satisfied': satisfied
+            })
+
+        # Check each goal for agentspeak
+        agentspeak_goal_results = []
+        for goal in ltl_goals:
+            satisfied = self._check_ltl_satisfaction(
+                agentspeak.get('env_final_state', []),
+                goal
+            )
+            agentspeak_goal_results.append({
+                'goal': goal,
+                'satisfied': satisfied
+            })
+
+        # Overall satisfaction: all goals must be satisfied
+        comparison['classical_satisfies_goal'] = all(r['satisfied'] for r in classical_goal_results)
+        comparison['agentspeak_satisfies_goal'] = all(r['satisfied'] for r in agentspeak_goal_results)
+
+        # Detailed goal results
+        comparison['classical_goal_details'] = classical_goal_results
+        comparison['agentspeak_goal_details'] = agentspeak_goal_results
 
         # Efficiency metrics
         if classical['success'] and agentspeak['success']:
@@ -149,17 +175,24 @@ class ComparativeEvaluator:
         """
         Check if final state satisfies LTLf goal
 
-        For MVP: Simple pattern matching for F(φ) goals
+        Supports: F(φ) goals with space normalization
         """
         # Extract goal from F(...)
         if ltl_goal.startswith('F(') and ltl_goal.endswith(')'):
             goal_predicate = ltl_goal[2:-1]  # Extract φ from F(φ)
 
-            # Check if goal predicate is in final state
-            return goal_predicate in final_state
+            # Normalize spaces in both goal and state for comparison
+            goal_normalized = goal_predicate.replace(' ', '')
+
+            # Check if normalized goal matches any normalized state predicate
+            for state_pred in final_state:
+                if state_pred.replace(' ', '') == goal_normalized:
+                    return True
+
+            return False
 
         # For other LTL formulas, would need full LTL checker
-        # MVP: Return True if we can't verify
+        # Return True if we can't verify (assume satisfied)
         return True
 
     def generate_report(self) -> str:
@@ -176,8 +209,14 @@ class ComparativeEvaluator:
         report.append("COMPARATIVE EVALUATION REPORT")
         report.append("="*80)
 
-        # LTL Goal
-        report.append(f"\nLTLf Goal: {self.results['ltl_goal']}")
+        # LTL Goal(s)
+        ltl_goal = self.results['ltl_goal']
+        if isinstance(ltl_goal, list):
+            report.append(f"\nLTLf Goals ({len(ltl_goal)}):")
+            for i, goal in enumerate(ltl_goal, 1):
+                report.append(f"  {i}. {goal}")
+        else:
+            report.append(f"\nLTLf Goal: {ltl_goal}")
 
         # Branch A: Classical
         report.append("\n" + "-"*80)
@@ -186,6 +225,13 @@ class ComparativeEvaluator:
         report.append(f"Success: {classical['success']}")
         report.append(f"Actions Executed: {classical.get('actions_executed', 0)}")
         report.append(f"Goal Satisfied: {comparison['classical_satisfies_goal']}")
+
+        # Detailed goal verification (if multiple goals)
+        if 'classical_goal_details' in comparison and len(comparison['classical_goal_details']) > 1:
+            report.append("\nDetailed Goal Verification:")
+            for detail in comparison['classical_goal_details']:
+                status = "✓" if detail['satisfied'] else "✗"
+                report.append(f"  {status} {detail['goal']}")
 
         if classical['success']:
             report.append(f"Final State: {classical.get('final_state', [])}")
@@ -202,6 +248,13 @@ class ComparativeEvaluator:
         report.append("-"*80)
         report.append(f"Success: {agentspeak['success']}")
         report.append(f"Goal Satisfied: {comparison['agentspeak_satisfies_goal']}")
+
+        # Detailed goal verification (if multiple goals)
+        if 'agentspeak_goal_details' in comparison and len(comparison['agentspeak_goal_details']) > 1:
+            report.append("\nDetailed Goal Verification:")
+            for detail in comparison['agentspeak_goal_details']:
+                status = "✓" if detail['satisfied'] else "✗"
+                report.append(f"  {status} {detail['goal']}")
 
         if agentspeak['success']:
             report.append(f"Final State: {agentspeak.get('env_final_state', [])}")

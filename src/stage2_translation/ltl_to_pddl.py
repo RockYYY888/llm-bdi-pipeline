@@ -11,14 +11,71 @@ Strategy:
 - Requires API key - no fallback
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import json
 import sys
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from stage1_interpretation.ltl_parser import LTLSpecification
+
+
+def validate_pddl_syntax(pddl_text: str) -> Tuple[bool, List[str]]:
+    """
+    Validate PDDL problem syntax
+
+    Checks for:
+    - Balanced parentheses
+    - Required sections: :domain, :objects, :init, :goal
+    - Basic structural correctness
+
+    Args:
+        pddl_text: PDDL problem text to validate
+
+    Returns:
+        Tuple of (is_valid, error_messages)
+    """
+    errors = []
+
+    # Check 1: Balanced parentheses
+    open_count = pddl_text.count('(')
+    close_count = pddl_text.count(')')
+    if open_count != close_count:
+        errors.append(f"Unbalanced parentheses: {open_count} open, {close_count} close (difference: {open_count - close_count})")
+
+    # Check 2: Must start with (define (problem
+    if not pddl_text.strip().startswith('(define (problem'):
+        errors.append("PDDL must start with '(define (problem'")
+
+    # Check 3: Required sections
+    required_sections = [':domain', ':objects', ':init', ':goal']
+    for section in required_sections:
+        if section not in pddl_text:
+            errors.append(f"Missing required section: {section}")
+
+    # Check 4: Goal section must have content
+    goal_match = re.search(r':goal\s+\(', pddl_text)
+    if goal_match:
+        # Find the content after :goal
+        goal_start = goal_match.end() - 1  # Position of opening (
+        remaining = pddl_text[goal_start:]
+
+        # Simple check: ensure there's something between :goal ( and the next )
+        goal_content_match = re.match(r'\(\s*\)', remaining)
+        if goal_content_match:
+            errors.append("Goal section is empty: :goal ()")
+
+    # Check 5: Objects section validation
+    objects_match = re.search(r':objects\s+([^\)]*)', pddl_text)
+    if objects_match:
+        objects_content = objects_match.group(1).strip()
+        if not objects_content or objects_content == '':
+            errors.append("Objects section is empty")
+
+    is_valid = len(errors) == 0
+    return is_valid, errors
 
 
 class LTLToPDDLConverter:
@@ -188,6 +245,15 @@ Generate a complete PDDL problem file."""
             # Validate basic PDDL structure
             if not pddl_text.startswith("(define (problem"):
                 raise ValueError("Generated text is not valid PDDL problem format")
+
+            # Validate PDDL syntax
+            is_valid, validation_errors = validate_pddl_syntax(pddl_text)
+            if not is_valid:
+                error_msg = "\n".join(validation_errors)
+                raise ValueError(
+                    f"Generated PDDL has syntax errors:\n{error_msg}\n\n"
+                    f"Generated PDDL:\n{pddl_text}"
+                )
 
             return (pddl_text, prompt_dict, response_text)
 
