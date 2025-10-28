@@ -248,19 +248,70 @@ The blocksworld domain provides a clear testbed for:
 
 ### Known Limitations
 
-1. **FOND (Non-Deterministic) Planning** - BLOCKED
-   - Status: NOT IMPLEMENTED
-   - Blockers:
-     - Safe-planner requires external classical planners (FF, OPTIC, etc.) - compilation failed on modern C++
-     - PRP planner has C++ compilation errors with deprecated headers (`hash_set`)
-     - Both require significant system-level dependencies
-   - Workaround: Use classical PDDL planning with pyperplan (deterministic)
-   - Future: Requires fixing C++ compilation issues or using pre-compiled binaries
+1. **FOND (Non-Deterministic) Planning** - BLOCKED (Solution Available via Docker)
+   - **Status**: NOT IMPLEMENTED in current environment
+   - **Root Cause**: Direct compilation blocked by modern C++ compiler incompatibility
+     - Safe-planner: Requires external classical planners (FF v2.3 fails with implicit function declarations)
+     - PRP planner: Uses deprecated C++ header `<hash_set>` removed in C++11+
+   - **Available Solution**: Docker/Apptainer containers (requires Docker installation)
+     - PRP provides official Dockerfile (`external/planner-for-relevant-policies/apptainer/Dockerfile.prp`)
+     - Dockerfile uses Ubuntu 18.04 with compatible C++ compiler
+     - Successfully builds PRP with all FOND planning capabilities
+   - **Current Workaround**: Classical PDDL planning with pyperplan (deterministic only)
+   - **To Enable FOND Planning**:
+     ```bash
+     # Install Docker Desktop for macOS/Windows or Docker Engine for Linux
+     # Then build PRP Docker image:
+     cd external/planner-for-relevant-policies/apptainer
+     docker build -t prp:latest -f Dockerfile.prp .
+
+     # Usage:
+     docker run -v $(pwd):/workspace prp:latest domain.pddl problem.pddl
+     ```
 
 2. **PPDDL with Oneof Clauses** - NOT SUPPORTED
    - Current implementation uses standard PDDL (deterministic)
-   - PPDDL examples exist in external/safe-planner/benchmarks/
-   - Requires FOND planner to utilize non-deterministic effects
+   - PPDDL examples exist in `external/safe-planner/benchmarks/`
+   - Requires FOND planner (see above) to utilize non-deterministic effects
+   - Once PRP Docker is set up, PPDDL support can be added to pipeline
+
+---
+
+## Future Work / TODO
+
+### High Priority
+1. **Enable FOND Planning via Docker**
+   - Install Docker Desktop (macOS/Windows) or Docker Engine (Linux)
+   - Build PRP Docker image using provided Dockerfile
+   - Create Python wrapper (`src/stage3_codegen/prp_docker_planner.py`) to invoke PRP via Docker
+   - Replace pyperplan with PRP for non-deterministic planning support
+
+2. **Add PPDDL Problem Generation**
+   - Extend `PDDLProblemGenerator` to support `oneof` clauses for non-deterministic effects
+   - Example: `(oneof (on b1 b2) (on b1 b3))` for stochastic block placement
+   - Enable realistic uncertainty modeling in blocksworld domain
+
+3. **Test FOND Planning with Non-Deterministic Scenarios**
+   - Create test cases with probabilistic action outcomes
+   - Verify PRP generates robust policies (not just plans)
+   - Compare policy robustness vs. classical plans
+
+### Medium Priority
+4. **Extend to Additional Domains**
+   - Mars Rover domain with sensor uncertainty
+   - Logistics domain with probabilistic delivery success
+   - Kitchen domain with stochastic cooking outcomes
+
+5. **Runtime Monitoring Integration**
+   - LTL runtime monitors for goal satisfaction verification
+   - Dynamic replanning on goal violations
+   - Integration with BDI execution cycle
+
+### Low Priority
+6. **Performance Optimization**
+   - Parallel execution of LLM/AgentSpeak/PDDL branches
+   - Caching of LLM responses for repeated queries
+   - Incremental plan generation
 
 ---
 
