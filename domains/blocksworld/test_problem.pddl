@@ -1,0 +1,12 @@
+(define (problem stack_c_on_b)
+  (:domain blocksworld)
+  (:objects b c)
+  (:init
+    (ontable b)
+    (ontable c)
+    (clear b)
+    (clear c)
+    (handempty)
+  )
+  (:goal (on c b))
+)

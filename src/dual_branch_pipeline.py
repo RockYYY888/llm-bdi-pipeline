@@ -19,7 +19,7 @@ from stage1_interpretation.ltl_parser import NLToLTLParser
 from stage2_pddl.pddl_problem_generator import PDDLProblemGenerator
 from stage3_codegen.llm_policy_generator import LLMPolicyGenerator
 from stage3_codegen.agentspeak_generator import AgentSpeakGenerator
-from stage3_codegen.pddl_planner import PDDLPlanner
+from stage3_codegen.pr2_planner import PR2Planner
 from stage4_execution.blocksworld_simulator import BlocksworldState, BlocksworldEnvironment, ClassicalPlanExecutor
 from stage4_execution.agentspeak_simulator import AgentSpeakExecutor
 from stage4_execution.comparative_evaluator import ComparativeEvaluator
@@ -247,8 +247,8 @@ class DualBranchPipeline:
             print(f"  Objects: {ltl_spec.objects}")
             print(f"  Goal Formulas: {[f.to_string() for f in ltl_spec.formulas]}")
 
-            # Step 2: Plan with pyperplan
-            planner = PDDLPlanner()
+            # Step 2: Plan with PR2/PRP FOND planner
+            planner = PR2Planner()
             plan = planner.solve_from_strings(
                 str(self.domain_path.read_text()),
                 pddl_problem

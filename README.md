@@ -224,11 +224,12 @@ The blocksworld domain provides a clear testbed for:
 ## Implementation Status
 
 ### Completed Features ✓
-1. **PDDL Planning Integration** - Classical PDDL planning using pyperplan
-   - LTLf → PDDL problem generation
-   - Pyperplan integration for classical planning
-   - PDDL mode (`--mode pddl`) fully functional
-   - Maintains PDDL in the pipeline workflow
+1. **FOND Planning Integration** - Non-deterministic planning using PR2/PRP
+   - LTLf → FOND PDDL problem generation
+   - PR2 Docker integration with PRP (Planner for Relevant Policies)
+   - PDDL mode (`--mode pddl`) fully functional with FOND support
+   - Generates strong cyclic policies for non-deterministic domains
+   - Legacy classical planner (pyperplan) moved to `src/legacy/`
 
 2. **Logger Output Integration** - Timestamped execution logs
    - Logs saved to `logs/YYYYMMDD_HHMMSS/`
@@ -248,26 +249,24 @@ The blocksworld domain provides a clear testbed for:
 
 ### Known Limitations
 
-1. **FOND (Non-Deterministic) Planning** - NOT IMPLEMENTED
-   - **Status**: Pipeline currently supports only classical (deterministic) PDDL planning
-   - **Current Implementation**: Uses pyperplan for classical PDDL planning
-   - **Limitation**: Cannot handle non-deterministic action outcomes or probabilistic effects
-   - **Future Work**: FOND planning support requires additional research and integration effort
+1. **FOND Domain Coverage** - Currently blocksworld only
+   - PR2/PRP fully integrated for blocksworld FOND domain
+   - Other domains (Mars Rover, Logistics) need FOND domain files
+   - FOND PDDL requires `:requirements :non-deterministic` and `oneof` effects
 
-2. **PPDDL with Oneof Clauses** - NOT SUPPORTED
-   - Current implementation uses standard PDDL (deterministic)
-   - Non-deterministic effects (oneof clauses) not supported
-   - Requires FOND planner integration for probabilistic action modeling
+2. **Action Name Compatibility** - FOND actions use hyphens
+   - PR2 generates action names with hyphens (e.g., `pick-up-from-table`)
+   - Simulator expects underscores (e.g., `pickup`)
+   - Action name mapping needed for full execution compatibility
 
 ---
 
 ## Future Work / TODO
 
 ### High Priority
-1. **FOND (Non-Deterministic) Planning Integration**
-   - Research and integrate FOND planner for non-deterministic scenarios
-   - Add PPDDL problem generation with `oneof` clauses
-   - Support probabilistic action outcomes and uncertainty modeling
+1. **Action Name Mapping** - Unify FOND and simulator action names
+   - Add translation layer between PR2 hyphenated names and simulator underscore names
+   - Ensure full execution compatibility with FOND-generated plans
 
 2. **Extended Domain Support**
    - Mars Rover domain with sensor uncertainty

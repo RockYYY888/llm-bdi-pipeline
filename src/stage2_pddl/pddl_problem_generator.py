@@ -49,9 +49,11 @@ class PDDLProblemGenerator:
         problem.append(f"(define (problem {problem_name})")
         problem.append(f"  (:domain {self.domain_name})")
 
-        # Objects
+        # Objects (with type declarations for FOND domain compatibility)
         if objects:
-            problem.append(f"  (:objects {' '.join(objects)})")
+            # Add type declarations for blocksworld domain
+            typed_objects = ' '.join(f"{obj} - block" for obj in objects)
+            problem.append(f"  (:objects {typed_objects})")
 
         # Initial state
         problem.append("  (:init")
