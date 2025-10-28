@@ -248,70 +248,47 @@ The blocksworld domain provides a clear testbed for:
 
 ### Known Limitations
 
-1. **FOND (Non-Deterministic) Planning** - BLOCKED (Solution Available via Docker)
-   - **Status**: NOT IMPLEMENTED in current environment
-   - **Root Cause**: Direct compilation blocked by modern C++ compiler incompatibility
-     - Safe-planner: Requires external classical planners (FF v2.3 fails with implicit function declarations)
-     - PRP planner: Uses deprecated C++ header `<hash_set>` removed in C++11+
-   - **Available Solution**: Docker/Apptainer containers (requires Docker installation)
-     - PRP provides official Dockerfile (`external/planner-for-relevant-policies/apptainer/Dockerfile.prp`)
-     - Dockerfile uses Ubuntu 18.04 with compatible C++ compiler
-     - Successfully builds PRP with all FOND planning capabilities
-   - **Current Workaround**: Classical PDDL planning with pyperplan (deterministic only)
-   - **To Enable FOND Planning**:
-     ```bash
-     # Install Docker Desktop for macOS/Windows or Docker Engine for Linux
-     # Then build PRP Docker image:
-     cd external/planner-for-relevant-policies/apptainer
-     docker build -t prp:latest -f Dockerfile.prp .
-
-     # Usage:
-     docker run -v $(pwd):/workspace prp:latest domain.pddl problem.pddl
-     ```
+1. **FOND (Non-Deterministic) Planning** - NOT IMPLEMENTED
+   - **Status**: Pipeline currently supports only classical (deterministic) PDDL planning
+   - **Current Implementation**: Uses pyperplan for classical PDDL planning
+   - **Limitation**: Cannot handle non-deterministic action outcomes or probabilistic effects
+   - **Future Work**: FOND planning support requires additional research and integration effort
 
 2. **PPDDL with Oneof Clauses** - NOT SUPPORTED
    - Current implementation uses standard PDDL (deterministic)
-   - PPDDL examples exist in `external/safe-planner/benchmarks/`
-   - Requires FOND planner (see above) to utilize non-deterministic effects
-   - Once PRP Docker is set up, PPDDL support can be added to pipeline
+   - Non-deterministic effects (oneof clauses) not supported
+   - Requires FOND planner integration for probabilistic action modeling
 
 ---
 
 ## Future Work / TODO
 
 ### High Priority
-1. **Enable FOND Planning via Docker**
-   - Install Docker Desktop (macOS/Windows) or Docker Engine (Linux)
-   - Build PRP Docker image using provided Dockerfile
-   - Create Python wrapper (`src/stage3_codegen/prp_docker_planner.py`) to invoke PRP via Docker
-   - Replace pyperplan with PRP for non-deterministic planning support
+1. **FOND (Non-Deterministic) Planning Integration**
+   - Research and integrate FOND planner for non-deterministic scenarios
+   - Add PPDDL problem generation with `oneof` clauses
+   - Support probabilistic action outcomes and uncertainty modeling
 
-2. **Add PPDDL Problem Generation**
-   - Extend `PDDLProblemGenerator` to support `oneof` clauses for non-deterministic effects
-   - Example: `(oneof (on b1 b2) (on b1 b3))` for stochastic block placement
-   - Enable realistic uncertainty modeling in blocksworld domain
-
-3. **Test FOND Planning with Non-Deterministic Scenarios**
-   - Create test cases with probabilistic action outcomes
-   - Verify PRP generates robust policies (not just plans)
-   - Compare policy robustness vs. classical plans
-
-### Medium Priority
-4. **Extend to Additional Domains**
+2. **Extended Domain Support**
    - Mars Rover domain with sensor uncertainty
    - Logistics domain with probabilistic delivery success
-   - Kitchen domain with stochastic cooking outcomes
+   - Additional IPC benchmark domains
 
-5. **Runtime Monitoring Integration**
+3. **Runtime LTL Monitoring**
    - LTL runtime monitors for goal satisfaction verification
    - Dynamic replanning on goal violations
    - Integration with BDI execution cycle
 
-### Low Priority
-6. **Performance Optimization**
+### Medium Priority
+4. **Performance Optimization**
    - Parallel execution of LLM/AgentSpeak/PDDL branches
    - Caching of LLM responses for repeated queries
    - Incremental plan generation
+
+5. **Enhanced BDI Integration**
+   - Jason/JAdex framework integration
+   - FIPA-ACL message protocol support
+   - Multi-agent coordination scenarios
 
 ---
 
