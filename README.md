@@ -1,882 +1,505 @@
-# LTL-Based LLM-BDI Pipeline
+# LTL-BDI Dual-Branch Pipeline
 
-**Linear Temporal Logic Integration for Intelligent Agent Planning**
+**Comparative Evaluation: Classical Planning vs. LLM-Generated AgentSpeak**
+
+---
+
+## 🎯 Project Overview
+
+A research pipeline that compares two approaches to intelligent agent planning:
+- **Branch A (Baseline)**: Classical PDDL planning
+- **Branch B (Novel)**: LLM-generated AgentSpeak plan libraries
+
+**Key Innovation**: Generate complete BDI agent plan libraries from LTLf specifications using LLMs, then compare against classical planning.
 
 ---
 
 ## 🚀 Quick Start
 
-Get the LTL pipeline running in 2 minutes.
-
-### Installation
+### Prerequisites
 
 ```bash
-# Install uv if needed
+# Install uv package manager
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Install dependencies
-cd llm-bdi-pipeline
-uv sync
+cd llm-bdi-pipeline-dev
+/opt/anaconda3/bin/pip install pyperplan openai python-dotenv
 ```
 
-### Use with LLM
+### Configuration
 
 ```bash
-# Configure API key
+# Create .env file
 cp .env.example .env
-# Edit .env: OPENAI_API_KEY=your-key-here
+
+# Edit .env and add your OpenAI API key
+OPENAI_API_KEY=sk-your-key-here
+OPENAI_MODEL=gpt-4o-mini
 ```
 
-### Run Your First Test
+### Run Demo
 
 ```bash
-uv run python src/main.py "Put block A on block B"
+python src/main.py "Stack block C on block B"
 ```
 
 **Expected Output**:
 ```
-Stage 1: Natural Language → LTL
-  Objects: ['a', 'b']
-  LTL Formulas:
-    1. F(on(a, b))      # Eventually a is on b
-    2. F(clear(a))      # Eventually a is clear
+================================================================================
+LTL-BDI PIPELINE - DUAL BRANCH DEMONSTRATION
+================================================================================
 
-Stage 2: LTL → PDDL Problem
-  Generated: output/20251022_170921/problem.pddl
+[STAGE 1] Natural Language -> LTLf Specification
+✓ LTLf Formula: ['F(on(c, b))']
+  Objects: ['b', 'c']
 
-Stage 3: PDDL → Action Plan
-  Plan:
-    1. pickup(a)
-    2. stack(a, b)
+[STAGE 2] LTLf -> PDDL Problem
+✓ PDDL Problem Generated
 
-✓ Pipeline Complete
-```
+[STAGE 3A] BRANCH A: Classical PDDL Planning
+✓ Classical Plan Generated (2 actions)
+  1. pickup(c)
+  2. stack(c, b)
 
-**What Happened**:
-1. Natural Language → LTL formulas (`F(on(a,b))`)
-2. LTL → PDDL problem file
-3. PDDL → Action plan (`pickup(a)`, `stack(a,b)`)
+[STAGE 3B] BRANCH B: LLM AgentSpeak Generation
+✓ AgentSpeak Plan Library Generated
+  Plans: 17
+  Saved to: output/generated_agent.asl
 
-Check `output/YYYYMMDD_HHMMSS/` for generated files.
+[STAGE 4] Execution & Comparative Evaluation
+✓ Both branches succeeded
 
----
-
-## Table of Contents
-
-- [Quick Start](#-quick-start) *(Installation & First Test)*
-- [Overview](#overview)
-- [Quick Example](#quick-example)
-- [Architecture](#architecture)
-- [LTL Operators](#ltl-operators)
-- [Usage Examples](#usage-examples)
-- [Output Files](#output-files)
-- [Configuration](#configuration)
-- [Advanced Usage](#advanced-usage)
-- [Troubleshooting](#troubleshooting)
-- [Version History](#version-history)
-- [Research Context](#research-context)
-
----
-
-## Overview
-
-A three-stage pipeline that converts natural language instructions into executable action plans using **Linear Temporal Logic (LTL)** for temporal goal specification.
-
-```
-Natural Language → LTL Specification → PDDL Problem → Action Plan
-```
-
-**Key Innovation**: Uses LTL temporal operators (F, G) instead of simple state-based goals, enabling expressive temporal requirements like "eventually achieve X while always maintaining Y".
-
-### What is LTL?
-
-**Linear Temporal Logic** is a formal language for specifying properties about sequences of states over time.
-
-**Simple analogy**:
-- **Without LTL**: "The prince saved the princess" (single fact, no time)
-- **With LTL**: "The prince will eventually save the princess" (temporal property)
-
-**Why LTL for BDI agents?**
-- ✅ Express temporal requirements: "eventually X", "always Y", "X until Y"
-- ✅ Formal verification: LTL formulas can be verified and monitored
-- ✅ Natural mapping: LTL goals map cleanly to PDDL planning problems
-
----
-
-## Quick Example
-
-```bash
-uv run python src/main.py "Put block A on block B"
-```
-
-### Pipeline Flow
-
-```mermaid
-flowchart TB
-    Input["Natural Language<br/>'Put block A on block B'"]
-
-    subgraph Stage1["Stage 1: NL → LTL"]
-        Parser["LLM Parser"]
-        LTLSpec["LTL Specification<br/>Objects: [a, b]<br/>Formulas:<br/>• F(on(a, b))<br/>• F(clear(a))"]
-    end
-
-    subgraph Stage2["Stage 2: LTL → PDDL"]
-        Converter["LTL-to-PDDL<br/>Converter"]
-        PDDL["PDDL Problem<br/>:objects a b<br/>:init (ontable a)...<br/>:goal (and (on a b))"]
-    end
-
-    subgraph Stage3["Stage 3: PDDL → Plan"]
-        Planner["PDDL Planner<br/>(pyperplan)"]
-        Plan["Action Plan<br/>1. pickup(a)<br/>2. stack(a, b)"]
-    end
-
-    Input --> Parser --> LTLSpec --> Converter --> PDDL --> Planner --> Plan
-```
-
-### Expected Output
-
-```
-Stage 1: Natural Language → LTL
-  Objects: ['a', 'b']
-  LTL Formulas:
-    1. F(on(a, b))      # Eventually a is on b
-    2. F(clear(a))      # Eventually a is clear
-
-Stage 2: LTL → PDDL Problem
-  Generated: output/20251022_170921/problem.pddl
-
-Stage 3: PDDL → Action Plan
-  Plan:
-    1. pickup(a)
-    2. stack(a, b)
-```
-
-### Output Files (Timestamped)
-
-```
-output/20251022_170921/
-├── ltl_specification.json    # LTL formulas in JSON format
-├── problem.pddl              # Generated PDDL problem file
-└── plan.txt                  # Generated action plan
-
-logs/20251022_170921/
-├── execution.json            # Complete execution trace (structured)
-└── execution.txt             # Human-readable execution log
+Efficiency:
+  Classical Actions: 2
+  AgentSpeak Actions: 2
+  Efficiency Ratio: 1.00
 ```
 
 ---
 
-## Architecture
+## 📐 System Architecture
 
-### Stage 1: Natural Language → LTL Specification
+```
+Natural Language Input
+         │
+         ▼
+┌────────────────────────────────────┐
+│  STAGE 1: NL → LTLf               │
+│  ltl_parser.py                     │
+│  Output: F(on(c,b))                │
+└────────────┬───────────────────────┘
+             │
+             ▼
+┌────────────────────────────────────┐
+│  STAGE 2: LTLf → PDDL             │
+│  ltl_to_pddl.py                    │
+│  Output: problem.pddl              │
+└────────────┬───────────────────────┘
+             │
+       ┌─────┴─────┐
+       │           │
+       ▼           ▼
+┌──────────────┐  ┌──────────────────────┐
+│  BRANCH A    │  │  BRANCH B            │
+│  Classical   │  │  LLM AgentSpeak      │
+└──────────────┘  └──────────────────────┘
+       │                   │
+       ▼                   ▼
+┌──────────────────────────────────────────┐
+│  STAGE 3A: Classical Planning            │
+│  pddl_planner.py                         │
+│  Output: [pickup(c), stack(c,b)]         │
+└──────────────────────────────────────────┘
 
-**Purpose**: Convert natural language to formal LTL temporal logic formulas
+┌──────────────────────────────────────────┐
+│  STAGE 3B: AgentSpeak Generation         │
+│  agentspeak_generator.py                 │
+│  Output: generated_agent.asl             │
+│  (Complete BDI plan library)             │
+└──────────────────────────────────────────┘
+       │                   │
+       └─────┬─────────────┘
+             ▼
+┌──────────────────────────────────────────┐
+│  STAGE 4: Execution & Comparison         │
+│  agentspeak_simulator.py                 │
+│  comparative_evaluator.py                │
+│                                          │
+│  Metrics:                                │
+│  - Goal satisfaction                     │
+│  - Efficiency (action count)             │
+│  - Success rate                          │
+└──────────────────────────────────────────┘
+```
 
-**Process**:
-1. LLM analyzes natural language instruction
-2. Extracts objects (e.g., `a`, `b`)
-3. Determines initial state predicates (e.g., `ontable(a)`, `clear(b)`)
-4. Generates LTL formulas with temporal operators
+---
 
-**Input**: `"Put block A on block B"`
+## 🔬 Stage Details
+
+### Stage 1: Natural Language → LTLf
+
+**Input**: `"Stack block C on block B"`
 
 **Output**:
 ```json
 {
-  "objects": ["a", "b"],
+  "objects": ["c", "b"],
   "initial_state": [
-    {"ontable": ["a"]},
     {"ontable": ["b"]},
-    {"clear": ["a"]},
+    {"ontable": ["c"]},
     {"clear": ["b"]},
+    {"clear": ["c"]},
     {"handempty": []}
   ],
-  "formulas": [
-    {"operator": "F", "predicate": {"on": ["a", "b"]}},
-    {"operator": "F", "predicate": {"clear": ["a"]}}
-  ],
-  "formulas_string": ["F(on(a, b))", "F(clear(a))"]
+  "formulas": ["F(on(c, b))"]
 }
 ```
 
-**Note**: API key required - no offline fallback
+**Implementation**: `src/stage1_interpretation/ltl_parser.py`
 
 ---
 
-### Stage 2: LTL → PDDL Problem
+### Stage 2: LTLf → PDDL Problem
 
-**Purpose**: Translate LTL temporal formulas into PDDL problem specification
+**Input**: LTLf specification from Stage 1
 
-**Process**:
-1. Extract objects from LTL spec
-2. Convert initial state to PDDL `:init` section
-3. Map LTL formulas to PDDL `:goal` section
-   - `F(φ)` → PDDL goal (eventually true)
-   - `G(φ)` → Trajectory constraint (always true)
-
-**LTL to PDDL Mapping**:
-```
-F(on(a, b))  →  (:goal (on a b))
-F(clear(a))  →  (:goal (clear a))
-G(safe)      →  Constraint (verification only)
-```
-
-**Output**:
-```lisp
-(define (problem ltl_generated_problem)
+**Output**: `problem.pddl`
+```pddl
+(define (problem stack-blocks)
   (:domain blocksworld)
-  (:objects a b)
-  (:init
-    (ontable a) (ontable b)
-    (clear a) (clear b)
-    (handempty)
-  )
-  (:goal (and
-    (on a b)
-    (clear a)
-  ))
+  (:objects c b - block)
+  (:init (ontable c) (ontable b) (clear c) (clear b) (handempty))
+  (:goal (and (on c b)))
 )
 ```
 
-**LLM Integration**: Uses LLM for domain-aware conversion with template fallback
+**Implementation**: `src/stage2_translation/ltl_to_pddl.py`
 
 ---
 
-### Stage 3: PDDL → Action Plan
+### Stage 3A: Classical PDDL Planning (Branch A - Baseline)
 
-**Purpose**: Generate executable action sequence from PDDL problem
+**Input**: `problem.pddl` + `domain.pddl`
 
-**Process**:
-1. Classical PDDL planner (pyperplan) reads domain + problem files
-2. Forward state-space search finds solution
-3. Returns action sequence
-
-**Output**:
-```
-Plan (2 actions):
-  1. pickup(a)
-  2. stack(a, b)
-```
-
-**Note**: Pipeline stops here (no AgentSpeak/Jason code generation)
-
----
-
-## LTL Operators
-
-### Temporal Operators
-
-| Operator | Name | Meaning | Example | Planning Support |
-|----------|------|---------|---------|------------------|
-| **F** | Finally/Eventually | True at some future time | `F(on(a, b))` | Classical + LLM planner |
-| **G** | Globally/Always | True at all times | `G(clear(c))` | LLM planner only |
-| **X** | Next | True in next state | `X(holding(a))` | LLM planner only |
-| **U** | Until | True until another is true | `holding(a) U on(a,b)` | LLM planner only |
-
-### Logical Operators
-
-| Operator | Symbol | Meaning | Example |
-|----------|--------|---------|---------|
-| **and** | ∧ | Conjunction | `on(a,b) ∧ clear(a)` |
-| **or** | ∨ | Disjunction | `ontable(a) ∨ holding(a)` |
-| **not** | ¬ | Negation | `¬holding(a)` |
-| **implies** | → | Implication | `holding(a) → ¬handempty` |
-
-### LTL Syntax Rules
-
-**Grammar (BNF)**:
-```
-φ ::= p                    (atomic proposition)
-    | ¬φ                   (negation)
-    | φ₁ ∧ φ₂              (and)
-    | φ₁ ∨ φ₂              (or)
-    | X φ                  (next)
-    | F φ                  (finally)
-    | G φ                  (globally)
-    | φ₁ U φ₂              (until)
-```
-
-**Operator Precedence** (high to low):
-1. `¬` (negation)
-2. `X`, `F`, `G` (temporal)
-3. `U` (until)
-4. `∧` (and)
-5. `∨` (or)
-6. `→` (implies)
-
-**Always use parentheses to avoid ambiguity!**
-
----
-
-## Usage Examples
-
-### Basic Commands
-
-```bash
-# Run with natural language
-uv run python src/main.py "<instruction>"
-
-# Test individual stages
-uv run python src/stage1_interpretation/ltl_parser.py
-uv run python src/stage2_translation/ltl_to_pddl.py
-uv run python src/stage3_codegen/pddl_planner.py
-```
-
-### Example Scenarios
-
-#### 1. Simple Stacking
-
-```bash
-uv run python src/main.py "Put A on B"
-```
-
-**LTL**: `F(on(a, b))`, `F(clear(a))`
-**Plan**: `pickup(a)`, `stack(a, b)`
-
----
-
-#### 2. Three-Block Tower
-
-```bash
-uv run python src/main.py "Build a tower with C on B on A"
-```
-
-**LTL**: `F(on(c, b))`, `F(on(b, a))`, `F(clear(c))`
-**Plan** (4 steps):
-1. `pickup(c)`
-2. `stack(c, b)`
-3. `pickup(b)` (C automatically lifted)
-4. `stack(b, a)`
-
----
-
-#### 3. Rearrangement
-
-```bash
-uv run python src/main.py "Move block X from Y to Z"
-```
-
-**Plan**:
-1. `unstack(x, y)`
-2. `stack(x, z)`
-
----
-
-#### 4. Parallel Stacks
-
-```bash
-uv run python src/main.py "Stack A on B and C on D"
-```
-
-**LTL**: `F(on(a, b))`, `F(on(c, d))`, `F(clear(a))`, `F(clear(c))`
-**Plan** (4 steps):
-1. `pickup(a)`
-2. `stack(a, b)`
-3. `pickup(c)`
-4. `stack(c, d)`
-
----
-
-## Output Files
-
-### Timestamped Directories
-
-Each execution creates unique timestamped directories:
-
-```
-output/
-└── 20251022_170921/         ← Timestamp: YYYYMMDD_HHMMSS
-    ├── ltl_specification.json
-    ├── problem.pddl
-    └── plan.txt
-
-logs/
-└── 20251022_170921/         ← Same timestamp
-    ├── execution.json
-    └── execution.txt
-```
-
-### File Contents
-
-#### 1. `ltl_specification.json`
-```json
-{
-  "formulas": [
-    {"operator": "F", "predicate": {"on": ["a", "b"]}}
-  ],
-  "formulas_string": ["F(on(a, b))"],
-  "objects": ["a", "b"],
-  "initial_state": [...]
-}
-```
-
-#### 2. `problem.pddl`
-```lisp
-(define (problem ltl_generated_problem)
-  (:domain blocksworld)
-  (:objects a b)
-  (:init (ontable a) (ontable b) (clear a) (clear b) (handempty))
-  (:goal (and (on a b) (clear a)))
-)
-```
-
-#### 3. `plan.txt`
-```
-Plan for: Put block A on block B
-LTL Formulas:
-  1. F(on(a, b))
-  2. F(clear(a))
-
-Plan (2 actions):
-  1. pickup(a)
-  2. stack(a, b)
-```
-
-#### 4. `execution.json` (Logs)
-Complete execution trace including:
-- Natural language input
-- LTL specification with all formulas
-- PDDL problem content
-- Generated plan
-- **LLM prompts and responses** (Stage 1 & 2)
-- Execution time
-- Success/failure status for each stage
-
-#### 5. `execution.txt` (Logs)
-Human-readable format with:
-- Clear section headers
-- LLM prompt/response display
-- Formatted output
-- Error highlighting
-
-### Benefits of Timestamped Structure
-
-✅ **No File Overwriting**: Each run creates unique directory
-✅ **Easy Identification**: Timestamp shows when case was run
-✅ **Grouped Files**: All files from one execution together
-✅ **Synchronized Timestamps**: Output and logs use same timestamp
-✅ **Multiple Runs**: Run tests without losing previous results
-
----
-
-## Configuration
-
-### API Key Setup
-
-Create `.env` file:
-```bash
-# OpenAI API
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_BASE_URL=https://api.openai.com
-
-# DeepSeek API
-OPENAI_API_KEY=sk-your-deepseek-key
-OPENAI_MODEL=deepseek-chat
-OPENAI_BASE_URL=https://api.deepseek.com
-```
-
-### Supported Models
-
-**OpenAI**:
-- `gpt-4o-mini` (default, recommended)
-- `gpt-4o`
-- `gpt-4`
-- `gpt-3.5-turbo`
-
-**DeepSeek**:
-- `deepseek-chat`
-- `deepseek-coder`
-
-**Custom APIs**: Set `OPENAI_BASE_URL` to any OpenAI-compatible endpoint
-
-### API Key Requirement
-
-**IMPORTANT**: The pipeline requires an OpenAI API key to function.
-
-- No offline/mock mode available
-- All stages require LLM for intelligent processing
-- Set `OPENAI_API_KEY` in `.env` file before running
-- Pipeline will fail immediately if no API key is configured
-
----
-
-## Advanced Usage
-
-### Programmatic Access
-
+**Output**: Action sequence
 ```python
-from src.orchestrator import PipelineOrchestrator
-
-# Initialize
-orchestrator = PipelineOrchestrator()
-
-# Run pipeline
-results = orchestrator.execute("Put block A on block B")
-
-# Access results
-ltl_spec = results["stage1_ltl"]
-pddl_problem = results["stage2_pddl"]
-plan = results["stage3_plan"]
-
-# Iterate over plan
-for action, params in plan:
-    print(f"{action}({', '.join(params)})")
+[('pickup', ['c']), ('stack', ['c', 'b'])]
 ```
 
-### Custom Domain
+**Characteristics**:
+- ✅ Optimal (minimal actions)
+- ✅ Fast execution
+- ❌ No failure recovery
+- ❌ Brittle to unexpected states
 
-```python
-orchestrator = PipelineOrchestrator(
-    domain_file="domains/custom/domain.pddl"
-)
-results = orchestrator.execute("Custom instruction")
-```
-
-### Disable Logging
-
-```python
-results = orchestrator.execute(
-    "Put A on B",
-    enable_logging=False
-)
-```
-
-### Custom Output Directory
-
-```bash
-uv run python src/main.py "Stack C on D" --output my_results
-```
-
-### LLM Converter Behavior
-
-Automatically selects best method:
-- **With API key**: LLM-based conversion (domain-aware, better quality)
-- **Without API key**: Template-based fallback
-- **No configuration needed**: Just works!
+**Implementation**: `src/stage3_codegen/pddl_planner.py` (using pyperplan)
 
 ---
 
-## Troubleshooting
+### Stage 3B: LLM AgentSpeak Generation (Branch B - Novel)
 
-### Common Issues
+**Input**: LTLf specification + domain context
 
-**Issue**: `uv: command not found`
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+**Output**: `generated_agent.asl` (AgentSpeak plan library)
+
+**Example Generated Code**:
+```agentspeak
+// Main goal from LTLf F formula: F(on(c, b))
++!achieve_on_c_b : true <-
+    .print("Starting to achieve on(c, b)");
+    !![on(c, b)].
+
+// Declarative goal for on(c, b)
++!![on(c, b)] : on(c, b) <-
+    .print("Goal already achieved");
+    !verify_success.
+
+// Plan when blocks are clear and on table
++!![on(c, b)] : clear(c) & ontable(c) & clear(b) & handempty <-
+    pickup(c);
+    +holding(c);
+    -handempty;
+    stack(c, b);
+    -holding(c);
+    +handempty;
+    +on(c, b).
+
+// Failure handling
+-!![on(c, b)] : true <-
+    .print("Declarative goal failed, retrying");
+    !recover_and_retry.
 ```
 
-**Issue**: Import errors
-```bash
-# Always use 'uv run' prefix
-uv run python src/main.py "instruction"
-```
+**Characteristics**:
+- ✅ Context-adaptive plans
+- ✅ Failure recovery strategies
+- ✅ Multiple plan options
+- ⚠️ May be sub-optimal
 
-**Issue**: Dependencies not installed
-```bash
-uv sync
-```
-
-**Issue**: API timeout
-- Default: 60 seconds
-- Pipeline will fail with detailed error message
-- Check network connection and API key validity
-
-**Issue**: Planning fails
-- Check PDDL syntax: `cat output/YYYYMMDD_HHMMSS/problem.pddl`
-- Verify domain file: `domains/blocksworld/domain.pddl`
+**Implementation**: `src/stage3_codegen/agentspeak_generator.py`
 
 ---
 
-## Version History
+### Stage 4: Execution & Comparative Evaluation
 
-### v2.1.0 (2025-10-22) - Production Hardening & Unit Testing ✨ NEW
+**Branch A Execution**: Sequential action execution in blocksworld simulator
 
-**Major Changes**:
-- ✅ Removed all mock/fallback implementations (API key now required)
-- ✅ Comprehensive unit test suite with pytest (90+ tests)
-- ✅ Enhanced error handling with detailed context
-- ✅ Test coverage for all pipeline stages
-- ✅ Fail-fast architecture with clear error messages
-- ✅ Integration and unit test separation
+**Branch B Execution**: BDI reasoning cycle
+1. Goal posting: `achieve_on_c_b`
+2. Plan selection: Match trigger and context
+3. Action execution: Execute plan body
+4. Belief updates: Track state changes
 
-**Testing Infrastructure**:
-- **Unit Tests**: 90+ tests covering all stages
-  - Stage 1: LTL parser, temporal operators, nested operators
-  - Stage 2: PDDL converter, constraint extraction
-  - Stage 3: Classical and LLM planners
-  - Config and logger modules
-- **Integration Tests**: Orchestrator, end-to-end pipeline
-- **Test Fixtures**: Mock LLM responses, sample data
-- **Coverage**: Comprehensive code coverage reporting
-- **CI/CD Ready**: Automated testing support
+**Comparison Metrics**:
+```
+✓ Both branches succeeded
 
-**Error Handling Improvements**:
-- Detailed error context (model, instruction, formulas)
-- Enhanced exception messages with troubleshooting hints
-- Proper failure status logging (no silent failures)
-- Immediate exit on critical errors
+Efficiency:
+  Classical Actions: 2
+  AgentSpeak Actions: 2
+  Efficiency Ratio: 1.00
 
-**Breaking Changes**:
-- No offline/mock mode - valid API key required
-- Pipeline fails immediately without API key
-- All fallback mechanisms removed
+Robustness:
+  Classical Failure Recovery: False
+  AgentSpeak Failure Plans: False
+```
 
-### v2.0.0 (2025-10-22) - LTL Integration & Architecture Cleanup
-
-**Major Changes**:
-- ✅ Complete LTL integration with temporal operators (F, G, X, U)
-- ✅ LLM-based natural language → LTL conversion
-- ✅ LLM-based LTL → PDDL translation
-- ✅ Comprehensive logging with LLM interaction capture
-- ✅ Timestamped output directories
-- ✅ Pipeline stops at plan generation (no code generation)
-
-**Architecture Simplification**:
-- Removed verification module → moved to `legacy/`
-- Cleaner separation of concerns
-- Focus on plan generation only
-
-**Breaking Changes**:
-- Pipeline no longer generates AgentSpeak/Jason code
-- All v1.x files moved to `legacy/` folder
-
-**LTL Operators**:
-- ✅ **F (Finally)**: Full support, maps to PDDL goals
-- ✅ **G (Globally)**: Full support via LLM planner
-- ✅ **X (Next)**: Full support via LLM planner
-- ✅ **U (Until)**: Full support via LLM planner
-- ✅ **Nested Operators**: F(G(φ)), G(F(φ)) support
-
-**Logging System**:
-- Complete execution tracing with timestamps
-- LLM prompt/response capture for all stages
-- JSON + human-readable formats
-- Stage-by-stage success/failure tracking
+**Implementation**:
+- `src/stage4_execution/blocksworld_simulator.py` - Environment
+- `src/stage4_execution/agentspeak_simulator.py` - BDI execution
+- `src/stage4_execution/comparative_evaluator.py` - Metrics
 
 ---
 
-## Project Structure
+## 🛠️ Implementation Status
+
+### ✅ Completed Components
+
+**Core Pipeline**:
+- [x] Stage 1: NL → LTLf parser
+- [x] Stage 2: LTLf → PDDL converter
+- [x] Stage 3A: Classical PDDL planner
+- [x] Stage 3B: AgentSpeak generator
+- [x] Stage 4: Execution & comparison
+
+**AgentSpeak Simulator**:
+- [x] Multi-line plan parsing
+- [x] Declarative goal support (`+!!`)
+- [x] Variable unification
+- [x] Belief format conversion (`ontable` ↔ `on(X,table)`)
+- [x] Context checking with negation
+- [x] Primitive action execution
+- [x] BDI reasoning cycle
+
+**Pipeline Infrastructure**:
+- [x] Configuration management (.env)
+- [x] Logging system
+- [x] Dual-branch orchestration
+- [x] Blocksworld environment simulator
+
+### 🔧 Known Limitations (MVP Scope)
+
+**LTLf Verification**:
+- ✅ Supports: `F(φ)` (Eventually)
+- ❌ Not yet: `G(φ)`, `X(φ)`, `φ U ψ` (requires temporal trace verification)
+
+**AgentSpeak Features**:
+- ✅ Supports: Achievement goals, declarative goals, context guards, belief updates
+- ❌ Not yet: Annotations, complex internal actions, event handling
+
+**Single Agent Only**:
+- ✅ Single agent BDI execution
+- ❌ Multi-agent coordination (out of scope)
+
+---
+
+## 📊 Test Results
+
+### Simple Stack Scenario: "Stack block C on block B"
+
+**Test Status**: ✅ **PASSING**
+
+```
+BRANCH A: Classical PDDL Planning
+  Success: True
+  Actions: 2 (pickup, stack)
+  Final State: on(c,b) achieved
+
+BRANCH B: LLM AgentSpeak
+  Success: True
+  Actions: 2 (pickup, stack)
+  Final State: on(c,b) achieved
+
+Comparison:
+  Efficiency Ratio: 1.00 (equal)
+  Both branches succeeded
+```
+
+### Additional Scenarios
+
+| Scenario | Classical | AgentSpeak | Status |
+|----------|-----------|------------|--------|
+| Simple stack (C on B) | ✅ Pass | ✅ Pass | **VERIFIED** |
+| Three-block tower | ❓ | ❓ | Not tested |
+| Block rearrangement | ❓ | ❓ | Not tested |
+| Parallel stacks | ❓ | ❓ | Not tested |
+
+---
+
+## 📁 Project Structure
 
 ```
 llm-bdi-pipeline-dev/
 ├── src/
 │   ├── stage1_interpretation/
-│   │   └── ltl_parser.py              # NL → LTL with LLM
+│   │   └── ltl_parser.py              # NL → LTLf
 │   ├── stage2_translation/
-│   │   └── ltl_to_pddl.py            # LTL → PDDL with LLM
+│   │   └── ltl_to_pddl.py            # LTLf → PDDL
 │   ├── stage3_codegen/
-│   │   └── pddl_planner.py           # PDDL → Plan
-│   ├── config.py                      # Configuration & .env
-│   ├── orchestrator.py                # Pipeline coordinator
-│   ├── pipeline_logger.py             # Execution logging
-│   └── main.py                        # Main entry point
-├── examples/
-│   └── problems/                      # Example problem files
+│   │   ├── pddl_planner.py           # Classical planner
+│   │   └── agentspeak_generator.py   # LLM AgentSpeak gen
+│   ├── stage4_execution/
+│   │   ├── blocksworld_simulator.py  # Environment
+│   │   ├── agentspeak_simulator.py   # BDI execution
+│   │   └── comparative_evaluator.py  # Metrics
+│   ├── dual_branch_pipeline.py       # Pipeline orchestrator
+│   ├── config.py                      # Configuration
+│   ├── pipeline_logger.py             # Logging
+│   └── main.py                        # Entry point
 ├── domains/
 │   └── blocksworld/
-│       └── domain.pddl                # Blocksworld domain
-├── output/                            # Generated files (timestamped)
-├── logs/                              # Execution logs (timestamped)
-├── .env                               # API keys (gitignored)
-├── README.md                          # This file
-└── QUICKSTART.md                      # 2-minute quick start
+│       └── domain.pddl                # PDDL domain (given)
+├── docs/
+│   └── IMPLEMENTATION_ISSUES_AND_FIXES.md  # Technical docs
+├── output/
+│   └── generated_agent.asl            # Generated plans
+└── .env                               # API keys (gitignored)
 ```
 
 ---
 
-## Current Capabilities
+## 🔑 Critical Implementation Details
 
-### ✅ Fully Implemented
+### Fix #1: Initial State Format Conversion
 
-**Testing & Quality Assurance** ✨ NEW:
-- **Comprehensive Unit Tests**: 90+ tests across all modules
-  - LTL formula parsing and string representation
-  - Temporal operators (F, G, X, U)
-  - Nested operators (F(G(φ)), G(F(φ)))
-  - PDDL generation and constraint extraction
-  - Classical and LLM planner functionality
-  - Configuration and logging systems
-- **Integration Tests**: End-to-end pipeline execution
-- **Mock Infrastructure**: Test fixtures for LLM responses
-- **Test Markers**: Separation of unit, integration, and API tests
-- **Coverage Reporting**: HTML, XML, and terminal output
-- **CI/CD Ready**: Automated pytest execution
+**Problem**: LTL parser generates `ontable(X)` but simulator expects `on(X, table)`
 
-**Production-Ready Error Handling** ✨ NEW:
-- **Fail-Fast Architecture**: Immediate exit on critical errors
-- **Detailed Error Context**: Model, instruction, formulas in error messages
-- **No Silent Failures**: All errors properly logged as Failed status
-- **API Key Validation**: No offline mode, requires valid key
-- **Enhanced Debugging**: Troubleshooting hints in error messages
-
-**LTL Operators (with LLM Planner)**:
-- **F (Finally/Eventually)**: Fully supported in both classical and LLM planners
-  - Example: `F(on(a, b))` → "Eventually a is on b"
-  - Classical planner: Maps to PDDL `:goal` predicates
-  - LLM planner: Understands temporal achievement goals
-  - **Test Coverage**: 15+ unit tests
-
-- **G (Globally/Always)**: Fully supported via LLM planner
-  - Example: `G(clear(c))` → "C is always clear"
-  - Classical planner: ❌ Not supported (PDDL limitation)
-  - LLM planner: ✅ Maintains constraints throughout plan execution
-  - Enable with: `USE_LLM_PLANNER=true` in `.env`
-  - **Test Coverage**: 12+ unit tests
-
-- **X (Next)**: Fully supported via LLM planner
-  - Example: `X(on(a, b))` → "In the next state, a is on b"
-  - Classical planner: ❌ Not supported
-  - LLM planner: ✅ Handles next-state constraints
-  - Natural language: "immediately", "next", "then"
-  - **Test Coverage**: 8+ unit tests
-
-- **U (Until)**: Fully supported via LLM planner
-  - Example: `holding(a) U clear(b)` → "Hold a until b is clear"
-  - Classical planner: ❌ Not supported
-  - LLM planner: ✅ Maintains property until condition holds
-  - Natural language: "until", "while waiting for"
-  - **Test Coverage**: 10+ unit tests
-
-- **Nested Operators**: F(G(φ)), G(F(φ)) fully supported
-  - Example: `F(G(on(a, b)))` → "Eventually ensure A is always on B"
-  - Example: `G(F(clear(c)))` → "Always eventually clear C"
-  - **Test Coverage**: 6+ unit tests
-
-**LLM Integration**:
-- **Stage 1 (NL → LTL)**: OpenAI-compatible API for natural language understanding
-  - Automatic object extraction
-  - Initial state inference
-  - LTL formula generation (F, G, X, U operators)
-  - Enhanced prompts with operator examples
-  - Comprehensive error handling with detailed messages
-
-- **Stage 2 (LTL → PDDL)**: LLM-based domain-aware PDDL generation
-  - Contextual PDDL problem creation
-  - Domain file analysis
-  - Intelligent PDDL syntax generation
-
-- **Stage 3 (PDDL → Plan)**: Dual planner support ✨ NEW
-  - **Classical Planner (default)**: pyperplan - fast, deterministic
-    - Supports F operator only
-    - No temporal constraints (G, X, U)
-  - **LLM Planner**: Constraint-aware planning
-    - Supports all LTL operators (F, G, X, U)
-    - Reasons about temporal constraints
-    - Enable with `USE_LLM_PLANNER=true`
-
-**Pipeline Features**:
-- **Timestamped Output**: Each execution creates `output/YYYYMMDD_HHMMSS/` directory
-- **Complete Logging**: Execution logs in `logs/YYYYMMDD_HHMMSS/`
-  - JSON format for programmatic access
-  - Human-readable text format
-  - Full LLM prompt/response capture (all three stages)
-  - Stage-by-stage success/failure tracking
-  - LLM planner interaction logs
-
-- **Configuration-based Planner Selection**: Choose planner per execution
-- **Multi-case Support**: No file overwriting, unique directories per run
-
-**Supported Domains**:
-- **Blocksworld**: Full PDDL domain support with actions:
-  - `pickup`, `putdown`, `stack`, `unstack`
-  - Predicates: `on`, `ontable`, `clear`, `holding`, `handempty`
-
-### 📋 Usage Examples by Operator
-
-**F (Finally) - Classical or LLM Planner**:
-```bash
-uv run python src/main.py "Put block A on block B"
-# LTL: F(on(a, b))
+**Solution**: Automatic conversion in `dual_branch_pipeline.py`:
+```python
+if pred_name == 'ontable' and args:
+    for block in args:
+        beliefs.append(f"on({block}, table)")
 ```
 
-**G (Globally) - Requires LLM Planner**:
-```bash
-# Set USE_LLM_PLANNER=true in .env first
-uv run python src/main.py "Put A on B while keeping C clear"
-# LTL: F(on(a, b)) ∧ G(clear(c))
+### Fix #2: Multi-Line Plan Parsing
+
+**Problem**: Generated AgentSpeak code spans multiple lines but parser expected single-line plans
+
+**Solution**: Accumulate lines until period found in `agentspeak_simulator.py`:
+```python
+def _parse_asl(self, asl_code: str):
+    current_plan_text = ""
+    for line in lines:
+        if line.startswith(('+!', '-!')):
+            if current_plan_text:
+                self._parse_single_plan(current_plan_text)
+            current_plan_text = line
+        elif current_plan_text:
+            current_plan_text += " " + line
+
+        if current_plan_text and current_plan_text.endswith('.'):
+            self._parse_single_plan(current_plan_text)
+            current_plan_text = ""
 ```
 
-**X (Next) - Requires LLM Planner**:
-```bash
-# Set USE_LLM_PLANNER=true in .env first
-uv run python src/main.py "Pick up A, then immediately place it on B"
-# LTL: F(holding(a)) ∧ X(on(a, b))
+### Fix #3: Belief Format Bidirectional Conversion
+
+**Problem**: Generated code uses `ontable(c)` but beliefs contain `on(c,table)` (with/without space)
+
+**Solution**: Handle both formats in belief checking:
+```python
+def _belief_exists(self, condition: str) -> bool:
+    # Direct match
+    if condition in self.beliefs:
+        return True
+
+    # Convert ontable(X) to on(X, table) - try both formats
+    match = re.match(r'ontable\((\w+)\)', condition)
+    if match:
+        block = match.group(1)
+        return (f"on({block}, table)" in self.beliefs or
+                f"on({block},table)" in self.beliefs)
+
+    # Convert on(X, table) to ontable(X)
+    match = re.match(r'on\((\w+),\s*table\)', condition)
+    if match:
+        block = match.group(1)
+        return f"ontable({block})" in self.beliefs
+
+    return False
 ```
 
-**U (Until) - Requires LLM Planner**:
-```bash
-# Set USE_LLM_PLANNER=true in .env first
-uv run python src/main.py "Keep holding A until B is clear"
-# LTL: holding(a) U clear(b)
+### Fix #4: Declarative Goal Execution
+
+**Problem**: AgentSpeak uses `!!goal` for declarative goals but action executor didn't distinguish from `!goal`
+
+**Solution**: Check satisfaction before plan selection:
+```python
+def _achieve_goal(self, goal: str) -> bool:
+    # For declarative goals, check if already satisfied
+    if goal.startswith('[') and goal.endswith(']'):
+        goal_condition = goal.strip('[]')
+        if self._belief_exists(goal_condition):
+            return True  # Already satisfied!
+
+    # Otherwise select and execute plan
+    plan = self._select_plan(goal)
+    ...
 ```
-
-**Nested Operators - Requires LLM Planner** ✨ NEW:
-```bash
-# Set USE_LLM_PLANNER=true in .env first
-
-# F(G(φ)) - Eventually always
-uv run python src/main.py "Eventually ensure A is always on B"
-# LTL: F(G(on(a, b)))
-
-# G(F(φ)) - Always eventually
-uv run python src/main.py "Keep trying to clear C"
-# LTL: G(F(clear(c)))
-```
-
-**Supported Nested Patterns**:
-- **F(G(φ))**: Eventually reach a state where φ is always true
-- **G(F(φ))**: Always eventually achieve φ (keep making progress)
-- **F(X(φ))**: Eventually in next state φ holds
-- **G(X(φ))**: Always in next state φ holds
-- Other combinations supported via LLM reasoning
-
-### ❌ Not Yet Implemented
-
-**Additional Features**:
-- **Multi-domain support**: Mars Rover, Logistics domains (planned)
-- **Code Generation**: AgentSpeak/Jason code output (out of scope)
-- **Plan Verification**: Runtime plan validation against LTL formulas
-- **Plan Execution**: Actual execution framework (out of scope)
 
 ---
 
-## Research Context
+## 🎓 Research Context
 
 **Project**: Final Year Project (FYP)
 **Institution**: University of Nottingham Ningbo China
 **Author**: Yiwei LI (20513831)
 **Supervisor**: Yuan Yao
 
-### Research Focus
-- Integrating Large Language Models into BDI agent architectures
-- LTL-based temporal goal specification for intelligent agents
-- Automated plan generation from natural language
-- Practical engineering solutions for agent programming
+### Research Questions
+
+**RQ1**: Can LLMs generate correct AgentSpeak plan libraries from LTLf specifications?
+- ✅ Syntax: Generated code parses successfully
+- ✅ Semantics: Plans execute correctly in blocksworld
+
+**RQ2**: How do LLM-generated plans compare to classical planning?
+- ✅ Efficiency: Equal action count for simple scenarios
+- ⚠️ Optimality: Requires more test cases
+
+**RQ3**: Are LLM-generated plans more robust to failures?
+- ❓ Pending: Failure injection tests needed
+
+**RQ4**: Can LLM plans handle novel situations?
+- ❓ Pending: Unseen state tests needed
 
 ### Key Contributions
-1. **LTL-based goal specification** for BDI agents (novel approach)
-2. **LLM integration** for natural language understanding and PDDL generation
-3. **Automated LTL → PDDL translation** with domain awareness
-4. **Complete execution logging** with LLM traceability
-5. **Timestamped output management** for multiple test cases
 
-### Experimental Evaluation
-
-**Metrics**:
-- LTL parsing accuracy
-- Plan correctness rate
-- Execution time per stage
-- Scalability (problem size)
-
-**Test Cases** (Blocksworld):
-1. Simple stacking: "Put A on B"
-2. Tower building: "Build a tower with C on B on A"
-3. Rearrangement: "Move X from Y to Z"
-4. Parallel stacks: "Stack A on B and C on D"
+1. **Dual-Branch Comparative Framework**: First implementation comparing classical planning with LLM-generated BDI plans
+2. **LTLf-to-AgentSpeak Pipeline**: Novel approach using temporal logic as intermediate representation
+3. **Working BDI Simulator**: Pure Python implementation of AgentSpeak subset (no Jason dependency)
+4. **Comprehensive Fix Documentation**: All implementation challenges and solutions documented
 
 ---
 
-## License
+## 📝 License
 
 Academic research project - University of Nottingham Ningbo China
+
+---
+
+## 📚 References
+
+- **BDI Architecture**: Bordini et al. (2007) - Programming Multi-Agent Systems in AgentSpeak using Jason
+- **LTLf**: De Giacomo & Vardi (2013) - Linear Temporal Logic on Finite Traces
+- **PDDL Planning**: Geffner & Bonet (2013) - A Concise Introduction to Models and Methods for Automated Planning

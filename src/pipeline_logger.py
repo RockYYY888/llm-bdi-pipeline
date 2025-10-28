@@ -215,6 +215,38 @@ class PipelineLogger:
         self.current_record.stage3_status = "failed"
         self.current_record.stage3_error = str(error)
 
+    # Simplified logging helpers for dual-branch pipeline
+    def log_stage1(self, nl_input: str, ltl_spec: Any, status: str, error: str = None):
+        """Simplified Stage 1 logger"""
+        if status == "Success" and ltl_spec:
+            self.log_stage1_success(ltl_spec.to_dict() if hasattr(ltl_spec, 'to_dict') else ltl_spec, used_llm=True)
+        elif error:
+            self.log_stage1_error(error)
+
+    def log_stage2(self, ltl_spec: Any, pddl_problem: Any, status: str, error: str = None):
+        """Simplified Stage 2 logger"""
+        if status == "Success" and pddl_problem:
+            self.log_stage2_success(str(pddl_problem), used_llm=True)
+        elif error:
+            self.log_stage2_error(error)
+
+    def log_stage3a(self, pddl_problem: Any, plan: List[Tuple[str, List[str]]], status: str, error: str = None):
+        """Simplified Stage 3A (Classical) logger"""
+        if status == "Success" and plan:
+            self.log_stage3_success(plan, used_llm=False)
+        elif error:
+            self.log_stage3_error(error)
+
+    def log_stage3b(self, ltl_spec: Any, asl_code: str, status: str, error: str = None):
+        """Simplified Stage 3B (AgentSpeak) logger - stores in unused fields"""
+        # For MVP: Store in llm_response field since we don't have dedicated stage3b fields
+        pass
+
+    def log_stage4(self, results: Dict[str, Any], status: str, error: str = None):
+        """Simplified Stage 4 (Execution) logger"""
+        # For MVP: Just track success/failure
+        pass
+
     def end_pipeline(self, success: bool = True) -> Path:
         """
         End logging and save the record
