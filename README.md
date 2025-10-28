@@ -591,6 +591,176 @@ def _select_plan(self, goal: str) -> Optional[AgentSpeakPlan]:
 
 ---
 
+## ⚠️ Known Issues and Incomplete Features
+
+**IMPORTANT**: The following issues were discovered through comprehensive testing. The pipeline works correctly for **simple single-goal scenarios** (e.g., "Stack block C on block B") but has limitations for more complex cases.
+
+### Issue 1: Multiple LTLf Goals Not Fully Supported ⚠️ MAJOR
+
+**Problem**: When natural language describes multiple goals (e.g., "Build a tower with A on B on C"), the pipeline generates multiple LTLf formulas but only processes the first one.
+
+**Test Case**:
+```bash
+Input: "Build a tower with block A on block B on block C"
+LTLf Generated: ['F(on(a, b))', 'F(on(b, c))']  # Two goals!
+```
+
+**What Happens**:
+1. **Stage 2 (PDDL Generation)**: LLM may generate incomplete PDDL goal (observed: `(on a b` without closing paren and missing second goal)
+2. **Stage 3B (AgentSpeak)**: `_extract_agentspeak_goal()` only extracts first formula → creates `achieve_on_a_b`, ignores `F(on(b,c))`
+3. **Stage 4 (Verification)**: `_check_ltl_satisfaction()` only checks first formula
+
+**Impact**:
+- ✅ Classical planner: May still work if PDDL LLM generates complete conjunctive goal
+- ❌ AgentSpeak execution: Only achieves first sub-goal, ignores others
+- ❌ Goal verification: Reports "Goal Satisfied: False" even when first goal is met
+
+**Affected Code**:
+- `dual_branch_pipeline.py:277-292` - `_extract_agentspeak_goal()` only matches one `F(on(X,Y))`
+- `comparative_evaluator.py:148-163` - `_check_ltl_satisfaction()` only checks one goal
+- `dual_branch_pipeline.py:251-262` - Passes only `formulas_string_list[0]` to evaluator
+
+**Status**: 🔴 **INCOMPLETE** - Multi-goal support not implemented
+
+---
+
+### Issue 2: LTLf Goal Verification Space Mismatch ⚠️ MODERATE
+
+**Problem**: Goal verification fails due to whitespace inconsistency between extracted goal and final state format.
+
+**Root Cause**:
+```python
+# comparative_evaluator.py:156
+goal_predicate = ltl_goal[2:-1]  # Extracts "on(a, b)" with space
+# But final_state contains: "on(a,b)" (no space)
+return goal_predicate in final_state  # Always False!
+```
+
+**Test Evidence**:
+```
+Test: "Stack block C on block B"
+LTLf Goal: F(on(c, b))          # Space after comma
+Extracted: "on(c, b)"            # Space preserved
+Final State: ['on(c,b)', ...]   # No space
+Result: Goal Satisfied: False   # WRONG! Goal was actually achieved
+```
+
+**Impact**:
+- ❌ Goal verification always reports False for achieved goals
+- ✅ Execution still succeeds (the goal is actually achieved)
+- ⚠️ Misleading evaluation metrics
+
+**Affected Code**:
+- `comparative_evaluator.py:148-163` - `_check_ltl_satisfaction()`
+
+**Workaround**: Normalize spaces in both goal and state before comparison
+
+**Status**: 🟡 **BUG** - Verification logic error
+
+---
+
+### Issue 3: Hardcoded Single-Goal Assumptions 🔒 LIMITATION
+
+**Problem**: Multiple components assume exactly one LTLf goal.
+
+**Hardcoded Logic**:
+
+1. **Goal Extraction** (`dual_branch_pipeline.py:277-292`):
+   ```python
+   def _extract_agentspeak_goal(self, ltl_formula: str):
+       # Match F(on(X, Y)) - ONLY ONE!
+       match = re.match(r'F\(on\((\w+),\s*(\w+)\)\)', ltl_formula)
+   ```
+
+2. **Goal Passing** (`dual_branch_pipeline.py:253`):
+   ```python
+   agentspeak_goal = self._extract_agentspeak_goal(formulas_string_list[0])  # [0]!
+   ```
+
+3. **Verification** (`comparative_evaluator.py:180`):
+   ```python
+   report.append(f"\nLTLf Goal: {self.results['ltl_goal']}")  # Singular!
+   ```
+
+**Impact**:
+- Works for: Simple scenarios with one goal ("Stack C on B")
+- Fails for: Complex scenarios with multiple goals ("Build tower A-B-C")
+
+**Status**: 🔒 **BY DESIGN** - MVP limitation
+
+---
+
+### Issue 4: No Conjunctive or Sequential Goal Support 🔒 LIMITATION
+
+**Problem**: Cannot handle:
+- Conjunctive goals: `F(on(a,b) & on(b,c))` - "A on B AND B on C simultaneously"
+- Sequential goals: `F(on(b,c)) & F(F(on(a,b)))` - "First B on C, then A on B"
+- Complex temporal: `G(holding(X) -> F(ontable(X)))` - "Whatever you pick up must eventually be put down"
+
+**Current Support**: Only `F(φ)` where φ is a single atomic predicate
+
+**Status**: 🔒 **OUT OF SCOPE** - Future work
+
+---
+
+### Issue 5: PDDL Goal Generation Relies on LLM Quality ⚠️ MODERATE
+
+**Problem**: Stage 2 uses LLM to generate PDDL, which may produce incomplete or incorrect goals for complex inputs.
+
+**Observed**:
+```
+Input: "Build tower A on B on C"
+LTLf: ['F(on(a, b))', 'F(on(b, c))']
+PDDL Goal (generated): "(on a b"      # Incomplete! Missing ) and second goal
+```
+
+**Impact**:
+- Classical planning may fail or solve wrong problem
+- No validation of LLM-generated PDDL
+
+**Mitigation**: Add PDDL syntax validation and goal completeness checking
+
+**Status**: ⚠️ **INCOMPLETE** - No LLM output validation
+
+---
+
+### Issue 6: Limited Blocksworld Initial States 🔒 LIMITATION
+
+**Current**: All blocks start `on(table)` and `clear`
+
+**Not Supported**:
+- Blocks already stacked in initial state
+- Blocks held in hand initially
+- Complex configurations
+
+**Why**: LTL parser prompt assumes "blocks on table" initial configuration
+
+**Status**: 🔒 **BY DESIGN** - Simplifying assumption for MVP
+
+---
+
+## ✅ What Actually Works (Verified)
+
+**Fully Functional**:
+1. ✅ Simple single-goal stacking: "Stack block C on block B"
+2. ✅ Classical PDDL planning for single goals
+3. ✅ AgentSpeak generation and parsing for single goals
+4. ✅ BDI execution with declarative goals
+5. ✅ All 7 critical fixes (multi-line parsing, variable unification, belief conversion, etc.)
+
+**Partially Functional**:
+6. ⚠️ Multi-goal scenarios: Classical may work (depends on LLM), AgentSpeak only achieves first goal
+7. ⚠️ Goal verification: Works but reports incorrect results due to space mismatch
+
+**Not Implemented**:
+8. ❌ Multiple independent goals
+9. ❌ Conjunctive goals
+10. ❌ Sequential/temporal goals
+11. ❌ Complex LTL operators (G, X, U)
+12. ❌ PDDL output validation
+
+---
+
 ## 🎓 Research Context
 
 **Project**: Final Year Project (FYP)
@@ -598,28 +768,30 @@ def _select_plan(self, goal: str) -> Optional[AgentSpeakPlan]:
 **Author**: Yiwei LI (20513831)
 **Supervisor**: Yuan Yao
 
-### Research Questions
+### Research Questions (Updated with Test Results)
 
 **RQ1**: Can LLMs generate correct AgentSpeak plan libraries from LTLf specifications?
 - ✅ Syntax: Generated code parses successfully
-- ✅ Semantics: Plans execute correctly in blocksworld
+- ✅ Semantics: Plans execute correctly for **single-goal** blocksworld scenarios
+- ⚠️ **Limitation**: Only supports single `F(on(X,Y))` goals currently
 
 **RQ2**: How do LLM-generated plans compare to classical planning?
-- ✅ Efficiency: Equal action count for simple scenarios
-- ⚠️ Optimality: Requires more test cases
+- ✅ Efficiency: Equal action count for simple scenarios (tested: "Stack C on B")
+- ⚠️ **Issue Found**: Multi-goal scenarios show discrepancy - classical may solve full problem, AgentSpeak only partial
 
 **RQ3**: Are LLM-generated plans more robust to failures?
 - ❓ Pending: Failure injection tests needed
 
 **RQ4**: Can LLM plans handle novel situations?
 - ❓ Pending: Unseen state tests needed
+- ⚠️ **Current**: Limited to single-goal scenarios
 
 ### Key Contributions
 
 1. **Dual-Branch Comparative Framework**: First implementation comparing classical planning with LLM-generated BDI plans
 2. **LTLf-to-AgentSpeak Pipeline**: Novel approach using temporal logic as intermediate representation
 3. **Working BDI Simulator**: Pure Python implementation of AgentSpeak subset (no Jason dependency)
-4. **Comprehensive Fix Documentation**: All implementation challenges and solutions documented
+4. **Comprehensive Documentation**: All implementation challenges, fixes, and **limitations** fully documented
 
 ---
 
