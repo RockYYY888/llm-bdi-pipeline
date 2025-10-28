@@ -749,6 +749,86 @@ Added `validate_pddl_syntax()` function in `ltl_to_pddl.py` that checks:
 
 ---
 
+## 🏗️ Architecture Analysis: Integration vs Comparison
+
+### Proposed Integration Architecture (Evaluated)
+
+User proposed this unified pipeline architecture:
+```
+Natural Language Instruction
+         ↓
+[LTLf Goal Specification]
+         ↓
+[FOND Planning with LTLf Goals]
+         ↓
+[Policy (State → Action mapping)]
+         ↓
+[AgentSpeak Execution]
+         ↓
+[Runtime LTLf Monitoring]
+```
+
+### Current Dual-Branch Comparison Architecture
+
+```
+Natural Language
+       ↓
+    [LTLf]
+       ↓
+    [PDDL]
+       ↓
+    ┌──┴──┐
+    ▼     ▼
+Branch A  Branch B
+Classical  LLM
+Planning  AgentSpeak
+    ↓     ↓
+[Comparison]
+```
+
+### Key Differences
+
+| Aspect | Proposed (Integration) | Current (Comparison) |
+|--------|----------------------|---------------------|
+| **Planner** | FOND (non-deterministic) | pyperplan (deterministic) |
+| **Output** | Policy (state→action map) | Plan (linear sequence) |
+| **Relationship** | FOND guides AgentSpeak | Independent execution |
+| **Research Q** | "How can classical enhance LLM?" | "How does LLM compare to classical?" |
+| **Goal Dependencies** | ✅ FOND handles automatically | ❌ Current issue (see tower example) |
+| **Robustness** | ✅ Policy covers multiple states | ⚠️ Plan is single trajectory |
+| **Runtime Monitoring** | ✅ Continuous LTLf checking | ⚠️ End-state verification only |
+
+### Analysis & Decision
+
+**Advantages of Integration Architecture:**
+1. ✅ **Solves goal ordering problem**: FOND policy naturally handles dependencies (B→C before A→B)
+2. ✅ **State-aware execution**: Policy provides actions for ANY reachable state
+3. ✅ **Runtime verification**: Continuous LTLf monitoring vs end-state only
+4. ✅ **Production-ready**: Better for real-world BDI systems
+
+**Disadvantages:**
+1. ❌ **Changes research focus**: From comparison to integration
+2. ❌ **Loses dual-branch insights**: Can't compare LLM vs classical separately
+3. ❌ **Requires FOND planner**: Not currently implemented (only pyperplan)
+4. ❌ **Policy→AgentSpeak translation**: Need new conversion logic
+
+### Recommended Approach: **KEEP CURRENT + ADD INTEGRATION AS FUTURE WORK**
+
+**Rationale:**
+- **Current dual-branch architecture serves core research goal**: Comparative evaluation
+- **Integration architecture is FUTURE ENHANCEMENT**, not replacement
+- **Goal ordering issue discovered through comparison** - this is valuable research insight!
+- **Can add FOND-guided branch later** as Branch C without disrupting A vs B comparison
+
+**Implementation Priority:**
+1. ✅ **Phase 1 (DONE)**: Fix current architecture issues (verification, validation, multi-goal)
+2. 📋 **Phase 2 (NEXT)**: Enhance current comparison (better goal ordering, PDDL multi-goal)
+3. 🔮 **Phase 3 (FUTURE)**: Add FOND-guided AgentSpeak as Branch C for three-way comparison
+
+**Current Status**: Dual-branch architecture is appropriate for comparative research. Integration architecture documented as future enhancement.
+
+---
+
 ## 🔧 Recent Fixes (Phase 1 MVP Completion)
 
 ### ✅ Fix 1: Goal Verification Space Normalization (Issue 2)
