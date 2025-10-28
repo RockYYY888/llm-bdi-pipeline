@@ -45,6 +45,9 @@ python src/main.py "Stack block C on block B" --mode llm
 
 # Run AgentSpeak only
 python src/main.py "Stack block C on block B" --mode asl
+
+# Run PDDL planner only
+python src/main.py "Stack block C on block B" --mode pddl
 ```
 
 ---
@@ -97,11 +100,12 @@ Natural Language Input ("Stack block C on block B")
 
 ## Execution Modes
 
-The pipeline supports three execution modes via the `--mode` flag:
+The pipeline supports four execution modes via the `--mode` flag:
 
-1. **both** (default): Run both branches and compare results
+1. **both** (default): Run both LLM and AgentSpeak branches and compare results
 2. **llm**: Run only LLM policy generation branch
 3. **asl**: Run only AgentSpeak generation branch
+4. **pddl**: Run only PDDL classical planning branch (using pyperplan)
 
 ---
 
@@ -217,37 +221,46 @@ The blocksworld domain provides a clear testbed for:
 
 ---
 
-## TODO: Implementation Tasks
+## Implementation Status
 
-### Critical Issues to Resolve
-1. **FOND Planner Integration** - Replace pyperplan with FOND planner (keep PDDL)
+### Completed Features ✓
+1. **PDDL Planning Integration** - Classical PDDL planning using pyperplan
+   - LTLf → PDDL problem generation
+   - Pyperplan integration for classical planning
+   - PDDL mode (`--mode pddl`) fully functional
+   - Maintains PDDL in the pipeline workflow
+
+2. **Logger Output Integration** - Timestamped execution logs
+   - Logs saved to `logs/YYYYMMDD_HHMMSS/`
+   - Both JSON and human-readable text formats
+   - Complete execution trace for all modes
+
+3. **Branch Mode Toggle** - Flexible execution modes
+   - `--mode both`: LLM + AgentSpeak comparison
+   - `--mode llm`: LLM policy only
+   - `--mode asl`: AgentSpeak only
+   - `--mode pddl`: Classical PDDL planning only
+
+4. **Documentation** - Clean, accurate README
+   - No emojis, single architecture diagram
+   - 100% accuracy with implementation
+   - Concise and precise content
+
+### Known Limitations
+
+1. **FOND (Non-Deterministic) Planning** - BLOCKED
    - Status: NOT IMPLEMENTED
-   - Requirements:
-     - Integrate safe-planner or equivalent FOND planner
-     - Install external classical planners (FF, OPTIC, etc.)
-     - Create PPDDL domain files with `oneof` clauses for non-deterministic effects
-   - Impact: High - core requirement for non-deterministic planning support
+   - Blockers:
+     - Safe-planner requires external classical planners (FF, OPTIC, etc.) - compilation failed on modern C++
+     - PRP planner has C++ compilation errors with deprecated headers (`hash_set`)
+     - Both require significant system-level dependencies
+   - Workaround: Use classical PDDL planning with pyperplan (deterministic)
+   - Future: Requires fixing C++ compilation issues or using pre-compiled binaries
 
-2. **Non-Deterministic Planning Support** - Add PPDDL with oneof clauses
-   - Status: NOT IMPLEMENTED
-   - Requirements:
-     - Extend PDDL domain to support non-deterministic action effects
-     - Update pipeline to handle PPDDL problem formulations
-     - Implement FOND solution verification
-   - Impact: High - required for realistic domain modeling
-
-3. **Logger Output Integration** - Fix pipeline_logger to save execution records
-   - Status: PARTIALLY IMPLEMENTED
-   - Issues:
-     - `dual_branch_pipeline.py` never calls `start_pipeline()` or `end_pipeline()`
-     - Logs are not being saved to disk after runs
-     - Need dual-branch specific logging for Branch A and Branch B results
-   - Impact: Medium - required for experiment tracking and reproducibility
-
-### Completed Features
-- Branch mode toggle (--mode flag with both/llm/asl)
-- README cleanup (no emojis, single architecture, concise)
-- Documentation matches implementation 100%
+2. **PPDDL with Oneof Clauses** - NOT SUPPORTED
+   - Current implementation uses standard PDDL (deterministic)
+   - PPDDL examples exist in external/safe-planner/benchmarks/
+   - Requires FOND planner to utilize non-deterministic effects
 
 ---
 

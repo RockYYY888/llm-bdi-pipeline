@@ -16,8 +16,10 @@ from typing import Dict, Any
 
 from config import get_config
 from stage1_interpretation.ltl_parser import NLToLTLParser
+from stage2_pddl.pddl_problem_generator import PDDLProblemGenerator
 from stage3_codegen.llm_policy_generator import LLMPolicyGenerator
 from stage3_codegen.agentspeak_generator import AgentSpeakGenerator
+from stage3_codegen.pddl_planner import PDDLPlanner
 from stage4_execution.blocksworld_simulator import BlocksworldState, BlocksworldEnvironment, ClassicalPlanExecutor
 from stage4_execution.agentspeak_simulator import AgentSpeakExecutor
 from stage4_execution.comparative_evaluator import ComparativeEvaluator
@@ -76,6 +78,7 @@ class DualBranchPipeline:
         # Execute based on mode
         llm_plan = None
         asl_code = None
+        pddl_plan = None
         comparison_results = None
 
         if mode in ["both", "llm"]:
@@ -90,6 +93,12 @@ class DualBranchPipeline:
             if not asl_code and mode == "asl":
                 return {"success": False, "stage": "Stage 2B"}
 
+        if mode == "pddl":
+            # Stage 2C: Branch C - PDDL Planning
+            pddl_plan = self._stage2c_pddl_planning(ltl_spec)
+            if not pddl_plan:
+                return {"success": False, "stage": "Stage 2C"}
+
         # Stage 3: Execution & Comparison
         if mode == "both":
             comparison_results = self._stage3_execute_and_compare(
@@ -101,6 +110,8 @@ class DualBranchPipeline:
             comparison_results = self._stage3_execute_single(ltl_spec, llm_plan, "llm")
         elif mode == "asl":
             comparison_results = self._stage3_execute_single(ltl_spec, asl_code, "asl")
+        elif mode == "pddl":
+            comparison_results = self._stage3_execute_single(ltl_spec, pddl_plan, "pddl")
 
         print("\n" + "="*80)
         print("PIPELINE COMPLETED SUCCESSFULLY")
@@ -219,6 +230,45 @@ class DualBranchPipeline:
             print(f"✗ Stage 3B Failed: {e}")
             return None
 
+    def _stage2c_pddl_planning(self, ltl_spec):
+        """Stage 2C: LTLf -> PDDL Problem -> Plan (Branch C)"""
+        print("\n[STAGE 2C] BRANCH C: PDDL Planning")
+        print("-"*80)
+
+        try:
+            # Step 1: Generate PDDL problem from LTLf
+            pddl_generator = PDDLProblemGenerator("blocksworld")
+            pddl_problem = pddl_generator.generate_problem(
+                ltl_spec.to_dict(),
+                "ltl_problem"
+            )
+
+            print("✓ PDDL Problem Generated")
+            print(f"  Objects: {ltl_spec.objects}")
+            print(f"  Goal Formulas: {[f.to_string() for f in ltl_spec.formulas]}")
+
+            # Step 2: Plan with pyperplan
+            planner = PDDLPlanner()
+            plan = planner.solve_from_strings(
+                str(self.domain_path.read_text()),
+                pddl_problem
+            )
+
+            if plan:
+                print(f"✓ PDDL Plan Generated ({len(plan)} actions)")
+                for i, (action, params) in enumerate(plan, 1):
+                    print(f"  {i}. {action}({', '.join(params)})")
+                return plan
+            else:
+                print("✗ No plan found by PDDL planner")
+                return None
+
+        except Exception as e:
+            print(f"✗ Stage 2C Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def _stage3_execute_single(self, ltl_spec, plan_or_code, branch_type):
         """Stage 3: Execute single branch only"""
         print("\n[STAGE 3] Execution")
@@ -242,12 +292,12 @@ class DualBranchPipeline:
         formulas_string_list = [f.to_string() for f in ltl_spec.formulas]
 
         try:
-            if branch_type == "llm":
-                # Execute LLM plan
+            if branch_type in ["llm", "pddl"]:
+                # Execute classical plan (LLM or PDDL)
                 env = BlocksworldEnvironment(init_state.copy())
                 executor = ClassicalPlanExecutor(env)
                 result = executor.execute(plan_or_code)
-                result['branch'] = 'llm'
+                result['branch'] = branch_type
                 result['plan_length'] = len(plan_or_code)
             else:  # asl
                 # Execute AgentSpeak
@@ -258,7 +308,7 @@ class DualBranchPipeline:
                 result['branch'] = 'agentspeak'
 
             # Check goal satisfaction
-            final_state = result.get('final_state' if branch_type == 'llm' else 'env_final_state', [])
+            final_state = result.get('final_state' if branch_type in ['llm', 'pddl'] else 'env_final_state', [])
             goals_satisfied = all(
                 self._check_ltl_satisfaction(final_state, goal)
                 for goal in formulas_string_list

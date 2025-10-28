@@ -37,8 +37,8 @@ Examples:
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')
-    parser.add_argument('--mode', choices=['both', 'llm', 'asl'], default='both',
-                        help='Execution mode: both (default), llm, or asl')
+    parser.add_argument('--mode', choices=['both', 'llm', 'asl', 'pddl'], default='both',
+                        help='Execution mode: both (default), llm, asl, or pddl')
 
     args = parser.parse_args()
     nl_instruction = args.instruction
