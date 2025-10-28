@@ -6,11 +6,11 @@
 
 ## 🎯 Project Overview
 
-A research pipeline that compares two approaches to intelligent agent planning:
-- **Branch A (Baseline)**: Classical PDDL planning
-- **Branch B (Novel)**: LLM-generated AgentSpeak plan libraries
+A research pipeline that compares two LLM-based approaches to intelligent agent planning:
+- **Branch A**: LLM Policy Generation (direct plan generation from LTLf goals)
+- **Branch B**: LLM-generated AgentSpeak plan libraries (BDI agent programs)
 
-**Key Innovation**: Generate complete BDI agent plan libraries from LTLf specifications using LLMs, then compare against classical planning.
+**Key Innovation**: Both branches use LLMs to generate executable plans from LTLf specifications, eliminating the need for classical PDDL planning or FOND planners. This demonstrates LLMs' ability to reason about temporal goals and generate correct action sequences.
 
 ---
 
@@ -19,13 +19,12 @@ A research pipeline that compares two approaches to intelligent agent planning:
 ### Prerequisites
 
 ```bash
-# Install uv package manager
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
 # Install dependencies
 cd llm-bdi-pipeline-dev
-/opt/anaconda3/bin/pip install pyperplan openai python-dotenv
+pip install openai python-dotenv
 ```
+
+**Note**: Classical PDDL planners (pyperplan, FOND planners) are no longer required. Both branches use LLM-based generation.
 
 ### Configuration
 
@@ -54,20 +53,17 @@ LTL-BDI PIPELINE - DUAL BRANCH DEMONSTRATION
 ✓ LTLf Formula: ['F(on(c, b))']
   Objects: ['b', 'c']
 
-[STAGE 2] LTLf -> PDDL Problem
-✓ PDDL Problem Generated
-
-[STAGE 3A] BRANCH A: Classical PDDL Planning
-✓ Classical Plan Generated (2 actions)
+[STAGE 2A] BRANCH A: LLM Policy Generation
+✓ LLM Policy Generated (2 actions)
   1. pickup(c)
   2. stack(c, b)
 
-[STAGE 3B] BRANCH B: LLM AgentSpeak Generation
+[STAGE 2B] BRANCH B: LLM AgentSpeak Generation
 ✓ AgentSpeak Plan Library Generated
-  Plans: 17
+  Plans: 13
   Saved to: output/generated_agent.asl
 
-[STAGE 4] Execution & Comparative Evaluation
+[STAGE 3] Execution & Comparative Evaluation
 ✓ Both branches succeeded
 
 Efficiency:
@@ -81,53 +77,49 @@ Efficiency:
 ## 📐 System Architecture
 
 ```
-Natural Language Input
+Natural Language Input ("Stack block C on block B")
          │
          ▼
-┌────────────────────────────────────┐
-│  STAGE 1: NL → LTLf               │
-│  ltl_parser.py                     │
-│  Output: F(on(c,b))                │
-└────────────┬───────────────────────┘
-             │
-             ▼
-┌────────────────────────────────────┐
-│  STAGE 2: LTLf → PDDL             │
-│  ltl_to_pddl.py                    │
-│  Output: problem.pddl              │
-└────────────┬───────────────────────┘
+┌────────────────────────────────────────────────┐
+│  STAGE 1: NL → LTLf                           │
+│  ltl_parser.py (LLM-based)                     │
+│  Output: F(on(c,b))                            │
+└────────────┬───────────────────────────────────┘
              │
        ┌─────┴─────┐
        │           │
        ▼           ▼
-┌──────────────┐  ┌──────────────────────┐
-│  BRANCH A    │  │  BRANCH B            │
-│  Classical   │  │  LLM AgentSpeak      │
-└──────────────┘  └──────────────────────┘
-       │                   │
-       ▼                   ▼
-┌──────────────────────────────────────────┐
-│  STAGE 3A: Classical Planning            │
-│  pddl_planner.py                         │
-│  Output: [pickup(c), stack(c,b)]         │
-└──────────────────────────────────────────┘
+┌──────────────────────────┐  ┌──────────────────────────┐
+│  BRANCH A                │  │  BRANCH B                │
+│  LLM Policy Generation   │  │  LLM AgentSpeak Gen      │
+└──────────────────────────┘  └──────────────────────────┘
+       │                               │
+       ▼                               ▼
+┌────────────────────────────────────────────────┐
+│  STAGE 2A: LLM Policy Generation              │
+│  llm_policy_generator.py                       │
+│  Input: F(on(c,b)), domain actions            │
+│  Output: [pickup(c), stack(c,b)]               │
+│  (Direct plan generation with goal analysis)   │
+└────────────────────────────────────────────────┘
 
-┌──────────────────────────────────────────┐
-│  STAGE 3B: AgentSpeak Generation         │
-│  agentspeak_generator.py                 │
-│  Output: generated_agent.asl             │
-│  (Complete BDI plan library)             │
-└──────────────────────────────────────────┘
-       │                   │
-       └─────┬─────────────┘
-             ▼
-┌──────────────────────────────────────────┐
-│  STAGE 4: Execution & Comparison         │
-│  agentspeak_simulator.py                 │
-│  comparative_evaluator.py                │
-│                                          │
-│  Metrics:                                │
-│  - Goal satisfaction                     │
+┌────────────────────────────────────────────────┐
+│  STAGE 2B: LLM AgentSpeak Generation          │
+│  agentspeak_generator.py                       │
+│  Input: F(on(c,b)), domain actions            │
+│  Output: generated_agent.asl                   │
+│  (Complete BDI plan library)                   │
+└────────────────────────────────────────────────┘
+       │                               │
+       └───────────┬───────────────────┘
+                   ▼
+┌────────────────────────────────────────────────┐
+│  STAGE 3: Execution & Comparison               │
+│  agentspeak_simulator.py                       │
+│  comparative_evaluator.py                      │
+│                                                │
+│  Metrics:                                      │
+│  - Goal satisfaction                           │
 │  - Efficiency (action count)             │
 │  - Success rate                          │
 └──────────────────────────────────────────┘

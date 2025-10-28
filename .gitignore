@@ -70,3 +70,4 @@ dmypy.json
 # Editors
 *.sublime-project
 *.sublime-workspace
+external/

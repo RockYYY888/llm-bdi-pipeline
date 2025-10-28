@@ -1,12 +1,13 @@
 """
-Dual-Branch Pipeline
+Dual-Branch Pipeline (LLM-Based)
 
 Orchestrates the complete dual-branch workflow:
-    Stage 1: NL -> LTLf
-    Stage 2: LTLf -> PDDL
-    Stage 3A: PDDL -> Classical Plan (Branch A)
-    Stage 3B: LTLf -> AgentSpeak (Branch B)
-    Stage 4: Execution & Comparison
+    Stage 1: NL -> LTLf Goals
+    Stage 2A: Branch A - LLM Policy Generation (direct from LTLf)
+    Stage 2B: Branch B - LLM AgentSpeak Generation (direct from LTLf)
+    Stage 3: Execution & Comparison
+
+Both branches use LLM directly from LTLf goals without PDDL intermediate step.
 """
 
 import re
@@ -15,8 +16,7 @@ from typing import Dict, Any
 
 from config import get_config
 from stage1_interpretation.ltl_parser import NLToLTLParser
-from stage2_translation.ltl_to_pddl import LTLToPDDLConverter
-from stage3_codegen.pddl_planner import PDDLPlanner
+from stage3_codegen.llm_policy_generator import LLMPolicyGenerator
 from stage3_codegen.agentspeak_generator import AgentSpeakGenerator
 from stage4_execution.blocksworld_simulator import BlocksworldState
 from stage4_execution.comparative_evaluator import ComparativeEvaluator
@@ -65,25 +65,20 @@ class DualBranchPipeline:
         if not ltl_spec:
             return {"success": False, "stage": "Stage 1"}
 
-        # Stage 2: LTLf -> PDDL
-        pddl_problem = self._stage2_generate_pddl(ltl_spec)
-        if not pddl_problem:
-            return {"success": False, "stage": "Stage 2"}
+        # Stage 2A: Branch A - LLM Policy Generation
+        llm_plan = self._stage2a_llm_policy(ltl_spec)
+        if not llm_plan:
+            return {"success": False, "stage": "Stage 2A"}
 
-        # Stage 3A: Classical Planning
-        classical_plan = self._stage3a_classical_plan(pddl_problem)
-        if not classical_plan:
-            return {"success": False, "stage": "Stage 3A"}
-
-        # Stage 3B: AgentSpeak Generation
-        asl_code = self._stage3b_generate_agentspeak(ltl_spec)
+        # Stage 2B: Branch B - AgentSpeak Generation
+        asl_code = self._stage2b_generate_agentspeak(ltl_spec)
         if not asl_code:
-            return {"success": False, "stage": "Stage 3B"}
+            return {"success": False, "stage": "Stage 2B"}
 
-        # Stage 4: Execution & Comparison
-        comparison_results = self._stage4_execute_and_compare(
+        # Stage 3: Execution & Comparison
+        comparison_results = self._stage3_execute_and_compare(
             ltl_spec,
-            classical_plan,
+            llm_plan,
             asl_code
         )
 
@@ -94,8 +89,7 @@ class DualBranchPipeline:
         return {
             "success": True,
             "ltl_spec": ltl_spec,
-            "pddl_problem": pddl_problem,
-            "classical_plan": classical_plan,
+            "llm_plan": llm_plan,
             "agentspeak_code": asl_code,
             "comparison": comparison_results
         }
@@ -126,72 +120,47 @@ class DualBranchPipeline:
             print(f"✗ Stage 1 Failed: {e}")
             return None
 
-    def _stage2_generate_pddl(self, ltl_spec):
-        """Stage 2: LTLf -> PDDL Problem"""
-        print("\n[STAGE 2] LTLf -> PDDL Problem")
+    def _stage2a_llm_policy(self, ltl_spec):
+        """Stage 2A: LTLf -> LLM-Generated Policy (Branch A)"""
+        print("\n[STAGE 2A] BRANCH A: LLM Policy Generation")
         print("-"*80)
 
-        converter = LTLToPDDLConverter(
+        generator = LLMPolicyGenerator(
             api_key=self.config.openai_api_key,
             model=self.config.openai_model
         )
 
         try:
-            pddl_problem, prompt_dict, response_text = converter.convert(
-                "stack-blocks",
-                ltl_spec,
-                str(self.domain_path)
+            # Convert ltl_spec to dict format expected by LLMPolicyGenerator
+            ltl_dict = {
+                "objects": ltl_spec.objects,
+                "initial_state": ltl_spec.initial_state,
+                "formulas_string": [f.to_string() for f in ltl_spec.formulas]
+            }
+
+            plan, prompt_dict, response_text = generator.generate_plan(
+                ltl_dict,
+                'blocksworld',
+                self.domain_actions,
+                self.domain_predicates
             )
-            self.logger.log_stage2(ltl_spec, pddl_problem, "Success")
 
-            print(f"✓ PDDL Problem Generated")
+            self.logger.log_stage3a(ltl_spec, plan, "Success")
 
-            # Extract and display key information
-            objects_match = re.search(r':objects\s+([^\)]+)', pddl_problem)
-            goal_match = re.search(r':goal\s+\(and\s+([^\)]+)\)', pddl_problem)
-            print(f"  Objects: {objects_match.group(1).strip() if objects_match else 'N/A'}")
-            print(f"  Goal: {goal_match.group(1).strip() if goal_match else 'N/A'}")
-
-            return pddl_problem
-
-        except Exception as e:
-            self.logger.log_stage2(ltl_spec, None, "Failed", str(e))
-            print(f"✗ Stage 2 Failed: {e}")
-            return None
-
-    def _stage3a_classical_plan(self, pddl_problem):
-        """Stage 3A: PDDL -> Classical Plan (Branch A)"""
-        print("\n[STAGE 3A] BRANCH A: Classical PDDL Planning")
-        print("-"*80)
-
-        planner = PDDLPlanner()
-
-        try:
-            # Read domain file
-            domain_str = self.domain_path.read_text()
-
-            # Solve using classical planner
-            plan = planner.solve_from_strings(domain_str, pddl_problem)
-
-            if not plan:
-                raise RuntimeError("Classical planner failed to find a solution")
-
-            self.logger.log_stage3a(pddl_problem, plan, "Success")
-
-            print(f"✓ Classical Plan Generated ({len(plan)} actions)")
+            print(f"✓ LLM Policy Generated ({len(plan)} actions)")
             for i, (action, params) in enumerate(plan, 1):
                 print(f"  {i}. {action}({', '.join(params)})")
 
             return plan
 
         except Exception as e:
-            self.logger.log_stage3a(pddl_problem, None, "Failed", str(e))
-            print(f"✗ Stage 3A Failed: {e}")
+            self.logger.log_stage3a(ltl_spec, None, "Failed", str(e))
+            print(f"✗ Stage 2A Failed: {e}")
             return None
 
-    def _stage3b_generate_agentspeak(self, ltl_spec):
-        """Stage 3B: LTLf -> AgentSpeak Plan Library (Branch B)"""
-        print("\n[STAGE 3B] BRANCH B: LLM AgentSpeak Generation")
+    def _stage2b_generate_agentspeak(self, ltl_spec):
+        """Stage 2B: LTLf -> AgentSpeak Plan Library (Branch B)"""
+        print("\n[STAGE 2B] BRANCH B: LLM AgentSpeak Generation")
         print("-"*80)
 
         generator = AgentSpeakGenerator(
@@ -225,9 +194,9 @@ class DualBranchPipeline:
             print(f"✗ Stage 3B Failed: {e}")
             return None
 
-    def _stage4_execute_and_compare(self, ltl_spec, classical_plan, asl_code):
-        """Stage 4: Execution & Comparative Evaluation"""
-        print("\n[STAGE 4] Execution & Comparative Evaluation")
+    def _stage3_execute_and_compare(self, ltl_spec, llm_plan, asl_code):
+        """Stage 3: Execution & Comparative Evaluation"""
+        print("\n[STAGE 3] Execution & Comparative Evaluation")
         print("-"*80)
 
         # Create initial state
@@ -258,7 +227,7 @@ class DualBranchPipeline:
             evaluator = ComparativeEvaluator()
             results = evaluator.evaluate(
                 init_state,
-                classical_plan,
+                llm_plan,
                 asl_code,
                 agentspeak_goal,
                 formulas_string_list  # Pass ALL formulas for verification
@@ -273,7 +242,7 @@ class DualBranchPipeline:
 
         except Exception as e:
             self.logger.log_stage4(None, "Failed", str(e))
-            print(f"✗ Stage 4 Failed: {e}")
+            print(f"✗ Stage 3 Failed: {e}")
             return None
 
     def _extract_agentspeak_goal(self, ltl_formula: str) -> str:
