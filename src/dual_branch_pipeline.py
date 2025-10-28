@@ -56,6 +56,9 @@ class DualBranchPipeline:
         Returns:
             Complete results including branch results and comparison (if mode="both")
         """
+        # Start logger
+        self.logger.start_pipeline(nl_instruction, domain_file=str(self.domain_path), output_dir=str(self.output_dir))
+
         print("="*80)
         mode_names = {"both": "DUAL BRANCH DEMONSTRATION", "llm": "LLM POLICY BRANCH", "asl": "AGENTSPEAK BRANCH"}
         print(f"LTL-BDI PIPELINE - {mode_names.get(mode, 'DUAL BRANCH DEMONSTRATION')}")
@@ -102,6 +105,10 @@ class DualBranchPipeline:
         print("\n" + "="*80)
         print("PIPELINE COMPLETED SUCCESSFULLY")
         print("="*80)
+
+        # End logger and save results
+        log_filepath = self.logger.end_pipeline(success=True)
+        print(f"\nExecution log saved to: {log_filepath}")
 
         return {
             "success": True,

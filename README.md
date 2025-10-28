@@ -217,6 +217,40 @@ The blocksworld domain provides a clear testbed for:
 
 ---
 
+## TODO: Implementation Tasks
+
+### Critical Issues to Resolve
+1. **FOND Planner Integration** - Replace pyperplan with FOND planner (keep PDDL)
+   - Status: NOT IMPLEMENTED
+   - Requirements:
+     - Integrate safe-planner or equivalent FOND planner
+     - Install external classical planners (FF, OPTIC, etc.)
+     - Create PPDDL domain files with `oneof` clauses for non-deterministic effects
+   - Impact: High - core requirement for non-deterministic planning support
+
+2. **Non-Deterministic Planning Support** - Add PPDDL with oneof clauses
+   - Status: NOT IMPLEMENTED
+   - Requirements:
+     - Extend PDDL domain to support non-deterministic action effects
+     - Update pipeline to handle PPDDL problem formulations
+     - Implement FOND solution verification
+   - Impact: High - required for realistic domain modeling
+
+3. **Logger Output Integration** - Fix pipeline_logger to save execution records
+   - Status: PARTIALLY IMPLEMENTED
+   - Issues:
+     - `dual_branch_pipeline.py` never calls `start_pipeline()` or `end_pipeline()`
+     - Logs are not being saved to disk after runs
+     - Need dual-branch specific logging for Branch A and Branch B results
+   - Impact: Medium - required for experiment tracking and reproducibility
+
+### Completed Features
+- Branch mode toggle (--mode flag with both/llm/asl)
+- README cleanup (no emojis, single architecture, concise)
+- Documentation matches implementation 100%
+
+---
+
 ## Citation
 
 If you use this work, please cite:
