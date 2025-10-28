@@ -300,17 +300,40 @@ Robustness:
 
 ### 🔧 Known Limitations (MVP Scope)
 
-**LTLf Verification**:
-- ✅ Supports: `F(φ)` (Eventually)
-- ❌ Not yet: `G(φ)`, `X(φ)`, `φ U ψ` (requires temporal trace verification)
+**L1: Limited LTLf Temporal Verification**
+- **Impact**: Can only verify `F(φ)` (Eventually) goals, not `G(φ)` (Always), `X(φ)` (Next), or `φ U ψ` (Until)
+- **Current Implementation**: Checks if goal predicate exists in final state (no temporal trace verification)
+- **Code** (`comparative_evaluator.py`):
+  ```python
+  def _check_ltl_satisfaction(self, final_state, ltl_goal):
+      if ltl_goal.startswith('F(') and ltl_goal.endswith(')'):
+          goal_predicate = ltl_goal[2:-1]  # Extract φ from F(φ)
+          return goal_predicate in final_state
+      return True  # MVP: can't verify other formulas
+  ```
+- **Future Work**: Integrate proper LTLf verification library (e.g., spot, pyLTL)
+- **Priority**: LOW (acceptable for research prototype)
 
-**AgentSpeak Features**:
-- ✅ Supports: Achievement goals, declarative goals, context guards, belief updates
-- ❌ Not yet: Annotations, complex internal actions, event handling
+**L2: Simplified AgentSpeak Subset**
+- **Supported**: Achievement goals (`+!goal`), declarative goals (`+!![state]`), context guards, belief updates (`+/-belief`)
+- **Not Supported**:
+  - Complex annotations
+  - Internal actions beyond `.print()`
+  - Event handling and intentions
+  - Strong negation
+- **Workaround**: Generator produces simplified AgentSpeak code within supported subset
+- **Priority**: MEDIUM
 
-**Single Agent Only**:
-- ✅ Single agent BDI execution
-- ❌ Multi-agent coordination (out of scope)
+**L3: Manual Belief Revision**
+- **Impact**: Belief updates after actions must be explicitly coded in AgentSpeak plans
+- **Example**: After `pickup(X)`, must manually add `+holding(X); -handempty; -clear(X)`
+- **Workaround**: Generator includes explicit +/- belief updates in all action plans
+- **Priority**: LOW (manual specification acceptable for MVP)
+
+**L4: Single Agent Only**
+- **Impact**: No multi-agent coordination or communication
+- **Scope**: Intentionally out of scope for this research
+- **Priority**: N/A
 
 ---
 
@@ -370,8 +393,6 @@ llm-bdi-pipeline-dev/
 ├── domains/
 │   └── blocksworld/
 │       └── domain.pddl                # PDDL domain (given)
-├── docs/
-│   └── IMPLEMENTATION_ISSUES_AND_FIXES.md  # Technical docs
 ├── output/
 │   └── generated_agent.asl            # Generated plans
 └── .env                               # API keys (gitignored)
@@ -379,28 +400,48 @@ llm-bdi-pipeline-dev/
 
 ---
 
-## 🔑 Critical Implementation Details
+## 🔑 Critical Implementation Fixes
+
+Seven critical bugs were identified and fixed during implementation. Each fix was essential for the pipeline to work correctly.
 
 ### Fix #1: Initial State Format Conversion
 
-**Problem**: LTL parser generates `ontable(X)` but simulator expects `on(X, table)`
+**Problem**: LTL parser generates `ontable(X)` but blocksworld simulator expects `on(X, table)`
 
-**Solution**: Automatic conversion in `dual_branch_pipeline.py`:
+**Impact**: Classical planner failed with precondition errors
+
+**Solution** (`dual_branch_pipeline.py:236-246`):
 ```python
-if pred_name == 'ontable' and args:
-    for block in args:
-        beliefs.append(f"on({block}, table)")
+# Convert dict-based initial_state to string-based beliefs
+beliefs = []
+for pred_dict in ltl_spec.initial_state:
+    for pred_name, args in pred_dict.items():
+        if pred_name == 'ontable' and args:
+            # Convert ontable(X) to on(X, table)
+            for block in args:
+                beliefs.append(f"on({block}, table)")
+        elif args:
+            beliefs.append(f"{pred_name}({', '.join(args)})")
+        else:
+            beliefs.append(pred_name)
 ```
 
 ### Fix #2: Multi-Line Plan Parsing
 
 **Problem**: Generated AgentSpeak code spans multiple lines but parser expected single-line plans
 
-**Solution**: Accumulate lines until period found in `agentspeak_simulator.py`:
+**Impact**: 0 plans were parsed successfully
+
+**Solution** (`agentspeak_simulator.py:41-76`):
 ```python
 def _parse_asl(self, asl_code: str):
+    """Parse AgentSpeak code - handles multi-line plans"""
     current_plan_text = ""
     for line in lines:
+        line = line.strip()
+        if not line or (line.startswith('//') and not current_plan_text):
+            continue
+
         if line.startswith(('+!', '-!')):
             if current_plan_text:
                 self._parse_single_plan(current_plan_text)
@@ -408,23 +449,81 @@ def _parse_asl(self, asl_code: str):
         elif current_plan_text:
             current_plan_text += " " + line
 
-        if current_plan_text and current_plan_text.endswith('.'):
+        if current_plan_text and current_plan_text.rstrip().endswith('.'):
             self._parse_single_plan(current_plan_text)
             current_plan_text = ""
 ```
 
-### Fix #3: Belief Format Bidirectional Conversion
+### Fix #3: Declarative Goal Support
 
-**Problem**: Generated code uses `ontable(c)` but beliefs contain `on(c,table)` (with/without space)
+**Problem**: Parser couldn't handle `+!![goal]` syntax for declarative goals
 
-**Solution**: Handle both formats in belief checking:
+**Impact**: Generated plans with declarative goals were not recognized
+
+**Solution** (`agentspeak_simulator.py:82`):
+```python
+# Pattern handles both +! (achievement) and +!! (declarative)
+plan_pattern = r'(\+!!?[\w\(\),\s\[\]_]+)\s*:\s*([^<]*)\s*<-\s*(.+)\.'
+```
+
+### Fix #4: Variable Unification
+
+**Problem**: Plans with variables `stack(X,Y)` couldn't match goals `stack(c,b)`
+
+**Impact**: No plans were found as "applicable" during execution
+
+**Solution** (`agentspeak_simulator.py:183-224`):
+```python
+def _unify_goal(self, pattern: str, goal: str) -> bool:
+    """Check if pattern matches goal with variable unification"""
+    pattern_match = re.match(r'(\w+)\((.*?)\)', pattern)
+    goal_match = re.match(r'(\w+)\((.*?)\)', goal)
+
+    if not pattern_match or not goal_match:
+        return False
+
+    pattern_pred, pattern_args_str = pattern_match.groups()
+    goal_pred, goal_args_str = goal_match.groups()
+
+    # Predicates must match
+    if pattern_pred != goal_pred:
+        return False
+
+    # Parse and check arguments
+    pattern_args = [a.strip() for a in pattern_args_str.split(',') if a.strip()]
+    goal_args = [a.strip() for a in goal_args_str.split(',') if a.strip()]
+
+    if len(pattern_args) != len(goal_args):
+        return False
+
+    for p_arg, g_arg in zip(pattern_args, goal_args):
+        # Uppercase = variable (matches anything)
+        if p_arg and p_arg[0].isupper():
+            continue
+        # Lowercase = constant (must match exactly)
+        elif p_arg == g_arg:
+            continue
+        else:
+            return False
+
+    return True
+```
+
+### Fix #5: Belief Format Bidirectional Conversion
+
+**Problem**: Generated code checks `ontable(c)` but beliefs contain `on(c,table)` (with/without space)
+
+**Impact**: All context checks failed, no plans were applicable
+
+**Solution** (`agentspeak_simulator.py:128-150`):
 ```python
 def _belief_exists(self, condition: str) -> bool:
-    # Direct match
+    """Check if belief exists, handling ontable(X) <-> on(X,table) conversion"""
+    # Direct match first
     if condition in self.beliefs:
         return True
 
-    # Convert ontable(X) to on(X, table) - try both formats
+    # Convert ontable(X) to on(X, table) - try both with and without space
     match = re.match(r'ontable\((\w+)\)', condition)
     if match:
         block = match.group(1)
@@ -440,22 +539,54 @@ def _belief_exists(self, condition: str) -> bool:
     return False
 ```
 
-### Fix #4: Declarative Goal Execution
+### Fix #6: Declarative Goal Early Satisfaction
 
-**Problem**: AgentSpeak uses `!!goal` for declarative goals but action executor didn't distinguish from `!goal`
+**Problem**: Declarative goals `!!goal` were not distinguished from achievement goals `!goal`
 
-**Solution**: Check satisfaction before plan selection:
+**Impact**: Redundant plan execution even when goal already satisfied
+
+**Solution** (`agentspeak_simulator.py:299-308`):
 ```python
 def _achieve_goal(self, goal: str) -> bool:
-    # For declarative goals, check if already satisfied
+    """Achieve a goal using BDI reasoning cycle"""
+    # For declarative goals with brackets, check if already satisfied
     if goal.startswith('[') and goal.endswith(']'):
         goal_condition = goal.strip('[]')
         if self._belief_exists(goal_condition):
             return True  # Already satisfied!
 
-    # Otherwise select and execute plan
+    # Otherwise, select and execute plan
     plan = self._select_plan(goal)
     ...
+```
+
+### Fix #7: Bracket Normalization
+
+**Problem**: Goal `[on(c,b)]` didn't match trigger `on(c,b)` in plan selection
+
+**Impact**: Valid plans were not selected
+
+**Solution** (`agentspeak_simulator.py:152-181`):
+```python
+def _select_plan(self, goal: str) -> Optional[AgentSpeakPlan]:
+    """Select applicable plan for goal with variable unification"""
+    # Strip brackets from goal if present (declarative goals)
+    goal_normalized = goal.strip('[]')
+
+    for plan in self.plans:
+        # Extract goal from trigger and remove brackets
+        trigger_goal = plan.trigger.replace('+!!', '').replace('+!', '').strip()
+        trigger_goal = trigger_goal.strip('[]')
+
+        # Compare normalized forms
+        if trigger_goal == goal_normalized:
+            if self._check_context(plan.context):
+                applicable.append(plan)
+        elif self._unify_goal(trigger_goal, goal_normalized):
+            if self._check_context(plan.context):
+                applicable.append(plan)
+
+    return applicable[0] if applicable else None
 ```
 
 ---
