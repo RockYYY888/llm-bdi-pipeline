@@ -25,7 +25,7 @@ class PipelineRecord:
     timestamp: str
     natural_language: str
     success: bool
-    mode: str = "fond"  # "llm_agentspeak" or "fond"
+    mode: str = "both"  # "both", "llm_agentspeak", or "fond"
 
     # Stage 1: NL -> LTL
     stage1_status: str = "pending"  # "success" | "failed" | "skipped" | "pending"
@@ -426,7 +426,7 @@ class PipelineLogger:
             if record['stage3_used_llm']:
                 f.write(f"Planner: LLM ({record['stage3_model']})\n")
             else:
-                f.write("Planner: PR2/PRP FOND Planner\n")
+                f.write("Planner: Classical PDDL Planner (pyperplan)\n")
 
             # LLM Prompt/Response for Stage 3
             if record['stage3_used_llm'] and record['stage3_llm_prompt']:

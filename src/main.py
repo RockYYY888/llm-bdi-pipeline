@@ -31,15 +31,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python src/main.py "Stack block C on block B"
   python src/main.py "Stack block C on block B" --mode llm_agentspeak
   python src/main.py "Stack block C on block B" --mode fond
-  python src/main.py "Build a tower" --mode both
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')
-    parser.add_argument('--mode', choices=['both', 'llm_agentspeak', 'fond'], default='both',
-                        help='Execution mode: both (default), llm_agentspeak, or fond')
+    parser.add_argument('--mode', choices=['llm_agentspeak', 'fond'], default='fond',
+                        help='Execution mode: llm_agentspeak or fond (default)')
 
     args = parser.parse_args()
     nl_instruction = args.instruction

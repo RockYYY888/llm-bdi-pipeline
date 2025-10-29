@@ -42,16 +42,15 @@ class DualBranchPipeline:
         # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
 
-    def execute(self, nl_instruction: str, mode: str = "both") -> Dict[str, Any]:
+    def execute(self, nl_instruction: str, mode: str = "fond") -> Dict[str, Any]:
         """
-        Execute dual-branch pipeline (Stages 1 and 2 only)
+        Execute single-branch pipeline (Stages 1 and 2 only)
 
         Args:
             nl_instruction: Natural language instruction
-            mode: Execution mode - "both", "llm_agentspeak", or "fond"
-                - "both": Run both branches (Stage 2A and 2B)
-                - "llm_agentspeak": Run only LLM AgentSpeak generation (Stage 2A)
-                - "fond": Run only FOND planning (Stage 2B)
+            mode: Execution mode - "llm_agentspeak" or "fond"
+                - "llm_agentspeak": LLM AgentSpeak generation (Branch A - Baseline)
+                - "fond": FOND planning with PR2 (Branch B - Research)
 
         Returns:
             Results from Stage 1 and Stage 2 (no execution/evaluation)
@@ -64,15 +63,13 @@ class DualBranchPipeline:
 
         print("="*80)
         mode_names = {
-            "both": "DUAL BRANCH (STAGES 1-2)",
-            "llm_agentspeak": "LLM AGENTSPEAK BRANCH (STAGES 1-2A)",
-            "fond": "FOND PLANNING BRANCH (STAGES 1-2B)"
+            "llm_agentspeak": "BRANCH A: LLM AGENTSPEAK GENERATION",
+            "fond": "BRANCH B: FOND PLANNING (PR2)"
         }
-        print(f"LTL-BDI PIPELINE - {mode_names.get(mode, 'DUAL BRANCH')}")
+        print(f"LTL-BDI PIPELINE - {mode_names.get(mode, 'UNKNOWN')}")
         print("="*80)
         print(f"\nNatural Language Instruction: \"{nl_instruction}\"")
-        if mode != "both":
-            print(f"Mode: {mode.upper()} only")
+        print(f"Mode: {mode.upper()}")
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)
 
@@ -81,20 +78,19 @@ class DualBranchPipeline:
         if not ltl_spec:
             return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
 
-        # Stage 2: Dual branches
-        llm_agentspeak_code = None
-        fond_plan = None
+        # Stage 2: Execute selected branch
+        result = None
 
-        if mode in ["both", "llm_agentspeak"]:
-            # Stage 2A: LLM AgentSpeak Generation
-            llm_agentspeak_code = self._stage2a_llm_agentspeak_generation(ltl_spec)
-            if not llm_agentspeak_code and mode == "llm_agentspeak":
+        if mode == "llm_agentspeak":
+            # Branch A: LLM AgentSpeak Generation
+            result = self._stage2a_llm_agentspeak_generation(ltl_spec)
+            if not result:
                 return {"success": False, "stage": "Stage 2A", "error": "AgentSpeak generation failed"}
 
-        if mode in ["both", "fond"]:
-            # Stage 2B: FOND Planning
-            fond_plan = self._stage2b_fond_planning(ltl_spec)
-            if not fond_plan and mode == "fond":
+        elif mode == "fond":
+            # Branch B: FOND Planning
+            result = self._stage2b_fond_planning(ltl_spec)
+            if not result:
                 return {"success": False, "stage": "Stage 2B", "error": "FOND planning failed"}
 
         print("\n" + "="*80)
@@ -110,8 +106,7 @@ class DualBranchPipeline:
             "success": True,
             "mode": mode,
             "ltl_spec": ltl_spec,
-            "llm_agentspeak_code": llm_agentspeak_code,
-            "fond_plan": fond_plan
+            "result": result
         }
 
     def _stage1_parse_nl(self, nl_instruction: str):
@@ -165,8 +160,8 @@ class DualBranchPipeline:
                 self.domain_predicates
             )
 
-            # Log to stage3a for now (will rename logger methods later)
-            self.logger.log_stage3a(ltl_spec, asl_code, "Success")
+            # Log Stage 2A success (AgentSpeak generation)
+            self.logger.log_stage2(ltl_spec, asl_code, "Success")
 
             print(f"✓ AgentSpeak Code Generated")
             print("  First few lines:")
@@ -182,7 +177,7 @@ class DualBranchPipeline:
             return asl_code
 
         except Exception as e:
-            self.logger.log_stage3a(ltl_spec, None, "Failed", str(e))
+            self.logger.log_stage2(ltl_spec, None, "Failed", str(e))
             print(f"✗ Stage 2A Failed: {e}")
             return None
 
