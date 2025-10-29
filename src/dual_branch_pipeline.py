@@ -39,9 +39,12 @@ class DualBranchPipeline:
         self.domain_actions = ['pickup', 'putdown', 'stack', 'unstack']
         self.domain_predicates = ['on(X, Y)', 'clear(X)', 'holding(X)', 'handempty']
 
-        # Output directory
-        self.output_dir = Path(__file__).parent.parent / "output"
-        self.output_dir.mkdir(exist_ok=True)
+        # Output directory (base)
+        self.output_base_dir = Path(__file__).parent.parent / "output"
+        self.output_base_dir.mkdir(exist_ok=True)
+
+        # Timestamped output directory (set during execution)
+        self.output_dir = None
 
     def execute(self, nl_instruction: str, mode: str = "both") -> Dict[str, Any]:
         """
@@ -58,7 +61,12 @@ class DualBranchPipeline:
             Results from Stage 1 and Stage 2 (no execution/evaluation)
         """
         # Start logger
-        self.logger.start_pipeline(nl_instruction, domain_file=str(self.domain_path), output_dir=str(self.output_dir))
+        self.logger.start_pipeline(nl_instruction, domain_file=str(self.domain_path), output_dir="output")
+
+        # Create timestamped output directory (matching logger timestamp)
+        timestamp = self.logger.current_record.timestamp
+        self.output_dir = self.output_base_dir / timestamp
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         print("="*80)
         mode_names = {
@@ -71,6 +79,7 @@ class DualBranchPipeline:
         print(f"\nNatural Language Instruction: \"{nl_instruction}\"")
         if mode != "both":
             print(f"Mode: {mode.upper()} only")
+        print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)
 
         # Stage 1: NL -> LTLf
