@@ -215,6 +215,18 @@ Natural Language Instruction: "Stack block C on block B"
 
 ### Running Tests
 
+Run the comprehensive test suite with 14 complex scenarios:
+
+```bash
+# Run all complex test cases (temporal sequences, nested goals, edge cases)
+python tests/test_complex_cases.py
+
+# Run with output logging
+python tests/test_complex_cases.py 2>&1 | tee tests/test_results.log
+```
+
+Or run unit tests with pytest:
+
 ```bash
 python -m pytest tests/
 ```

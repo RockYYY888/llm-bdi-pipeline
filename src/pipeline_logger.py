@@ -28,7 +28,7 @@ class PipelineRecord:
     mode: str = "both"  # "both", "llm_agentspeak", or "fond"
 
     # Stage 1: NL -> LTL
-    stage1_status: str  # "success" | "failed" | "skipped"
+    stage1_status: str = "pending"  # "success" | "failed" | "skipped" | "pending"
     stage1_ltl_spec: Optional[Dict[str, Any]] = None
     stage1_error: Optional[str] = None
     stage1_used_llm: bool = False
@@ -455,9 +455,19 @@ class PipelineLogger:
                 f.write("\n" + "~"*40 + "\n")
                 f.write("GENERATED PLAN (Stage 3)\n")
                 f.write("~"*40 + "\n")
-                f.write(f"Plan ({len(record['stage3_plan'])} actions):\n")
-                for i, (action, params) in enumerate(record['stage3_plan'], 1):
-                    f.write(f"  {i}. {action}({', '.join(params)})\n")
+                # Check if plan is a list of tuples (FOND) or string (AgentSpeak)
+                if isinstance(record['stage3_plan'], list) and len(record['stage3_plan']) > 0:
+                    # Verify first element is a tuple
+                    if isinstance(record['stage3_plan'][0], tuple):
+                        f.write(f"Plan ({len(record['stage3_plan'])} actions):\n")
+                        for i, (action, params) in enumerate(record['stage3_plan'], 1):
+                            f.write(f"  {i}. {action}({', '.join(params)})\n")
+                    else:
+                        # Handle unexpected format
+                        f.write(f"Plan (unexpected format):\n{record['stage3_plan']}\n")
+                else:
+                    # Handle string or other format
+                    f.write(f"Generated Code:\n{record['stage3_plan']}\n")
 
             elif record['stage3_error']:
                 f.write(f"\nError: {record['stage3_error']}\n")
