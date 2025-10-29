@@ -2,10 +2,10 @@
 """
 Complex Test Cases for LTL-BDI Pipeline
 
-Tests 3 most complex scenarios covering:
-- Temporal sequences with multiple operators
-- Multiple objects (4 blocks)
-- Complex rearrangement from non-trivial initial states
+Tests based on FOND benchmark problems (bw_5_1, bw_5_3, bw_5_5):
+- Complex rearrangement tasks with 5 blocks
+- Non-trivial initial states (pre-built towers)
+- Multiple goals requiring sophisticated planning
 """
 
 import sys
@@ -27,26 +27,26 @@ class TestCase:
         self.error = None
 
 
-# Test cases - Only 3 most complex scenarios
+# Test cases - Based on FOND benchmark problems (bw_5_1, bw_5_3, bw_5_5)
 test_cases = [
-    # Complex temporal sequence with 3 goals
+    # bw_5_1: Complex rearrangement from two towers to one tower
     TestCase(
-        "Complex-1: Sequential tower building",
-        "Build a tower with A on top, B in middle, C at bottom",
+        "Complex-1: Two towers to single tower (bw_5_1)",
+        "Given blocks b1, b2, b3, b4, b5 where initially b2 is on b1, b1 is on b3 (b3 is on table), and b5 is on b4 (b4 is on table). Rearrange them so that b1 is on b2, b2 is on b5 (b5 is on table), and b3, b4 are separately on table.",
         mode="fond"
     ),
 
-    # Multiple objects (4 blocks) with multiple goals
+    # bw_5_3: Complex rearrangement with tower reconstruction
     TestCase(
-        "Complex-2: Four-block tower",
-        "Build tower using blocks A, B, C, D with D at bottom and A on top",
+        "Complex-2: Tower reconstruction (bw_5_3)",
+        "Given blocks b1, b2, b3, b4, b5 where initially b3 is on b2, b2 is on b1 (b1 is on table), and b4 is on b5 (b5 is on table). Rearrange them so that b5 is on b3, b3 is on b1 (b1 is on table), and b2, b4 are separately on table.",
         mode="fond"
     ),
 
-    # Complex rearrangement from non-trivial initial state
+    # bw_5_5: Complex rearrangement to 4-block tower
     TestCase(
-        "Complex-3: Rearrangement task",
-        "Move block C from on top of A to on top of B",
+        "Complex-3: Four-block tower assembly (bw_5_5)",
+        "Given blocks b1, b2, b3, b4, b5 where initially b3 is on b5, b5 is on b1 (b1 is on table), and b4 is on b2 (b2 is on table). Rearrange them to form a tower with b2 on b4, b4 on b1, b1 on b3 (b3 is on table), and b5 separately on table.",
         mode="fond"
     ),
 ]
@@ -55,8 +55,9 @@ test_cases = [
 def run_tests():
     """Run all test cases"""
     print("#" * 80)
-    print("# COMPLEX TEST SUITE")
-    print("# Testing LTL-BDI Pipeline with 3 most complex scenarios")
+    print("# FOND BENCHMARK TEST SUITE")
+    print("# Testing LTL-BDI Pipeline with 3 FOND benchmark problems")
+    print("# Based on: bw_5_1, bw_5_3, bw_5_5 from PR2 benchmarks")
     print("#" * 80)
     print()
 
