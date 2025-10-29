@@ -292,6 +292,18 @@ Examples of nested operators:
 
         result_text = response.choices[0].message.content.strip()
 
+        # Strip markdown code fences if present
+        # LLM sometimes returns JSON wrapped in ```json ... ```
+        if result_text.startswith("```"):
+            # Find the first newline after ```
+            first_newline = result_text.find('\n')
+            if first_newline != -1:
+                # Find the closing ```
+                closing_fence = result_text.rfind('```')
+                if closing_fence != -1 and closing_fence > first_newline:
+                    # Extract content between code fences
+                    result_text = result_text[first_newline+1:closing_fence].strip()
+
         # Parse JSON response
         try:
             result = json.loads(result_text)

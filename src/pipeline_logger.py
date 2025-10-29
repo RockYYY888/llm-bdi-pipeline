@@ -25,6 +25,7 @@ class PipelineRecord:
     timestamp: str
     natural_language: str
     success: bool
+    mode: str = "both"  # "both", "llm_agentspeak", or "fond"
 
     # Stage 1: NL -> LTL
     stage1_status: str  # "success" | "failed" | "skipped"
@@ -82,6 +83,7 @@ class PipelineLogger:
 
     def start_pipeline(self,
                       natural_language: str,
+                      mode: str = "both",
                       domain_file: str = "domains/blocksworld/domain.pddl",
                       output_dir: str = "output",
                       timestamp: str = None):
@@ -90,6 +92,7 @@ class PipelineLogger:
 
         Args:
             natural_language: The input instruction
+            mode: Execution mode - "both", "llm_agentspeak", or "fond"
             domain_file: PDDL domain file used
             output_dir: Output directory for generated files
             timestamp: Optional timestamp string (YYYYMMDD_HHMMSS format). If not provided, current time is used.
@@ -106,6 +109,7 @@ class PipelineLogger:
             timestamp=timestamp,
             natural_language=natural_language,
             success=False,
+            mode=mode,
             stage1_status="pending",
             stage2_status="pending",
             stage3_status="pending",

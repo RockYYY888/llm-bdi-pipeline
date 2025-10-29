@@ -108,31 +108,76 @@ class PDDLProblemGenerator:
         Returns:
             PDDL predicate string (e.g., "(on c b)")
         """
-        # Handle F(predicate) format
+        # Handle F(predicate) format (eventually)
         if ltl_formula.startswith("F(") and ltl_formula.endswith(")"):
             predicate = ltl_formula[2:-1]  # Remove "F(" and ")"
-            # Convert from on(c,b) to (on c b)
-            if "(" in predicate:
-                pred_name = predicate[:predicate.index("(")]
-                args_str = predicate[predicate.index("(") + 1:predicate.rindex(")")]
-                args = [arg.strip() for arg in args_str.split(",")]
-                return f"({pred_name} {' '.join(args)})"
-            else:
-                return f"({predicate})"
+            # Recursively handle nested operators
+            return self._convert_predicate_to_pddl(predicate)
 
         # Handle G(predicate) format (always)
         if ltl_formula.startswith("G(") and ltl_formula.endswith(")"):
             predicate = ltl_formula[2:-1]
-            if "(" in predicate:
-                pred_name = predicate[:predicate.index("(")]
-                args_str = predicate[predicate.index("(") + 1:predicate.rindex(")")]
-                args = [arg.strip() for arg in args_str.split(",")]
-                return f"({pred_name} {' '.join(args)})"
-            else:
-                return f"({predicate})"
+            # For G (always), we include it as a goal to maintain
+            return self._convert_predicate_to_pddl(predicate)
 
-        # Fallback: return as-is
-        return ltl_formula
+        # Handle X(predicate) format (next)
+        if ltl_formula.startswith("X(") and ltl_formula.endswith(")"):
+            predicate = ltl_formula[2:-1]  # Remove "X(" and ")"
+            # For X (next), extract the inner predicate as goal
+            return self._convert_predicate_to_pddl(predicate)
+
+        # Handle U (until) format: (phi U psi)
+        # For PDDL, we take the right side (psi) as the goal
+        if " U " in ltl_formula:
+            # Find the U operator (not inside parentheses)
+            parts = ltl_formula.split(" U ", 1)
+            if len(parts) == 2:
+                # Extract the right side (psi) - what we want to achieve
+                right_side = parts[1].strip()
+                # Remove outer parentheses if present
+                if right_side.startswith("(") and right_side.endswith(")"):
+                    right_side = right_side[1:-1]
+                return self._convert_predicate_to_pddl(right_side)
+
+        # Fallback: try to convert as predicate
+        return self._convert_predicate_to_pddl(ltl_formula)
+
+    def _convert_predicate_to_pddl(self, predicate: str) -> str:
+        """
+        Convert predicate from LTL format to PDDL format
+
+        Args:
+            predicate: Predicate string (e.g., "on(c, b)" or "on(c,b)")
+
+        Returns:
+            PDDL predicate string (e.g., "(on c b)")
+        """
+        # Remove outer parentheses if wrapping entire predicate
+        predicate = predicate.strip()
+        if predicate.startswith("(") and predicate.endswith(")"):
+            # Check if these are outer wrapping parens, not function call parens
+            paren_count = 0
+            for i, char in enumerate(predicate):
+                if char == "(":
+                    paren_count += 1
+                elif char == ")":
+                    paren_count -= 1
+                if paren_count == 0 and i < len(predicate) - 1:
+                    # Parentheses closed before end - not outer wrapping
+                    break
+            if paren_count == 0 and i == len(predicate) - 1:
+                # Outer wrapping parentheses - remove them
+                predicate = predicate[1:-1].strip()
+
+        # Convert from on(c,b) to (on c b)
+        if "(" in predicate and ")" in predicate:
+            pred_name = predicate[:predicate.index("(")]
+            args_str = predicate[predicate.index("(") + 1:predicate.rindex(")")]
+            args = [arg.strip() for arg in args_str.split(",")]
+            return f"({pred_name} {' '.join(args)})"
+        else:
+            # Simple predicate with no arguments
+            return f"({predicate})"
 
 
 # Example usage

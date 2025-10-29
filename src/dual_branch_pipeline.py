@@ -39,11 +39,7 @@ class DualBranchPipeline:
         self.domain_actions = ['pickup', 'putdown', 'stack', 'unstack']
         self.domain_predicates = ['on(X, Y)', 'clear(X)', 'holding(X)', 'handempty']
 
-        # Output directory (base)
-        self.output_base_dir = Path(__file__).parent.parent / "output"
-        self.output_base_dir.mkdir(exist_ok=True)
-
-        # Timestamped output directory (set during execution)
+        # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
 
     def execute(self, nl_instruction: str, mode: str = "both") -> Dict[str, Any]:
@@ -60,13 +56,11 @@ class DualBranchPipeline:
         Returns:
             Results from Stage 1 and Stage 2 (no execution/evaluation)
         """
-        # Start logger
-        self.logger.start_pipeline(nl_instruction, domain_file=str(self.domain_path), output_dir="output")
+        # Start logger (creates timestamped directory in logs/)
+        self.logger.start_pipeline(nl_instruction, mode=mode, domain_file=str(self.domain_path), output_dir="logs")
 
-        # Create timestamped output directory (matching logger timestamp)
-        timestamp = self.logger.current_record.timestamp
-        self.output_dir = self.output_base_dir / timestamp
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Use logger's directory for all output files
+        self.output_dir = self.logger.current_log_dir
 
         print("="*80)
         mode_names = {
@@ -164,7 +158,7 @@ class DualBranchPipeline:
                 "formulas_string": [f.to_string() for f in ltl_spec.formulas]
             }
 
-            asl_code, prompt_dict, response_text = generator.generate_agentspeak(
+            asl_code, prompt_dict, response_text = generator.generate(
                 ltl_dict,
                 'blocksworld',
                 self.domain_actions,

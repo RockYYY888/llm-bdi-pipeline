@@ -143,7 +143,7 @@ class PR2Planner:
             output: Full output from PR2/PRP
 
         Returns:
-            List of (action_name, [parameters]) tuples matching pyperplan format
+            List of (action_name, [parameters]) tuples
             Example: [("pick-up", ["b5", "b4"]), ("put-on-block", ["b2", "b5"])]
         """
         actions = []
