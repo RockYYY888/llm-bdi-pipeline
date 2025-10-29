@@ -1,16 +1,16 @@
 # LTL-BDI Dual-Branch Pipeline
 
-Comparative Evaluation: LLM Policy Generation vs. LLM-Generated AgentSpeak
+Comparative Evaluation: LLM AgentSpeak Generation vs. FOND Planning
 
 ---
 
 ## Project Overview
 
-A research pipeline that compares two LLM-based approaches to intelligent agent planning:
-- **Branch A (LLM Policy)**: Direct action sequence generation from LTLf specifications
-- **Branch B (AgentSpeak)**: BDI agent program generation with plan libraries
+A research pipeline comparing two approaches to BDI agent planning from temporal goals:
+- **Branch A (llm_agentspeak)**: LLM directly generates AgentSpeak code from LTLf specifications (Baseline)
+- **Branch B (fond)**: FOND planner generates policies from PDDL problem formulations (Research)
 
-Both branches use LLMs to generate executable plans from LTLf (Linear Temporal Logic on Finite Traces) specifications, demonstrating LLM capability for temporal goal reasoning and action sequence generation.
+The pipeline converts natural language instructions to LTLf (Linear Temporal Logic on Finite Traces) specifications, then evaluates two distinct approaches for generating executable agent plans.
 
 ---
 
@@ -19,8 +19,12 @@ Both branches use LLMs to generate executable plans from LTLf (Linear Temporal L
 ### Prerequisites
 
 ```bash
-# Install dependencies
+# Install Python dependencies
 pip install openai python-dotenv
+
+# Install Docker (required for PR2 FOND planner)
+# macOS: Install Docker Desktop from https://www.docker.com/products/docker-desktop
+# Linux: sudo apt-get install docker.io
 ```
 
 ### Configuration
@@ -37,17 +41,14 @@ OPENAI_MODEL=gpt-4o-mini
 ### Run Demo
 
 ```bash
-# Run both branches (default)
+# Run both branches (default) - comparison mode
 python src/main.py "Stack block C on block B"
 
-# Run LLM policy only
-python src/main.py "Stack block C on block B" --mode llm
+# Run LLM AgentSpeak baseline only
+python src/main.py "Stack block C on block B" --mode llm_agentspeak
 
-# Run AgentSpeak only
-python src/main.py "Stack block C on block B" --mode asl
-
-# Run PDDL planner only
-python src/main.py "Stack block C on block B" --mode pddl
+# Run FOND planning only
+python src/main.py "Stack block C on block B" --mode fond
 ```
 
 ---
@@ -67,21 +68,23 @@ Natural Language Input ("Stack block C on block B")
        +-----------------+-----------------+
        |                                   |
        v                                   v
-+------------------------+  +--------------------------+
-|  BRANCH A              |  |  BRANCH B                |
-|  LLM Policy            |  |  LLM AgentSpeak          |
-+------------------------+  +--------------------------+
++---------------------------+  +---------------------------+
+|  BRANCH A (Baseline)      |  |  BRANCH B (Research)      |
+|  LLM AgentSpeak           |  |  FOND Planning            |
++---------------------------+  +---------------------------+
        |                                   |
        v                                   v
-+------------------------+  +--------------------------+
-| STAGE 2A: LLM Policy   |  | STAGE 2B: LLM AgentSpeak |
-| Generator              |  | Generator                |
-|                        |  |                          |
-| Input: F(on(c,b))      |  | Input: F(on(c,b))        |
-| Output:                |  | Output:                  |
-|  [pickup(c),           |  |  generated_agent.asl     |
-|   stack(c,b)]          |  |  (BDI plan library)      |
-+------------------------+  +--------------------------+
++---------------------------+  +---------------------------+
+| STAGE 2A: LLM AgentSpeak  |  | STAGE 2B: FOND Planning   |
+| Generation                |  |                           |
+|                           |  | Step 1: LTLf -> PDDL      |
+| Input: F(on(c,b))         |  | Step 2: PR2 FOND Planner  |
+| Output:                   |  |                           |
+|  AgentSpeak code (.asl)   |  | Input: F(on(c,b))         |
+|  with plans and beliefs   |  | Output:                   |
+|                           |  |  [pick-up-from-table(c),  |
+|                           |  |   put-on-block(c,b)]      |
++---------------------------+  +---------------------------+
        |                                   |
        +----------------+------------------+
                         |
@@ -93,6 +96,7 @@ Natural Language Input ("Stack block C on block B")
         |  - Goal satisfaction          |
         |  - Efficiency (action count)  |
         |  - Success rate               |
+        |  - Execution traces           |
         +-------------------------------+
 ```
 
@@ -100,53 +104,77 @@ Natural Language Input ("Stack block C on block B")
 
 ## Execution Modes
 
-The pipeline supports four execution modes via the `--mode` flag:
+The pipeline supports three execution modes via the `--mode` flag:
 
-1. **both** (default): Run both LLM and AgentSpeak branches and compare results
-2. **llm**: Run only LLM policy generation branch
-3. **asl**: Run only AgentSpeak generation branch
-4. **pddl**: Run only PDDL classical planning branch (using pyperplan)
+1. **both** (default): Run both branches and compare results
+2. **llm_agentspeak**: Run only LLM AgentSpeak baseline branch
+3. **fond**: Run only FOND planning branch
 
 ---
 
 ## Key Features
 
-### Branch A: LLM Policy Generation
-- Direct plan generation from LTLf goals
-- Goal dependency analysis for multi-goal scenarios
-- Optimal action sequence generation
-- Example output: `[pickup(c), stack(c, b)]`
-
-### Branch B: AgentSpeak Generation
-- Complete BDI agent program generation
-- Plan libraries with multiple context-sensitive plans
+### Branch A: LLM AgentSpeak Generation (Baseline)
+- Complete AgentSpeak (.asl) program generation
+- LLM directly generates BDI plans from LTLf goals
+- Plan libraries with context-sensitive plans
 - Declarative goal handling
-- Failure recovery plans (when LLM generates them)
+- End-to-end LLM-based approach
+
+### Branch B: FOND Planning (Research)
+- Formal FOND (Fully Observable Non-Deterministic) planning
+- LTLf goals converted to PDDL problem formulations
+- PR2/PRP planner generates strong cyclic policies
+- Handles non-deterministic action effects
+- Classical planning approach
 
 ### Comparative Evaluation
 - Goal satisfaction verification against LTLf specifications
 - Efficiency comparison (action count)
 - Success rate tracking
 - Detailed execution traces
+- JSON and text log outputs
 
 ---
 
-## Example Results
+## Example Usage
 
 ### Simple Goal: "Stack block C on block B"
-- **LTLf Formula**: F(on(c, b))
-- **Branch A**: SUCCESS - 2 actions
-- **Branch B**: SUCCESS - 2 actions
-- **Efficiency Ratio**: 1.00 (equal)
 
-### Complex Multi-Goal: "Build a tower with block A on block B on block C"
-- **LTLf Formulas**: [F(on(a, b)), F(on(b, c))]
-- **Branch A**: SUCCESS - 4 actions (B->C first, then A->B)
-  - Correctly analyzes goal dependencies
-- **Branch B**: FAILED - Executes A->B first, blocking B->C
-  - Demonstrates goal ordering dependency limitation
+```bash
+$ python src/main.py "Stack block C on block B"
 
-**Key Finding**: LLM policy generator demonstrates superior goal dependency analysis, correctly determining execution order to avoid blocking states.
+================================================================================
+LTL-BDI PIPELINE - DUAL BRANCH COMPARISON
+================================================================================
+
+Natural Language Instruction: "Stack block C on block B"
+
+--------------------------------------------------------------------------------
+[STAGE 1] Natural Language -> LTLf Specification
+--------------------------------------------------------------------------------
+✓ LTLf Formula: ['F(on(c, b))']
+  Objects: ['b', 'c']
+  Initial State: [{'ontable': ['b']}, {'ontable': ['c']}, ...]
+
+--------------------------------------------------------------------------------
+[STAGE 2A] BRANCH A: LLM AgentSpeak Generation (Baseline)
+--------------------------------------------------------------------------------
+✓ AgentSpeak Code Generated
+
+--------------------------------------------------------------------------------
+[STAGE 2B] BRANCH B: FOND Planning (PR2)
+--------------------------------------------------------------------------------
+✓ PDDL Problem Generated
+✓ FOND Plan Generated (2 actions)
+  1. pick-up-from-table(c)
+  2. put-on-block(c, b)
+
+--------------------------------------------------------------------------------
+[STAGE 3] Execution & Comparative Evaluation
+--------------------------------------------------------------------------------
+...
+```
 
 ---
 
@@ -160,18 +188,22 @@ The pipeline supports four execution modes via the `--mode` flag:
 │   ├── dual_branch_pipeline.py          # Main pipeline orchestration
 │   ├── pipeline_logger.py               # Logging utilities
 │   ├── stage1_interpretation/
-│   │   └── ltl_parser.py                # NL -> LTLf conversion
+│   │   └── ltl_parser.py                # NL -> LTLf conversion (LLM)
+│   ├── stage2_pddl/
+│   │   └── pddl_problem_generator.py    # LTLf -> PDDL conversion
 │   ├── stage3_codegen/
-│   │   ├── llm_policy_generator.py      # LLM policy generation
-│   │   └── agentspeak_generator.py      # AgentSpeak generation
+│   │   ├── agentspeak_generator.py      # LLM AgentSpeak generation
+│   │   └── pr2_planner.py               # PR2 FOND planner wrapper
 │   └── stage4_execution/
 │       ├── blocksworld_simulator.py     # Environment simulation
 │       ├── agentspeak_simulator.py      # AgentSpeak execution
-│       └── comparative_evaluator.py     # Result comparison
+│       └── comparative_evaluator.py     # Branch comparison
 ├── domains/
 │   └── blocksworld/
-│       └── domain.pddl                  # Blocksworld domain definition
-├── output/                              # Generated plans and logs
+│       └── domain.pddl                  # Blocksworld PDDL domain
+├── pr2/                                 # PR2 FOND planner files
+├── logs/                                # Execution logs (timestamped)
+├── output/                              # Generated plans
 └── tests/                               # Test suites
 ```
 
@@ -180,114 +212,116 @@ The pipeline supports four execution modes via the `--mode` flag:
 ## Development
 
 ### Running Tests
+
 ```bash
 python -m pytest tests/
 ```
 
 ### Test Individual Components
+
 ```bash
 # Test LTL parser
 python src/stage1_interpretation/ltl_parser.py
 
-# Test LLM policy generator
-python src/stage3_codegen/llm_policy_generator.py
-
 # Test AgentSpeak generator
 python src/stage3_codegen/agentspeak_generator.py
+
+# Test PDDL problem generator
+python src/stage2_pddl/pddl_problem_generator.py
 ```
+
+---
+
+## Pipeline Stages
+
+### Stage 1: Natural Language -> LTLf
+- **Input**: Natural language instruction (e.g., "Stack block C on block B")
+- **Process**: LLM-based parser extracts objects, initial state, and goals
+- **Output**: LTLf specification with formula(s), objects, initial state
+
+### Stage 2A: LLM AgentSpeak Generation (Branch A)
+- **Input**: LTLf specification
+- **Process**: LLM generates complete AgentSpeak program
+- **Output**: AgentSpeak code (.asl) with plans and beliefs
+
+### Stage 2B: FOND Planning (Branch B)
+- **Step 1**: LTLf -> PDDL problem conversion
+- **Step 2**: PR2 FOND planner execution (Docker-based)
+- **Output**: Action sequence policy
+
+### Stage 3: Execution & Comparison
+- Execute both branches in blocksworld simulator
+- Verify LTLf goal satisfaction
+- Compare efficiency and success rates
+- Generate detailed logs
 
 ---
 
 ## Implementation Notes
 
 ### LTL-BDI Integration
-The pipeline demonstrates LLM integration into BDI systems through:
-1. **Goal Specification**: Natural language -> LTLf formal specifications
-2. **Policy Generation**: LTL goals -> executable action sequences
-3. **BDI Programming**: LTL goals -> AgentSpeak plan libraries
-4. **Verification**: LTL goal satisfaction checking
+The pipeline demonstrates two approaches to LLM integration in BDI systems:
+1. **Direct Generation (Branch A)**: LLM generates full AgentSpeak programs
+2. **Formal Planning (Branch B)**: Classical FOND planning from formal specifications
+
+### FOND Planning
+- Uses PR2 (Planner for Relevant Policies) via Docker
+- Generates strong cyclic policies for non-deterministic domains
+- Handles uncertainty in action outcomes
+- Requires PDDL domain with `:non-deterministic` requirements
 
 ### Blocksworld Domain
-The blocksworld domain provides a clear testbed for:
-- Goal dependency analysis (stacking order matters)
-- State space exploration (block configuration)
+The blocksworld domain provides a testbed for:
+- Goal dependency analysis (stacking order)
+- State space exploration (block configurations)
 - Action precondition/effect reasoning
 
-### Future Extensions
-- Additional planning domains (Mars Rover, Logistics)
-- Runtime LTL monitoring integration
-- FOND (Fully Observable Non-Deterministic) planner integration
-- Extended LTL formula support (G, U, X operators)
-
 ---
 
-## Implementation Status
+## Current Status
 
-### Completed Features ✓
-1. **FOND Planning Integration** - Non-deterministic planning using PR2/PRP
-   - LTLf → FOND PDDL problem generation
-   - PR2 Docker integration with PRP (Planner for Relevant Policies)
-   - PDDL mode (`--mode pddl`) fully functional with FOND support
-   - Generates strong cyclic policies for non-deterministic domains
-   - Legacy classical planner (pyperplan) moved to `src/legacy/`
-
-2. **Logger Output Integration** - Timestamped execution logs
-   - Logs saved to `logs/YYYYMMDD_HHMMSS/`
-   - Both JSON and human-readable text formats
-   - Complete execution trace for all modes
-
-3. **Branch Mode Toggle** - Flexible execution modes
-   - `--mode both`: LLM + AgentSpeak comparison
-   - `--mode llm`: LLM policy only
-   - `--mode asl`: AgentSpeak only
-   - `--mode pddl`: Classical PDDL planning only
-
-4. **Documentation** - Clean, accurate README
-   - No emojis, single architecture diagram
-   - 100% accuracy with implementation
-   - Concise and precise content
+### Implemented Features
+- ✓ Dual-branch architecture (LLM AgentSpeak vs FOND)
+- ✓ LTLf goal specification from natural language
+- ✓ PDDL problem generation from LTLf
+- ✓ PR2 FOND planner integration (Docker)
+- ✓ AgentSpeak code generation via LLM
+- ✓ Blocksworld simulator
+- ✓ Comparative evaluation framework
+- ✓ JSON and text logging
 
 ### Known Limitations
-
-1. **FOND Domain Coverage** - Currently blocksworld only
-   - PR2/PRP fully integrated for blocksworld FOND domain
-   - Other domains (Mars Rover, Logistics) need FOND domain files
-   - FOND PDDL requires `:requirements :non-deterministic` and `oneof` effects
-
-2. **Action Name Compatibility** - FOND actions use hyphens
-   - PR2 generates action names with hyphens (e.g., `pick-up-from-table`)
-   - Simulator expects underscores (e.g., `pickup`)
-   - Action name mapping needed for full execution compatibility
+1. **Single Domain**: Currently supports blocksworld only
+2. **Action Name Mapping**: FOND uses hyphens, simulator expects underscores
+3. **LTL Operators**: Currently supports F (eventually) operator primarily
 
 ---
 
-## Future Work / TODO
+## Future Work
 
 ### High Priority
-1. **Action Name Mapping** - Unify FOND and simulator action names
-   - Add translation layer between PR2 hyphenated names and simulator underscore names
-   - Ensure full execution compatibility with FOND-generated plans
-
-2. **Extended Domain Support**
-   - Mars Rover domain with sensor uncertainty
-   - Logistics domain with probabilistic delivery success
+1. **Extended Domain Support**
+   - Mars Rover domain
+   - Logistics domain
    - Additional IPC benchmark domains
 
-3. **Runtime LTL Monitoring**
-   - LTL runtime monitors for goal satisfaction verification
-   - Dynamic replanning on goal violations
-   - Integration with BDI execution cycle
+2. **Runtime LTL Monitoring**
+   - Dynamic goal satisfaction checking
+   - Replanning on violations
+
+3. **Jason Integration**
+   - Full BDI platform integration
+   - Multi-agent scenarios
 
 ### Medium Priority
 4. **Performance Optimization**
-   - Parallel execution of LLM/AgentSpeak/PDDL branches
-   - Caching of LLM responses for repeated queries
+   - Parallel branch execution
+   - LLM response caching
    - Incremental plan generation
 
-5. **Enhanced BDI Integration**
-   - Jason/JAdex framework integration
-   - FIPA-ACL message protocol support
-   - Multi-agent coordination scenarios
+5. **Enhanced LTL Support**
+   - G (always), U (until), X (next) operators
+   - Complex temporal formulas
 
 ---
 
@@ -297,7 +331,7 @@ If you use this work, please cite:
 
 ```bibtex
 @software{ltl_bdi_pipeline,
-  title={LTL-BDI Dual-Branch Pipeline: LLM-Based Policy vs AgentSpeak Generation},
+  title={LTL-BDI Dual-Branch Pipeline: LLM AgentSpeak vs FOND Planning},
   author={Yiwei LI},
   year={2025},
   institution={University of Nottingham Ningbo China}
@@ -320,4 +354,4 @@ Key references:
 - Rao & Georgeff: BDI architecture foundations
 - Bordini et al.: AgentSpeak semantics and implementation
 - De Giacomo & Vardi: LTLf specifications
-- Geffner & Bonet: Planning as heuristic search
+- Geffner & Bonet: FOND planning

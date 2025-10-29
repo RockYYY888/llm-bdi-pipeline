@@ -1,5 +1,5 @@
 """
-Main Entry Point - Dual-Branch MVP Demo
+Main Entry Point - Dual-Branch Comparison
 
 This is the main entry point for the LTL-BDI pipeline.
 
@@ -7,9 +7,9 @@ Usage:
     python src/main.py "Stack block C on block B" [--mode MODE]
 
 Modes:
-    both    - Run both branches and compare (default)
-    llm     - Run only LLM policy branch
-    asl     - Run only AgentSpeak branch
+    both            - Run both branches and compare (default)
+    llm_agentspeak  - Run only LLM AgentSpeak baseline branch
+    fond            - Run only FOND planning branch
 """
 
 import sys
@@ -27,18 +27,19 @@ def main():
     """Main entry point"""
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='LTL-BDI Pipeline - Dual-Branch Demonstration',
+        description='LTL-BDI Pipeline - Dual-Branch Comparison (LLM AgentSpeak vs FOND)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
   python src/main.py "Stack block C on block B"
-  python src/main.py "Stack block C on block B" --mode llm
+  python src/main.py "Stack block C on block B" --mode llm_agentspeak
+  python src/main.py "Stack block C on block B" --mode fond
   python src/main.py "Build a tower" --mode both
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')
-    parser.add_argument('--mode', choices=['both', 'llm', 'asl', 'pddl'], default='both',
-                        help='Execution mode: both (default), llm, asl, or pddl')
+    parser.add_argument('--mode', choices=['both', 'llm_agentspeak', 'fond'], default='both',
+                        help='Execution mode: both (default), llm_agentspeak, or fond')
 
     args = parser.parse_args()
     nl_instruction = args.instruction

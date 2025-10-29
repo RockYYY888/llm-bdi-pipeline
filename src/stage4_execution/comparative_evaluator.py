@@ -1,7 +1,7 @@
 """
 Comparative Evaluator
 
-Compares Classical PDDL planning (Branch A) with LLM AgentSpeak (Branch B).
+Compares LLM AgentSpeak Generation (Branch A) with FOND Planning (Branch B).
 Provides metrics and analysis for research evaluation.
 """
 
@@ -12,7 +12,7 @@ from .agentspeak_simulator import AgentSpeakExecutor
 
 class ComparativeEvaluator:
     """
-    Evaluates and compares Classical vs AgentSpeak execution
+    Evaluates and compares LLM AgentSpeak vs FOND Planning execution
     """
 
     def __init__(self):
@@ -20,18 +20,16 @@ class ComparativeEvaluator:
 
     def evaluate(self,
                  initial_state: BlocksworldState,
-                 classical_plan: List[Tuple[str, List[str]]],
-                 agentspeak_code: str,
-                 agentspeak_goal: str,
+                 llm_agentspeak_code: str,
+                 fond_plan: List[Tuple[str, List[str]]],
                  ltl_goal: Union[str, List[str]]) -> Dict[str, Any]:
         """
         Run both branches and compare results
 
         Args:
             initial_state: Initial blocksworld state
-            classical_plan: Classical action sequence from PDDL planner
-            agentspeak_code: Generated AgentSpeak plan library
-            agentspeak_goal: Initial goal for AgentSpeak (e.g., "stack(c,b)")
+            llm_agentspeak_code: AgentSpeak code from LLM generator (Branch A)
+            fond_plan: Action sequence from FOND planner (Branch B)
             ltl_goal: Original LTLf goal(s) for verification
                      - Single: "F(on(c,b))"
                      - Multiple: ["F(on(a,b))", "F(on(b,c))"]
@@ -39,34 +37,49 @@ class ComparativeEvaluator:
         Returns:
             Comparison results with metrics
         """
-        # Branch A: Classical Planning
-        classical_result = self._run_classical(initial_state, classical_plan)
+        # Branch A: LLM AgentSpeak
+        llm_agentspeak_result = self._run_agentspeak(initial_state, llm_agentspeak_code, ltl_goal)
 
-        # Branch B: AgentSpeak
-        agentspeak_result = self._run_agentspeak(initial_state, agentspeak_code, agentspeak_goal)
+        # Branch B: FOND Planning
+        fond_result = self._run_plan(initial_state, fond_plan, 'fond')
 
         # Compare results
         comparison = self._compare_results(
-            classical_result,
-            agentspeak_result,
-            ltl_goal,
-            agentspeak_code
+            llm_agentspeak_result,
+            fond_result,
+            ltl_goal
         )
 
         # Store results
         self.results = {
-            'classical': classical_result,
-            'agentspeak': agentspeak_result,
+            'llm_agentspeak': llm_agentspeak_result,
+            'fond': fond_result,
             'comparison': comparison,
             'ltl_goal': ltl_goal
         }
 
         return self.results
 
-    def _run_classical(self,
-                       initial_state: BlocksworldState,
-                       plan: List[Tuple[str, List[str]]]) -> Dict[str, Any]:
-        """Execute classical plan"""
+    def _run_agentspeak(self,
+                        initial_state: BlocksworldState,
+                        agentspeak_code: str,
+                        ltl_goals: Union[str, List[str]]) -> Dict[str, Any]:
+        """Execute AgentSpeak code (Branch A)"""
+        # Execute AgentSpeak code
+        executor = AgentSpeakExecutor(initial_state.copy())
+        goals_list = [ltl_goals] if isinstance(ltl_goals, str) else ltl_goals
+        result = executor.execute(agentspeak_code, goals_list)
+
+        # Add metadata
+        result['branch'] = 'llm_agentspeak'
+
+        return result
+
+    def _run_plan(self,
+                  initial_state: BlocksworldState,
+                  plan: List[Tuple[str, List[str]]],
+                  branch_name: str) -> Dict[str, Any]:
+        """Execute a plan (FOND)"""
         # Create fresh environment
         env = BlocksworldEnvironment(initial_state.copy())
 
@@ -75,98 +88,77 @@ class ComparativeEvaluator:
         result = executor.execute(plan)
 
         # Add metadata
-        result['branch'] = 'classical'
+        result['branch'] = branch_name
         result['plan_length'] = len(plan)
 
         return result
 
-    def _run_agentspeak(self,
-                        initial_state: BlocksworldState,
-                        asl_code: str,
-                        initial_goal: str) -> Dict[str, Any]:
-        """Execute AgentSpeak program"""
-        # Create fresh environment
-        env = BlocksworldEnvironment(initial_state.copy())
-
-        # Execute AgentSpeak
-        executor = AgentSpeakExecutor(env)
-        result = executor.execute(asl_code, initial_goal)
-
-        # Add metadata
-        result['branch'] = 'agentspeak'
-
-        return result
-
     def _compare_results(self,
-                         classical: Dict[str, Any],
-                         agentspeak: Dict[str, Any],
-                         ltl_goal: str,
-                         agentspeak_code: str) -> Dict[str, Any]:
+                         llm_agentspeak: Dict[str, Any],
+                         fond: Dict[str, Any],
+                         ltl_goal: str) -> Dict[str, Any]:
         """Compare execution results"""
 
         comparison = {
-            'both_succeeded': classical['success'] and agentspeak['success'],
-            'classical_only': classical['success'] and not agentspeak['success'],
-            'agentspeak_only': agentspeak['success'] and not classical['success'],
-            'both_failed': not classical['success'] and not agentspeak['success']
+            'both_succeeded': llm_agentspeak['success'] and fond['success'],
+            'llm_agentspeak_only': llm_agentspeak['success'] and not fond['success'],
+            'fond_only': fond['success'] and not llm_agentspeak['success'],
+            'both_failed': not llm_agentspeak['success'] and not fond['success']
         }
 
         # Goal satisfaction check - handle both single goal (string) and multiple goals (list)
         ltl_goals = [ltl_goal] if isinstance(ltl_goal, str) else ltl_goal
 
-        # Check each goal for classical
-        classical_goal_results = []
+        # Check each goal for LLM AgentSpeak
+        llm_agentspeak_goal_results = []
         for goal in ltl_goals:
             satisfied = self._check_ltl_satisfaction(
-                classical.get('final_state', []),
+                llm_agentspeak.get('final_state', []),
                 goal
             )
-            classical_goal_results.append({
+            llm_agentspeak_goal_results.append({
                 'goal': goal,
                 'satisfied': satisfied
             })
 
-        # Check each goal for agentspeak
-        agentspeak_goal_results = []
+        # Check each goal for FOND
+        fond_goal_results = []
         for goal in ltl_goals:
             satisfied = self._check_ltl_satisfaction(
-                agentspeak.get('env_final_state', []),
+                fond.get('final_state', []),
                 goal
             )
-            agentspeak_goal_results.append({
+            fond_goal_results.append({
                 'goal': goal,
                 'satisfied': satisfied
             })
 
         # Overall satisfaction: all goals must be satisfied
-        comparison['classical_satisfies_goal'] = all(r['satisfied'] for r in classical_goal_results)
-        comparison['agentspeak_satisfies_goal'] = all(r['satisfied'] for r in agentspeak_goal_results)
+        comparison['llm_agentspeak_satisfies_goal'] = all(r['satisfied'] for r in llm_agentspeak_goal_results)
+        comparison['fond_satisfies_goal'] = all(r['satisfied'] for r in fond_goal_results)
 
         # Detailed goal results
-        comparison['classical_goal_details'] = classical_goal_results
-        comparison['agentspeak_goal_details'] = agentspeak_goal_results
+        comparison['llm_agentspeak_goal_details'] = llm_agentspeak_goal_results
+        comparison['fond_goal_details'] = fond_goal_results
 
         # Efficiency metrics
-        if classical['success'] and agentspeak['success']:
-            classical_actions = classical.get('actions_executed', 0)
-            agentspeak_trace_actions = len([
-                t for t in agentspeak.get('trace', [])
-                if 'Executing:' in t
-            ])
+        if llm_agentspeak['success'] and fond['success']:
+            llm_agentspeak_actions = llm_agentspeak.get('actions_executed', 0)
+            fond_actions = fond.get('actions_executed', 0)
 
             comparison['efficiency'] = {
-                'classical_actions': classical_actions,
-                'agentspeak_actions': agentspeak_trace_actions,
-                'classical_more_efficient': classical_actions < agentspeak_trace_actions,
-                'efficiency_ratio': agentspeak_trace_actions / classical_actions if classical_actions > 0 else float('inf')
+                'llm_agentspeak_actions': llm_agentspeak_actions,
+                'fond_actions': fond_actions,
+                'llm_agentspeak_more_efficient': llm_agentspeak_actions < fond_actions,
+                'efficiency_ratio': fond_actions / llm_agentspeak_actions if llm_agentspeak_actions > 0 else float('inf')
             }
         else:
             comparison['efficiency'] = None
 
-        # Robustness comparison (for future: inject failures and test)
+        # Robustness comparison (simplified for LLM AgentSpeak vs FOND)
         comparison['robustness'] = {
-            'classical_failure_recovery': False,  # Classical has no recovery
-            'agentspeak_failure_recovery': 'failure plan' in agentspeak_code.lower()  # Check for -! plans
+            'llm_agentspeak_deterministic': True,  # LLM AgentSpeak generates deterministic code
+            'fond_handles_nondeterminism': True  # FOND explicitly handles non-determinism
         }
 
         return comparison
@@ -200,8 +192,8 @@ class ComparativeEvaluator:
         if not self.results:
             return "No evaluation results available. Run evaluate() first."
 
-        classical = self.results['classical']
-        agentspeak = self.results['agentspeak']
+        llm_agentspeak = self.results['llm_agentspeak']
+        fond = self.results['fond']
         comparison = self.results['comparison']
 
         report = []
@@ -218,54 +210,53 @@ class ComparativeEvaluator:
         else:
             report.append(f"\nLTLf Goal: {ltl_goal}")
 
-        # Branch A: Classical
+        # Branch A: LLM AgentSpeak
         report.append("\n" + "-"*80)
-        report.append("BRANCH A: Classical PDDL Planning")
+        report.append("BRANCH A: LLM AgentSpeak Generation (Baseline)")
         report.append("-"*80)
-        report.append(f"Success: {classical['success']}")
-        report.append(f"Actions Executed: {classical.get('actions_executed', 0)}")
-        report.append(f"Goal Satisfied: {comparison['classical_satisfies_goal']}")
+        report.append(f"Success: {llm_agentspeak['success']}")
+        report.append(f"Actions Executed: {llm_agentspeak.get('actions_executed', 0)}")
+        report.append(f"Goal Satisfied: {comparison['llm_agentspeak_satisfies_goal']}")
 
         # Detailed goal verification (if multiple goals)
-        if 'classical_goal_details' in comparison and len(comparison['classical_goal_details']) > 1:
+        if 'llm_agentspeak_goal_details' in comparison and len(comparison['llm_agentspeak_goal_details']) > 1:
             report.append("\nDetailed Goal Verification:")
-            for detail in comparison['classical_goal_details']:
+            for detail in comparison['llm_agentspeak_goal_details']:
                 status = "✓" if detail['satisfied'] else "✗"
                 report.append(f"  {status} {detail['goal']}")
 
-        if classical['success']:
-            report.append(f"Final State: {classical.get('final_state', [])}")
+        if llm_agentspeak['success']:
+            report.append(f"Final State: {llm_agentspeak.get('final_state', [])}")
         else:
-            report.append(f"Failure Action: {classical.get('failure_action', 'N/A')}")
+            report.append(f"Failure Action: {llm_agentspeak.get('failure_action', 'N/A')}")
 
         report.append("\nExecution Trace:")
-        for action in classical.get('trace', []):
+        for action in llm_agentspeak.get('trace', []):
             report.append(f"  {action}")
 
-        # Branch B: AgentSpeak
+        # Branch B: FOND Planning
         report.append("\n" + "-"*80)
-        report.append("BRANCH B: LLM AgentSpeak")
+        report.append("BRANCH B: FOND Planning (PR2)")
         report.append("-"*80)
-        report.append(f"Success: {agentspeak['success']}")
-        report.append(f"Goal Satisfied: {comparison['agentspeak_satisfies_goal']}")
+        report.append(f"Success: {fond['success']}")
+        report.append(f"Actions Executed: {fond.get('actions_executed', 0)}")
+        report.append(f"Goal Satisfied: {comparison['fond_satisfies_goal']}")
 
         # Detailed goal verification (if multiple goals)
-        if 'agentspeak_goal_details' in comparison and len(comparison['agentspeak_goal_details']) > 1:
+        if 'fond_goal_details' in comparison and len(comparison['fond_goal_details']) > 1:
             report.append("\nDetailed Goal Verification:")
-            for detail in comparison['agentspeak_goal_details']:
+            for detail in comparison['fond_goal_details']:
                 status = "✓" if detail['satisfied'] else "✗"
                 report.append(f"  {status} {detail['goal']}")
 
-        if agentspeak['success']:
-            report.append(f"Final State: {agentspeak.get('env_final_state', [])}")
+        if fond['success']:
+            report.append(f"Final State: {fond.get('final_state', [])}")
         else:
-            report.append("Execution failed (see trace)")
+            report.append(f"Failure Action: {fond.get('failure_action', 'N/A')}")
 
         report.append("\nExecution Trace:")
-        for line in agentspeak.get('trace', [])[:20]:  # Limit trace length
-            report.append(f"  {line}")
-        if len(agentspeak.get('trace', [])) > 20:
-            report.append(f"  ... ({len(agentspeak['trace']) - 20} more lines)")
+        for action in fond.get('trace', []):
+            report.append(f"  {action}")
 
         # Comparison
         report.append("\n" + "="*80)
@@ -274,10 +265,10 @@ class ComparativeEvaluator:
 
         if comparison['both_succeeded']:
             report.append("✓ Both branches succeeded")
-        elif comparison['classical_only']:
-            report.append("⚠ Classical succeeded, AgentSpeak failed")
-        elif comparison['agentspeak_only']:
-            report.append("⚠ AgentSpeak succeeded, Classical failed")
+        elif comparison['llm_agentspeak_only']:
+            report.append("⚠ LLM AgentSpeak succeeded, FOND failed")
+        elif comparison['fond_only']:
+            report.append("⚠ FOND succeeded, LLM AgentSpeak failed")
         else:
             report.append("✗ Both branches failed")
 
@@ -285,20 +276,20 @@ class ComparativeEvaluator:
         if comparison['efficiency']:
             eff = comparison['efficiency']
             report.append(f"\nEfficiency:")
-            report.append(f"  Classical Actions: {eff['classical_actions']}")
-            report.append(f"  AgentSpeak Actions: {eff['agentspeak_actions']}")
+            report.append(f"  LLM AgentSpeak Actions: {eff['llm_agentspeak_actions']}")
+            report.append(f"  FOND Actions: {eff['fond_actions']}")
             report.append(f"  Efficiency Ratio: {eff['efficiency_ratio']:.2f}")
 
-            if eff['classical_more_efficient']:
-                report.append("  → Classical is more efficient (fewer actions)")
+            if eff['llm_agentspeak_more_efficient']:
+                report.append("  → LLM AgentSpeak is more efficient (fewer actions)")
             else:
-                report.append("  → AgentSpeak is more efficient or equal")
+                report.append("  → FOND is more efficient or equal")
 
         # Robustness
         rob = comparison['robustness']
         report.append(f"\nRobustness:")
-        report.append(f"  Classical Failure Recovery: {rob['classical_failure_recovery']}")
-        report.append(f"  AgentSpeak Failure Plans: {rob['agentspeak_failure_recovery']}")
+        report.append(f"  LLM AgentSpeak Deterministic: {rob['llm_agentspeak_deterministic']}")
+        report.append(f"  FOND Handles Non-determinism: {rob['fond_handles_nondeterminism']}")
 
         report.append("\n" + "="*80)
 
