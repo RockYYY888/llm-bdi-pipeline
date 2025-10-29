@@ -101,8 +101,10 @@ class PipelineLogger:
         if timestamp is None:
             timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
 
-        # Create timestamp-specific log directory
-        self.current_log_dir = self.logs_dir / timestamp
+        # Create timestamp and mode-specific log directory
+        # Format: YYYYMMDD_HHMMSS_mode (e.g., 20251029_222949_fond)
+        dir_name = f"{timestamp}_{mode}"
+        self.current_log_dir = self.logs_dir / dir_name
         self.current_log_dir.mkdir(parents=True, exist_ok=True)
 
         self.current_record = PipelineRecord(
