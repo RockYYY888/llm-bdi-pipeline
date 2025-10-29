@@ -174,7 +174,7 @@ class PR2Planner:
 
         return actions
 
-    def solve_from_strings(self, domain_str: str, problem_str: str) -> Optional[List[Tuple[str, List[str]]]]:
+    def solve_from_strings(self, domain_str: str, problem_str: str, verbose: bool = False) -> Tuple[Optional[List[Tuple[str, List[str]]]], dict]:
         """
         Solve a FOND planning problem from string representations.
 
@@ -184,9 +184,16 @@ class PR2Planner:
         Args:
             domain_str: PDDL domain as string
             problem_str: PDDL problem as string
+            verbose: If True, print detailed PR2 output
 
         Returns:
-            List of (action_name, [parameters]) tuples, or None if no plan found
+            Tuple of (plan, info_dict) where:
+            - plan: List of (action_name, [parameters]) tuples, or None if no plan found
+            - info_dict: Dictionary containing PR2 execution info:
+                - success: bool - Whether planning succeeded
+                - plan_length: int - Number of actions in plan
+                - pr2_output: str - Full PR2/PRP output
+                - error: str - Error message if planning failed
         """
         # Create temporary files in PR2 directory (so they can be mounted)
         temp_dir = self.pr2_dir / "temp"
@@ -195,11 +202,40 @@ class PR2Planner:
         domain_file = temp_dir / "temp_domain.pddl"
         problem_file = temp_dir / "temp_problem.pddl"
 
+        info_dict = {
+            "success": False,
+            "plan_length": 0,
+            "pr2_output": "",
+            "error": None
+        }
+
         try:
             domain_file.write_text(domain_str)
             problem_file.write_text(problem_str)
 
-            plan = self.solve(str(domain_file), str(problem_file))
+            # Run PR2 planner
+            plan, pr2_output = self._solve_with_output(str(domain_file), str(problem_file))
+
+            # Update info dict
+            info_dict["pr2_output"] = pr2_output
+
+            if plan:
+                info_dict["success"] = True
+                info_dict["plan_length"] = len(plan)
+            else:
+                info_dict["error"] = "No plan found by PR2 planner"
+
+            # Print detailed output if requested
+            if verbose:
+                print("\n" + "="*80)
+                print("PR2 PLANNER OUTPUT:")
+                print("="*80)
+                print(pr2_output)
+                print("="*80 + "\n")
+
+        except Exception as e:
+            info_dict["error"] = str(e)
+            plan = None
         finally:
             # Clean up temporary files
             if domain_file.exists():
@@ -210,7 +246,73 @@ class PR2Planner:
             if temp_dir.exists() and not any(temp_dir.iterdir()):
                 temp_dir.rmdir()
 
-        return plan
+        return plan, info_dict
+
+    def _solve_with_output(self, domain_file: str, problem_file: str) -> Tuple[Optional[List[Tuple[str, List[str]]]], str]:
+        """
+        Internal method to solve planning problem and return both plan and full output.
+
+        Returns:
+            Tuple of (plan, output_string)
+        """
+        # Convert to absolute paths
+        domain_path = Path(domain_file)
+        problem_path = Path(problem_file)
+
+        if not domain_path.is_absolute():
+            domain_path = self.project_root / domain_path
+        if not problem_path.is_absolute():
+            problem_path = self.project_root / problem_path
+
+        # Verify files exist
+        if not domain_path.exists():
+            raise FileNotFoundError(f"Domain file not found: {domain_path}")
+        if not problem_path.exists():
+            raise FileNotFoundError(f"Problem file not found: {problem_path}")
+
+        # Convert paths to be relative to PR2 directory for Docker mount
+        try:
+            domain_rel = f"/PROJECT/{domain_path.relative_to(self.pr2_dir)}"
+            problem_rel = f"/PROJECT/{problem_path.relative_to(self.pr2_dir)}"
+        except ValueError:
+            raise NotImplementedError(
+                "Currently only supports files within external/pr2/ directory. "
+                f"Domain: {domain_path}, Problem: {problem_path}"
+            )
+
+        # Run PR2/PRP using Docker
+        docker_cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{str(self.pr2_dir)}:/PROJECT",
+            "pr2",
+            "/PLANNERS/bin/prp",
+            domain_rel,
+            problem_rel
+        ]
+
+        try:
+            result = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+
+            output = result.stdout + result.stderr
+
+            # Parse output for plan
+            policy_actions = self._parse_policy(output)
+            success = "Strong cyclic plan found" in output
+
+            if success and policy_actions:
+                return policy_actions, output
+            else:
+                return None, output
+
+        except subprocess.TimeoutExpired:
+            return None, "PR2 planner timed out after 5 minutes"
+        except subprocess.CalledProcessError as e:
+            return None, f"PR2 planner failed: {e}"
 
 
 def main():

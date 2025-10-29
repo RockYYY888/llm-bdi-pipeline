@@ -185,25 +185,27 @@ Natural Language Instruction: "Stack block C on block B"
 ├── src/
 │   ├── main.py                          # Entry point with mode selection
 │   ├── config.py                        # Configuration management
-│   ├── dual_branch_pipeline.py          # Main pipeline orchestration
+│   ├── dual_branch_pipeline.py          # Main pipeline orchestration (Stages 1-2)
 │   ├── pipeline_logger.py               # Logging utilities
 │   ├── stage1_interpretation/
-│   │   └── ltl_parser.py                # NL -> LTLf conversion (LLM)
-│   ├── stage2_pddl/
-│   │   └── pddl_problem_generator.py    # LTLf -> PDDL conversion
-│   ├── stage3_codegen/
-│   │   ├── agentspeak_generator.py      # LLM AgentSpeak generation
-│   │   └── pr2_planner.py               # PR2 FOND planner wrapper
-│   └── stage4_execution/
-│       ├── blocksworld_simulator.py     # Environment simulation
-│       ├── agentspeak_simulator.py      # AgentSpeak execution
-│       └── comparative_evaluator.py     # Branch comparison
+│   │   └── ltl_parser.py                # Stage 1: NL -> LTLf conversion (LLM)
+│   ├── stage2_planning/                 # Stage 2: Dual-branch planning
+│   │   ├── agentspeak_generator.py      #   Branch A: LLM AgentSpeak generation
+│   │   ├── pr2_planner.py               #   Branch B: PR2 FOND planner wrapper
+│   │   └── pddl_problem_generator.py    #   LTLf -> PDDL conversion (for Branch B)
+│   └── legacy/                          # Legacy code (Stage 3 execution - not implemented)
+│       └── stage4_execution/            # Future: Execution & evaluation
 ├── domains/
 │   └── blocksworld/
 │       └── domain.pddl                  # Blocksworld PDDL domain
-├── pr2/                                 # PR2 FOND planner files
-├── logs/                                # Execution logs (timestamped)
-├── output/                              # Generated plans
+├── external/
+│   └── pr2/                             # PR2 FOND planner (Docker-based)
+├── logs/                                # Execution logs (timestamped JSON)
+├── output/                              # Generated plans and outputs
+│   ├── agentspeak_generated.asl         # Branch A output
+│   ├── problem_generated.pddl           # Branch B PDDL problem
+│   ├── fond_plan.txt                    # Branch B plan
+│   └── pr2_output.log                   # PR2 planner detailed log
 └── tests/                               # Test suites
 ```
 
@@ -264,11 +266,35 @@ The pipeline demonstrates two approaches to LLM integration in BDI systems:
 1. **Direct Generation (Branch A)**: LLM generates full AgentSpeak programs
 2. **Formal Planning (Branch B)**: Classical FOND planning from formal specifications
 
-### FOND Planning
-- Uses PR2 (Planner for Relevant Policies) via Docker
+### FOND Planning with PR2
+- Uses **PR2 (Planner for Relevant Policies)** via Docker for FOND planning
 - Generates strong cyclic policies for non-deterministic domains
-- Handles uncertainty in action outcomes
+- Handles uncertainty in action outcomes through policy-based solutions
 - Requires PDDL domain with `:non-deterministic` requirements
+
+**PR2 Setup**:
+```bash
+# Build PR2 Docker image (one-time setup)
+cd external/pr2
+docker build -t pr2 .
+cd ../..
+```
+
+**How PR2 Works**:
+1. Takes PDDL domain + problem as input
+2. Runs PRP (Planner for Relevant Policies) solver via Docker
+3. Generates a strong cyclic policy (handles all possible non-deterministic outcomes)
+4. Returns sequential action plan extracted from policy
+5. Full PR2 output logged to `output/pr2_output.log` for debugging
+
+**Docker Volume Mounting**:
+- PR2 container mounts `external/pr2/` as `/PROJECT`
+- Temporary PDDL files created in `external/pr2/temp/`
+- Ensures Docker can access domain and problem files
+
+**Output Logs**:
+- `output/pr2_output.log` - Complete PR2/PRP execution log (on success)
+- `output/pr2_output_failed.log` - Debugging log when planning fails
 
 ### Blocksworld Domain
 The blocksworld domain provides a testbed for:
@@ -280,20 +306,29 @@ The blocksworld domain provides a testbed for:
 
 ## Current Status
 
-### Implemented Features
-- ✓ Dual-branch architecture (LLM AgentSpeak vs FOND)
-- ✓ LTLf goal specification from natural language
-- ✓ PDDL problem generation from LTLf
-- ✓ PR2 FOND planner integration (Docker)
+### Implemented Features (Stages 1-2)
+- ✓ **Stage 1**: Natural language -> LTLf specification (LLM-based)
+- ✓ **Stage 2A** (Branch A - Baseline): LTLf -> LLM AgentSpeak code generation
+- ✓ **Stage 2B** (Branch B - Research): LTLf -> PDDL -> PR2 FOND planning
+- ✓ PR2 FOND planner integration via Docker with detailed logging
+- ✓ PDDL problem generation from LTLf specifications
 - ✓ AgentSpeak code generation via LLM
-- ✓ Blocksworld simulator
-- ✓ Comparative evaluation framework
-- ✓ JSON and text logging
+- ✓ Blocksworld domain support
+- ✓ JSON execution logs with timestamp
+- ✓ Comprehensive output files (AgentSpeak, PDDL, plans, PR2 logs)
+
+### Not Yet Implemented
+- ⏳ **Stage 3**: Execution & Comparative Evaluation
+  - Execution of AgentSpeak code
+  - FOND plan execution
+  - Goal satisfaction verification
+  - Performance comparison
+  - (Code exists in `legacy/stage4_execution/` for future development)
 
 ### Known Limitations
 1. **Single Domain**: Currently supports blocksworld only
-2. **Action Name Mapping**: FOND uses hyphens, simulator expects underscores
-3. **LTL Operators**: Currently supports F (eventually) operator primarily
+2. **LTL Operators**: Primarily supports F (eventually) operator
+3. **No Execution**: Pipeline stops after plan generation (Stage 2)
 
 ---
 
