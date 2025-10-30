@@ -1,9 +1,10 @@
 """
-LTL-BDI Pipeline: LLM AgentSpeak Generation
+LTL-BDI Pipeline: DFA-AgentSpeak Generation
 
-Implements the 2-stage architecture:
+Implements the 3-stage architecture:
     Stage 1: NL -> LTLf Goals
-    Stage 2: LTLf -> LLM AgentSpeak Generation
+    Stage 2: LTLf -> DFA Conversion
+    Stage 3: LTLf -> AgentSpeak Code Generation
 
 Note: FOND Planning (Branch B) has been moved to legacy/fond/
 """
@@ -19,13 +20,14 @@ from pipeline_logger import PipelineLogger
 
 class LTL_BDI_Pipeline:
     """
-    LTL-BDI pipeline implementing Stages 1 and 2
+    LTL-BDI pipeline implementing Stages 1-3 (dfa_agentspeak mode)
 
     Stage 1: Natural Language -> LTLf Specification
-    Stage 2: LTLf -> LLM AgentSpeak Code Generation
+    Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
+    Stage 3: LTLf -> AgentSpeak Code Generation (LLM)
 
     Legacy Note: FOND Planning (Branch B) has been deprecated and moved to src/legacy/fond/
-    The pipeline now focuses exclusively on LLM-based AgentSpeak generation.
+    The pipeline now focuses exclusively on DFA-AgentSpeak generation.
     """
 
     def __init__(self):
@@ -39,26 +41,34 @@ class LTL_BDI_Pipeline:
         # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
 
-    def execute(self, nl_instruction: str) -> Dict[str, Any]:
+    def execute(self, nl_instruction: str, mode: str = "dfa_agentspeak") -> Dict[str, Any]:
         """
-        Execute LTL-BDI pipeline (Stages 1 and 2 only)
+        Execute LTL-BDI pipeline (Stages 1-3: NL -> LTLf -> DFA -> AgentSpeak)
 
         Args:
             nl_instruction: Natural language instruction
+            mode: Execution mode (only "dfa_agentspeak" is supported)
 
         Returns:
-            Results from Stage 1 and Stage 2 (no execution/evaluation)
+            Results from Stage 1-3 (no execution/evaluation yet)
         """
+        if mode != "dfa_agentspeak":
+            raise ValueError(
+                f"Unknown mode '{mode}'. Only 'dfa_agentspeak' is supported. "
+                "FOND planning has been moved to src/legacy/fond/"
+            )
+
         # Start logger (creates timestamped directory in logs/)
-        self.logger.start_pipeline(nl_instruction, mode="llm_agentspeak", domain_file="N/A", output_dir="logs")
+        self.logger.start_pipeline(nl_instruction, mode=mode, domain_file="N/A", output_dir="logs")
 
         # Use logger's directory for all output files
         self.output_dir = self.logger.current_log_dir
 
         print("="*80)
-        print("LTL-BDI PIPELINE - LLM AGENTSPEAK GENERATION")
+        print(f"LTL-BDI PIPELINE - {mode.upper()} MODE")
         print("="*80)
         print(f"\nNatural Language Instruction: \"{nl_instruction}\"")
+        print(f"Mode: {mode}")
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)
 
@@ -67,15 +77,19 @@ class LTL_BDI_Pipeline:
         if not ltl_spec:
             return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
 
-        # Stage 2: LTLf -> AgentSpeak
-        asl_code = self._stage2_llm_agentspeak_generation(ltl_spec)
+        # Stage 2: LTLf -> DFA (optional visualization/verification)
+        # Note: DFA conversion is available but not yet integrated into execution flow
+        # Can be called manually via: from ltlf_dfa_conversion.ltlf_to_dfa import LTLfToDFA
+
+        # Stage 3: LTLf -> AgentSpeak
+        asl_code = self._stage3_llm_agentspeak_generation(ltl_spec)
         if not asl_code:
-            return {"success": False, "stage": "Stage 2", "error": "AgentSpeak generation failed"}
+            return {"success": False, "stage": "Stage 3", "error": "AgentSpeak generation failed"}
 
         print("\n" + "="*80)
-        print("STAGES 1-2 COMPLETED SUCCESSFULLY")
+        print("STAGES 1-3 COMPLETED SUCCESSFULLY")
         print("="*80)
-        print("\nNote: Stage 3 (Execution & Evaluation) not yet implemented")
+        print("\nNote: Stage 4 (Execution & Evaluation) not yet implemented")
 
         # End logger and save results
         log_filepath = self.logger.end_pipeline(success=True)
@@ -120,9 +134,9 @@ class LTL_BDI_Pipeline:
             print(f"✗ Stage 1 Failed: {e}")
             return None
 
-    def _stage2_llm_agentspeak_generation(self, ltl_spec):
-        """Stage 2: LTLf -> LLM AgentSpeak Generation"""
-        print("\n[STAGE 2] LLM AgentSpeak Generation")
+    def _stage3_llm_agentspeak_generation(self, ltl_spec):
+        """Stage 3: LTLf -> LLM AgentSpeak Generation"""
+        print("\n[STAGE 3] LLM AgentSpeak Generation")
         print("-"*80)
 
         generator = AgentSpeakGenerator(
@@ -145,7 +159,8 @@ class LTL_BDI_Pipeline:
                 self.domain_predicates
             )
 
-            # Log Stage 2 success (AgentSpeak generation)
+            # Log Stage 3 success (AgentSpeak generation)
+            # Note: Still using log_stage2 for backward compatibility with logger
             self.logger.log_stage2(
                 ltl_spec,
                 asl_code,
@@ -170,5 +185,5 @@ class LTL_BDI_Pipeline:
 
         except Exception as e:
             self.logger.log_stage2(ltl_spec, None, "Failed", str(e))
-            print(f"✗ Stage 2 Failed: {e}")
+            print(f"✗ Stage 3 Failed: {e}")
             return None

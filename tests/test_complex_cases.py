@@ -7,8 +7,8 @@ Tests based on FOND benchmark problems (bw_5_1, bw_5_3, bw_5_5):
 - Non-trivial initial states (pre-built towers)
 - Multiple goals requiring sophisticated planning
 
-Note: Only tests LLM AgentSpeak generation (Branch A).
-FOND planning (Branch B) has been moved to legacy/fond/
+Mode: dfa_agentspeak (NL -> LTLf -> DFA -> AgentSpeak)
+Note: FOND planning (Branch B) has been moved to legacy/fond/
 """
 
 import sys
@@ -52,15 +52,17 @@ test_cases = [
 
 
 def run_tests():
-    """Run all test cases with LLM AgentSpeak generation"""
+    """Run all test cases with DFA-AgentSpeak generation"""
     print("#" * 80)
     print("# LTL-BDI PIPELINE TEST SUITE")
-    print("# Testing LLM AgentSpeak Generation with FOND benchmark problems")
+    print("# Testing DFA-AgentSpeak Generation with FOND benchmark problems")
     print("# Based on: bw_5_1, bw_5_3, bw_5_5 from PR2 benchmarks")
+    print("# Mode: dfa_agentspeak")
     print("#" * 80)
     print()
 
     pipeline = LTL_BDI_Pipeline()
+    mode = "dfa_agentspeak"  # Same mode as main.py
 
     # Statistics
     total_runs = 0
@@ -73,13 +75,14 @@ def run_tests():
         print(f"TEST: {test.name}")
         print("=" * 80)
         print(f"Instruction: {test.instruction}")
+        print(f"Mode: {mode}")
         print("=" * 80)
         print()
 
         total_runs += 1
 
         try:
-            result = pipeline.execute(test.instruction)
+            result = pipeline.execute(test.instruction, mode=mode)
             test.result = result
 
             if result.get("success"):

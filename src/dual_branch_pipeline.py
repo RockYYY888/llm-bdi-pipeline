@@ -40,41 +40,42 @@ class DualBranchPipeline:
         self.domain_actions = self._pipeline.domain_actions
         self.domain_predicates = self._pipeline.domain_predicates
 
-    def execute(self, nl_instruction: str, mode: str = "llm_agentspeak"):
+    def execute(self, nl_instruction: str, mode: str = "dfa_agentspeak"):
         """
         Execute pipeline (backward compatibility method)
 
         Args:
             nl_instruction: Natural language instruction
-            mode: Execution mode (only "llm_agentspeak" is supported)
+            mode: Execution mode (only "dfa_agentspeak" is supported)
 
         Returns:
             Results from execution
 
         Raises:
-            ValueError: If mode is "fond" (no longer supported)
+            ValueError: If mode is "fond" or other unsupported mode
         """
         if mode == "fond":
             raise ValueError(
                 "FOND mode is no longer supported in the main pipeline. "
                 "FOND planning has been moved to src/legacy/fond/. "
-                "Please use mode='llm_agentspeak' or see legacy/fond/README.md "
+                "Please use mode='dfa_agentspeak' or see legacy/fond/README.md "
                 "for instructions on restoring FOND functionality."
             )
 
-        if mode != "llm_agentspeak":
+        if mode != "dfa_agentspeak":
             warnings.warn(
-                f"Unknown mode '{mode}'. Defaulting to 'llm_agentspeak'.",
+                f"Unknown mode '{mode}'. Defaulting to 'dfa_agentspeak'.",
                 UserWarning
             )
+            mode = "dfa_agentspeak"
 
         # Delegate to new pipeline
-        result = self._pipeline.execute(nl_instruction)
+        result = self._pipeline.execute(nl_instruction, mode=mode)
 
         # Update output_dir for compatibility
         self.output_dir = self._pipeline.output_dir
 
         # Add mode to result for compatibility
-        result["mode"] = "llm_agentspeak"
+        result["mode"] = mode
 
         return result
