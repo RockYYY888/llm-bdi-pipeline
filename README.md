@@ -6,10 +6,11 @@ Research pipeline for generating BDI agent code from natural language using LLMs
 
 ## Project Overview
 
-This pipeline converts natural language instructions into executable AgentSpeak code through a two-stage process:
+This pipeline converts natural language instructions into executable AgentSpeak code through a three-stage process:
 
 1. **Stage 1**: Natural Language → LTLf (Linear Temporal Logic on Finite Traces) Specification
-2. **Stage 2**: LTLf → AgentSpeak Code Generation (via LLM)
+2. **Stage 2**: LTLf → DFA (Deterministic Finite Automaton) Conversion using ltlf2dfa
+3. **Stage 3**: LTLf → AgentSpeak Code Generation (via LLM)
 
 **Note**: This project previously supported a dual-branch comparison with FOND planning (Branch B). That functionality has been moved to `src/legacy/fond/` to focus development on LLM-based AgentSpeak generation.
 
@@ -20,8 +21,11 @@ This pipeline converts natural language instructions into executable AgentSpeak 
 ### Prerequisites
 
 ```bash
-# Install Python dependencies
-pip install openai python-dotenv
+# Install Python dependencies using uv (recommended)
+uv sync
+
+# Or using pip
+pip install openai python-dotenv ltlf2dfa
 ```
 
 ### Configuration
@@ -58,7 +62,16 @@ Natural Language Input ("Stack block C on block B")
          |
          v
 +------------------------------------------------+
-|  STAGE 2: LTLf -> AgentSpeak Code              |
+|  STAGE 2: LTLf -> DFA                          |
+|  ltlf_to_dfa.py (ltlf2dfa-based)               |
+|  Output: DFA in DOT format + metadata          |
+|  - Predicate encoding: on(c,b) → on_c_b        |
+|  - Formal automaton representation             |
++------------------------------------------------+
+         |
+         v
++------------------------------------------------+
+|  STAGE 3: LTLf -> AgentSpeak Code              |
 |  agentspeak_generator.py (LLM-based)           |
 |                                                |
 |  Input: F(on(c,b))                            |
@@ -78,11 +91,18 @@ Natural Language Input ("Stack block C on block B")
 - Support for F (eventually), G (always), U (until), X (next) operators
 - Domain-aware code generation with action preconditions
 
+### Formal DFA Conversion
+- LTLf to DFA conversion using ltlf2dfa library
+- Automatic predicate-to-proposition encoding (e.g., on(a,b) → on_a_b)
+- DOT format output for visualization
+- Formal verification and analysis capabilities
+- Metadata tracking with predicate mappings
+
 ### Comprehensive Logging
 - Timestamped execution logs in JSON and human-readable formats
 - Full LLM prompts and responses recorded for reproducibility
 - Separate log directories for each execution
-- Complete trace of NL → LTLf → AgentSpeak transformation
+- Complete trace of NL → LTLf → DFA → AgentSpeak transformation
 
 ---
 
@@ -106,7 +126,16 @@ Output directory: logs/20251030_123456_llm_agentspeak
   Initial State: [{'ontable': ['b']}, {'ontable': ['c']}, ...]
 
 --------------------------------------------------------------------------------
-[STAGE 2] LLM AgentSpeak Generation
+[STAGE 2] LTLf -> DFA Conversion
+--------------------------------------------------------------------------------
+✓ DFA Generated
+  Original Formula: F(on(c, b))
+  Propositional Formula: F(on_c_b)
+  Predicate Mappings: {'on(c, b)': 'on_c_b'}
+  DFA saved in DOT format
+
+--------------------------------------------------------------------------------
+[STAGE 3] LLM AgentSpeak Generation
 --------------------------------------------------------------------------------
 ✓ AgentSpeak Code Generated
   First few lines:
@@ -118,7 +147,7 @@ Output directory: logs/20251030_123456_llm_agentspeak
   Saved to: logs/20251030_123456_llm_agentspeak/agentspeak_generated.asl
 
 ================================================================================
-STAGES 1-2 COMPLETED SUCCESSFULLY
+STAGES 1-3 COMPLETED SUCCESSFULLY
 ================================================================================
 
 Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
@@ -133,13 +162,16 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 ├── src/
 │   ├── main.py                          # Entry point
 │   ├── config.py                        # Configuration management
+│   ├── domain.pddl                      # Blocksworld PDDL domain (reference)
 │   ├── ltl_bdi_pipeline.py              # Main pipeline orchestration
 │   ├── dual_branch_pipeline.py          # DEPRECATED: Backward compatibility wrapper
 │   ├── pipeline_logger.py               # Logging utilities
 │   ├── stage1_interpretation/
 │   │   └── ltl_parser.py                # Stage 1: NL -> LTLf conversion (LLM)
+│   ├── ltlf_dfa_conversion/
+│   │   └── ltlf_to_dfa.py               # Stage 2: LTLf -> DFA conversion (ltlf2dfa)
 │   ├── stage2_planning/
-│   │   └── agentspeak_generator.py      # Stage 2: LTLf -> AgentSpeak (LLM)
+│   │   └── agentspeak_generator.py      # Stage 3: LTLf -> AgentSpeak (LLM)
 │   └── legacy/
 │       ├── fond/                        # Legacy FOND planning (Branch B)
 │       │   ├── README.md                # Instructions for restoring FOND functionality
@@ -148,11 +180,9 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │       │   ├── domains/blocksworld/     # PDDL domain files
 │       │   └── external/pr2/            # PR2 FOND planner (Docker)
 │       └── stage4_execution/            # Future: Execution & evaluation
-├── domains/
-│   └── blocksworld/                     # (empty - PDDL domain moved to legacy)
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 └── tests/                               # Test suites
-    └── test_complex_cases.py            # Complex FOND benchmark tests
+    └── test_complex_cases.py            # Complex test cases
 ```
 
 ---
@@ -191,7 +221,19 @@ python src/stage2_planning/agentspeak_generator.py
 - **Output**: LTLf specification with formula(s), objects, initial state
 - **LLM Model**: Configured via `OPENAI_MODEL` in `.env` (e.g., `deepseek-chat`, `gpt-4o-mini`)
 
-### Stage 2: LTLf → AgentSpeak Code
+### Stage 2: LTLf → DFA Conversion
+- **Input**: LTLf specification from Stage 1
+- **Process**: Converts LTLf formulas to Deterministic Finite Automata using ltlf2dfa
+  - Automatic predicate-to-proposition encoding (on(a,b) → on_a_b)
+  - Handles LTL temporal operators (F, G, X, U, etc.)
+  - Iterative conversion for nested structures
+- **Output**:
+  - DFA in DOT format (for visualization)
+  - Metadata with predicate mappings
+  - Formal automaton representation for verification
+- **Tool**: ltlf2dfa library (based on MONA)
+
+### Stage 3: LTLf → AgentSpeak Code
 - **Input**: LTLf specification from Stage 1
 - **Process**: LLM generates complete AgentSpeak program with:
   - Initial beliefs (from initial state)
@@ -224,16 +266,20 @@ The blocksworld domain provides a testbed for:
 
 ## Current Status
 
-### Implemented Features (Stages 1-2)
+### Implemented Features (Stages 1-3)
 - ✓ **Stage 1**: Natural language → LTLf specification (LLM-based)
-- ✓ **Stage 2**: LTLf → LLM AgentSpeak code generation
+- ✓ **Stage 2**: LTLf → DFA conversion (ltlf2dfa-based)
+  - Predicate-to-proposition encoding
+  - DOT format output for visualization
+  - Metadata with predicate mappings
+- ✓ **Stage 3**: LTLf → LLM AgentSpeak code generation
 - ✓ Blocksworld domain support
 - ✓ Comprehensive JSON + text execution logs with full LLM prompts
 - ✓ Support for F, G, U, X temporal operators and nested formulas
 - ✓ AgentSpeak code output (.asl files)
 
 ### Not Yet Implemented
-- ⏳ **Stage 3**: Execution & Comparative Evaluation
+- ⏳ **Stage 4**: Execution & Comparative Evaluation
   - Execution of AgentSpeak code in Jason/JAdex
   - Goal satisfaction verification
   - Performance metrics
@@ -241,7 +287,8 @@ The blocksworld domain provides a testbed for:
 
 ### Known Limitations
 1. **Single Domain**: Currently supports blocksworld only
-2. **No Execution**: Pipeline stops after code generation (Stage 2)
+2. **No Execution**: Pipeline stops after code generation (Stage 3)
+3. **DFA Integration**: DFA conversion is implemented but not yet integrated into main pipeline execution flow
 
 ---
 

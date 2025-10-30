@@ -8,6 +8,7 @@ dependencies = [
     "openai>=2.6.0",
     "pddl>=0.4.3",
     "pyperplan>=2.1",
+    "ltlf2dfa>=1.0.2",
 ]
 
 [dependency-groups]
