@@ -121,7 +121,14 @@ class DualBranchPipeline:
 
         try:
             ltl_spec, prompt_dict, response_text = parser.parse(nl_instruction)
-            self.logger.log_stage1(nl_instruction, ltl_spec, "Success")
+            self.logger.log_stage1(
+                nl_instruction,
+                ltl_spec,
+                "Success",
+                model=self.config.openai_model,
+                llm_prompt=prompt_dict,
+                llm_response=response_text
+            )
 
             formulas_string = [f.to_string() for f in ltl_spec.formulas]
             print(f"✓ LTLf Formula: {formulas_string}")
@@ -161,7 +168,14 @@ class DualBranchPipeline:
             )
 
             # Log Stage 2A success (AgentSpeak generation)
-            self.logger.log_stage2(ltl_spec, asl_code, "Success")
+            self.logger.log_stage2(
+                ltl_spec,
+                asl_code,
+                "Success",
+                model=self.config.openai_model,
+                llm_prompt=prompt_dict,
+                llm_response=response_text
+            )
 
             print(f"✓ AgentSpeak Code Generated")
             print("  First few lines:")

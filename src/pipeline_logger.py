@@ -222,17 +222,31 @@ class PipelineLogger:
         self.current_record.stage3_error = str(error)
 
     # Simplified logging helpers for dual-branch pipeline
-    def log_stage1(self, nl_input: str, ltl_spec: Any, status: str, error: str = None):
+    def log_stage1(self, nl_input: str, ltl_spec: Any, status: str, error: str = None,
+                   model: str = None, llm_prompt: Dict[str, str] = None, llm_response: str = None):
         """Simplified Stage 1 logger"""
         if status == "Success" and ltl_spec:
-            self.log_stage1_success(ltl_spec.to_dict() if hasattr(ltl_spec, 'to_dict') else ltl_spec, used_llm=True)
+            self.log_stage1_success(
+                ltl_spec.to_dict() if hasattr(ltl_spec, 'to_dict') else ltl_spec,
+                used_llm=True,
+                model=model,
+                llm_prompt=llm_prompt,
+                llm_response=llm_response
+            )
         elif error:
             self.log_stage1_error(error)
 
-    def log_stage2(self, ltl_spec: Any, pddl_problem: Any, status: str, error: str = None):
+    def log_stage2(self, ltl_spec: Any, pddl_problem: Any, status: str, error: str = None,
+                   model: str = None, llm_prompt: Dict[str, str] = None, llm_response: str = None):
         """Simplified Stage 2 logger"""
         if status == "Success" and pddl_problem:
-            self.log_stage2_success(str(pddl_problem), used_llm=True)
+            self.log_stage2_success(
+                str(pddl_problem),
+                used_llm=True,
+                model=model,
+                llm_prompt=llm_prompt,
+                llm_response=llm_response
+            )
         elif error:
             self.log_stage2_error(error)
 
@@ -328,24 +342,21 @@ class PipelineLogger:
             # LLM Prompt/Response for Stage 1
             if record['stage1_used_llm'] and record['stage1_llm_prompt']:
                 f.write("\n" + "~"*40 + "\n")
-                f.write("LLM PROMPT (Stage 1)\n")
+                f.write("System Prompt\n")
                 f.write("~"*40 + "\n")
                 prompt = record['stage1_llm_prompt']
-                f.write("\n[SYSTEM MESSAGE]\n")
-                f.write(prompt.get('system', 'N/A')[:500])  # First 500 chars
-                if len(prompt.get('system', '')) > 500:
-                    f.write(f"\n... (truncated, total {len(prompt.get('system', ''))} chars)")
-                f.write("\n\n[USER MESSAGE]\n")
-                f.write(prompt.get('user', 'N/A'))
+                f.write(prompt.get('system', 'N/A'))  # Full system prompt
+                f.write("\n\n" + "~"*40 + "\n")
+                f.write("User Prompt\n")
+                f.write("~"*40 + "\n")
+                f.write(prompt.get('user', 'N/A'))  # Full user prompt
                 f.write("\n")
 
             if record['stage1_used_llm'] and record['stage1_llm_response']:
                 f.write("\n" + "~"*40 + "\n")
                 f.write("LLM RESPONSE (Stage 1)\n")
                 f.write("~"*40 + "\n")
-                f.write(record['stage1_llm_response'][:1000])  # First 1000 chars
-                if len(record['stage1_llm_response']) > 1000:
-                    f.write(f"\n... (truncated, total {len(record['stage1_llm_response'])} chars)")
+                f.write(record['stage1_llm_response'])  # Full response
                 f.write("\n")
 
             if record['stage1_status'] == 'success' and record['stage1_ltl_spec']:
@@ -385,26 +396,21 @@ class PipelineLogger:
             # LLM Prompt/Response for Stage 2
             if record['stage2_used_llm'] and record['stage2_llm_prompt']:
                 f.write("\n" + "~"*40 + "\n")
-                f.write("LLM PROMPT (Stage 2)\n")
+                f.write("System Prompt\n")
                 f.write("~"*40 + "\n")
                 prompt = record['stage2_llm_prompt']
-                f.write("\n[SYSTEM MESSAGE]\n")
-                f.write(prompt.get('system', 'N/A')[:500])  # First 500 chars
-                if len(prompt.get('system', '')) > 500:
-                    f.write(f"\n... (truncated, total {len(prompt.get('system', ''))} chars)")
-                f.write("\n\n[USER MESSAGE]\n")
-                f.write(prompt.get('user', 'N/A')[:500])  # First 500 chars
-                if len(prompt.get('user', '')) > 500:
-                    f.write(f"\n... (truncated, total {len(prompt.get('user', ''))} chars)")
+                f.write(prompt.get('system', 'N/A'))  # Full system prompt
+                f.write("\n\n" + "~"*40 + "\n")
+                f.write("User Prompt\n")
+                f.write("~"*40 + "\n")
+                f.write(prompt.get('user', 'N/A'))  # Full user prompt
                 f.write("\n")
 
             if record['stage2_used_llm'] and record['stage2_llm_response']:
                 f.write("\n" + "~"*40 + "\n")
                 f.write("LLM RESPONSE (Stage 2)\n")
                 f.write("~"*40 + "\n")
-                f.write(record['stage2_llm_response'][:1000])  # First 1000 chars
-                if len(record['stage2_llm_response']) > 1000:
-                    f.write(f"\n... (truncated, total {len(record['stage2_llm_response'])} chars)")
+                f.write(record['stage2_llm_response'])  # Full response
                 f.write("\n")
 
             if record['stage2_status'] == 'success' and record['stage2_pddl']:
@@ -433,24 +439,21 @@ class PipelineLogger:
             # LLM Prompt/Response for Stage 3
             if record['stage3_used_llm'] and record['stage3_llm_prompt']:
                 f.write("\n" + "~"*40 + "\n")
-                f.write("LLM PROMPT (Stage 3)\n")
+                f.write("System Prompt\n")
                 f.write("~"*40 + "\n")
                 prompt = record['stage3_llm_prompt']
-                f.write("\n[SYSTEM MESSAGE]\n")
-                f.write(prompt.get('system', 'N/A')[:500])  # First 500 chars
-                if len(prompt.get('system', '')) > 500:
-                    f.write(f"\n... (truncated, total {len(prompt.get('system', ''))} chars)")
-                f.write("\n\n[USER MESSAGE]\n")
-                f.write(prompt.get('user', 'N/A'))
+                f.write(prompt.get('system', 'N/A'))  # Full system prompt
+                f.write("\n\n" + "~"*40 + "\n")
+                f.write("User Prompt\n")
+                f.write("~"*40 + "\n")
+                f.write(prompt.get('user', 'N/A'))  # Full user prompt
                 f.write("\n")
 
             if record['stage3_used_llm'] and record['stage3_llm_response']:
                 f.write("\n" + "~"*40 + "\n")
                 f.write("LLM RESPONSE (Stage 3)\n")
                 f.write("~"*40 + "\n")
-                f.write(record['stage3_llm_response'][:1000])  # First 1000 chars
-                if len(record['stage3_llm_response']) > 1000:
-                    f.write(f"\n... (truncated, total {len(record['stage3_llm_response'])} chars)")
+                f.write(record['stage3_llm_response'])  # Full response
                 f.write("\n")
 
             if record['stage3_status'] == 'success' and record['stage3_plan']:
