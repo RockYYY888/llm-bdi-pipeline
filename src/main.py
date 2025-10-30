@@ -1,15 +1,12 @@
 """
-Main Entry Point - Dual-Branch Comparison
+Main Entry Point - LTL-BDI Pipeline
 
-This is the main entry point for the LTL-BDI pipeline.
+This is the main entry point for the LTL-BDI pipeline (LLM AgentSpeak Generation).
 
 Usage:
-    python src/main.py "Stack block C on block B" [--mode MODE]
+    python src/main.py "Stack block C on block B"
 
-Modes:
-    both            - Run both branches and compare (default)
-    llm_agentspeak  - Run only LLM AgentSpeak baseline branch
-    fond            - Run only FOND planning branch
+Note: FOND planning mode has been moved to src/legacy/fond/
 """
 
 import sys
@@ -20,28 +17,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import get_config
-from dual_branch_pipeline import DualBranchPipeline
+from ltl_bdi_pipeline import LTL_BDI_Pipeline
 
 
 def main():
     """Main entry point"""
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='LTL-BDI Pipeline - Dual-Branch Comparison (LLM AgentSpeak vs FOND)',
+        description='LTL-BDI Pipeline - LLM AgentSpeak Generation from Natural Language',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python src/main.py "Stack block C on block B" --mode llm_agentspeak
-  python src/main.py "Stack block C on block B" --mode fond
+  python src/main.py "Stack block C on block B"
+  python src/main.py "Given blocks a, b, c on table, stack a on b on c"
+
+Note:
+  FOND planning mode has been moved to src/legacy/fond/
+  See src/legacy/fond/README.md for restoration instructions
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')
-    parser.add_argument('--mode', choices=['llm_agentspeak', 'fond'], default='fond',
-                        help='Execution mode: llm_agentspeak or fond (default)')
 
     args = parser.parse_args()
     nl_instruction = args.instruction
-    mode = args.mode
 
     # Validate configuration
     config = get_config()
@@ -55,13 +53,14 @@ Examples:
         print("   cp .env.example .env")
         print("\n2. Edit .env and add your API key:")
         print("   OPENAI_API_KEY=sk-proj-your-actual-key-here")
+        print("   OPENAI_MODEL=deepseek-chat  # or gpt-4o-mini")
         print("\n3. Run the pipeline again")
         print("\n" + "="*80)
         sys.exit(1)
 
     # Execute pipeline
-    pipeline = DualBranchPipeline()
-    results = pipeline.execute(nl_instruction, mode=mode)
+    pipeline = LTL_BDI_Pipeline()
+    results = pipeline.execute(nl_instruction)
 
     # Exit with appropriate code
     sys.exit(0 if results.get("success", False) else 1)
