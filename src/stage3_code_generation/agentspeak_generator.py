@@ -50,6 +50,8 @@ class AgentSpeakGenerator:
         Returns:
             Tuple of (asl_code, prompt_dict, response_text)
         """
+        from .prompts import AGENTSPEAK_SYSTEM_PROMPT
+
         if not self.client:
             raise RuntimeError(
                 "No API key configured. Please set OPENAI_API_KEY in .env file.\n"
@@ -102,6 +104,7 @@ class AgentSpeakGenerator:
                       predicates: list,
                       dfa_result: Optional[Any] = None) -> str:
         """Build comprehensive prompt for AgentSpeak generation with DFA guidance"""
+        from .prompts import get_agentspeak_user_prompt
 
         objects = ltl_spec.get('objects', [])
         formulas = ltl_spec.get('formulas_string', [])
@@ -120,68 +123,14 @@ class AgentSpeakGenerator:
         if dfa_result and hasattr(dfa_result, 'all_dfas'):
             dfa_info = self._format_dfa_information(dfa_result)
 
-        prompt = f"""Generate a complete AgentSpeak plan library for a BDI agent guided by DFA decomposition.
-
-**CRITICAL REQUIREMENT**: The generated plans MUST be GENERAL and work from ANY initial configuration.
-Do NOT assume any specific initial state. Plans must handle all possible scenarios through context-sensitive conditions.
-
-**Domain**: {domain_name}
-
-**Objects**: {', '.join(objects) if objects else 'none specified'}
-
-**Available Actions**: {actions_str}
-
-**Available Predicates**: {predicates_str}
-
-**LTLf Temporal Goals**:
-{formulas_str}
-
-{dfa_info}
-
-**Requirements**:
-1. Use the DFA transitions as guidance for plan generation - transitions show which conditions/actions lead to goal achievement
-2. Generate plans for each subgoal identified in the DFA decomposition
-3. Follow the DFA structure: each transition label indicates when to trigger specific plans
-4. Include multiple context-sensitive plans based on different DFA transitions
-5. Add failure handling plans (-!goal) for robustness
-6. Use clear, meaningful plan names matching the DFA structure
-7. Add brief comments explaining the DFA-guided logic
-8. Include belief updates after actions
-9. Use declarative goals (!![state]) where appropriate for state-based goals
-
-**Example Plan Structure** (for reference):
-```agentspeak
-// Main goal from LTLf F formula
-+!achieve_main_goal : true <-
-    !subgoal1;
-    !subgoal2;
-    !verify_success.
-
-// Subgoal with context adaptation
-+!subgoal1 : favorable_condition <-
-    action1;
-    +new_belief;
-    -old_belief.
-
-+!subgoal1 : difficult_condition <-
-    alternative_action;
-    !recovery.
-
-// Failure handling
--!subgoal1 : true <-
-    .print("Subgoal failed, trying alternative");
-    !alternative_approach.
-
-// G constraint monitoring (if any G formulas exist)
-+belief_change : violates_constraint <-
-    .print("Constraint violated!");
-    !recovery_action.
-```
-
-Now generate the COMPLETE AgentSpeak plan library for the {domain_name} domain.
-Output ONLY the AgentSpeak code, no explanations before or after.
-"""
-        return prompt
+        return get_agentspeak_user_prompt(
+            domain_name,
+            objects,
+            actions_str,
+            predicates_str,
+            formulas_str,
+            dfa_info
+        )
 
     def _format_dfa_information(self, dfa_result: Any) -> str:
         """Format DFA decomposition information for the prompt (using cleaned DFA)"""
@@ -255,62 +204,6 @@ Output ONLY the AgentSpeak code, no explanations before or after.
             code = '\n'.join(lines[1:]).strip()
 
         return code
-
-
-# System prompt for AgentSpeak expert
-AGENTSPEAK_SYSTEM_PROMPT = """You are an expert AgentSpeak/Jason programmer with deep knowledge of BDI agent architectures.
-
-**AgentSpeak Syntax Essentials**:
-
-1. **Plans**: +triggering_event : context <- body.
-   - triggering_event: +!goal (goal added), -!goal (goal failed), +belief (belief added), -belief (belief removed)
-   - context: Boolean combination of beliefs (use & for AND, | for OR, not for negation)
-   - body: Sequence of actions (use ; to separate), subgoals (!goal), belief updates (+belief, -belief)
-
-2. **Goals**:
-   - Achievement: !goal_name (execute plan to achieve)
-   - Test: ?belief_name (query belief base)
-   - Declarative: !![state] (achieve state, automatically satisfied when state holds)
-
-3. **Actions**:
-   - Lowercase: physical/primitive actions (pickup, move, etc.)
-   - !goal: post achievement subgoal
-   - ?belief: test/query belief
-   - +belief: add belief
-   - -belief: remove belief
-   - .print(...): internal action for printing
-
-4. **Context Operators**:
-   - & (AND): multiple conditions must hold
-   - | (OR): at least one condition must hold
-   - not X or \\+ X: negation
-   - Variables: Uppercase (X, Y, Block1)
-   - Constants: lowercase (a, b, table)
-
-5. **LTLf Integration**:
-   - F(φ): "eventually φ" → generate plan to achieve φ
-   - G(φ): "always φ" → monitor and maintain φ throughout execution
-   - X(φ): "next φ" → ensure φ in next state
-   - φ U ψ: "φ until ψ" → maintain φ until ψ
-
-**Best Practices**:
-- Always provide multiple plans for same goal (different contexts)
-- Add failure handlers (-!goal) for critical goals
-- Update beliefs after actions to maintain consistency
-- Use meaningful variable names
-- Add brief comments for complex logic
-- For state-based goals from F formulas, consider using declarative goals !![state]
-- For G formulas, add monitoring plans that check constraints
-
-**Code Quality**:
-- Generate syntactically correct AgentSpeak
-- Use proper indentation (4 spaces)
-- Follow Jason/AgentSpeak conventions
-- Ensure plans are complete and executable
-
-Generate ONLY AgentSpeak code. Do not include explanations, markdown, or prose.
-Start directly with plan definitions.
-"""
 
 
 if __name__ == "__main__":
