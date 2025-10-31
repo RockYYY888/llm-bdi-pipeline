@@ -259,7 +259,7 @@ class PipelineLogger:
             f.write("-"*80 + "\n")
             f.write("INPUT\n")
             f.write("-"*80 + "\n")
-            f.write(f"Natural Language: \"{record['natural_language']}\"\n")
+            f.write(f"\"{record['natural_language']}\"\n")
             f.write("\n")
 
             # Stage 1

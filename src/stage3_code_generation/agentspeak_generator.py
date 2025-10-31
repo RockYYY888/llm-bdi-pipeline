@@ -185,10 +185,7 @@ Output ONLY the AgentSpeak code, no explanations before or after.
 
     def _format_dfa_information(self, dfa_result: Any) -> str:
         """Format DFA decomposition information for the prompt (using cleaned DFA)"""
-        import sys
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from dfa_dot_cleaner import format_dfa_for_prompt
+        from stage2_dfa_generation.dfa_dot_cleaner import format_dfa_for_prompt
 
         if not dfa_result or not hasattr(dfa_result, 'all_dfas'):
             return ""
