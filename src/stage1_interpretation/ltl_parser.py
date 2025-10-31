@@ -120,12 +120,34 @@ class NLToLTLParser:
     structured LTL specifications for temporal goals.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None):
-        """Initialize parser with optional API key, model, and base URL"""
+    def __init__(self,
+                 api_key: Optional[str] = None,
+                 model: Optional[str] = None,
+                 base_url: Optional[str] = None,
+                 domain_file: Optional[str] = None):
+        """
+        Initialize parser with optional API key, model, base URL, and domain file
+
+        Args:
+            api_key: OpenAI API key
+            model: Model name
+            base_url: Custom API base URL
+            domain_file: Path to PDDL domain file (for dynamic prompt construction)
+        """
         self.api_key = api_key
         self.model = model or "gpt-4o-mini"
         self.base_url = base_url
+        self.domain_file = domain_file
         self.client = None
+
+        # Parse domain if provided
+        self.domain = None
+        if domain_file:
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from pddl_parser import PDDLParser
+            self.domain = PDDLParser.parse_domain(domain_file)
 
         if api_key:
             from openai import OpenAI
@@ -164,18 +186,29 @@ class NLToLTLParser:
         Returns:
             Tuple of (LTLSpecification, prompt_dict, response_text)
         """
-        system_prompt = """You are an expert in Linear Temporal Logic (LTL) and BDI agent systems.
-
-Domain: Blocksworld
-
-Objects: blocks (e.g., a, b, c, d)
-
-Predicates:
-- on(X, Y): block X is on block Y
+        # Build system prompt dynamically from domain
+        if self.domain:
+            domain_name = self.domain.name
+            types_str = ', '.join(self.domain.types) if self.domain.types else 'objects'
+            predicates_str = '\n'.join([f"- {pred.to_signature()}" for pred in self.domain.predicates])
+        else:
+            # Fallback to hardcoded blocksworld
+            domain_name = "Blocksworld"
+            types_str = "blocks (e.g., a, b, c, d)"
+            predicates_str = """- on(X, Y): block X is on block Y
 - ontable(X): block X is on the table
 - clear(X): block X has nothing on top
 - holding(X): robot arm is holding block X
-- handempty: robot arm is empty
+- handempty: robot arm is empty"""
+
+        system_prompt = f"""You are an expert in Linear Temporal Logic (LTL) and BDI agent systems.
+
+Domain: {domain_name}
+
+Objects: {types_str}
+
+Predicates:
+{predicates_str}
 
 LTL Temporal Operators:
 - F (Finally/Eventually): ◇ - the property will be true at some point in the future
@@ -222,44 +255,44 @@ Only extract:
 2. The LTL goal formulas (what should be achieved)
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
-{
+{{
   "objects": ["a", "b"],
   "ltl_formulas": [
-    {
+    {{
       "type": "temporal",
       "operator": "F",
-      "formula": {"on": ["a", "b"]}
-    },
-    {
+      "formula": {{"on": ["a", "b"]}}
+    }},
+    {{
       "type": "temporal",
       "operator": "G",
-      "formula": {"clear": ["c"]}
-    }
+      "formula": {{"clear": ["c"]}}
+    }}
   ]
-}
+}}
 
 For U (Until) operator, use this format:
-{
+{{
   "type": "until",
   "operator": "U",
-  "left_formula": {"holding": ["a"]},
-  "right_formula": {"clear": ["b"]}
-}
+  "left_formula": {{"holding": ["a"]}},
+  "right_formula": {{"clear": ["b"]}}
+}}
 
 For NESTED operators (e.g., F(G(φ)), G(F(φ))), use this format:
-{
+{{
   "type": "nested",
   "outer_operator": "F",
   "inner_operator": "G",
-  "formula": {"on": ["a", "b"]}
-}
+  "formula": {{"on": ["a", "b"]}}
+}}
 
 Examples of nested operators:
 - F(G(on(a, b))): Eventually A is always on B
-  → {"type": "nested", "outer_operator": "F", "inner_operator": "G", "formula": {"on": ["a", "b"]}}
+  → {{"type": "nested", "outer_operator": "F", "inner_operator": "G", "formula": {{"on": ["a", "b"]}}}}
 
 - G(F(clear(c))): Always eventually C is clear
-  → {"type": "nested", "outer_operator": "G", "inner_operator": "F", "formula": {"clear": ["c"]}}"""
+  → {{"type": "nested", "outer_operator": "G", "inner_operator": "F", "formula": {{"clear": ["c"]}}}}"""
 
         user_prompt = f"Natural language instruction: {nl_instruction}"
 

@@ -184,7 +184,11 @@ Output ONLY the AgentSpeak code, no explanations before or after.
         return prompt
 
     def _format_dfa_information(self, dfa_result: Any) -> str:
-        """Format DFA decomposition information for the prompt"""
+        """Format DFA decomposition information for the prompt (using cleaned DFA)"""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from dfa_dot_cleaner import format_dfa_for_prompt
 
         if not dfa_result or not hasattr(dfa_result, 'all_dfas'):
             return ""
@@ -204,20 +208,19 @@ Output ONLY the AgentSpeak code, no explanations before or after.
 
             info += f"   Depth: {dfa_node.depth}\n"
 
-            # Extract key transitions from DFA
-            transitions = self._extract_key_transitions(dfa_node.dfa_dot)
-            if transitions:
-                info += f"   Key Transitions:\n"
-                for trans in transitions[:5]:  # Limit to 5 most important
-                    info += f"      - {trans}\n"
+            # Use cleaned DFA format (no Graphviz formatting)
+            cleaned_dfa = format_dfa_for_prompt(dfa_node.dfa_dot)
+            # Indent each line
+            indented_dfa = '\n'.join(f"   {line}" for line in cleaned_dfa.split('\n'))
+            info += f"\n{indented_dfa}\n"
 
             if dfa_node.subgoals:
-                info += f"   Subgoals to achieve: {', '.join(dfa_node.subgoals)}\n"
+                info += f"\n   Subgoals to achieve: {', '.join(dfa_node.subgoals)}\n"
 
             info += "\n"
 
-        info += "**IMPORTANT**: Use the transition labels above as conditions in your AgentSpeak plan contexts.\n"
-        info += "For example, if a transition shows `on_a_b & clear_c`, create a plan:\n"
+        info += "**IMPORTANT**: Use the transition conditions as plan contexts in AgentSpeak.\n"
+        info += "For example, if a transition shows 'when [on_a_b & clear_c]', create a plan:\n"
         info += "  +!goal : on(a,b) & clear(c) <- ...\n\n"
 
         return info

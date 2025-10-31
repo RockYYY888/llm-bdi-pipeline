@@ -31,13 +31,29 @@ class LTL_BDI_Pipeline:
     The pipeline now focuses exclusively on DFA-AgentSpeak generation.
     """
 
-    def __init__(self):
+    def __init__(self, domain_file: str = None):
+        """
+        Initialize pipeline
+
+        Args:
+            domain_file: Path to PDDL domain file. If None, uses default blocksworld domain.
+        """
         self.config = get_config()
         self.logger = PipelineLogger()
 
-        # Domain configuration (for AgentSpeak generation)
-        self.domain_actions = ['pickup', 'putdown', 'stack', 'unstack']
-        self.domain_predicates = ['on(X, Y)', 'clear(X)', 'holding(X)', 'handempty']
+        # Domain file path
+        if domain_file is None:
+            # Default to blocksworld domain
+            from pathlib import Path
+            domain_file = str(Path(__file__).parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl")
+
+        self.domain_file = domain_file
+
+        # Parse domain to extract actions and predicates
+        from pddl_parser import PDDLParser
+        self.domain = PDDLParser.parse_domain(domain_file)
+        self.domain_actions = self.domain.get_action_names()
+        self.domain_predicates = self.domain.get_predicate_signatures()
 
         # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
@@ -110,7 +126,8 @@ class LTL_BDI_Pipeline:
 
         parser = NLToLTLParser(
             api_key=self.config.openai_api_key,
-            model=self.config.openai_model
+            model=self.config.openai_model,
+            domain_file=self.domain_file  # Pass domain file for dynamic prompt
         )
 
         try:
