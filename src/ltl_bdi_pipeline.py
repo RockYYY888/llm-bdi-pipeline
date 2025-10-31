@@ -50,7 +50,7 @@ class LTL_BDI_Pipeline:
         self.domain_file = domain_file
 
         # Parse domain to extract actions and predicates
-        from pddl_parser import PDDLParser
+        from stage1_interpretation.pddl_parser import PDDLParser
         self.domain = PDDLParser.parse_domain(domain_file)
         self.domain_actions = self.domain.get_action_names()
         self.domain_predicates = self.domain.get_predicate_signatures()

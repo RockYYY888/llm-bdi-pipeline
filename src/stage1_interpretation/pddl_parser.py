@@ -186,11 +186,10 @@ class PDDLParser:
 
 def test_pddl_parser():
     """Test the PDDL parser"""
-    import sys
     from pathlib import Path
 
-    # Find blocksworld domain
-    domain_file = Path(__file__).parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    # Find blocksworld domain (go up to project root, then to legacy folder)
+    domain_file = Path(__file__).parent.parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
 
     if not domain_file.exists():
         print(f"Domain file not found: {domain_file}")

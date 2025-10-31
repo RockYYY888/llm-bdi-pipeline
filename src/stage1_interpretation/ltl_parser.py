@@ -143,10 +143,7 @@ class NLToLTLParser:
         # Parse domain if provided
         self.domain = None
         if domain_file:
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, str(Path(__file__).parent.parent))
-            from pddl_parser import PDDLParser
+            from .pddl_parser import PDDLParser
             self.domain = PDDLParser.parse_domain(domain_file)
 
         if api_key:
