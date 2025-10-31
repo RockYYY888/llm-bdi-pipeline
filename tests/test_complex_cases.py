@@ -34,19 +34,19 @@ test_cases = [
     # bw_5_1: Complex rearrangement from two towers to one tower
     TestCase(
         "Complex-1: Two towers to single tower (bw_5_1)",
-        "Given blocks b1, b2, b3, b4, b5 where initially b2 is on b1, b1 is on b3 (b3 is on table), and b5 is on b4 (b4 is on table). Rearrange them so that b1 is on b2, b2 is on b5 (b5 is on table), and b3, b4 are separately on table."
+        "Using blocks b1, b2, b3, b4, b5, arrange them so that b1 is on b2, b2 is on b5 (b5 is on table), and b3, b4 are separately on table."
     ),
 
     # bw_5_3: Complex rearrangement with tower reconstruction
     TestCase(
         "Complex-2: Tower reconstruction (bw_5_3)",
-        "Given blocks b1, b2, b3, b4, b5 where initially b3 is on b2, b2 is on b1 (b1 is on table), and b4 is on b5 (b5 is on table). Rearrange them so that b5 is on b3, b3 is on b1 (b1 is on table), and b2, b4 are separately on table."
+        "Using blocks b1, b2, b3, b4, b5, arrange them so that b5 is on b3, b3 is on b1 (b1 is on table), and b2, b4 are separately on table."
     ),
 
     # bw_5_5: Complex rearrangement to 4-block tower
     TestCase(
         "Complex-3: Four-block tower assembly (bw_5_5)",
-        "Given blocks b1, b2, b3, b4, b5 where initially b3 is on b5, b5 is on b1 (b1 is on table), and b4 is on b2 (b2 is on table). Rearrange them to form a tower with b2 on b4, b4 on b1, b1 on b3 (b3 is on table), and b5 separately on table."
+        "Using blocks b1, b2, b3, b4, b5, build a tower with b2 on b4, b4 on b1, b1 on b3 (b3 is on table), and b5 separately on table."
     ),
 ]
 
