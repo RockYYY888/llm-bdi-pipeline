@@ -84,7 +84,7 @@ class LTL_BDI_Pipeline:
         print("="*80)
         print(f"LTL-BDI PIPELINE - {mode.upper()} MODE")
         print("="*80)
-        print(f"\nNatural Language Instruction: \"{nl_instruction}\"")
+        print(f"\n"{nl_instruction}"")
         print(f"Mode: {mode}")
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)

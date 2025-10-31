@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Complex Test Cases for LTL-BDI Pipeline
+Integration Tests for LTL-BDI Pipeline (End-to-End)
 
-Tests based on FOND benchmark problems (bw_5_1, bw_5_3, bw_5_5):
+Tests the complete pipeline flow: NL -> LTLf -> DFA -> AgentSpeak
+Based on FOND benchmark problems (bw_5_1, bw_5_3, bw_5_5):
 - Complex rearrangement tasks with 5 blocks
-- Non-trivial initial states (pre-built towers)
 - Multiple goals requiring sophisticated planning
+- Validates all pipeline stages working together
 
 Mode: dfa_agentspeak (NL -> LTLf -> DFA -> AgentSpeak)
 Note: FOND planning (Branch B) has been moved to legacy/fond/
