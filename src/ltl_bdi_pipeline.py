@@ -14,7 +14,8 @@ from typing import Dict, Any
 
 from config import get_config
 from stage1_interpretation.ltl_parser import NLToLTLParser
-from stage2_planning.agentspeak_generator import AgentSpeakGenerator
+from stage2_dfa_generation.recursive_dfa_builder import RecursiveDFABuilder
+from stage3_code_generation.agentspeak_generator import AgentSpeakGenerator
 from pipeline_logger import PipelineLogger
 
 
@@ -77,12 +78,13 @@ class LTL_BDI_Pipeline:
         if not ltl_spec:
             return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
 
-        # Stage 2: LTLf -> DFA (optional visualization/verification)
-        # Note: DFA conversion is available but not yet integrated into execution flow
-        # Can be called manually via: from ltlf_dfa_conversion.ltlf_to_dfa import LTLfToDFA
+        # Stage 2: LTLf -> Recursive DFA Generation
+        dfa_result = self._stage2_recursive_dfa_generation(ltl_spec)
+        if not dfa_result:
+            return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
 
-        # Stage 3: LTLf -> AgentSpeak
-        asl_code = self._stage3_llm_agentspeak_generation(ltl_spec)
+        # Stage 3: DFAs -> AgentSpeak Code
+        asl_code = self._stage3_llm_agentspeak_generation(ltl_spec, dfa_result)
         if not asl_code:
             return {"success": False, "stage": "Stage 3", "error": "AgentSpeak generation failed"}
 
@@ -125,7 +127,7 @@ class LTL_BDI_Pipeline:
             formulas_string = [f.to_string() for f in ltl_spec.formulas]
             print(f"✓ LTLf Formula: {formulas_string}")
             print(f"  Objects: {ltl_spec.objects}")
-            print(f"  Initial State: {ltl_spec.initial_state}")
+            print(f"  (No initial state - plans work from any configuration)")
 
             return ltl_spec
 
@@ -134,9 +136,47 @@ class LTL_BDI_Pipeline:
             print(f"✗ Stage 1 Failed: {e}")
             return None
 
-    def _stage3_llm_agentspeak_generation(self, ltl_spec):
-        """Stage 3: LTLf -> LLM AgentSpeak Generation"""
-        print("\n[STAGE 3] LLM AgentSpeak Generation")
+    def _stage2_recursive_dfa_generation(self, ltl_spec):
+        """Stage 2: LTLf -> Recursive DFA Generation"""
+        print("\n[STAGE 2] Recursive DFA Generation")
+        print("-"*80)
+
+        builder = RecursiveDFABuilder(domain_actions=self.domain_actions)
+
+        try:
+            dfa_result = builder.build(ltl_spec)
+
+            # Log Stage 2 success
+            self.logger.log_stage2_dfas(
+                ltl_spec,
+                dfa_result,
+                "Success"
+            )
+
+            print(f"✓ DFA Decomposition Complete")
+            print(f"  Root formula: {dfa_result.root_formula}")
+            print(f"  Total DFAs: {len(dfa_result.all_dfas)}")
+            print(f"  Physical actions: {len(dfa_result.physical_actions)}")
+            print(f"  Max depth: {dfa_result.max_depth}")
+
+            # Save DFA result to output
+            output_file = self.output_dir / "dfa_decomposition.json"
+            import json
+            output_file.write_text(json.dumps(dfa_result.to_dict(), indent=2))
+            print(f"  Saved to: {output_file}")
+
+            return dfa_result
+
+        except Exception as e:
+            self.logger.log_stage2_dfas(ltl_spec, None, "Failed", str(e))
+            print(f"✗ Stage 2 Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _stage3_llm_agentspeak_generation(self, ltl_spec, dfa_result):
+        """Stage 3: DFAs -> LLM AgentSpeak Generation"""
+        print("\n[STAGE 3] LLM AgentSpeak Generation from DFAs")
         print("-"*80)
 
         generator = AgentSpeakGenerator(
@@ -145,24 +185,26 @@ class LTL_BDI_Pipeline:
         )
 
         try:
-            # Convert ltl_spec to dict format expected by AgentSpeakGenerator
+            # Convert ltl_spec to dict format
+            # Note: No initial_state - plans must work from ANY configuration
             ltl_dict = {
                 "objects": ltl_spec.objects,
-                "initial_state": ltl_spec.initial_state,
                 "formulas_string": [f.to_string() for f in ltl_spec.formulas]
             }
 
+            # Pass DFA result to generator
             asl_code, prompt_dict, response_text = generator.generate(
                 ltl_dict,
                 'blocksworld',
                 self.domain_actions,
-                self.domain_predicates
+                self.domain_predicates,
+                dfa_result=dfa_result  # NEW: Pass all DFAs with transitions
             )
 
-            # Log Stage 3 success (AgentSpeak generation)
-            # Note: Still using log_stage2 for backward compatibility with logger
-            self.logger.log_stage2(
+            # Log Stage 3 success
+            self.logger.log_stage3(
                 ltl_spec,
+                dfa_result,
                 asl_code,
                 "Success",
                 model=self.config.openai_model,
@@ -184,6 +226,8 @@ class LTL_BDI_Pipeline:
             return asl_code
 
         except Exception as e:
-            self.logger.log_stage2(ltl_spec, None, "Failed", str(e))
+            self.logger.log_stage3(ltl_spec, dfa_result, None, "Failed", str(e))
             print(f"✗ Stage 3 Failed: {e}")
+            import traceback
+            traceback.print_exc()
             return None

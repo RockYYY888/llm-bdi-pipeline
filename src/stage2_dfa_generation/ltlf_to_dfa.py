@@ -14,7 +14,19 @@ predicates with arguments (e.g., on(a, b)). We handle this by:
 3. Converting formulas to propositional form
 4. Generating DFA using ltlf2dfa
 5. Maintaining mapping for downstream use
+
+NOTE: Requires MONA (MONadic second-order logic Automata) to be installed.
+      The setup_mona_path module automatically adds MONA to PATH.
 """
+
+# Setup MONA path before importing ltlf2dfa
+import sys
+from pathlib import Path
+# Add parent src directory to path for setup_mona_path import
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from setup_mona_path import setup_mona
+setup_mona()
 
 from typing import Dict, List, Any, Tuple
 import re
@@ -244,7 +256,11 @@ def test_converter():
             print(f"  Original: {metadata['original_formula']}")
             print(f"  Propositional: {metadata['propositional_formula']}")
             print(f"  Mappings: {metadata['predicate_to_prop_mapping']}")
-            print(f"  DFA preview: {dfa_dot[:200]}...")
+            print(f"\n  COMPLETE DFA (DOT format):")
+            print("  " + "~" * 76)
+            for line in dfa_dot.split('\n'):
+                print(f"  {line}")
+            print("  " + "~" * 76)
             print()
 
         except Exception as e:

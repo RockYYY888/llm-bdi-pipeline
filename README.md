@@ -9,8 +9,8 @@ Research pipeline for generating BDI agent code from natural language using LLMs
 This pipeline converts natural language instructions into executable AgentSpeak code through a three-stage process:
 
 1. **Stage 1**: Natural Language → LTLf (Linear Temporal Logic on Finite Traces) Specification
-2. **Stage 2**: LTLf → DFA (Deterministic Finite Automaton) Conversion using ltlf2dfa
-3. **Stage 3**: LTLf → AgentSpeak Code Generation (via LLM)
+2. **Stage 2**: LTLf → Recursive DFA Generation (DFS-based decomposition until physical actions)
+3. **Stage 3**: DFAs → AgentSpeak Code Generation (LLM-guided by DFA transitions)
 
 **Note**: This project previously supported a dual-branch comparison with FOND planning (Branch B). That functionality has been moved to `src/legacy/fond/` to focus development on LLM-based AgentSpeak generation.
 
@@ -19,6 +19,34 @@ This pipeline converts natural language instructions into executable AgentSpeak 
 ## Quick Start
 
 ### Prerequisites
+
+#### 1. Install MONA (Required for ltlf2dfa)
+
+The `ltlf2dfa` library requires MONA (MONadic second-order logic Automata) to generate complete DFAs with transition labels. MONA is already included in this repository and needs to be compiled:
+
+```bash
+# Navigate to MONA directory
+cd src/external/mona-1.4
+
+# Configure MONA (with static libraries for compatibility)
+./configure --prefix=$(pwd)/mona-install --disable-shared --enable-static
+
+# Compile and install
+make && make install-strip
+
+# Verify installation
+./mona-install/bin/mona --version
+# Should output: MONA v1.4-18 for WS1S/WS2S
+```
+
+**Important**: The MONA binary at `src/external/mona-1.4/mona-install/bin/mona` must be accessible for ltlf2dfa to generate complete DFAs with transition labels. The project automatically adds MONA to PATH when you import from `src/` modules.
+
+**Troubleshooting MONA**:
+- If MONA not found: Check `./mona-install/bin/mona` exists after compilation
+- If DFAs have no transitions: MONA wasn't in PATH when ltlf2dfa ran
+- Verify: `python src/setup_mona_path.py` should show "✓ MONA is properly configured"
+
+#### 2. Install Python Dependencies
 
 ```bash
 # Install Python dependencies using uv (recommended)
@@ -62,21 +90,33 @@ Natural Language Input ("Stack block C on block B")
          |
          v
 +------------------------------------------------+
-|  STAGE 2: LTLf -> DFA                          |
-|  ltlf_to_dfa.py (ltlf2dfa-based)               |
-|  Output: DFA in DOT format + metadata          |
-|  - Predicate encoding: on(c,b) → on_c_b        |
-|  - Formal automaton representation             |
+|  STAGE 2: LTLf -> Recursive DFA Generation     |
+|  recursive_dfa_builder.py (DFS-based)          |
+|                                                |
+|  Process:                                      |
+|  1. Generate DFA for root goal F(on(c,b))      |
+|  2. Analyze transitions for subgoals           |
+|  3. Recursively generate DFAs (DFS) until:     |
+|     - Physical actions reached (terminal)      |
+|     - Existing DFA found (reuse)               |
+|                                                |
+|  Output: RecursiveDFAResult with:              |
+|  - All DFAs (root + subgoals)                  |
+|  - DFA transitions (key for plan generation)   |
+|  - Physical actions identified                 |
+|  - Decomposition tree                          |
 +------------------------------------------------+
          |
          v
 +------------------------------------------------+
-|  STAGE 3: LTLf -> AgentSpeak Code              |
+|  STAGE 3: DFAs -> AgentSpeak Code              |
 |  agentspeak_generator.py (LLM-based)           |
 |                                                |
-|  Input: F(on(c,b))                            |
-|  Output: Complete AgentSpeak (.asl) program   |
-|          with plans and beliefs                |
+|  Input: All DFAs with transition information   |
+|  Output: Complete AgentSpeak (.asl) program    |
+|          - Plans guided by DFA transitions     |
+|          - Context-sensitive plan alternatives |
+|          - Belief updates and actions          |
 +------------------------------------------------+
 ```
 
@@ -126,16 +166,17 @@ Output directory: logs/20251030_123456_llm_agentspeak
   Initial State: [{'ontable': ['b']}, {'ontable': ['c']}, ...]
 
 --------------------------------------------------------------------------------
-[STAGE 2] LTLf -> DFA Conversion
+[STAGE 2] Recursive DFA Generation
 --------------------------------------------------------------------------------
-✓ DFA Generated
-  Original Formula: F(on(c, b))
-  Propositional Formula: F(on_c_b)
-  Predicate Mappings: {'on(c, b)': 'on_c_b'}
-  DFA saved in DOT format
+✓ DFA Decomposition Complete
+  Root formula: F(on(c, b))
+  Total DFAs: 3
+  Physical actions: 2
+  Max depth: 2
+  Saved to: logs/20251030_123456_dfa_agentspeak/dfa_decomposition.json
 
 --------------------------------------------------------------------------------
-[STAGE 3] LLM AgentSpeak Generation
+[STAGE 3] LLM AgentSpeak Generation from DFAs
 --------------------------------------------------------------------------------
 ✓ AgentSpeak Code Generated
   First few lines:
@@ -163,15 +204,19 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── main.py                          # Entry point
 │   ├── config.py                        # Configuration management
 │   ├── domain.pddl                      # Blocksworld PDDL domain (reference)
-│   ├── ltl_bdi_pipeline.py              # Main pipeline orchestration
+│   ├── ltl_bdi_pipeline.py              # Main pipeline orchestration (3 stages)
 │   ├── dual_branch_pipeline.py          # DEPRECATED: Backward compatibility wrapper
-│   ├── pipeline_logger.py               # Logging utilities
+│   ├── pipeline_logger.py               # Logging utilities (3-stage logging)
+│   ├── setup_mona_path.py               # Automatic MONA PATH configuration
 │   ├── stage1_interpretation/
 │   │   └── ltl_parser.py                # Stage 1: NL -> LTLf conversion (LLM)
-│   ├── ltlf_dfa_conversion/
-│   │   └── ltlf_to_dfa.py               # Stage 2: LTLf -> DFA conversion (ltlf2dfa)
-│   ├── stage2_planning/
-│   │   └── agentspeak_generator.py      # Stage 3: LTLf -> AgentSpeak (LLM)
+│   ├── stage2_dfa_generation/
+│   │   ├── recursive_dfa_builder.py     # Stage 2: Recursive DFA generation (DFS)
+│   │   └── ltlf_to_dfa.py               # LTLf -> DFA conversion (ltlf2dfa)
+│   ├── stage3_code_generation/
+│   │   └── agentspeak_generator.py      # Stage 3: DFAs -> AgentSpeak (LLM)
+│   ├── external/
+│   │   └── mona-1.4/                    # MONA automata tool (for ltlf2dfa)
 │   └── legacy/
 │       ├── fond/                        # Legacy FOND planning (Branch B)
 │       │   ├── README.md                # Instructions for restoring FOND functionality
@@ -181,6 +226,7 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │       │   └── external/pr2/            # PR2 FOND planner (Docker)
 │       └── stage4_execution/            # Future: Execution & evaluation
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
+├── run_with_mona.sh                     # Wrapper script to run with MONA in PATH
 └── tests/                               # Test suites
     └── test_complex_cases.py            # Complex test cases
 ```
@@ -190,6 +236,8 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 ## Development
 
 ### Running Tests
+
+**Important**: Tests that use ltlf2dfa require MONA to be available. The project automatically adds MONA to PATH when you import from `src/` modules.
 
 Run the comprehensive test suite with 3 complex scenarios based on FOND benchmarks:
 
@@ -204,11 +252,27 @@ python tests/test_complex_cases.py 2>&1 | tee tests/test_results.log
 ### Test Individual Components
 
 ```bash
-# Test LTL parser
+# Test LTL parser (Stage 1)
 python src/stage1_interpretation/ltl_parser.py
 
-# Test AgentSpeak generator
-python src/stage2_planning/agentspeak_generator.py
+# Test recursive DFA builder (Stage 2)
+python src/stage2_dfa_generation/recursive_dfa_builder.py
+
+# Test AgentSpeak generator (Stage 3)
+python src/stage3_code_generation/agentspeak_generator.py
+
+# Test ltlf2dfa integration (requires MONA)
+python temp/test_ltlf2dfa.py
+```
+
+**Alternative**: Use the wrapper script to run any Python script with MONA in PATH:
+
+```bash
+# Run with explicit MONA path setup
+./run_with_mona.sh python tests/test_complex_cases.py
+
+# Run ltlf2dfa tests
+./run_with_mona.sh python temp/test_ltlf2dfa.py
 ```
 
 ---
@@ -221,27 +285,45 @@ python src/stage2_planning/agentspeak_generator.py
 - **Output**: LTLf specification with formula(s), objects, initial state
 - **LLM Model**: Configured via `OPENAI_MODEL` in `.env` (e.g., `deepseek-chat`, `gpt-4o-mini`)
 
-### Stage 2: LTLf → DFA Conversion
+### Stage 2: LTLf → Recursive DFA Generation
 - **Input**: LTLf specification from Stage 1
-- **Process**: Converts LTLf formulas to Deterministic Finite Automata using ltlf2dfa
+- **Process**: Recursively decomposes LTLf goals into subgoals using DFS strategy
+  1. Generate DFA for root goal using ltlf2dfa
+  2. Analyze DFA transitions to identify subgoals
+  3. For each subgoal:
+     - If physical action → mark as terminal (no further decomposition)
+     - If DFA already exists → reuse cached DFA
+     - Otherwise → recursively generate DFA (DFS deeper)
+  4. Continue until all paths reach physical actions or cached DFAs
+- **Output**: `RecursiveDFAResult` containing:
+  - All generated DFAs (root + subgoals) in breadth-first order
+  - DFA transitions for each goal (key information for plan generation)
+  - Physical actions identified (terminal nodes)
+  - Decomposition tree structure with depth information
+  - DFA dependency graph
+- **Tools**:
+  - ltlf2dfa library (Python interface for DFA generation)
+  - MONA v1.4 (underlying automata generator)
+  - Custom recursive DFA builder with DFS decomposition
+- **Requirements**: MONA must be compiled and available (see Prerequisites above)
+- **Key Features**:
   - Automatic predicate-to-proposition encoding (on(a,b) → on_a_b)
-  - Handles LTL temporal operators (F, G, X, U, etc.)
-  - Iterative conversion for nested structures
-- **Output**:
-  - DFA in DOT format (for visualization)
-  - Metadata with predicate mappings
-  - Formal automaton representation for verification
-- **Tool**: ltlf2dfa library (based on MONA)
+  - DFA caching to prevent regeneration
+  - Cycle prevention through cache-before-recurse pattern
+  - Complete transition labels extraction
 
-### Stage 3: LTLf → AgentSpeak Code
-- **Input**: LTLf specification from Stage 1
-- **Process**: LLM generates complete AgentSpeak program with:
-  - Initial beliefs (from initial state)
-  - Goal-achieving plans (from LTLf formulas)
-  - Context-sensitive plan alternatives
-  - Belief updates and action sequences
-- **Output**: AgentSpeak code (.asl) ready for Jason/JAdex execution
+### Stage 3: DFAs → AgentSpeak Code
+- **Input**: All DFAs with transition information from Stage 2
+- **Process**: LLM generates complete AgentSpeak program guided by DFA decomposition:
+  - Uses DFA transitions as plan context conditions
+  - Generates plans for each subgoal in decomposition tree
+  - Creates context-sensitive plan alternatives based on different DFA transitions
+  - Incorporates initial beliefs (from Stage 1 initial state)
+  - Adds belief updates and action sequences
+  - Includes failure handling plans (-!goal)
+- **Output**: Complete AgentSpeak code (.asl) ready for Jason/JAdex execution
 - **LLM Model**: Same as Stage 1
+- **Guidance Strategy**: DFA transitions provide explicit conditions for when plans should be triggered, enabling more accurate and context-aware plan generation
 
 ---
 
@@ -268,13 +350,19 @@ The blocksworld domain provides a testbed for:
 
 ### Implemented Features (Stages 1-3)
 - ✓ **Stage 1**: Natural language → LTLf specification (LLM-based)
-- ✓ **Stage 2**: LTLf → DFA conversion (ltlf2dfa-based)
-  - Predicate-to-proposition encoding
+- ✓ **Stage 2**: LTLf → Recursive DFA generation (DFS-based decomposition)
+  - Recursive goal decomposition until physical actions
+  - DFA caching and reuse to prevent regeneration
+  - Predicate-to-proposition encoding (on(a,b) → on_a_b)
+  - Complete DFA transitions extraction
+  - Decomposition tree with depth tracking
   - DOT format output for visualization
-  - Metadata with predicate mappings
-- ✓ **Stage 3**: LTLf → LLM AgentSpeak code generation
-- ✓ Blocksworld domain support
-- ✓ Comprehensive JSON + text execution logs with full LLM prompts
+- ✓ **Stage 3**: DFAs → LLM AgentSpeak code generation
+  - DFA-guided plan generation using transition information
+  - Context-sensitive plan alternatives
+  - Failure handling plans
+- ✓ Blocksworld domain support with physical action identification
+- ✓ Comprehensive JSON + text execution logs with full LLM prompts and DFA decomposition
 - ✓ Support for F, G, U, X temporal operators and nested formulas
 - ✓ AgentSpeak code output (.asl files)
 
@@ -288,7 +376,7 @@ The blocksworld domain provides a testbed for:
 ### Known Limitations
 1. **Single Domain**: Currently supports blocksworld only
 2. **No Execution**: Pipeline stops after code generation (Stage 3)
-3. **DFA Integration**: DFA conversion is implemented but not yet integrated into main pipeline execution flow
+3. **Subgoal Extraction**: Current implementation extracts subgoals from transition labels, which may not capture all domain-specific decomposition strategies
 
 ---
 

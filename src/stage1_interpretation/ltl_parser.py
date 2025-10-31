@@ -216,16 +216,14 @@ Your task: Convert natural language to LTL formulas.
 - "eventually ensure always", "finally maintain" → F(G(φ)) (nested)
 - "keep trying", "always eventually" → G(F(φ)) (nested)
 
+**IMPORTANT**: Do NOT assume or specify any initial state. The generated plans must work from ANY initial configuration.
+Only extract:
+1. The objects (blocks) mentioned in the instruction
+2. The LTL goal formulas (what should be achieved)
+
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {
   "objects": ["a", "b"],
-  "initial_state": [
-    {"ontable": ["a"]},
-    {"ontable": ["b"]},
-    {"clear": ["a"]},
-    {"clear": ["b"]},
-    {"handempty": []}
-  ],
   "ltl_formulas": [
     {
       "type": "temporal",
@@ -317,7 +315,8 @@ Examples of nested operators:
         # Build LTL specification
         spec = LTLSpecification()
         spec.objects = result["objects"]
-        spec.initial_state = result["initial_state"]
+        # No initial_state - plans must work from ANY initial configuration
+        spec.initial_state = []
 
         # Convert formulas
         for ltl_def in result["ltl_formulas"]:

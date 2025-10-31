@@ -9,6 +9,14 @@ NOTE: ltlf2dfa uses PROPOSITIONAL variables, not predicates with arguments.
       So we use 'on_a_b' instead of 'on(a, b)'.
 """
 
+# Add project root to path and setup MONA
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from setup_mona_path import setup_mona
+setup_mona(verbose=True)
+
 from ltlf2dfa.parser.ltlf import LTLfParser
 
 
@@ -53,9 +61,12 @@ def test_simple_formulas():
             dfa_dot = formula.to_dfa()
             print(f"✓ DFA generated successfully (DOT format)")
 
-            # Show preview of DOT output
-            print(f"\n  DOT representation (first 300 chars):")
-            print(f"  {dfa_dot[:300]}...")
+            # Show COMPLETE DOT output (no truncation)
+            print(f"\n DOT representation:")
+            print("  " + "~" * 76)
+            for line in dfa_dot.split('\n'):
+                print(f"  {line}")
+            print("  " + "~" * 76)
 
             print("\n✓ TEST PASSED")
             passed += 1
@@ -105,8 +116,10 @@ def test_blocksworld_formulas():
     failed = 0
 
     for formula_str, description in blocksworld_formulas:
+        print("-" * 80)
         print(f"Formula: {formula_str}")
         print(f"Meaning: {description}")
+        print("-" * 80)
 
         try:
             formula = parser(formula_str)
@@ -115,7 +128,15 @@ def test_blocksworld_formulas():
             # Count lines in DOT to get sense of DFA size
             dfa_lines = len(dfa_dot.strip().split('\n'))
 
-            print(f"✓ Success - DFA with ~{dfa_lines} lines in DOT format")
+            print(f"✓ Success - DFA with {dfa_lines} lines in DOT format")
+
+            # Show COMPLETE DOT output (no truncation)
+            print(f"\n  COMPLETE DOT representation:")
+            print("  " + "~" * 76)
+            for line in dfa_dot.split('\n'):
+                print(f"  {line}")
+            print("  " + "~" * 76)
+
             passed += 1
         except Exception as e:
             print(f"✗ Failed: {e}")
@@ -146,13 +167,24 @@ def test_complex_formulas():
     ]
 
     for formula_str in complex_formulas:
+        print("-" * 80)
         print(f"Formula: {formula_str}")
+        print("-" * 80)
         try:
             formula = parser(formula_str)
             dfa_dot = formula.to_dfa()
-            print(f"✓ Success")
+
+            # Show COMPLETE DOT output (no truncation)
+            print(f"\n  COMPLETE DOT representation:")
+            print("  " + "~" * 76)
+            for line in dfa_dot.split('\n'):
+                print(f"  {line}")
+            print("  " + "~" * 76)
+
         except Exception as e:
             print(f"✗ Failed: {e}")
+            import traceback
+            traceback.print_exc()
         print()
 
 

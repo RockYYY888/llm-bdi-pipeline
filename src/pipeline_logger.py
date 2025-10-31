@@ -24,25 +24,33 @@ class PipelineRecord:
     timestamp: str
     natural_language: str
     success: bool
-    mode: str = "fond"  # "llm_agentspeak" or "fond"
+    mode: str = "dfa_agentspeak"
 
     # Stage 1: NL -> LTLf
-    stage1_status: str = "pending"  # "success" | "failed" | "skipped" | "pending"
+    stage1_status: str = "pending"
     stage1_ltlf_spec: Optional[Dict[str, Any]] = None
     stage1_error: Optional[str] = None
     stage1_used_llm: bool = False
     stage1_model: Optional[str] = None
-    stage1_llm_prompt: Optional[Dict[str, str]] = None  # {"system": "...", "user": "..."}
+    stage1_llm_prompt: Optional[Dict[str, str]] = None
     stage1_llm_response: Optional[str] = None
 
-    # Stage 2: LTLf -> DFA (optional) / Stage 3: LTLf -> AgentSpeak
-    stage2_status: str = "skipped"
-    stage2_agentspeak: Optional[str] = None
+    # Stage 2: LTLf -> Recursive DFA Generation
+    stage2_status: str = "pending"
+    stage2_dfa_result: Optional[Dict[str, Any]] = None  # RecursiveDFAResult as dict
+    stage2_num_dfas: int = 0
+    stage2_max_depth: int = 0
+    stage2_physical_actions: Optional[list] = None
     stage2_error: Optional[str] = None
-    stage2_used_llm: bool = False
-    stage2_model: Optional[str] = None
-    stage2_llm_prompt: Optional[Dict[str, str]] = None  # {"system": "...", "user": "..."}
-    stage2_llm_response: Optional[str] = None
+
+    # Stage 3: DFAs -> AgentSpeak Code Generation
+    stage3_status: str = "pending"
+    stage3_agentspeak: Optional[str] = None
+    stage3_error: Optional[str] = None
+    stage3_used_llm: bool = False
+    stage3_model: Optional[str] = None
+    stage3_llm_prompt: Optional[Dict[str, str]] = None
+    stage3_llm_response: Optional[str] = None
 
     # Metadata
     domain_file: str = "domains/blocksworld/domain.pddl"
@@ -142,42 +150,42 @@ class PipelineLogger:
         self.current_record.stage1_status = "failed"
         self.current_record.stage1_error = str(error)
 
-    def log_stage2_success(self,
-                          pddl_problem: str,
-                          used_llm: bool = False,
-                          model: Optional[str] = None,
-                          llm_prompt: Optional[Dict[str, str]] = None,
-                          llm_response: Optional[str] = None):
-        """
-        Log successful Stage 2 completion
-
-        Args:
-            pddl_problem: The generated PDDL problem
-            used_llm: Whether LLM was used (vs template fallback)
-            model: Model name if LLM was used
-            llm_prompt: LLM prompt (system + user messages)
-            llm_response: Raw LLM response text
-        """
+    # NEW: Stage 2 - DFA Generation logging
+    def log_stage2_dfas(self, ltl_spec: Any, dfa_result: Any, status: str, error: str = None):
+        """Log Stage 2: LTLf -> Recursive DFA Generation"""
         if not self.current_record:
             return
 
-        self.current_record.stage2_status = "success"
-        self.current_record.stage2_pddl = pddl_problem
-        self.current_record.stage2_used_llm = used_llm
-        self.current_record.stage2_model = model
-        self.current_record.stage2_llm_prompt = llm_prompt
-        self.current_record.stage2_llm_response = llm_response
+        if status == "Success" and dfa_result:
+            self.current_record.stage2_status = "success"
+            self.current_record.stage2_dfa_result = dfa_result.to_dict() if hasattr(dfa_result, 'to_dict') else dfa_result
+            self.current_record.stage2_num_dfas = len(dfa_result.all_dfas) if hasattr(dfa_result, 'all_dfas') else 0
+            self.current_record.stage2_max_depth = dfa_result.max_depth if hasattr(dfa_result, 'max_depth') else 0
+            self.current_record.stage2_physical_actions = dfa_result.physical_actions if hasattr(dfa_result, 'physical_actions') else []
+        elif error:
+            self.current_record.stage2_status = "failed"
+            self.current_record.stage2_error = str(error)
 
-    def log_stage2_error(self, error: str):
-        """Log Stage 2 failure"""
+    # NEW: Stage 3 - AgentSpeak Generation logging
+    def log_stage3(self, ltl_spec: Any, dfa_result: Any, agentspeak_code: str, status: str,
+                   error: str = None, model: str = None, llm_prompt: Dict[str, str] = None,
+                   llm_response: str = None):
+        """Log Stage 3: DFAs -> AgentSpeak Code Generation"""
         if not self.current_record:
             return
 
-        self.current_record.stage2_status = "failed"
-        self.current_record.stage2_error = str(error)
+        if status == "Success" and agentspeak_code:
+            self.current_record.stage3_status = "success"
+            self.current_record.stage3_agentspeak = agentspeak_code
+            self.current_record.stage3_used_llm = True
+            self.current_record.stage3_model = model
+            self.current_record.stage3_llm_prompt = llm_prompt
+            self.current_record.stage3_llm_response = llm_response
+        elif error:
+            self.current_record.stage3_status = "failed"
+            self.current_record.stage3_error = str(error)
 
-
-    # Simplified logging helpers for dual-branch pipeline
+    # Simplified logging helper for Stage 1
     def log_stage1(self, nl_input: str, ltl_spec: Any, status: str, error: str = None,
                    model: str = None, llm_prompt: Dict[str, str] = None, llm_response: str = None):
         """Simplified Stage 1 logger"""
@@ -191,20 +199,6 @@ class PipelineLogger:
             )
         elif error:
             self.log_stage1_error(error)
-
-    def log_stage2(self, ltl_spec: Any, pddl_problem: Any, status: str, error: str = None,
-                   model: str = None, llm_prompt: Dict[str, str] = None, llm_response: str = None):
-        """Simplified Stage 2 logger"""
-        if status == "Success" and pddl_problem:
-            self.log_stage2_success(
-                str(pddl_problem),
-                used_llm=True,
-                model=model,
-                llm_prompt=llm_prompt,
-                llm_response=llm_response
-            )
-        elif error:
-            self.log_stage2_error(error)
 
 
     def end_pipeline(self, success: bool = True) -> Path:
@@ -305,15 +299,7 @@ class PipelineLogger:
                 f.write("~"*40 + "\n")
                 ltlf = record['stage1_ltlf_spec']
                 f.write(f"Objects: {ltlf.get('objects', [])}\n")
-                f.write(f"\nInitial State ({len(ltlf.get('initial_state', []))} predicates):\n")
-                for pred in ltlf.get('initial_state', []):
-                    for name, args in pred.items():
-                        if args:
-                            f.write(f"  - {name}({', '.join(args)})\n")
-                        else:
-                            f.write(f"  - {name}\n")
-
-                f.write(f"\nLTLf Formulas:\n")
+                f.write(f"\nLTLf Formulas (goal-oriented, no initial state assumptions):\n")
                 for i, formula_str in enumerate(ltlf.get('formulas_string', []), 1):
                     f.write(f"  {i}. {formula_str}\n")
 
@@ -322,46 +308,86 @@ class PipelineLogger:
 
             f.write("\n")
 
-            # Stage 2
+            # Stage 2: DFA Generation
             f.write("-"*80 + "\n")
-            f.write("STAGE 2: LTL Specification → PDDL Problem\n")
+            f.write("STAGE 2: LTL Specification → Recursive DFA Generation\n")
             f.write("-"*80 + "\n")
             f.write(f"Status: {record['stage2_status'].upper()}\n")
 
-            if record['stage2_used_llm']:
-                f.write(f"Converter: LLM ({record['stage2_model']})\n")
-            else:
-                f.write("Converter: Template Fallback\n")
+            if record['stage2_status'] == 'success' and record.get('stage2_dfa_result'):
+                f.write("\n" + "~"*40 + "\n")
+                f.write("DFA DECOMPOSITION RESULT\n")
+                f.write("~"*40 + "\n")
 
-            # LLM Prompt/Response for Stage 2
-            if record['stage2_used_llm'] and record['stage2_llm_prompt']:
+                dfa_result = record['stage2_dfa_result']
+                f.write(f"Root Formula: {dfa_result.get('root_formula', 'N/A')}\n")
+                f.write(f"Total DFAs Generated: {record.get('stage2_num_dfas', 0)}\n")
+                f.write(f"Max Decomposition Depth: {record.get('stage2_max_depth', 0)}\n")
+
+                physical_actions = record.get('stage2_physical_actions', [])
+                if physical_actions:
+                    f.write(f"Physical Actions Identified: {', '.join(physical_actions)}\n")
+
+                # Show DFA tree structure
+                all_dfas = dfa_result.get('all_dfas', [])
+                if all_dfas:
+                    f.write(f"\nDFA Decomposition Tree ({len(all_dfas)} nodes):\n")
+                    for i, dfa in enumerate(all_dfas, 1):
+                        indent = "  " * dfa.get('depth', 0)
+                        goal = dfa.get('goal_formula', 'N/A')
+                        is_physical = dfa.get('is_physical_action', False)
+                        action_marker = " [PHYSICAL ACTION]" if is_physical else ""
+                        f.write(f"{indent}{i}. {goal}{action_marker}\n")
+
+                        subgoals = dfa.get('subgoals', [])
+                        if subgoals and not is_physical:
+                            f.write(f"{indent}   Subgoals: {', '.join(subgoals)}\n")
+
+                f.write("\n")
+
+            elif record.get('stage2_error'):
+                f.write(f"\nError: {record['stage2_error']}\n")
+
+            f.write("\n")
+
+            # Stage 3: AgentSpeak Generation
+            f.write("-"*80 + "\n")
+            f.write("STAGE 3: DFAs → AgentSpeak Code Generation\n")
+            f.write("-"*80 + "\n")
+            f.write(f"Status: {record.get('stage3_status', 'pending').upper()}\n")
+
+            if record.get('stage3_used_llm'):
+                f.write(f"Generator: LLM ({record.get('stage3_model', 'N/A')})\n")
+
+            # LLM Prompt/Response for Stage 3
+            if record.get('stage3_used_llm') and record.get('stage3_llm_prompt'):
                 f.write("\n" + "~"*40 + "\n")
                 f.write("System Prompt\n")
                 f.write("~"*40 + "\n")
-                prompt = record['stage2_llm_prompt']
-                f.write(prompt.get('system', 'N/A'))  # Full system prompt
+                prompt = record['stage3_llm_prompt']
+                f.write(prompt.get('system', 'N/A'))
                 f.write("\n\n" + "~"*40 + "\n")
                 f.write("User Prompt\n")
                 f.write("~"*40 + "\n")
-                f.write(prompt.get('user', 'N/A'))  # Full user prompt
+                f.write(prompt.get('user', 'N/A'))
                 f.write("\n")
 
-            if record['stage2_used_llm'] and record['stage2_llm_response']:
+            if record.get('stage3_used_llm') and record.get('stage3_llm_response'):
                 f.write("\n" + "~"*40 + "\n")
-                f.write("LLM RESPONSE (Stage 2)\n")
+                f.write("LLM RESPONSE (Stage 3)\n")
                 f.write("~"*40 + "\n")
-                f.write(record['stage2_llm_response'])  # Full response
+                f.write(record['stage3_llm_response'])
                 f.write("\n")
 
-            if record['stage2_status'] == 'success' and record['stage2_pddl']:
+            if record.get('stage3_status') == 'success' and record.get('stage3_agentspeak'):
                 f.write("\n" + "~"*40 + "\n")
-                f.write("GENERATED PDDL PROBLEM (Stage 2)\n")
+                f.write("GENERATED AGENTSPEAK CODE (Stage 3)\n")
                 f.write("~"*40 + "\n")
-                f.write(record['stage2_pddl'])
+                f.write(record['stage3_agentspeak'])
                 f.write("\n")
 
-            elif record['stage2_error']:
-                f.write(f"\nError: {record['stage2_error']}\n")
+            elif record.get('stage3_error'):
+                f.write(f"\nError: {record['stage3_error']}\n")
 
             f.write("\n")
 

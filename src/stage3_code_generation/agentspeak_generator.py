@@ -35,15 +35,17 @@ class AgentSpeakGenerator:
                  ltl_spec: Dict[str, Any],
                  domain_name: str,
                  domain_actions: list,
-                 domain_predicates: list) -> Tuple[str, Dict, str]:
+                 domain_predicates: list,
+                 dfa_result: Optional[Any] = None) -> Tuple[str, Dict, str]:
         """
-        Generate complete AgentSpeak plan library
+        Generate complete AgentSpeak plan library from DFAs
 
         Args:
             ltl_spec: LTL specification dictionary
             domain_name: Domain name (e.g., "blocksworld")
             domain_actions: List of available actions
             domain_predicates: List of available predicates
+            dfa_result: RecursiveDFAResult with all generated DFAs and transitions (NEW)
 
         Returns:
             Tuple of (asl_code, prompt_dict, response_text)
@@ -54,8 +56,8 @@ class AgentSpeakGenerator:
                 "AgentSpeak generation requires LLM."
             )
 
-        # Build comprehensive prompt
-        prompt = self._build_prompt(ltl_spec, domain_name, domain_actions, domain_predicates)
+        # Build comprehensive prompt with DFA information
+        prompt = self._build_prompt(ltl_spec, domain_name, domain_actions, domain_predicates, dfa_result)
 
         # Call LLM
         messages = [
@@ -97,18 +99,15 @@ class AgentSpeakGenerator:
                       ltl_spec: Dict[str, Any],
                       domain_name: str,
                       actions: list,
-                      predicates: list) -> str:
-        """Build comprehensive prompt for AgentSpeak generation"""
+                      predicates: list,
+                      dfa_result: Optional[Any] = None) -> str:
+        """Build comprehensive prompt for AgentSpeak generation with DFA guidance"""
 
         objects = ltl_spec.get('objects', [])
-        initial_state = ltl_spec.get('initial_state', [])
         formulas = ltl_spec.get('formulas_string', [])
 
         # Format formulas nicely
         formulas_str = "\n".join([f"  - {f}" for f in formulas])
-
-        # Format initial state
-        init_str = "\n".join([f"  - {s}" for s in initial_state])
 
         # Format actions
         actions_str = ", ".join(actions)
@@ -116,7 +115,15 @@ class AgentSpeakGenerator:
         # Format predicates
         predicates_str = ", ".join(predicates)
 
-        prompt = f"""Generate a complete AgentSpeak plan library for a BDI agent.
+        # NEW: Format DFA information if available
+        dfa_info = ""
+        if dfa_result and hasattr(dfa_result, 'all_dfas'):
+            dfa_info = self._format_dfa_information(dfa_result)
+
+        prompt = f"""Generate a complete AgentSpeak plan library for a BDI agent guided by DFA decomposition.
+
+**CRITICAL REQUIREMENT**: The generated plans MUST be GENERAL and work from ANY initial configuration.
+Do NOT assume any specific initial state. Plans must handle all possible scenarios through context-sensitive conditions.
 
 **Domain**: {domain_name}
 
@@ -126,21 +133,21 @@ class AgentSpeakGenerator:
 
 **Available Predicates**: {predicates_str}
 
-**Initial State**:
-{init_str}
-
 **LTLf Temporal Goals**:
 {formulas_str}
 
+{dfa_info}
+
 **Requirements**:
-1. Generate plans to achieve ALL LTLf F (eventually) goals
-2. Generate monitoring for ALL LTLf G (always) constraints
-3. Include multiple context-sensitive plans per goal (handle different situations)
-4. Add failure handling plans (-!goal) for robustness
-5. Use clear, meaningful plan names
-6. Add brief comments explaining complex logic
-7. Include belief updates after actions
-8. Use declarative goals (!![state]) where appropriate for state-based goals
+1. Use the DFA transitions as guidance for plan generation - transitions show which conditions/actions lead to goal achievement
+2. Generate plans for each subgoal identified in the DFA decomposition
+3. Follow the DFA structure: each transition label indicates when to trigger specific plans
+4. Include multiple context-sensitive plans based on different DFA transitions
+5. Add failure handling plans (-!goal) for robustness
+6. Use clear, meaningful plan names matching the DFA structure
+7. Add brief comments explaining the DFA-guided logic
+8. Include belief updates after actions
+9. Use declarative goals (!![state]) where appropriate for state-based goals
 
 **Example Plan Structure** (for reference):
 ```agentspeak
@@ -175,6 +182,60 @@ Now generate the COMPLETE AgentSpeak plan library for the {domain_name} domain.
 Output ONLY the AgentSpeak code, no explanations before or after.
 """
         return prompt
+
+    def _format_dfa_information(self, dfa_result: Any) -> str:
+        """Format DFA decomposition information for the prompt"""
+
+        if not dfa_result or not hasattr(dfa_result, 'all_dfas'):
+            return ""
+
+        info = "\n**DFA Decomposition (KEY GUIDANCE FOR PLAN GENERATION)**:\n"
+        info += f"Total DFAs generated: {len(dfa_result.all_dfas)}\n"
+        info += f"Decomposition depth: {dfa_result.max_depth}\n\n"
+
+        info += "**DFA Structure and Transitions** (use these to guide plan creation):\n\n"
+
+        for i, dfa_node in enumerate(dfa_result.all_dfas, 1):
+            info += f"{i}. Goal: `{dfa_node.goal_formula}`\n"
+            if dfa_node.is_physical_action:
+                info += f"   Type: PHYSICAL ACTION (terminal - direct execution)\n"
+            else:
+                info += f"   Type: Subgoal (decompose further)\n"
+
+            info += f"   Depth: {dfa_node.depth}\n"
+
+            # Extract key transitions from DFA
+            transitions = self._extract_key_transitions(dfa_node.dfa_dot)
+            if transitions:
+                info += f"   Key Transitions:\n"
+                for trans in transitions[:5]:  # Limit to 5 most important
+                    info += f"      - {trans}\n"
+
+            if dfa_node.subgoals:
+                info += f"   Subgoals to achieve: {', '.join(dfa_node.subgoals)}\n"
+
+            info += "\n"
+
+        info += "**IMPORTANT**: Use the transition labels above as conditions in your AgentSpeak plan contexts.\n"
+        info += "For example, if a transition shows `on_a_b & clear_c`, create a plan:\n"
+        info += "  +!goal : on(a,b) & clear(c) <- ...\n\n"
+
+        return info
+
+    def _extract_key_transitions(self, dfa_dot: str) -> list:
+        """Extract important transitions from DFA DOT format"""
+        import re
+
+        transitions = []
+        # Parse transitions: "1 -> 2 [label="condition"];"
+        pattern = r'(\d+)\s*->\s*(\d+)\s*\[label="([^"]+)"\]'
+
+        for match in re.finditer(pattern, dfa_dot):
+            from_state, to_state, label = match.groups()
+            if label != "true" and "init" not in from_state:
+                transitions.append(f"State {from_state} → {to_state} when [{label}]")
+
+        return transitions
 
     def _extract_asl_code(self, response: str) -> str:
         """Extract AgentSpeak code from LLM response"""
