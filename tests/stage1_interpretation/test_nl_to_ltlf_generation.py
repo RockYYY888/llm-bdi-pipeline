@@ -77,6 +77,39 @@ def normalize_formula(formula: str) -> str:
     return normalized.lower()
 
 
+def split_formulas(formula_string: str) -> List[str]:
+    """
+    Split comma-separated formulas while respecting parentheses
+
+    Example: "F(on(a, b)), F(on(c, d))" -> ["F(on(a, b))", "F(on(c, d))"]
+    Not: ["F(on(a", "b))", ...] (incorrect naive split)
+    """
+    formulas = []
+    current = []
+    paren_depth = 0
+
+    for char in formula_string:
+        if char == '(':
+            paren_depth += 1
+            current.append(char)
+        elif char == ')':
+            paren_depth -= 1
+            current.append(char)
+        elif char == ',' and paren_depth == 0:
+            # This is a top-level comma separating formulas
+            if current:
+                formulas.append(''.join(current).strip())
+                current = []
+        else:
+            current.append(char)
+
+    # Don't forget the last formula
+    if current:
+        formulas.append(''.join(current).strip())
+
+    return formulas
+
+
 def compare_formulas(expected: str, actual: List[str]) -> tuple[bool, str]:
     """
     Compare expected and actual formulas
@@ -85,8 +118,8 @@ def compare_formulas(expected: str, actual: List[str]) -> tuple[bool, str]:
         (is_match, match_type)
         match_type: "exact", "partial", "wrong"
     """
-    # Parse expected (can be comma-separated)
-    expected_formulas = [f.strip() for f in expected.split(',')]
+    # Parse expected (can be comma-separated, but respect parentheses)
+    expected_formulas = split_formulas(expected)
 
     # Normalize for comparison
     expected_normalized = set(normalize_formula(f) for f in expected_formulas)
