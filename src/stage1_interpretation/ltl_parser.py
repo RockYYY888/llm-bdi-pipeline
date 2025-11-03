@@ -44,9 +44,13 @@ class LTLFormula:
     def to_string(self) -> str:
         """Convert LTL formula to string representation"""
         if self.predicate and not self.operator:
-            # Atomic proposition: on(a, b)
+            # Atomic proposition: on(a, b), clear(a), or handempty
             pred_name = list(self.predicate.keys())[0]
             args = self.predicate[pred_name]
+            # Nullary predicates (0 arguments): no parentheses
+            if len(args) == 0:
+                return pred_name
+            # Predicates with arguments: include parentheses
             return f"{pred_name}({', '.join(args)})"
 
         if self.operator == TemporalOperator.UNTIL and len(self.sub_formulas) == 2:
@@ -61,7 +65,7 @@ class LTLFormula:
             inner = self.sub_formulas[0].to_string()
             return f"{self.operator.value}({inner})"
 
-        if self.logical_op and len(self.sub_formulas) >= 2:
+        if self.logical_op and len(self.sub_formulas) >= 1:
             # Logical combination: on(a, b) & clear(a)
             parts = [f.to_string() for f in self.sub_formulas]
             if self.logical_op == LogicalOperator.AND:
@@ -69,7 +73,8 @@ class LTLFormula:
             elif self.logical_op == LogicalOperator.OR:
                 return f"({' | '.join(parts)})"
             elif self.logical_op == LogicalOperator.NOT:
-                return f"¬({parts[0]})"
+                # Negation: not(on(a, b))
+                return f"not({parts[0]})"
 
         return "true"
 
@@ -262,15 +267,63 @@ class NLToLTLParser:
         for ltl_def in result["ltl_formulas"]:
             if ltl_def["type"] == "temporal":
                 operator = TemporalOperator(ltl_def["operator"])
-                predicate = ltl_def["formula"]
+                inner_formula_def = ltl_def["formula"]
 
-                # Create atomic formula
-                atomic = LTLFormula(
-                    operator=None,
-                    predicate=predicate,
-                    sub_formulas=[],
-                    logical_op=None
-                )
+                # Check if inner formula is a special type (negation, conjunction, etc.)
+                if isinstance(inner_formula_def, dict) and "type" in inner_formula_def:
+                    inner_type = inner_formula_def["type"]
+
+                    if inner_type == "negation":
+                        # Negation: G(not(on(a, b)))
+                        neg_predicate = inner_formula_def["formula"]
+                        neg_atomic = LTLFormula(
+                            operator=None,
+                            predicate=neg_predicate,
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                        # Wrap in NOT
+                        atomic = LTLFormula(
+                            operator=None,
+                            predicate=None,
+                            sub_formulas=[neg_atomic],
+                            logical_op=LogicalOperator.NOT
+                        )
+
+                    elif inner_type == "conjunction":
+                        # Conjunction: F(on(a,b) & on(c,d))
+                        conjuncts = []
+                        for pred in inner_formula_def["formulas"]:
+                            conjuncts.append(LTLFormula(
+                                operator=None,
+                                predicate=pred,
+                                sub_formulas=[],
+                                logical_op=None
+                            ))
+                        # Wrap in AND
+                        atomic = LTLFormula(
+                            operator=None,
+                            predicate=None,
+                            sub_formulas=conjuncts,
+                            logical_op=LogicalOperator.AND
+                        )
+
+                    else:
+                        # Unknown inner type, treat as regular predicate
+                        atomic = LTLFormula(
+                            operator=None,
+                            predicate=inner_formula_def,
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                else:
+                    # Regular predicate
+                    atomic = LTLFormula(
+                        operator=None,
+                        predicate=inner_formula_def,
+                        sub_formulas=[],
+                        logical_op=None
+                    )
 
                 # Wrap in temporal operator
                 formula = LTLFormula(

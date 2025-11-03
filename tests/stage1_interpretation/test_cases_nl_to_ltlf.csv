@@ -6,7 +6,7 @@ test_id,category,natural_language,expected_ltlf,expected_objects,description,not
 5,globally_constraint,"Always keep block a clear","G(clear(a))","['a']",Safety constraint,G operator for always
 6,mixed_temporal,"Put a on b while keeping c clear","F(on(a, b)), G(clear(c))","['a', 'b', 'c']",Liveness + safety,F and G together
 7,next_operator,"Pick up a and immediately place it on b","F(holding(a)), X(on(a, b))","['a', 'b']",Sequential action with next,F followed by X
-8,until_operator,"Keep holding a until b is clear","holding(a) U clear(b)","['a', 'b']",Until temporal operator,U operator
+8,until_operator,"Keep holding a until b is clear","(holding(a) U clear(b))","['a', 'b']",Until temporal operator,U operator with outer parentheses
 9,nested_fg,"Eventually ensure a is always on b","F(G(on(a, b)))","['a', 'b']",Nested operators,F(G(φ)) pattern
 10,nested_gf,"Keep trying to clear c","G(F(clear(c)))","['c']",Infinite repetition,G(F(φ)) pattern
 11,tower_building,"Build a tower with a on b and b on c","F(on(a, b)), F(on(b, c))","['a', 'b', 'c']",Multi-level tower,Implicit tower structure

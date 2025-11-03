@@ -221,12 +221,15 @@ def run_all_tests(csv_path: Path, output_path: Path):
     print(f"Loaded {len(test_cases)} test cases from {csv_path}")
     print()
 
-    # Initialize parser
+    # Initialize parser using the actual pipeline's domain configuration
     config = get_config()
+    # Use default blocksworld domain (same as main pipeline)
+    domain_file = str(Path(__file__).parent.parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl")
+
     parser = NLToLTLParser(
         api_key=config.openai_api_key,
         model=config.openai_model,
-        domain_file=str(Path(__file__).parent.parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl")
+        domain_file=domain_file
     )
 
     # Run tests

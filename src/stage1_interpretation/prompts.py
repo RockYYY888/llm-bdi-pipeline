@@ -66,10 +66,36 @@ Your task: Convert natural language to LTL formulas.
 - "eventually ensure always", "finally maintain" → F(G(φ)) (nested)
 - "keep trying", "always eventually" → G(F(φ)) (nested)
 
+**CRITICAL: Predicate Argument Rules**
+
+Predicates have different arities (number of arguments). You MUST include the correct arguments:
+
+1. **Nullary predicates (0 arguments)**: NO arguments, NO parentheses in formula field
+   - Example: handempty
+   - JSON: {{{{"handempty": []}}}}
+   - Output formula: G(handempty) or F(handempty)
+
+2. **Unary predicates (1 argument)**: ONE argument in list
+   - Examples: clear(a), holding(b)
+   - JSON: {{{{"clear": ["a"]}}}}, {{{{"holding": ["b"]}}}}
+   - Output formula: F(clear(a)), G(holding(b))
+
+3. **Binary predicates (2 arguments)**: TWO arguments in list
+   - Example: on(a, b)
+   - JSON: {{{{"on": ["a", "b"]}}}}
+   - Output formula: F(on(a, b))
+
+4. **Negation**: ALWAYS include FULL predicate with ALL arguments
+   - CORRECT: {{{{"type": "negation", "formula": {{{{"on": ["a", "b"]}}}}}}}}
+   - WRONG: {{{{"not": ["on"]}}}} ❌ Missing arguments!
+   - Output formula: G(not(on(a, b)))
+
 **IMPORTANT**: Do NOT assume or specify any initial state. The generated plans must work from ANY initial configuration.
 Only extract:
 1. The objects (blocks) mentioned in the instruction
 2. The LTL goal formulas (what should be achieved)
+
+**JSON Output Format (STRICT - Follow Exactly):**
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
 {{{{
@@ -88,15 +114,16 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
   ]
 }}}}
 
-For U (Until) operator, use this format:
+**For U (Until) operator** - ALWAYS use outer parentheses:
 {{{{
   "type": "until",
   "operator": "U",
   "left_formula": {{{{"holding": ["a"]}}}},
   "right_formula": {{{{"clear": ["b"]}}}}
 }}}}
+Output: (holding(a) U clear(b))
 
-For NESTED operators (e.g., F(G(φ)), G(F(φ))), use this format:
+**For NESTED operators** (e.g., F(G(φ)), G(F(φ))):
 {{{{
   "type": "nested",
   "outer_operator": "F",
@@ -104,12 +131,49 @@ For NESTED operators (e.g., F(G(φ)), G(F(φ))), use this format:
   "formula": {{{{"on": ["a", "b"]}}}}
 }}}}
 
-Examples of nested operators:
+**For NEGATION**:
+{{{{
+  "type": "temporal",
+  "operator": "G",
+  "formula": {{{{
+    "type": "negation",
+    "formula": {{{{"on": ["a", "b"]}}}}
+  }}}}
+}}}}
+Output: G(not(on(a, b)))
+
+**For LOGICAL CONJUNCTION within temporal operator**:
+Natural language: "Eventually a is on b and c is on d at the same time"
+{{{{
+  "type": "temporal",
+  "operator": "F",
+  "formula": {{{{
+    "type": "conjunction",
+    "formulas": [
+      {{{{"on": ["a", "b"]}}}},
+      {{{{"on": ["c", "d"]}}}}
+    ]
+  }}}}
+}}}}
+Output: F(on(a, b) & on(c, d))
+
+**Examples of Complete Responses:**
+
+1. Nested operators:
 - F(G(on(a, b))): Eventually A is always on B
   → {{{{"type": "nested", "outer_operator": "F", "inner_operator": "G", "formula": {{{{"on": ["a", "b"]}}}}}}}}
 
+2. Always eventually:
 - G(F(clear(c))): Always eventually C is clear
-  → {{{{"type": "nested", "outer_operator": "G", "inner_operator": "F", "formula": {{{{"clear": ["c"]}}}}}}}}"""
+  → {{{{"type": "nested", "outer_operator": "G", "inner_operator": "F", "formula": {{{{"clear": ["c"]}}}}}}}}
+
+3. Negation with full arguments:
+- G(not(on(a, b))): Never put A on B
+  → {{{{"type": "temporal", "operator": "G", "formula": {{{{"type": "negation", "formula": {{{{"on": ["a", "b"]}}}}}}}}}}}}
+
+4. Nullary predicate:
+- G(handempty): Always keep hand empty
+  → {{{{"type": "temporal", "operator": "G", "formula": {{{{"handempty": []}}}}}}}}"""
 
 
 def get_ltl_user_prompt(nl_instruction: str) -> str:
