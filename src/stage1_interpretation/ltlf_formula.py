@@ -34,8 +34,11 @@ Example formulas:
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING
 from enum import Enum
+
+if TYPE_CHECKING:
+    from .grounding_map import GroundingMap
 
 
 class TemporalOperator(Enum):
@@ -127,12 +130,16 @@ class LTLSpecification:
     - Safety properties (what should never happen)
     - Liveness properties (what should eventually happen)
     - Fairness properties (what should happen infinitely often)
+
+    Uses propositional symbols (e.g., on_a_b) with a grounding map
+    to maintain the connection to domain predicates and objects.
     """
 
     def __init__(self):
         self.formulas: List[LTLFormula] = []
         self.objects: List[str] = []
         self.initial_state: List[Dict[str, List[str]]] = []
+        self.grounding_map: Optional['GroundingMap'] = None
 
     def add_formula(self, formula: LTLFormula):
         """Add an LTL formula to the specification"""
@@ -140,9 +147,15 @@ class LTLSpecification:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
-        return {
+        result = {
             "formulas": [f.to_dict() for f in self.formulas],
             "formulas_string": [f.to_string() for f in self.formulas],
             "objects": self.objects,
             "initial_state": self.initial_state
         }
+
+        # Include grounding map if available
+        if self.grounding_map:
+            result["grounding_map"] = self.grounding_map.to_dict()
+
+        return result

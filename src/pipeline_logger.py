@@ -142,6 +142,13 @@ class PipelineLogger:
         self.current_record.stage1_llm_prompt = llm_prompt
         self.current_record.stage1_llm_response = llm_response
 
+        # Save grounding_map.json if present
+        if ltl_spec and 'grounding_map' in ltl_spec and self.current_log_dir:
+            import json
+            grounding_map_path = self.current_log_dir / "grounding_map.json"
+            with open(grounding_map_path, 'w') as f:
+                json.dump(ltl_spec['grounding_map'], f, indent=2)
+
     def log_stage1_error(self, error: str):
         """Log Stage 1 failure"""
         if not self.current_record:

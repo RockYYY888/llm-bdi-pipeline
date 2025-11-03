@@ -10,6 +10,7 @@ from typing import Optional
 import json
 
 from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
+from .grounding_map import GroundingMap, create_propositional_symbol
 
 
 class NLToLTLfGenerator:
@@ -369,7 +370,40 @@ class NLToLTLfGenerator:
 
                 spec.add_formula(outer_formula)
 
+        # Create grounding map from parsed formulas
+        spec.grounding_map = self._create_grounding_map(spec)
+
         return (spec, prompt_dict, result_text)
+
+    def _create_grounding_map(self, spec: LTLSpecification) -> GroundingMap:
+        """
+        Create grounding map from LTL specification
+
+        Extracts all predicates from formulas and creates propositional symbols
+        with their mappings back to original predicates and arguments.
+        """
+        gmap = GroundingMap()
+
+        # Helper to recursively extract predicates from formula
+        def extract_predicates(formula: LTLFormula):
+            """Recursively extract all predicates from a formula"""
+            if formula.predicate and isinstance(formula.predicate, dict):
+                # This is an atomic predicate like {"on": ["a", "b"]}
+                for pred_name, args in formula.predicate.items():
+                    # Create propositional symbol
+                    symbol = create_propositional_symbol(pred_name, args)
+                    # Add to grounding map
+                    gmap.add_atom(symbol, pred_name, args)
+
+            # Recursively process sub-formulas
+            for sub_formula in formula.sub_formulas:
+                extract_predicates(sub_formula)
+
+        # Extract predicates from all formulas
+        for formula in spec.formulas:
+            extract_predicates(formula)
+
+        return gmap
 
 
 def test_ltlf_generator():

@@ -8,6 +8,7 @@ to Linear Temporal Logic on Finite Traces (LTLf) specifications.
 from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
 from .ltlf_generator import NLToLTLfGenerator
 from .pddl_parser import PDDLParser, PDDLDomain, PDDLPredicate, PDDLAction
+from .grounding_map import GroundingMap, GroundedAtom, create_propositional_symbol
 
 __all__ = [
     'LTLFormula',
@@ -19,4 +20,7 @@ __all__ = [
     'PDDLDomain',
     'PDDLPredicate',
     'PDDLAction',
+    'GroundingMap',
+    'GroundedAtom',
+    'create_propositional_symbol',
 ]
