@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from stage1_interpretation.ltl_parser import LTLSpecification, TemporalOperator
+from stage1_interpretation.ltlf_formula import LTLSpecification, TemporalOperator
 
 
 class LLMPlanner:

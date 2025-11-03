@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from stage1_interpretation.ltl_parser import LTLSpecification
+from stage1_interpretation.ltlf_formula import LTLSpecification
 
 
 def validate_pddl_syntax(pddl_text: str) -> Tuple[bool, List[str]]:
@@ -283,7 +283,7 @@ Generate a complete PDDL problem file."""
             List of constraints with type and predicate info
         """
         constraints = []
-        from stage1_interpretation.ltl_parser import TemporalOperator
+        from stage1_interpretation.ltlf_formula import TemporalOperator
 
         for formula in ltl_spec.formulas:
             if formula.operator == TemporalOperator.GLOBALLY:
@@ -301,7 +301,7 @@ Generate a complete PDDL problem file."""
 
 def test_converter():
     """Test LTL to PDDL converter"""
-    from stage1_interpretation.ltl_parser import NLToLTLParser
+    from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
     from config import get_config
 
     print("="*80)
@@ -314,12 +314,12 @@ def test_converter():
     model = config.openai_model
     base_url = config.openai_base_url
 
-    # Parse natural language to LTL
-    parser = NLToLTLParser(api_key=api_key, model=model, base_url=base_url)
+    # Generate LTLf from natural language
+    generator = NLToLTLfGenerator(api_key=api_key, model=model, base_url=base_url)
     instruction = "Put block A on block B"
 
     print(f"Instruction: {instruction}\n")
-    ltl_spec = parser.parse(instruction)
+    ltl_spec, _, _ = generator.generate(instruction)
 
     print("LTL Formulas:")
     for i, formula in enumerate(ltl_spec.formulas, 1):

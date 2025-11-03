@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Any
 
 from config import get_config
-from stage1_interpretation.ltl_parser import NLToLTLParser
+from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.recursive_dfa_builder import RecursiveDFABuilder
 from stage3_code_generation.agentspeak_generator import AgentSpeakGenerator
 from pipeline_logger import PipelineLogger
@@ -84,7 +84,7 @@ class LTL_BDI_Pipeline:
         print("="*80)
         print(f"LTL-BDI PIPELINE - {mode.upper()} MODE")
         print("="*80)
-        print(f"\n"{nl_instruction}"")
+        print(f"\n\"{nl_instruction}\"")
         print(f"Mode: {mode}")
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)
@@ -124,14 +124,14 @@ class LTL_BDI_Pipeline:
         print("\n[STAGE 1] Natural Language -> LTLf Specification")
         print("-"*80)
 
-        parser = NLToLTLParser(
+        generator = NLToLTLfGenerator(
             api_key=self.config.openai_api_key,
             model=self.config.openai_model,
             domain_file=self.domain_file  # Pass domain file for dynamic prompt
         )
 
         try:
-            ltl_spec, prompt_dict, response_text = parser.parse(nl_instruction)
+            ltl_spec, prompt_dict, response_text = generator.generate(nl_instruction)
             self.logger.log_stage1(
                 nl_instruction,
                 ltl_spec,

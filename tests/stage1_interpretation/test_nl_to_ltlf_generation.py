@@ -4,6 +4,8 @@ Stage 1 Testing: Natural Language -> LTLf Generation
 
 Tests the LLM's ability to correctly generate LTLf formulas from natural language.
 Results are recorded in CSV format with actual outputs and reflections.
+
+**LTLf Syntax Reference**: http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax
 """
 
 import sys
@@ -16,7 +18,7 @@ from typing import List, Dict, Any
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from config import get_config
-from stage1_interpretation.ltl_parser import NLToLTLParser
+from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 
 
 class TestResult:
@@ -69,11 +71,23 @@ def load_test_cases(csv_path: Path) -> List[Dict[str, str]]:
 
 
 def normalize_formula(formula: str) -> str:
-    """Normalize formula for comparison (remove spaces, standardize format)"""
+    """
+    Normalize formula for comparison (remove spaces, standardize format)
+
+    Handles all LTLf syntax operators
+    """
     # Remove all spaces
     normalized = formula.replace(' ', '')
-    # Standardize operators
-    normalized = normalized.replace('¬', 'not')
+
+    # Standardize boolean operators
+    normalized = normalized.replace('¬', '!')  # Old negation symbol
+    normalized = normalized.replace('not', '!')  # Alternative negation
+    normalized = normalized.replace('~', '!')  # Alternative negation symbol
+    normalized = normalized.replace('&&', '&')  # Standardize AND
+    normalized = normalized.replace('||', '|')  # Standardize OR
+    normalized = normalized.replace('=>', '->')  # Standardize IMPLIES
+    normalized = normalized.replace('<=>', '<->')  # Standardize EQUIVALENCE
+
     return normalized.lower()
 
 
@@ -154,15 +168,31 @@ def generate_reflection(test_result: TestResult) -> str:
         reflections.append(f"Expected: {expected}")
         reflections.append(f"Got: {actual}")
 
-        # Specific analysis
+        # Specific analysis for temporal operators
         if "F(" in expected and "F(" not in actual:
-            reflections.append("Missing F (Eventually) operator - prompt may not emphasize temporal goals")
+            reflections.append("Missing F (Eventually) operator")
         if "G(" in expected and "G(" not in actual:
-            reflections.append("Missing G (Always) operator - prompt may not emphasize constraints")
-        if "U" in expected and "U" not in actual:
-            reflections.append("Missing U (Until) operator - prompt may need Until examples")
+            reflections.append("Missing G (Always) operator")
         if "X(" in expected and "X(" not in actual:
-            reflections.append("Missing X (Next) operator - prompt may need sequential action examples")
+            reflections.append("Missing X (Next) operator")
+        if "WX(" in expected and "WX(" not in actual:
+            reflections.append("Missing WX (Weak Next) operator")
+        if " U " in expected and " U " not in actual:
+            reflections.append("Missing U (Until) operator")
+        if " R " in expected and " R " not in actual:
+            reflections.append("Missing R (Release) operator")
+
+        # Boolean operators analysis
+        if " & " in expected and " & " not in actual:
+            reflections.append("Missing & (AND) operator")
+        if " | " in expected and " | " not in actual:
+            reflections.append("Missing | (OR) operator")
+        if "!(" in expected and "!(" not in actual:
+            reflections.append("Missing ! (NOT) operator")
+        if " -> " in expected and " -> " not in actual:
+            reflections.append("Missing -> (IMPLIES) operator")
+        if " <-> " in expected and " <-> " not in actual:
+            reflections.append("Missing <-> (EQUIVALENCE) operator")
 
         # Check object recognition
         if test_result.expected_objects != str(test_result.actual_objects):
@@ -176,13 +206,13 @@ def generate_reflection(test_result: TestResult) -> str:
     return " | ".join(reflections)
 
 
-def run_test_case(parser: NLToLTLParser, test_case: Dict[str, str]) -> TestResult:
+def run_test_case(generator: NLToLTLfGenerator, test_case: Dict[str, str]) -> TestResult:
     """Run a single test case"""
     result = TestResult(test_case)
 
     try:
-        # Parse natural language
-        ltl_spec, _, _ = parser.parse(test_case['natural_language'])
+        # Generate LTLf from natural language
+        ltl_spec, _, _ = generator.generate(test_case['natural_language'])
 
         # Extract results
         result.actual_ltlf = [f.to_string() for f in ltl_spec.formulas]
@@ -221,12 +251,12 @@ def run_all_tests(csv_path: Path, output_path: Path):
     print(f"Loaded {len(test_cases)} test cases from {csv_path}")
     print()
 
-    # Initialize parser using the actual pipeline's domain configuration
+    # Initialize generator using the actual pipeline's domain configuration
     config = get_config()
     # Use default blocksworld domain (same as main pipeline)
     domain_file = str(Path(__file__).parent.parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl")
 
-    parser = NLToLTLParser(
+    generator = NLToLTLfGenerator(
         api_key=config.openai_api_key,
         model=config.openai_model,
         domain_file=domain_file
@@ -240,7 +270,7 @@ def run_all_tests(csv_path: Path, output_path: Path):
         print(f"[{i}/{len(test_cases)}] Testing: {test_case['test_id']} - {test_case['description']}")
         print(f"  NL: \"{test_case['natural_language']}\"")
 
-        result = run_test_case(parser, test_case)
+        result = run_test_case(generator, test_case)
         results.append(result)
 
         # Update category stats
@@ -342,11 +372,11 @@ def print_summary(results: List[TestResult], categories_stats: Dict):
 if __name__ == "__main__":
     # Paths
     script_dir = Path(__file__).parent
-    csv_input = script_dir / "test_cases_nl_to_ltlf.csv"
+    csv_input = script_dir / "test_cases_nl_to_ltlf_comprehensive.csv"
 
     # Create output filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_output = script_dir / f"test_results_nl_to_ltlf_{timestamp}.csv"
+    csv_output = script_dir / f"test_results_nl_to_ltlf_comprehensive_{timestamp}.csv"
 
     # Run tests
     run_all_tests(csv_input, csv_output)

@@ -1,80 +1,112 @@
 """
 LTL (Linear Temporal Logic) Parser and Specification Module
 
-This module converts natural language instructions into LTL formulas
-using temporal operators: G (globally), F (finally), X (next), U (until)
+This module converts natural language instructions into LTLf (LTL on Finite Traces) formulas.
 
-Example LTL formulas for Blocksworld:
+**LTLf Syntax Reference**: http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax
+
+Supported syntax (in order of precedence):
+
+1. Propositional Symbols:
+   - true, false (constants)
+   - [a-z][a-z0-9_]* (atomic propositions)
+
+2. Boolean Operators:
+   - & or && (And)
+   - | or || (Or)
+   - ! or ~ (Not)
+   - -> or => (Implication)
+   - <-> or <=> (Equivalence)
+
+3. Future Temporal Operators:
+   - X (Next)
+   - WX (WeakNext)
+   - U (Until)
+   - R (Release)
+   - F (Eventually)
+   - G (Always)
+
+Example formulas:
 - F(on(a, b))           : Eventually a is on b
 - G(clear(a))           : Always a is clear
 - F(on(a, b) & clear(a)): Eventually a is on b AND a is clear
+- (holding(a) U clear(b)): Hold a until b becomes clear
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from enum import Enum
 import json
 
 
 class TemporalOperator(Enum):
-    """LTL temporal operators"""
+    """Future Temporal Operators (ordered as per LTLf syntax specification)"""
+    NEXT = "X"         # Next state (strong)
+    WEAK_NEXT = "WX"   # Weak next state
+    UNTIL = "U"        # Until (φ U ψ)
+    RELEASE = "R"      # Release (φ R ψ)
     FINALLY = "F"      # Eventually (◇)
     GLOBALLY = "G"     # Always (□)
-    NEXT = "X"         # Next state
-    UNTIL = "U"        # Until
-    RELEASE = "R"      # Release
 
 
 class LogicalOperator(Enum):
-    """Logical operators"""
-    AND = "and"
-    OR = "or"
-    NOT = "not"
-    IMPLIES = "implies"
+    """Boolean Operators (ordered as per LTLf syntax specification)"""
+    AND = "and"         # & or &&
+    OR = "or"           # | or ||
+    NOT = "not"         # ! or ~
+    IMPLIES = "implies" # -> or =>
+    EQUIVALENCE = "equivalence"  # <-> or <=>
 
 
 @dataclass
 class LTLFormula:
-    """Represents an LTL formula"""
+    """Represents an LTLf formula with full syntax support"""
     operator: Optional[TemporalOperator]
-    predicate: Optional[Dict[str, List[str]]]  # e.g., {"on": ["a", "b"]}
+    predicate: Optional[Union[Dict[str, List[str]], str]]  # Dict for predicates, str for constants
     sub_formulas: List['LTLFormula']
     logical_op: Optional[LogicalOperator]
 
     def to_string(self) -> str:
         """Convert LTL formula to string representation"""
+        # Propositional constants: true, false
+        if isinstance(self.predicate, str) and self.predicate in ["true", "false"]:
+            return self.predicate
+
         if self.predicate and not self.operator:
             # Atomic proposition: on(a, b), clear(a), or handempty
-            pred_name = list(self.predicate.keys())[0]
-            args = self.predicate[pred_name]
-            # Nullary predicates (0 arguments): no parentheses
-            if len(args) == 0:
-                return pred_name
-            # Predicates with arguments: include parentheses
-            return f"{pred_name}({', '.join(args)})"
+            if isinstance(self.predicate, dict):
+                pred_name = list(self.predicate.keys())[0]
+                args = self.predicate[pred_name]
+                if len(args) == 0:
+                    return pred_name
+                return f"{pred_name}({', '.join(args)})"
 
-        if self.operator == TemporalOperator.UNTIL and len(self.sub_formulas) == 2:
-            # Until operator: holding(a) U clear(b)
+        # Binary temporal operators: U (Until), R (Release)
+        if self.operator in [TemporalOperator.UNTIL, TemporalOperator.RELEASE] and len(self.sub_formulas) == 2:
             left = self.sub_formulas[0].to_string()
             right = self.sub_formulas[1].to_string()
-            return f"({left} U {right})"
+            op_symbol = self.operator.value
+            return f"({left} {op_symbol} {right})"
 
+        # Unary temporal operators: X, WX, F, G
         if self.operator and len(self.sub_formulas) == 1:
-            # Temporal operator: F(on(a, b)), G(clear(c)), X(holding(a))
-            # Also handles nested: F(G(on(a, b))) where inner is G(on(a, b))
             inner = self.sub_formulas[0].to_string()
             return f"{self.operator.value}({inner})"
 
+        # Boolean operators
         if self.logical_op and len(self.sub_formulas) >= 1:
-            # Logical combination: on(a, b) & clear(a)
             parts = [f.to_string() for f in self.sub_formulas]
+
             if self.logical_op == LogicalOperator.AND:
                 return f"({' & '.join(parts)})"
             elif self.logical_op == LogicalOperator.OR:
                 return f"({' | '.join(parts)})"
             elif self.logical_op == LogicalOperator.NOT:
-                # Negation: not(on(a, b))
-                return f"not({parts[0]})"
+                return f"!({parts[0]})"
+            elif self.logical_op == LogicalOperator.IMPLIES:
+                return f"({parts[0]} -> {parts[1]})"
+            elif self.logical_op == LogicalOperator.EQUIVALENCE:
+                return f"({parts[0]} <-> {parts[1]})"
 
         return "true"
 
@@ -300,12 +332,74 @@ class NLToLTLParser:
                                 sub_formulas=[],
                                 logical_op=None
                             ))
-                        # Wrap in AND
                         atomic = LTLFormula(
                             operator=None,
                             predicate=None,
                             sub_formulas=conjuncts,
                             logical_op=LogicalOperator.AND
+                        )
+
+                    elif inner_type == "disjunction":
+                        # Disjunction: F(on(a,b) | on(c,d))
+                        disjuncts = []
+                        for pred in inner_formula_def["formulas"]:
+                            disjuncts.append(LTLFormula(
+                                operator=None,
+                                predicate=pred,
+                                sub_formulas=[],
+                                logical_op=None
+                            ))
+                        atomic = LTLFormula(
+                            operator=None,
+                            predicate=None,
+                            sub_formulas=disjuncts,
+                            logical_op=LogicalOperator.OR
+                        )
+
+                    elif inner_type == "implication":
+                        # Implication: F(clear(a) -> on(a,b))
+                        left_pred = inner_formula_def["left_formula"]
+                        right_pred = inner_formula_def["right_formula"]
+                        left_atomic = LTLFormula(
+                            operator=None,
+                            predicate=left_pred,
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                        right_atomic = LTLFormula(
+                            operator=None,
+                            predicate=right_pred,
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                        atomic = LTLFormula(
+                            operator=None,
+                            predicate=None,
+                            sub_formulas=[left_atomic, right_atomic],
+                            logical_op=LogicalOperator.IMPLIES
+                        )
+
+                    elif inner_type == "equivalence":
+                        # Equivalence: F(clear(a) <-> on(a,b))
+                        left_pred = inner_formula_def["left_formula"]
+                        right_pred = inner_formula_def["right_formula"]
+                        left_atomic = LTLFormula(
+                            operator=None,
+                            predicate=left_pred,
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                        right_atomic = LTLFormula(
+                            operator=None,
+                            predicate=right_pred,
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                        atomic = LTLFormula(
+                            operator=None,
+                            predicate=None,
+                            sub_formulas=[left_atomic, right_atomic],
+                            logical_op=LogicalOperator.EQUIVALENCE
                         )
 
                     else:
@@ -336,12 +430,11 @@ class NLToLTLParser:
                 spec.add_formula(formula)
 
             elif ltl_def["type"] == "until":
-                # U (Until) operator has two sub-formulas
+                # U (Until) operator
                 operator = TemporalOperator.UNTIL
                 left_predicate = ltl_def["left_formula"]
                 right_predicate = ltl_def["right_formula"]
 
-                # Create left atomic formula
                 left_atomic = LTLFormula(
                     operator=None,
                     predicate=left_predicate,
@@ -349,7 +442,6 @@ class NLToLTLParser:
                     logical_op=None
                 )
 
-                # Create right atomic formula
                 right_atomic = LTLFormula(
                     operator=None,
                     predicate=right_predicate,
@@ -357,7 +449,35 @@ class NLToLTLParser:
                     logical_op=None
                 )
 
-                # Wrap in Until operator
+                formula = LTLFormula(
+                    operator=operator,
+                    predicate=None,
+                    sub_formulas=[left_atomic, right_atomic],
+                    logical_op=None
+                )
+
+                spec.add_formula(formula)
+
+            elif ltl_def["type"] == "release":
+                # R (Release) operator
+                operator = TemporalOperator.RELEASE
+                left_predicate = ltl_def["left_formula"]
+                right_predicate = ltl_def["right_formula"]
+
+                left_atomic = LTLFormula(
+                    operator=None,
+                    predicate=left_predicate,
+                    sub_formulas=[],
+                    logical_op=None
+                )
+
+                right_atomic = LTLFormula(
+                    operator=None,
+                    predicate=right_predicate,
+                    sub_formulas=[],
+                    logical_op=None
+                )
+
                 formula = LTLFormula(
                     operator=operator,
                     predicate=None,

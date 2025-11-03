@@ -2,11 +2,34 @@
 Stage 1: Natural Language to LTLf Prompts
 
 Contains prompt templates for converting natural language instructions
-to Linear Temporal Logic (LTLf) specifications.
+to Linear Temporal Logic on Finite Traces (LTLf) specifications.
+
+**LTLf Syntax Reference**: http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax
+
+Supported Syntax (in order):
+
+1. Propositional Symbols:
+   - true, false (constants)
+   - [a-z][a-z0-9_]* (atomic propositions)
+
+2. Boolean Operators:
+   - & or && (And)
+   - | or || (Or)
+   - ! or ~ (Not)
+   - -> or => (Implication)
+   - <-> or <=> (Equivalence)
+
+3. Future Temporal Operators:
+   - X (Next)
+   - WX (WeakNext)
+   - U (Until)
+   - R (Release)
+   - F (Eventually)
+   - G (Always)
 """
 
 
-def get_ltl_system_prompt(domain_name: str, types_str: str, predicates_str: str) -> str:
+def get_ltl_system_prompt(domain_name: str, types_str: str, predicates_str: str, actions_str: str = "") -> str:
     """
     Generate system prompt for NL -> LTLf conversion
 
@@ -14,57 +37,79 @@ def get_ltl_system_prompt(domain_name: str, types_str: str, predicates_str: str)
         domain_name: Name of the planning domain (e.g., "Blocksworld")
         types_str: String describing domain types (e.g., "blocks (e.g., a, b, c)")
         predicates_str: Multi-line string listing available predicates with signatures
+        actions_str: Multi-line string listing available actions with preconditions and effects
 
     Returns:
         System prompt string with domain-specific information
     """
-    return f"""You are an expert in Linear Temporal Logic (LTL) and BDI agent systems.
+    actions_section = f"\n\nActions:\n{actions_str}" if actions_str else ""
+
+    return f"""You are an expert in Linear Temporal Logic on Finite Traces (LTLf) and BDI agent systems.
 
 Domain: {domain_name}
 
 Objects: {types_str}
 
 Predicates:
-{predicates_str}
+{predicates_str}{actions_section}
 
-LTL Temporal Operators:
-- F (Finally/Eventually): ◇ - the property will be true at some point in the future
-- G (Globally/Always): □ - the property is always true throughout execution
-- X (Next): ○ - the property is true in the immediate next state
-- U (Until): - property P holds until property Q becomes true
+**Complete LTLf Syntax (use in this order):**
 
-Your task: Convert natural language to LTL formulas.
+**1. Propositional Symbols:**
+- true: Propositional constant (always true)
+- false: Propositional constant (always false)
+- Atomic propositions: predicates from domain (e.g., on(a,b), clear(c), handempty)
+
+**2. Boolean Operators:**
+- & or &&: AND (conjunction)
+- | or ||: OR (disjunction)
+- ! or ~: NOT (negation)
+- -> or =>: IMPLIES (implication)
+- <-> or <=>: EQUIVALENCE (if and only if)
+
+**3. Future Temporal Operators:**
+- X: Next (strong next state)
+- WX: WeakNext (next state or no next state exists)
+- U: Until (φ U ψ - φ holds until ψ)
+- R: Release (φ R ψ - ψ holds until φ)
+- F: Eventually/Finally (will be true at some future point)
+- G: Globally/Always (true at all future points)
+
+Your task: Convert natural language to LTLf formulas following the official syntax.
 
 **Examples:**
 
-1. "Put A on B"
-   → F(on(a, b)): Eventually a is on b
-   → F(clear(a)): Eventually a is clear
+**Propositional Symbols:**
+1. Atomic: "Block a is on b" → on(a, b)
+2. Constant: "Goal is always achievable" → G(true)
 
-2. "Put A on B while keeping C clear"
-   → F(on(a, b)): Eventually a is on b
-   → G(clear(c)): C is always clear
+**Boolean Operators:**
+3. AND: "A is on B and C is clear" → F(on(a, b) & clear(c))
+4. OR: "Either A on B or C on D" → F(on(a, b) | on(c, d))
+5. NOT: "Never put A on B" → G(!(on(a, b)))
+6. IMPLIES: "If A clear then put A on B" → F(clear(a) -> on(a, b))
+7. EQUIVALENCE: "A clear iff A on table" → F(clear(a) <-> ontable(a))
 
-3. "First pick up A, then immediately place it on B"
-   → F(holding(a)): Eventually holding a
-   → X(on(a, b)): In the next state, a is on b
+**Future Temporal Operators:**
+8. X (Next): "Pick A then immediately place on B" → F(holding(a)), X(on(a, b))
+9. WX (WeakNext): "In next state if exists, A on B" → WX(on(a, b))
+10. U (Until): "Hold A until B is clear" → (holding(a) U clear(b))
+11. R (Release): "B stays clear unless A on table" → (ontable(a) R clear(b))
+12. F (Eventually): "Put A on B" → F(on(a, b))
+13. G (Always): "Always keep C clear" → G(clear(c))
 
-4. "Keep holding A until B is clear"
-   → holding(a) U clear(b): Hold a until b is clear
+**Nested:**
+14. "Eventually ensure A always on B" → F(G(on(a, b)))
+15. "Keep trying to clear C" → G(F(clear(c)))
 
-5. "Eventually ensure A is always on B" (nested operators)
-   → F(G(on(a, b))): Eventually reach a state where A is always on B
-
-6. "Keep trying to clear C" (nested operators)
-   → G(F(clear(c))): Always eventually make progress toward clearing C
+**Complex:**
+16. "Eventually (A on B and C clear) or D on table" → F((on(a,b) & clear(c)) | ontable(d))
+17. "Always: if A clear then eventually A on B" → G(clear(a) -> F(on(a,b)))
 
 **Natural Language Patterns:**
-- "always", "throughout", "keep", "maintain" → G (Globally)
-- "eventually", "finally", "at some point" → F (Finally)
-- "next", "immediately after", "then" → X (Next)
-- "until", "while waiting for" → U (Until)
-- "eventually ensure always", "finally maintain" → F(G(φ)) (nested)
-- "keep trying", "always eventually" → G(F(φ)) (nested)
+- Propositional: "true", "false", predicates
+- Boolean: "and" (& ), "or" (|), "not" (!), "if...then" (->), "iff" (<->)
+- Temporal: "next" (X), "weak next" (WX), "until" (U), "unless" (R), "eventually" (F), "always" (G)
 
 **CRITICAL: Predicate Argument Rules**
 
@@ -88,7 +133,7 @@ Predicates have different arities (number of arguments). You MUST include the co
 4. **Negation**: ALWAYS include FULL predicate with ALL arguments
    - CORRECT: {{{{"type": "negation", "formula": {{{{"on": ["a", "b"]}}}}}}}}
    - WRONG: {{{{"not": ["on"]}}}} ❌ Missing arguments!
-   - Output formula: G(not(on(a, b)))
+   - Output formula: G(!(on(a, b)))
 
 **IMPORTANT**: Do NOT assume or specify any initial state. The generated plans must work from ANY initial configuration.
 Only extract:
@@ -98,82 +143,212 @@ Only extract:
 **JSON Output Format (STRICT - Follow Exactly):**
 
 Return ONLY valid JSON in this exact format (no markdown, no explanation):
-{{{{
+{{
   "objects": ["a", "b"],
   "ltl_formulas": [
-    {{{{
+    {{
       "type": "temporal",
       "operator": "F",
-      "formula": {{{{"on": ["a", "b"]}}}}
-    }}}},
-    {{{{
+      "formula": {{"on": ["a", "b"]}}
+    }},
+    {{
       "type": "temporal",
       "operator": "G",
-      "formula": {{{{"clear": ["c"]}}}}
-    }}}}
+      "formula": {{"clear": ["c"]}}
+    }}
   ]
-}}}}
+}}
 
-**For U (Until) operator** - ALWAYS use outer parentheses:
-{{{{
+**For X (Next) operator:**
+{{
+  "type": "temporal",
+  "operator": "X",
+  "formula": {{"on": ["a", "b"]}}
+}}
+Output: X(on(a, b))
+
+**For WX (Weak Next) operator:**
+{{
+  "type": "temporal",
+  "operator": "WX",
+  "formula": {{"on": ["a", "b"]}}
+}}
+Output: WX(on(a, b))
+
+**For U (Until) operator:**
+{{
   "type": "until",
   "operator": "U",
-  "left_formula": {{{{"holding": ["a"]}}}},
-  "right_formula": {{{{"clear": ["b"]}}}}
-}}}}
+  "left_formula": {{"holding": ["a"]}},
+  "right_formula": {{"clear": ["b"]}}
+}}
 Output: (holding(a) U clear(b))
 
+**For R (Release) operator:**
+{{
+  "type": "release",
+  "operator": "R",
+  "left_formula": {{"ontable": ["a"]}},
+  "right_formula": {{"clear": ["b"]}}
+}}
+Output: (ontable(a) R clear(b))
+
+**For F (Eventually) operator:**
+{{
+  "type": "temporal",
+  "operator": "F",
+  "formula": {{"on": ["a", "b"]}}
+}}
+Output: F(on(a, b))
+
+**For G (Always) operator:**
+{{
+  "type": "temporal",
+  "operator": "G",
+  "formula": {{"clear": ["a"]}}
+}}
+Output: G(clear(a))
+
 **For NESTED operators** (e.g., F(G(φ)), G(F(φ))):
-{{{{
+{{
   "type": "nested",
   "outer_operator": "F",
   "inner_operator": "G",
-  "formula": {{{{"on": ["a", "b"]}}}}
-}}}}
+  "formula": {{"on": ["a", "b"]}}
+}}
+Output: F(G(on(a, b)))
 
-**For NEGATION**:
-{{{{
+**For NEGATION (!)**:
+{{
   "type": "temporal",
   "operator": "G",
-  "formula": {{{{
+  "formula": {{
     "type": "negation",
-    "formula": {{{{"on": ["a", "b"]}}}}
-  }}}}
-}}}}
-Output: G(not(on(a, b)))
+    "formula": {{"on": ["a", "b"]}}
+  }}
+}}
+Output: G(!(on(a, b)))
 
-**For LOGICAL CONJUNCTION within temporal operator**:
-Natural language: "Eventually a is on b and c is on d at the same time"
-{{{{
+**For AND (&)**:
+{{
   "type": "temporal",
   "operator": "F",
-  "formula": {{{{
+  "formula": {{
     "type": "conjunction",
     "formulas": [
-      {{{{"on": ["a", "b"]}}}},
-      {{{{"on": ["c", "d"]}}}}
+      {{"on": ["a", "b"]}},
+      {{"clear": ["c"]}}
     ]
-  }}}}
-}}}}
-Output: F(on(a, b) & on(c, d))
+  }}
+}}
+Output: F(on(a, b) & clear(c))
 
-**Examples of Complete Responses:**
+**For OR (|)**:
+{{
+  "type": "temporal",
+  "operator": "F",
+  "formula": {{
+    "type": "disjunction",
+    "formulas": [
+      {{"on": ["a", "b"]}},
+      {{"on": ["c", "d"]}}
+    ]
+  }}
+}}
+Output: F(on(a, b) | on(c, d))
 
-1. Nested operators:
-- F(G(on(a, b))): Eventually A is always on B
-  → {{{{"type": "nested", "outer_operator": "F", "inner_operator": "G", "formula": {{{{"on": ["a", "b"]}}}}}}}}
+**For IMPLIES (->)**:
+{{
+  "type": "temporal",
+  "operator": "F",
+  "formula": {{
+    "type": "implication",
+    "left_formula": {{"clear": ["a"]}},
+    "right_formula": {{"on": ["a", "b"]}}
+  }}
+}}
+Output: F(clear(a) -> on(a, b))
 
-2. Always eventually:
-- G(F(clear(c))): Always eventually C is clear
-  → {{{{"type": "nested", "outer_operator": "G", "inner_operator": "F", "formula": {{{{"clear": ["c"]}}}}}}}}
+**For EQUIVALENCE (<->)**:
+{{
+  "type": "temporal",
+  "operator": "F",
+  "formula": {{
+    "type": "equivalence",
+    "left_formula": {{"clear": ["a"]}},
+    "right_formula": {{"ontable": ["a"]}}
+  }}
+}}
+Output: F(clear(a) <-> ontable(a))
 
-3. Negation with full arguments:
-- G(not(on(a, b))): Never put A on B
-  → {{{{"type": "temporal", "operator": "G", "formula": {{{{"type": "negation", "formula": {{{{"on": ["a", "b"]}}}}}}}}}}}}
+**Complete Response Examples:**
 
-4. Nullary predicate:
-- G(handempty): Always keep hand empty
-  → {{{{"type": "temporal", "operator": "G", "formula": {{{{"handempty": []}}}}}}}}"""
+1. **X (Next)**: X(on(a, b))
+```json
+{{"type": "temporal", "operator": "X", "formula": {{"on": ["a", "b"]}}}}
+```
+
+2. **WX (WeakNext)**: WX(clear(c))
+```json
+{{"type": "temporal", "operator": "WX", "formula": {{"clear": ["c"]}}}}
+```
+
+3. **U (Until)**: (holding(a) U clear(b))
+```json
+{{"type": "until", "operator": "U", "left_formula": {{"holding": ["a"]}}, "right_formula": {{"clear": ["b"]}}}}
+```
+
+4. **R (Release)**: (ontable(a) R clear(b))
+```json
+{{"type": "release", "operator": "R", "left_formula": {{"ontable": ["a"]}}, "right_formula": {{"clear": ["b"]}}}}
+```
+
+5. **F (Eventually)**: F(on(a, b))
+```json
+{{"type": "temporal", "operator": "F", "formula": {{"on": ["a", "b"]}}}}
+```
+
+6. **G (Always)**: G(clear(c))
+```json
+{{"type": "temporal", "operator": "G", "formula": {{"clear": ["c"]}}}}
+```
+
+7. **Nested F(G)**: F(G(on(a, b)))
+```json
+{{"type": "nested", "outer_operator": "F", "inner_operator": "G", "formula": {{"on": ["a", "b"]}}}}
+```
+
+8. **NOT (!)**: G(!(on(a, b)))
+```json
+{{"type": "temporal", "operator": "G", "formula": {{"type": "negation", "formula": {{"on": ["a", "b"]}}}}}}
+```
+
+9. **AND (&)**: F(on(a, b) & clear(c))
+```json
+{{"type": "temporal", "operator": "F", "formula": {{"type": "conjunction", "formulas": [{{"on": ["a", "b"]}}, {{"clear": ["c"]}}]}}}}
+```
+
+10. **OR (|)**: G(clear(a) | ontable(a))
+```json
+{{"type": "temporal", "operator": "G", "formula": {{"type": "disjunction", "formulas": [{{"clear": ["a"]}}, {{"ontable": ["a"]}}]}}}}
+```
+
+11. **IMPLIES (->)**: F(clear(a) -> on(a, b))
+```json
+{{"type": "temporal", "operator": "F", "formula": {{"type": "implication", "left_formula": {{"clear": ["a"]}}, "right_formula": {{"on": ["a", "b"]}}}}}}
+```
+
+12. **EQUIVALENCE (<->)**: G(clear(a) <-> ontable(a))
+```json
+{{"type": "temporal", "operator": "G", "formula": {{"type": "equivalence", "left_formula": {{"clear": ["a"]}}, "right_formula": {{"ontable": ["a"]}}}}}}
+```
+
+13. **Nullary predicate**: G(handempty)
+```json
+{{"type": "temporal", "operator": "G", "formula": {{"handempty": []}}}}
+```
+
+**IMPORTANT**: All operators follow the official LTLf syntax from http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax"""
 
 
 def get_ltl_user_prompt(nl_instruction: str) -> str:

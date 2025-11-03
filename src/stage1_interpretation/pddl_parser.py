@@ -44,9 +44,16 @@ class PDDLPredicate:
 
 @dataclass
 class PDDLAction:
-    """Represents a PDDL action"""
+    """Represents a PDDL action with full details"""
     name: str
     parameters: List[str]
+    preconditions: str  # String representation of preconditions
+    effects: str  # String representation of effects
+
+    def to_description(self) -> str:
+        """Convert to human-readable description"""
+        params_str = ", ".join(self.parameters) if self.parameters else "none"
+        return f"{self.name}({params_str})\n    Pre: {self.preconditions}\n    Eff: {self.effects}"
 
 
 @dataclass
@@ -141,17 +148,67 @@ class PDDLParser:
 
     @staticmethod
     def _extract_actions(content: str) -> List[PDDLAction]:
-        """Extract action declarations"""
-        # Find all action definitions
-        action_pattern = r'\(:action\s+([a-zA-Z][a-zA-Z0-9_-]*)\s+:parameters\s+\(([^)]*)\)'
-        matches = re.findall(action_pattern, content, re.DOTALL)
-
+        """Extract action declarations with preconditions and effects"""
         actions = []
-        for action_name, params_str in matches:
-            params = PDDLParser._parse_parameters(params_str)
-            actions.append(PDDLAction(name=action_name, parameters=params))
+
+        # Find all action blocks
+        action_pattern = r'\(:action\s+([a-zA-Z][a-zA-Z0-9_-]*)\s+(.*?)\s*(?=\(:action|\Z)'
+        action_matches = re.findall(action_pattern, content, re.DOTALL)
+
+        for action_name, action_body in action_matches:
+            # Extract parameters
+            params_match = re.search(r':parameters\s+\(([^)]*)\)', action_body)
+            params = PDDLParser._parse_parameters(params_match.group(1)) if params_match else []
+
+            # Extract preconditions
+            precond_match = re.search(r':precondition\s+(.*?)(?=:effect|\Z)', action_body, re.DOTALL)
+            preconditions = PDDLParser._clean_formula(precond_match.group(1)) if precond_match else "none"
+
+            # Extract effects
+            effect_match = re.search(r':effect\s+(.*?)(?=\)[\s]*\Z)', action_body, re.DOTALL)
+            effects = PDDLParser._clean_formula(effect_match.group(1)) if effect_match else "none"
+
+            actions.append(PDDLAction(
+                name=action_name,
+                parameters=params,
+                preconditions=preconditions,
+                effects=effects
+            ))
 
         return actions
+
+    @staticmethod
+    def _clean_formula(formula_str: str) -> str:
+        """
+        Clean and format a PDDL formula string
+
+        Removes extra whitespace and normalizes formatting while preserving
+        the logical structure. Handles oneof effects and nested formulas.
+        """
+        if not formula_str:
+            return "none"
+
+        # Remove extra whitespace and newlines
+        formula_str = ' '.join(formula_str.split())
+
+        # Remove outer parentheses if the entire formula is wrapped
+        formula_str = formula_str.strip()
+        if formula_str.startswith('(') and formula_str.endswith(')'):
+            # Check if these are the outermost parens
+            depth = 0
+            is_outer = True
+            for i, char in enumerate(formula_str[1:-1], 1):
+                if char == '(':
+                    depth += 1
+                elif char == ')':
+                    depth -= 1
+                    if depth < 0:
+                        is_outer = False
+                        break
+            if is_outer and depth == 0:
+                formula_str = formula_str[1:-1].strip()
+
+        return formula_str if formula_str else "none"
 
     @staticmethod
     def _parse_parameters(params_str: str) -> List[str]:
@@ -211,7 +268,7 @@ def test_pddl_parser():
 
     print(f"\nActions ({len(domain.actions)}):")
     for action in domain.actions:
-        print(f"  - {action.name}")
+        print(f"  - {action.to_description()}")
 
     print()
     print("="*80)

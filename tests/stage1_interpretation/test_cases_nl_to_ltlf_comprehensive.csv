@@ -1,0 +1,21 @@
+test_id,category,natural_language,expected_ltlf,expected_objects,description,notes
+P01,propositional_constant_true,"Goal is always achievable","G(true)","[]",Propositional constant: true,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Propositional Symbols
+P02,propositional_atomic_nullary,"Keep the hand empty","G(handempty)","[]",Atomic proposition: nullary predicate,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Propositional Symbols
+P03,propositional_atomic_unary,"Eventually block a is clear","F(clear(a))","['a']",Atomic proposition: unary predicate,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Propositional Symbols
+P04,propositional_atomic_binary,"Eventually a is on b","F(on(a, b))","['a', 'b']",Atomic proposition: binary predicate,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Propositional Symbols
+B01,boolean_and,"Eventually a is on b and c is clear","F(on(a, b) & clear(c))","['a', 'b', 'c']",Boolean AND operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Boolean Operators (And)
+B02,boolean_or,"Eventually either a is on b or c is on d","F(on(a, b) | on(c, d))","['a', 'b', 'c', 'd']",Boolean OR operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Boolean Operators (Or)
+B03,boolean_not,"Never put a on b","G(!(on(a, b)))","['a', 'b']",Boolean NOT operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Boolean Operators (Not)
+B04,boolean_implies,"Eventually if a is clear then a is on b","F(clear(a) -> on(a, b))","['a', 'b']",Boolean IMPLIES operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Boolean Operators (Implication)
+B05,boolean_equivalence,"Eventually a is clear if and only if a is on table","F(clear(a) <-> ontable(a))","['a']",Boolean EQUIVALENCE operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Boolean Operators (Equivalence)
+T01,temporal_next,"Pick up a then immediately place on b","F(holding(a)), X(on(a, b))","['a', 'b']",Temporal X (Next) operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Future Temporal Operators (Next)
+T02,temporal_weak_next,"In next state if exists a is on b","WX(on(a, b))","['a', 'b']",Temporal WX (WeakNext) operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Future Temporal Operators (WeakNext)
+T03,temporal_until,"Keep holding a until b is clear","(holding(a) U clear(b))","['a', 'b']",Temporal U (Until) operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Future Temporal Operators (Until)
+T04,temporal_release,"B stays clear unless a is placed on table","(ontable(a) R clear(b))","['a', 'b']",Temporal R (Release) operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Future Temporal Operators (Release)
+T05,temporal_eventually,"Put block a on block b","F(on(a, b))","['a', 'b']",Temporal F (Eventually) operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Future Temporal Operators (Eventually)
+T06,temporal_globally,"Always keep block a clear","G(clear(a))","['a']",Temporal G (Always) operator,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Future Temporal Operators (Always)
+N01,nested_fg,"Eventually ensure a is always on b","F(G(on(a, b)))","['a', 'b']",Nested temporal: F(G),http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Nested operators
+N02,nested_gf,"Keep trying to clear c","G(F(clear(c)))","['c']",Nested temporal: G(F),http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Nested operators
+C01,complex_bool_temporal,"Eventually either a on b and c clear or d on table","F((on(a, b) & clear(c)) | ontable(d))","['a', 'b', 'c', 'd']",Complex: Boolean within temporal,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Combined operators
+C02,complex_temporal_bool,"Always if a is clear then eventually a is on b","G(clear(a) -> F(on(a, b)))","['a', 'b']",Complex: Temporal within boolean,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Combined operators
+C03,complex_until_conjunction,"Keep holding a and b clear until c is on d","((holding(a) & clear(b)) U on(c, d))","['a', 'b', 'c', 'd']",Complex: Until with conjunction,http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax - Combined operators
