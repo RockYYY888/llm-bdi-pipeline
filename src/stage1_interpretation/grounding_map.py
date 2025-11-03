@@ -204,7 +204,18 @@ def create_propositional_symbol(predicate: str, args: List[str]) -> str:
         return predicate.lower()
 
     # Join predicate and args with underscores, all lowercase
-    return f"{predicate.lower()}_{'_'.join(arg.lower() for arg in args)}"
+    # Ensure all args are strings (convert if needed)
+    str_args = []
+    for arg in args:
+        if isinstance(arg, str):
+            str_args.append(arg.lower())
+        elif isinstance(arg, dict):
+            # Skip nested formulas - these shouldn't be in propositional symbols
+            continue
+        else:
+            str_args.append(str(arg).lower())
+
+    return f"{predicate.lower()}_{'_'.join(str_args)}"
 
 
 def test_grounding_map():

@@ -139,6 +139,18 @@ Predicates have different arities (number of arguments). You MUST include the co
 Only extract:
 1. The objects (blocks) mentioned in the instruction
 2. The LTL goal formulas (what should be achieved)
+3. The propositional atoms used (for grounding map)
+
+**CRITICAL - Propositionalization Concept:**
+
+LTLf only supports propositional atoms (not parameterized predicates). However, for human readability
+and domain mapping, we maintain a grounding map between propositional symbols and original predicates.
+
+Naming Convention for Propositional Symbols:
+- Nullary predicates: handempty → handempty
+- Unary predicates: clear(a) → clear_a
+- Binary predicates: on(a, b) → on_a_b
+- General rule: predicate_arg1_arg2_... (lowercase, underscore-separated)
 
 **JSON Output Format (STRICT - Follow Exactly):**
 
@@ -156,6 +168,10 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
       "operator": "G",
       "formula": {{"clear": ["c"]}}
     }}
+  ],
+  "atoms": [
+    {{"symbol": "on_a_b", "predicate": "on", "args": ["a", "b"]}},
+    {{"symbol": "clear_c", "predicate": "clear", "args": ["c"]}}
   ]
 }}
 
@@ -347,6 +363,37 @@ Output: F(clear(a) <-> ontable(a))
 ```json
 {{"type": "temporal", "operator": "G", "formula": {{"handempty": []}}}}
 ```
+
+**COMPLETE RESPONSE EXAMPLE:**
+
+For instruction "Put block a on block b, and keep c clear":
+```json
+{{
+  "objects": ["a", "b", "c"],
+  "ltl_formulas": [
+    {{
+      "type": "temporal",
+      "operator": "F",
+      "formula": {{"on": ["a", "b"]}}
+    }},
+    {{
+      "type": "temporal",
+      "operator": "G",
+      "formula": {{"clear": ["c"]}}
+    }}
+  ],
+  "atoms": [
+    {{"symbol": "on_a_b", "predicate": "on", "args": ["a", "b"]}},
+    {{"symbol": "clear_c", "predicate": "clear", "args": ["c"]}}
+  ]
+}}
+```
+
+**VALIDATION RULES:**
+1. Every predicate used in ltl_formulas MUST have a corresponding entry in atoms
+2. Symbol naming MUST follow: predicate_arg1_arg2_... (lowercase, underscore)
+3. All args in atoms must be from the objects list
+4. Predicates and objects MUST exist in the provided domain
 
 **IMPORTANT**: All operators follow the official LTLf syntax from http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax"""
 

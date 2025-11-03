@@ -370,8 +370,11 @@ class NLToLTLfGenerator:
 
                 spec.add_formula(outer_formula)
 
-        # Create grounding map from parsed formulas
-        spec.grounding_map = self._create_grounding_map(spec)
+        # Create grounding map - use LLM-provided atoms if available, otherwise extract
+        if "atoms" in result and result["atoms"]:
+            spec.grounding_map = self._create_grounding_map_from_atoms(result["atoms"], spec)
+        else:
+            spec.grounding_map = self._create_grounding_map(spec)
 
         return (spec, prompt_dict, result_text)
 
@@ -402,6 +405,59 @@ class NLToLTLfGenerator:
         # Extract predicates from all formulas
         for formula in spec.formulas:
             extract_predicates(formula)
+
+        return gmap
+
+    def _create_grounding_map_from_atoms(self, atoms_list: list, spec: LTLSpecification) -> GroundingMap:
+        """
+        Create grounding map from LLM-provided atoms list
+
+        Also validates that all atoms are consistent with formulas.
+
+        Args:
+            atoms_list: List of atom dicts from LLM response
+            spec: LTL specification for validation
+
+        Returns:
+            GroundingMap with validated atoms
+        """
+        gmap = GroundingMap()
+
+        # Add each atom from LLM response
+        for atom_dict in atoms_list:
+            symbol = atom_dict.get("symbol", "")
+            predicate = atom_dict.get("predicate", "")
+            args = atom_dict.get("args", [])
+
+            # Validate symbol naming convention
+            expected_symbol = create_propositional_symbol(predicate, args)
+            if symbol != expected_symbol:
+                print(f"⚠️  Warning: LLM provided symbol '{symbol}' doesn't match convention '{expected_symbol}'")
+                # Use the expected symbol for consistency
+                symbol = expected_symbol
+
+            gmap.add_atom(symbol, predicate, args)
+
+        # Also extract predicates from formulas to verify completeness
+        extracted_gmap = self._create_grounding_map(spec)
+
+        # Check if LLM missed any atoms
+        for extracted_symbol, extracted_atom in extracted_gmap.atoms.items():
+            if extracted_symbol not in gmap.atoms:
+                print(f"⚠️  Warning: LLM missed atom '{extracted_symbol}', adding it")
+                gmap.add_atom(
+                    extracted_symbol,
+                    extracted_atom.predicate,
+                    extracted_atom.args
+                )
+
+        # Validate with domain if available
+        if self.domain:
+            domain_predicates = [pred.name for pred in self.domain.predicates]
+            for symbol, atom in gmap.atoms.items():
+                errors = gmap.validate_atom(symbol, domain_predicates, spec.objects)
+                if errors:
+                    print(f"⚠️  Validation errors for {symbol}: {errors}")
 
         return gmap
 
