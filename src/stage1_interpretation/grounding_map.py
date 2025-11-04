@@ -131,8 +131,8 @@ class GroundingMap:
             errors.append(f"Atom '{symbol}' not found in grounding map")
             return errors
 
-        # Check predicate exists
-        if atom.predicate not in domain_predicates:
+        # Check predicate exists (skip propositional constants)
+        if atom.predicate not in ['true', 'false'] and atom.predicate not in domain_predicates:
             errors.append(f"Unknown predicate '{atom.predicate}' in atom '{symbol}'")
 
         # Check all arguments are valid objects

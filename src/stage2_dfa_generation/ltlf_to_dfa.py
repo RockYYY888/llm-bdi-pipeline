@@ -90,7 +90,7 @@ class PredicateToProposition:
         """
 
         # Reserved LTL operators that should NOT be replaced
-        ltl_operators = {'F', 'G', 'X', 'U', 'R', 'W', 'M'}
+        ltl_operators = {'F', 'G', 'X', 'WX', 'U', 'R', 'W', 'M'}
 
         def replacer(match):
             full_match = match.group(0)  # e.g., "on(a, b)" or "F(x)"

@@ -95,33 +95,43 @@ Predicates:
 - Semicolons (;)
 - Any other punctuation (symbol) not in the tables above
 
-**CRITICAL - Operator Precedence (Highest to Lowest):**
+**CRITICAL - Operator Precedence:**
 
 Understanding precedence is CRITICAL for correct LTLf formula construction. The parser applies operators
-in the following order (from highest precedence to lowest):
+based on the following precedence levels (higher number = higher precedence = binds tighter):
 
-**Precedence Level 1 (Highest - Unary Operators):**
-- !, ~ (Negation)
-- X (Next)
-- WX (WeakNext)
-- F (Eventually)
-- G (Always)
+**Operator Precedence Table (JSON format for clarity):**
 
-**Precedence Level 2 (Binary Temporal):**
-- U (Until)
-- R (Release)
+```json
+{{
+  "!": 6,
+  "~": 6,
+  "X": 5,
+  "WX": 5,
+  "F": 5,
+  "G": 5,
+  "U": 4,
+  "R": 4,
+  "&": 3,
+  "&&": 3,
+  "|": 2,
+  "||": 2,
+  "->": 1,
+  "=>": 1,
+  "<->": 0,
+  "<=>": 0
+}}
+```
 
-**Precedence Level 3 (Boolean AND):**
-- &, && (Conjunction)
+**Precedence Levels Explained:**
 
-**Precedence Level 4 (Boolean OR):**
-- |, || (Disjunction)
-
-**Precedence Level 5 (Implication):**
-- ->, => (Implication)
-
-**Precedence Level 6 (Lowest - Equivalence):**
-- <->, <=> (Equivalence)
+- **Level 6 (Highest - Binds Tightest)**: ! ~ (Negation)
+- **Level 5**: X WX F G (Unary Temporal Operators)
+- **Level 4**: U R (Binary Temporal Operators - Until, Release)
+- **Level 3**: & && (Conjunction/AND)
+- **Level 2**: | || (Disjunction/OR)
+- **Level 1**: -> => (Implication)
+- **Level 0 (Lowest - Binds Loosest)**: <-> <=> (Equivalence)
 
 **Precedence Examples:**
 
@@ -137,9 +147,10 @@ in the following order (from highest precedence to lowest):
    - Disjunction groups before implication
    - Equivalent to: "clear(a) IMPLIES (on(a,b) OR on(b,c))"
 
-4. **"holding(a) U clear(b) & on(c,d)"** parses as **"holding(a) U (clear(b) & on(c,d))"** (& has higher precedence than U)
-   - Conjunction in right operand of Until
-   - Equivalent to: "holding(a) UNTIL (clear(b) AND on(c,d))"
+4. **"holding(a) U clear(b) & on(c,d)"** parses as **"(holding(a) U clear(b)) & on(c,d)"** (U has higher precedence than &)
+   - Until binds tighter than conjunction
+   - Equivalent to: "(holding(a) UNTIL clear(b)) AND on(c,d)"
+   - NOTE: If you want conjunction in right operand, use explicit parentheses: "holding(a) U (clear(b) & on(c,d))"
 
 5. **"!on(a,b) & clear(c)"** parses as **"(!on(a,b)) & clear(c)"** (! has higher precedence than &)
    - Negation binds tighter than conjunction
@@ -185,7 +196,23 @@ Your JSON structure MUST reflect the correct operator precedence through proper 
 }}
 ```
 
-**Example 3:** "holding(a) U clear(b) & on(c,d)" → holding(a) U (clear(b) & on(c,d))
+**Example 3:** "holding(a) U clear(b) & on(c,d)" → (holding(a) U clear(b)) & on(c,d)
+```json
+{{
+  "type": "conjunction",
+  "formulas": [
+    {{
+      "type": "until",
+      "operator": "U",
+      "left_formula": {{"holding": ["a"]}},
+      "right_formula": {{"clear": ["b"]}}
+    }},
+    {{"on": ["c", "d"]}}
+  ]
+}}
+```
+
+**Example 3b:** If you want conjunction in right operand: "holding(a) U (clear(b) & on(c,d))"
 ```json
 {{
   "type": "until",
@@ -210,11 +237,29 @@ the final LTLf string formula, parentheses should be used to:
 2. Improve readability for complex nested expressions
 3. Group operands for Until (U) and Release (R) operators (always use outer parentheses)
 
-**Key Rules:**
-- Unary operators (!, X, WX, F, G) bind tightest - always apply to immediate next atom/formula
-- U and R require careful attention - right operand often needs grouping
-- & groups before | (like multiplication before addition in arithmetic)
-- -> and <-> have lowest precedence - they group last
+**Key Rules for Precedence:**
+
+1. **Unary operators (Level 6 & 5) bind tightest:**
+   - !, X, WX, F, G always apply to the immediate next atom/formula
+   - Example: `F a & b` means `(F(a)) & b`, NOT `F(a & b)`
+
+2. **Binary temporal (U, R) at Level 4 bind tighter than boolean operators:**
+   - `a U b & c` means `(a U b) & c`, NOT `a U (b & c)`
+   - `a U b | c` means `(a U b) | c`, NOT `a U (b | c)`
+   - **CRITICAL**: If you want conjunction/disjunction in right operand, use explicit parentheses!
+
+3. **AND (&) at Level 3 binds tighter than OR (|) at Level 2:**
+   - Like multiplication before addition in arithmetic
+   - `a & b | c` means `(a & b) | c`
+
+4. **Implication (->) and Equivalence (<->) have lowest precedence:**
+   - They group last after all other operators
+   - `a & b -> c` means `(a & b) -> c`
+   - `a | b <-> c` means `(a | b) <-> c`
+
+5. **When in doubt, use explicit parentheses in your JSON structure:**
+   - Nesting in JSON defines precedence
+   - Clear nesting avoids ambiguity
 
 **Multiple Goals Handling:**
 

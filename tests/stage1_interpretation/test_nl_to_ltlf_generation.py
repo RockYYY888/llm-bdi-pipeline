@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
+from stage1_interpretation.ltlf_formula import LTLSpecification, LTLFormula
+from stage1_interpretation.grounding_map import GroundingMap
+from stage2_dfa_generation.ltlf_to_dfa import LTLfToDFA
 
 
 class TestResult:
@@ -33,11 +36,17 @@ class TestResult:
         self.description = test_case['description']
         self.notes = test_case['notes']
 
+        # DFA-related fields (if available in test case)
+        self.propositionalized_ltlf = test_case.get('propositionalized_ltlf', '')
+        self.expected_dfa = test_case.get('expected_dfa', '')
+
         # Results to be filled
         self.actual_ltlf: List[str] = []
         self.actual_objects: List[str] = []
+        self.actual_propositionalized_ltlf: str = ""
+        self.actual_dfa: str = ""
         self.success: bool = False
-        self.match_type: str = ""  # "exact", "partial", "wrong", "error"
+        self.match_type: str = ""  # "exact", "dfa_equivalent", "dfa_different", "error"
         self.error_message: str = ""
         self.reflection: str = ""
 
@@ -49,8 +58,12 @@ class TestResult:
             'natural_language': self.natural_language,
             'expected_ltlf': self.expected_ltlf,
             'expected_objects': self.expected_objects,
+            'propositionalized_ltlf': self.propositionalized_ltlf,
+            'expected_dfa': self.expected_dfa,
             'actual_ltlf': ', '.join(self.actual_ltlf),
             'actual_objects': str(self.actual_objects),
+            'actual_propositionalized_ltlf': self.actual_propositionalized_ltlf,
+            'actual_dfa': self.actual_dfa,
             'success': self.success,
             'match_type': self.match_type,
             'error_message': self.error_message,
@@ -124,9 +137,113 @@ def split_formulas(formula_string: str) -> List[str]:
     return formulas
 
 
-def compare_formulas(expected: str, actual: List[str]) -> tuple[bool, str]:
+def create_spec_from_formula_string(formula_str: str, objects: List[str]) -> LTLSpecification:
     """
-    Compare expected and actual formulas
+    Create a minimal LTLSpecification from a formula string for DFA generation
+
+    Args:
+        formula_str: LTLf formula string (e.g., "F(on(a, b))")
+        objects: List of objects used in the formula
+
+    Returns:
+        LTLSpecification with grounding map
+    """
+    from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
+
+    # Parse the formula string to create proper LTLFormula objects
+    # For now, we'll create a temporary generator and parse it
+    generator = NLToLTLfGenerator(api_key="dummy", model="gpt-4")
+
+    # Create a mock spec with the formula string
+    # We need to actually parse this into LTLFormula objects
+    # For simplicity, let's just use the string directly via ltlf2dfa
+    spec = LTLSpecification()
+    spec.objects = objects
+
+    # Create a simple formula wrapper that returns the string
+    class StringFormula:
+        def __init__(self, s):
+            self.s = s
+        def to_string(self):
+            return self.s
+
+    spec.formulas = [StringFormula(formula_str)]
+
+    return spec
+
+
+def compare_formulas_via_dfa(expected: str, actual: List[str], objects: List[str]) -> tuple[bool, str]:
+    """
+    Compare expected and actual formulas by converting to DFA and checking equivalence
+
+    Args:
+        expected: Expected LTLf formula string
+        actual: List of actual LTLf formula strings from generator
+        objects: List of objects in the domain
+
+    Returns:
+        (is_match, match_type)
+        match_type: "dfa_equivalent", "dfa_different", "error"
+    """
+    if not actual:
+        return False, "error"
+
+    try:
+        # Create DFA converter
+        converter = LTLfToDFA()
+
+        # Parse expected formula(s)
+        expected_formulas = split_formulas(expected)
+
+        # Join expected formulas with AND if multiple
+        if len(expected_formulas) > 1:
+            expected_combined = " & ".join(f"({f})" for f in expected_formulas)
+        else:
+            expected_combined = expected_formulas[0]
+
+        # Join actual formulas with AND if multiple
+        if len(actual) > 1:
+            actual_combined = " & ".join(f"({f})" for f in actual)
+        else:
+            actual_combined = actual[0]
+
+        # Create specs
+        expected_spec = create_spec_from_formula_string(expected_combined, objects)
+        actual_spec = create_spec_from_formula_string(actual_combined, objects)
+
+        # Convert to DFA
+        expected_dfa, expected_meta = converter.convert(expected_spec)
+        actual_dfa, actual_meta = converter.convert(actual_spec)
+
+        # Compare DFAs by checking if they have the same structure
+        # For now, use a simple heuristic: compare propositional formulas
+        # A proper DFA equivalence check would require graph isomorphism checking
+
+        # Simple check: if propositional formulas are identical, DFAs are equivalent
+        exp_prop = expected_meta['propositional_formula']
+        act_prop = actual_meta['propositional_formula']
+
+        # Normalize both for comparison
+        exp_norm = normalize_formula(exp_prop)
+        act_norm = normalize_formula(act_prop)
+
+        if exp_norm == act_norm:
+            return True, "dfa_equivalent"
+        else:
+            # Try parsing with ltlf2dfa to see if they're semantically equivalent
+            # This is a basic check - proper equivalence needs graph comparison
+            return False, "dfa_different"
+
+    except Exception as e:
+        # If DFA generation fails, fall back to string comparison
+        print(f"  ⚠️  DFA comparison failed: {str(e)}")
+        print(f"  → Falling back to string comparison")
+        return compare_formulas_string_based(expected, actual)
+
+
+def compare_formulas_string_based(expected: str, actual: List[str]) -> tuple[bool, str]:
+    """
+    Original string-based formula comparison (fallback method)
 
     Returns:
         (is_match, match_type)
@@ -147,10 +264,38 @@ def compare_formulas(expected: str, actual: List[str]) -> tuple[bool, str]:
         return False, "wrong"
 
 
+def compare_formulas(expected: str, actual: List[str], objects: List[str] = None) -> tuple[bool, str]:
+    """
+    Compare expected and actual formulas using DFA equivalence check
+
+    Args:
+        expected: Expected LTLf formula string
+        actual: List of actual LTLf formula strings
+        objects: List of objects (optional, for DFA comparison)
+
+    Returns:
+        (is_match, match_type)
+    """
+    # Try DFA-based comparison if objects are provided
+    if objects:
+        try:
+            return compare_formulas_via_dfa(expected, actual, objects)
+        except Exception as e:
+            print(f"  ⚠️  DFA comparison error: {str(e)}")
+            print(f"  → Using string comparison")
+
+    # Fall back to string-based comparison
+    return compare_formulas_string_based(expected, actual)
+
+
 def generate_reflection(test_result: TestResult) -> str:
     """Generate reflection on why the test failed and how to improve"""
 
-    if test_result.match_type == "exact":
+    if test_result.match_type in ["exact", "dfa_equivalent", "dfa_exact"]:
+        if test_result.match_type == "dfa_exact":
+            return "✓ DFA-exact (identical DFAs)"
+        elif test_result.match_type == "dfa_equivalent":
+            return "✓ DFA-equivalent (semantically correct)"
         return "✓ Perfect match"
 
     reflections = []
@@ -218,14 +363,36 @@ def run_test_case(generator: NLToLTLfGenerator, test_case: Dict[str, str]) -> Te
         result.actual_ltlf = [f.to_string() for f in ltl_spec.formulas]
         result.actual_objects = ltl_spec.objects
 
-        # Compare with expected
-        is_match, match_type = compare_formulas(
-            test_case['expected_ltlf'],
-            result.actual_ltlf
-        )
+        # Generate actual DFA
+        try:
+            dfa_converter = LTLfToDFA()
+            actual_dfa_dot, actual_metadata = dfa_converter.convert(ltl_spec)
+            result.actual_propositionalized_ltlf = actual_metadata['propositional_formula']
+            # Escape quotes and newlines for CSV storage
+            result.actual_dfa = actual_dfa_dot.replace('"', '""').replace('\n', '\\n')
+        except Exception as dfa_error:
+            result.actual_propositionalized_ltlf = f"DFA_ERROR: {str(dfa_error)}"
+            result.actual_dfa = ""
 
-        result.success = is_match
-        result.match_type = match_type
+        # Compare DFAs if both expected and actual are available
+        if result.expected_dfa and result.actual_dfa:
+            # Compare DFA strings directly (they should be identical if semantically equivalent)
+            if result.expected_dfa == result.actual_dfa:
+                result.success = True
+                result.match_type = "dfa_exact"
+            else:
+                # DFAs are different - formulas are not equivalent
+                result.success = False
+                result.match_type = "dfa_different"
+        else:
+            # Fall back to formula comparison
+            is_match, match_type = compare_formulas(
+                test_case['expected_ltlf'],
+                result.actual_ltlf,
+                objects=result.actual_objects
+            )
+            result.success = is_match
+            result.match_type = match_type
 
     except Exception as e:
         result.success = False
@@ -307,7 +474,9 @@ def save_results(results: List[TestResult], output_path: Path):
     fieldnames = [
         'test_id', 'category', 'natural_language',
         'expected_ltlf', 'expected_objects',
+        'propositionalized_ltlf', 'expected_dfa',
         'actual_ltlf', 'actual_objects',
+        'actual_propositionalized_ltlf', 'actual_dfa',
         'success', 'match_type', 'error_message', 'reflection',
         'description', 'notes'
     ]
@@ -372,11 +541,19 @@ def print_summary(results: List[TestResult], categories_stats: Dict):
 if __name__ == "__main__":
     # Paths
     script_dir = Path(__file__).parent
-    csv_input = script_dir / "test_cases_nl_to_ltlf_comprehensive.csv"
+
+    # Use the merged CSV file with all test cases (comprehensive + complex_nested)
+    csv_input = script_dir / "nl_to_ltlf_test_cases.csv"
+
+    # Check if CSV exists
+    if not csv_input.exists():
+        print(f"❌ Error: Test cases CSV not found at {csv_input}")
+        print("   Expected file: nl_to_ltlf_test_cases.csv")
+        sys.exit(1)
 
     # Create output filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_output = script_dir / f"test_results_nl_to_ltlf_comprehensive_{timestamp}.csv"
+    csv_output = script_dir / f"test_results_nl_to_ltlf_{timestamp}.csv"
 
     # Run tests
     run_all_tests(csv_input, csv_output)
