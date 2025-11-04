@@ -53,29 +53,228 @@ Objects: {types_str}
 Predicates:
 {predicates_str}{actions_section}
 
-**Complete LTLf Syntax (use in this order):**
+**LTLf Syntax Reference**
 
-**1. Propositional Symbols:**
-- true: Propositional constant (always true)
-- false: Propositional constant (always false)
-- Atomic propositions: predicates from domain (e.g., on(a,b), clear(c), handempty)
+┌─────────────────────────────────────────────────────────────────┐
+│ PROPOSITIONAL SYMBOLS                                            │
+├──────────────────┬──────────────────────────────────────────────┤
+│ Symbol           │ Syntax                                        │
+├──────────────────┼──────────────────────────────────────────────┤
+│ true             │ True                                          │
+│ false            │ False                                         │
+│ [a-z][a-z0-9_]*  │ Atomic propositions                          │
+└──────────────────┴──────────────────────────────────────────────┘
 
-**2. Boolean Operators:**
-- & or &&: AND (conjunction)
-- | or ||: OR (disjunction)
-- ! or ~: NOT (negation)
-- -> or =>: IMPLIES (implication)
-- <-> or <=>: EQUIVALENCE (if and only if)
+┌─────────────────────────────────────────────────────────────────┐
+│ BOOLEAN OPERATORS                                                │
+├──────────────────┬──────────────────────────────────────────────┤
+│ Symbol           │ Syntax                                        │
+├──────────────────┼──────────────────────────────────────────────┤
+│ &, &&            │ And (conjunction)                            │
+│ |, ||            │ Or (disjunction)                             │
+│ !, ~             │ Not (negation)                               │
+│ ->, =>           │ Implication                                  │
+│ <->, <=>         │ Equivalence                                  │
+└──────────────────┴──────────────────────────────────────────────┘
 
-**3. Future Temporal Operators:**
-- X: Next (strong next state)
-- WX: WeakNext (next state or no next state exists)
-- U: Until (φ U ψ - φ holds until ψ)
-- R: Release (φ R ψ - ψ holds until φ)
-- F: Eventually/Finally (will be true at some future point)
-- G: Globally/Always (true at all future points)
+┌─────────────────────────────────────────────────────────────────┐
+│ FUTURE TEMPORAL OPERATORS                                        │
+├──────────────────┬──────────────────────────────────────────────┤
+│ Symbol           │ Syntax                                        │
+├──────────────────┼──────────────────────────────────────────────┤
+│ X                │ Next (strong next state)                     │
+│ WX               │ WeakNext (next state or no next)             │
+│ U                │ Until (φ U ψ - φ holds until ψ)              │
+│ R                │ Release (φ R ψ - ψ holds until φ)            │
+│ F                │ Eventually (will be true at some point)      │
+│ G                │ Always (true at all future points)           │
+└──────────────────┴──────────────────────────────────────────────┘
 
-Your task: Convert natural language to LTLf formulas following the official syntax.
+**CRITICAL: These are the ONLY valid symbols. DO NOT use:**
+- Commas (,)
+- Semicolons (;)
+- Any other punctuation (symbol) not in the tables above
+
+**CRITICAL - Operator Precedence (Highest to Lowest):**
+
+Understanding precedence is CRITICAL for correct LTLf formula construction. The parser applies operators
+in the following order (from highest precedence to lowest):
+
+**Precedence Level 1 (Highest - Unary Operators):**
+- !, ~ (Negation)
+- X (Next)
+- WX (WeakNext)
+- F (Eventually)
+- G (Always)
+
+**Precedence Level 2 (Binary Temporal):**
+- U (Until)
+- R (Release)
+
+**Precedence Level 3 (Boolean AND):**
+- &, && (Conjunction)
+
+**Precedence Level 4 (Boolean OR):**
+- |, || (Disjunction)
+
+**Precedence Level 5 (Implication):**
+- ->, => (Implication)
+
+**Precedence Level 6 (Lowest - Equivalence):**
+- <->, <=> (Equivalence)
+
+**Precedence Examples:**
+
+1. **"F on(a,b) & clear(c)"** parses as **"F(on(a,b)) & clear(c)"** (F has higher precedence than &)
+   - Unary F binds tighter than binary &
+   - Equivalent to: "Eventually on(a,b) AND clear(c)"
+
+2. **"on(a,b) & clear(c) | on(d,e)"** parses as **"(on(a,b) & clear(c)) | on(d,e)"** (& has higher precedence than |)
+   - Conjunction groups before disjunction
+   - Equivalent to: "(on(a,b) AND clear(c)) OR on(d,e)"
+
+3. **"clear(a) -> on(a,b) | on(b,c)"** parses as **"clear(a) -> (on(a,b) | on(b,c))"** (| has higher precedence than ->)
+   - Disjunction groups before implication
+   - Equivalent to: "clear(a) IMPLIES (on(a,b) OR on(b,c))"
+
+4. **"holding(a) U clear(b) & on(c,d)"** parses as **"holding(a) U (clear(b) & on(c,d))"** (& has higher precedence than U)
+   - Conjunction in right operand of Until
+   - Equivalent to: "holding(a) UNTIL (clear(b) AND on(c,d))"
+
+5. **"!on(a,b) & clear(c)"** parses as **"(!on(a,b)) & clear(c)"** (! has higher precedence than &)
+   - Negation binds tighter than conjunction
+   - Equivalent to: "NOT on(a,b) AND clear(c)"
+
+6. **"G clear(a) -> F on(a,b)"** parses as **"G(clear(a)) -> F(on(a,b))"** (G, F have higher precedence than ->)
+   - Both temporal operators bind before implication
+   - Equivalent to: "Always clear(a) IMPLIES Eventually on(a,b)"
+
+**How to Reflect Precedence in JSON Output:**
+
+Your JSON structure MUST reflect the correct operator precedence through proper nesting:
+
+**Example 1:** "F on(a,b) & clear(c)" → F(on(a,b)) & clear(c)
+```json
+{{
+  "type": "conjunction",
+  "formulas": [
+    {{
+      "type": "temporal",
+      "operator": "F",
+      "formula": {{"on": ["a", "b"]}}
+    }},
+    {{"clear": ["c"]}}
+  ]
+}}
+```
+
+**Example 2:** "on(a,b) & clear(c) | on(d,e)" → (on(a,b) & clear(c)) | on(d,e)
+```json
+{{
+  "type": "disjunction",
+  "formulas": [
+    {{
+      "type": "conjunction",
+      "formulas": [
+        {{"on": ["a", "b"]}},
+        {{"clear": ["c"]}}
+      ]
+    }},
+    {{"on": ["d", "e"]}}
+  ]
+}}
+```
+
+**Example 3:** "holding(a) U clear(b) & on(c,d)" → holding(a) U (clear(b) & on(c,d))
+```json
+{{
+  "type": "until",
+  "operator": "U",
+  "left_formula": {{"holding": ["a"]}},
+  "right_formula": {{
+    "type": "conjunction",
+    "formulas": [
+      {{"clear": ["b"]}},
+      {{"on": ["c", "d"]}}
+    ]
+  }}
+}}
+```
+
+**When to Use Explicit Parentheses:**
+
+In your JSON output, the nesting structure implicitly defines precedence. However, when generating
+the final LTLf string formula, parentheses should be used to:
+
+1. Override default precedence (rare, since JSON nesting handles this)
+2. Improve readability for complex nested expressions
+3. Group operands for Until (U) and Release (R) operators (always use outer parentheses)
+
+**Key Rules:**
+- Unary operators (!, X, WX, F, G) bind tightest - always apply to immediate next atom/formula
+- U and R require careful attention - right operand often needs grouping
+- & groups before | (like multiplication before addition in arithmetic)
+- -> and <-> have lowest precedence - they group last
+
+**Multiple Goals Handling:**
+
+When the natural language describes multiple goals connected with "and", "conjoined with", or similar:
+→ **ALWAYS use & operator to combine into a SINGLE formula**
+
+Example: "Eventually on a b and always clear c"
+```json
+{{
+  "ltl_formulas": [
+    {{
+      "type": "conjunction",
+      "formulas": [
+        {{"type": "temporal", "operator": "F", "formula": {{"on": ["a", "b"]}}}},
+        {{"type": "temporal", "operator": "G", "formula": {{"clear": ["c"]}}}}
+      ]
+    }}
+  ]
+}}
+```
+Output: **F(on(a, b)) & G(clear(c))**
+
+**COMMON MISTAKES TO AVOID:**
+
+❌ **WRONG - Using commas to separate formulas:**
+```json
+{{"ltl_formulas": [{{"type": "temporal", "operator": "F", ...}}, {{"type": "temporal", "operator": "G", ...}}]}}
+```
+This outputs: `F(on(a, b)), G(clear(c))` - **INVALID! Commas are NOT LTL operators!**
+
+✓ **CORRECT - Using & operator in a conjunction:**
+```json
+{{
+  "ltl_formulas": [
+    {{
+      "type": "conjunction",
+      "formulas": [
+        {{"type": "temporal", "operator": "F", "formula": {{"on": ["a", "b"]}}}},
+        {{"type": "temporal", "operator": "G", "formula": {{"clear": ["c"]}}}}
+      ]
+    }}
+  ]
+}}
+```
+This outputs: `F(on(a, b)) & G(clear(c))` - **CORRECT!**
+
+❌ **WRONG - Treating "and" as a separator:**
+Natural language: "Eventually on a b and always clear c"
+Wrong interpretation: Two separate goals → outputs `F(on(a, b)), G(clear(c))`
+
+✓ **CORRECT - Treating "and" as Boolean AND operator:**
+Natural language: "Eventually on a b and always clear c"
+Correct interpretation: Single conjunction → outputs `F(on(a, b)) & G(clear(c))`
+
+**Parentheses for Clarity:**
+Even when operator precedence allows omitting parentheses, include them for readability:
+- `G(clear(a) | on(a, b) -> F(on(c, d)))` works but is hard to read
+- `G((clear(a) | on(a, b)) -> F(on(c, d)))` is clearer - **PREFER THIS**
+
+Your task: Convert natural language to LTLf formulas following the syntax.
 
 **Examples:**
 
@@ -91,7 +290,7 @@ Your task: Convert natural language to LTLf formulas following the official synt
 7. EQUIVALENCE: "A clear iff A on table" → F(clear(a) <-> ontable(a))
 
 **Future Temporal Operators:**
-8. X (Next): "Pick A then immediately place on B" → F(holding(a)), X(on(a, b))
+8. X (Next): "Pick A then immediately place on B" → F(holding(a) & X(on(a, b)))
 9. WX (WeakNext): "In next state if exists, A on B" → WX(on(a, b))
 10. U (Until): "Hold A until B is clear" → (holding(a) U clear(b))
 11. R (Release): "B stays clear unless A on table" → (ontable(a) R clear(b))
@@ -450,9 +649,7 @@ Output: ((holding(a) & clear(b)) U on(c, d))
 1. Every predicate used in ltl_formulas MUST have a corresponding entry in atoms
 2. Symbol naming MUST follow: predicate_arg1_arg2_... (lowercase, underscore)
 3. All args in atoms must be from the objects list
-4. Predicates and objects MUST exist in the provided domain
-
-**IMPORTANT**: All operators follow the official LTLf syntax from http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax"""
+4. Predicates and objects MUST exist in the provided domain"""
 
 
 def get_ltl_user_prompt(nl_instruction: str) -> str:
@@ -465,4 +662,4 @@ def get_ltl_user_prompt(nl_instruction: str) -> str:
     Returns:
         User prompt string
     """
-    return f"Natural language instruction: {nl_instruction}"
+    return f"Goal: {nl_instruction}"
