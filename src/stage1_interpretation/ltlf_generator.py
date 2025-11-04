@@ -299,6 +299,13 @@ class NLToLTLfGenerator:
 
         # Convert formulas
         for ltl_def in result["ltl_formulas"]:
+            # First try to use recursive builder for any complex structure
+            formula = build_formula_recursive(ltl_def)
+            if formula is not None:
+                spec.add_formula(formula)
+                continue
+
+            # Fallback: handle specific types
             if ltl_def["type"] == "temporal":
                 operator = TemporalOperator(ltl_def["operator"])
                 inner_formula_def = ltl_def["formula"]
