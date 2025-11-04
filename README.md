@@ -253,7 +253,7 @@ python tests/test_complex_cases.py 2>&1 | tee tests/test_results.log
 
 ```bash
 # Test LTL parser (Stage 1)
-python src/stage1_interpretation/ltl_parser.py
+python src/stage1_interpretation/ltlf_parser.py
 
 # Test recursive DFA builder (Stage 2)
 python src/stage2_dfa_generation/recursive_dfa_builder.py

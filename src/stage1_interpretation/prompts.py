@@ -364,9 +364,10 @@ Output: F(clear(a) <-> ontable(a))
 {{"type": "temporal", "operator": "G", "formula": {{"handempty": []}}}}
 ```
 
-**COMPLETE RESPONSE EXAMPLE:**
+**COMPLETE RESPONSE EXAMPLES:**
 
-For instruction "Put block a on block b, and keep c clear":
+**Example 1**: Simple temporals
+For "Put block a on block b, and keep c clear":
 ```json
 {{
   "objects": ["a", "b", "c"],
@@ -388,6 +389,62 @@ For instruction "Put block a on block b, and keep c clear":
   ]
 }}
 ```
+
+**Example 2**: Nested temporal in implication (CRITICAL PATTERN!)
+For "Always if a is clear then eventually a is on b":
+```json
+{{
+  "objects": ["a", "b"],
+  "ltl_formulas": [
+    {{
+      "type": "temporal",
+      "operator": "G",
+      "formula": {{
+        "type": "implication",
+        "left_formula": {{"clear": ["a"]}},
+        "right_formula": {{
+          "type": "temporal",
+          "operator": "F",
+          "formula": {{"on": ["a", "b"]}}
+        }}
+      }}
+    }}
+  ],
+  "atoms": [
+    {{"symbol": "clear_a", "predicate": "clear", "args": ["a"]}},
+    {{"symbol": "on_a_b", "predicate": "on", "args": ["a", "b"]}}
+  ]
+}}
+```
+Output: G(clear(a) -> F(on(a, b)))
+
+**Example 3**: Conjunction in Until
+For "Keep holding a and b clear until c is on d":
+```json
+{{
+  "objects": ["a", "b", "c", "d"],
+  "ltl_formulas": [
+    {{
+      "type": "until",
+      "operator": "U",
+      "left_formula": {{
+        "type": "conjunction",
+        "formulas": [
+          {{"holding": ["a"]}},
+          {{"clear": ["b"]}}
+        ]
+      }},
+      "right_formula": {{"on": ["c", "d"]}}
+    }}
+  ],
+  "atoms": [
+    {{"symbol": "holding_a", "predicate": "holding", "args": ["a"]}},
+    {{"symbol": "clear_b", "predicate": "clear", "args": ["b"]}},
+    {{"symbol": "on_c_d", "predicate": "on", "args": ["c", "d"]}}
+  ]
+}}
+```
+Output: ((holding(a) & clear(b)) U on(c, d))
 
 **VALIDATION RULES:**
 1. Every predicate used in ltl_formulas MUST have a corresponding entry in atoms

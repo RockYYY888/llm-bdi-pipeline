@@ -92,16 +92,22 @@ class LTL_BDI_Pipeline:
         # Stage 1: NL -> LTLf
         ltl_spec = self._stage1_parse_nl(nl_instruction)
         if not ltl_spec:
+            log_filepath = self.logger.end_pipeline(success=False)
+            print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
 
         # Stage 2: LTLf -> Recursive DFA Generation
         dfa_result = self._stage2_recursive_dfa_generation(ltl_spec)
         if not dfa_result:
+            log_filepath = self.logger.end_pipeline(success=False)
+            print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
 
         # Stage 3: DFAs -> AgentSpeak Code
         asl_code = self._stage3_llm_agentspeak_generation(ltl_spec, dfa_result)
         if not asl_code:
+            log_filepath = self.logger.end_pipeline(success=False)
+            print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 3", "error": "AgentSpeak generation failed"}
 
         print("\n" + "="*80)

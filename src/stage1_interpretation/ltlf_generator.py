@@ -161,115 +161,152 @@ class NLToLTLfGenerator:
         spec.objects = result["objects"]
         spec.initial_state = []
 
+        # Helper function to recursively build formula structures
+        def build_formula_recursive(formula_def):
+            """Recursively build LTLFormula from nested JSON structure"""
+            if not isinstance(formula_def, dict):
+                return None
+
+            # Check if this is a nested formula type
+            if "type" in formula_def:
+                formula_type = formula_def["type"]
+
+                if formula_type == "negation":
+                    neg_formula = build_formula_recursive(formula_def["formula"])
+                    if neg_formula is None:
+                        # It's an atomic predicate
+                        neg_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    return LTLFormula(
+                        operator=None,
+                        predicate=None,
+                        sub_formulas=[neg_formula],
+                        logical_op=LogicalOperator.NOT
+                    )
+
+                elif formula_type == "conjunction":
+                    conjuncts = []
+                    for f_def in formula_def["formulas"]:
+                        sub_formula = build_formula_recursive(f_def)
+                        if sub_formula is None:
+                            # It's an atomic predicate
+                            sub_formula = LTLFormula(
+                                operator=None,
+                                predicate=f_def,
+                                sub_formulas=[],
+                                logical_op=None
+                            )
+                        conjuncts.append(sub_formula)
+                    return LTLFormula(
+                        operator=None,
+                        predicate=None,
+                        sub_formulas=conjuncts,
+                        logical_op=LogicalOperator.AND
+                    )
+
+                elif formula_type == "disjunction":
+                    disjuncts = []
+                    for f_def in formula_def["formulas"]:
+                        sub_formula = build_formula_recursive(f_def)
+                        if sub_formula is None:
+                            # It's an atomic predicate
+                            sub_formula = LTLFormula(
+                                operator=None,
+                                predicate=f_def,
+                                sub_formulas=[],
+                                logical_op=None
+                            )
+                        disjuncts.append(sub_formula)
+                    return LTLFormula(
+                        operator=None,
+                        predicate=None,
+                        sub_formulas=disjuncts,
+                        logical_op=LogicalOperator.OR
+                    )
+
+                elif formula_type == "implication":
+                    left_formula = build_formula_recursive(formula_def["left_formula"])
+                    right_formula = build_formula_recursive(formula_def["right_formula"])
+                    if left_formula is None:
+                        left_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["left_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    if right_formula is None:
+                        right_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["right_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    return LTLFormula(
+                        operator=None,
+                        predicate=None,
+                        sub_formulas=[left_formula, right_formula],
+                        logical_op=LogicalOperator.IMPLIES
+                    )
+
+                elif formula_type == "equivalence":
+                    left_formula = build_formula_recursive(formula_def["left_formula"])
+                    right_formula = build_formula_recursive(formula_def["right_formula"])
+                    if left_formula is None:
+                        left_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["left_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    if right_formula is None:
+                        right_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["right_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    return LTLFormula(
+                        operator=None,
+                        predicate=None,
+                        sub_formulas=[left_formula, right_formula],
+                        logical_op=LogicalOperator.EQUIVALENCE
+                    )
+
+                elif formula_type == "temporal":
+                    # Nested temporal (e.g., F inside implication)
+                    operator = TemporalOperator(formula_def["operator"])
+                    inner = build_formula_recursive(formula_def["formula"])
+                    if inner is None:
+                        inner = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    return LTLFormula(
+                        operator=operator,
+                        predicate=None,
+                        sub_formulas=[inner],
+                        logical_op=None
+                    )
+
+            # Not a special type - return None to indicate it's an atomic predicate
+            return None
+
         # Convert formulas
         for ltl_def in result["ltl_formulas"]:
             if ltl_def["type"] == "temporal":
                 operator = TemporalOperator(ltl_def["operator"])
                 inner_formula_def = ltl_def["formula"]
 
-                # Check if inner formula is a special type
-                if isinstance(inner_formula_def, dict) and "type" in inner_formula_def:
-                    inner_type = inner_formula_def["type"]
-
-                    if inner_type == "negation":
-                        neg_predicate = inner_formula_def["formula"]
-                        neg_atomic = LTLFormula(
-                            operator=None,
-                            predicate=neg_predicate,
-                            sub_formulas=[],
-                            logical_op=None
-                        )
-                        atomic = LTLFormula(
-                            operator=None,
-                            predicate=None,
-                            sub_formulas=[neg_atomic],
-                            logical_op=LogicalOperator.NOT
-                        )
-
-                    elif inner_type == "conjunction":
-                        conjuncts = []
-                        for pred in inner_formula_def["formulas"]:
-                            conjuncts.append(LTLFormula(
-                                operator=None,
-                                predicate=pred,
-                                sub_formulas=[],
-                                logical_op=None
-                            ))
-                        atomic = LTLFormula(
-                            operator=None,
-                            predicate=None,
-                            sub_formulas=conjuncts,
-                            logical_op=LogicalOperator.AND
-                        )
-
-                    elif inner_type == "disjunction":
-                        disjuncts = []
-                        for pred in inner_formula_def["formulas"]:
-                            disjuncts.append(LTLFormula(
-                                operator=None,
-                                predicate=pred,
-                                sub_formulas=[],
-                                logical_op=None
-                            ))
-                        atomic = LTLFormula(
-                            operator=None,
-                            predicate=None,
-                            sub_formulas=disjuncts,
-                            logical_op=LogicalOperator.OR
-                        )
-
-                    elif inner_type == "implication":
-                        left_pred = inner_formula_def["left_formula"]
-                        right_pred = inner_formula_def["right_formula"]
-                        left_atomic = LTLFormula(
-                            operator=None,
-                            predicate=left_pred,
-                            sub_formulas=[],
-                            logical_op=None
-                        )
-                        right_atomic = LTLFormula(
-                            operator=None,
-                            predicate=right_pred,
-                            sub_formulas=[],
-                            logical_op=None
-                        )
-                        atomic = LTLFormula(
-                            operator=None,
-                            predicate=None,
-                            sub_formulas=[left_atomic, right_atomic],
-                            logical_op=LogicalOperator.IMPLIES
-                        )
-
-                    elif inner_type == "equivalence":
-                        left_pred = inner_formula_def["left_formula"]
-                        right_pred = inner_formula_def["right_formula"]
-                        left_atomic = LTLFormula(
-                            operator=None,
-                            predicate=left_pred,
-                            sub_formulas=[],
-                            logical_op=None
-                        )
-                        right_atomic = LTLFormula(
-                            operator=None,
-                            predicate=right_pred,
-                            sub_formulas=[],
-                            logical_op=None
-                        )
-                        atomic = LTLFormula(
-                            operator=None,
-                            predicate=None,
-                            sub_formulas=[left_atomic, right_atomic],
-                            logical_op=LogicalOperator.EQUIVALENCE
-                        )
-
-                    else:
-                        atomic = LTLFormula(
-                            operator=None,
-                            predicate=inner_formula_def,
-                            sub_formulas=[],
-                            logical_op=None
-                        )
-                else:
+                # Use recursive builder
+                atomic = build_formula_recursive(inner_formula_def)
+                if atomic is None:
+                    # It's an atomic predicate
                     atomic = LTLFormula(
                         operator=None,
                         predicate=inner_formula_def,
@@ -288,27 +325,32 @@ class NLToLTLfGenerator:
 
             elif ltl_def["type"] == "until":
                 operator = TemporalOperator.UNTIL
-                left_predicate = ltl_def["left_formula"]
-                right_predicate = ltl_def["right_formula"]
+                left_formula_def = ltl_def["left_formula"]
+                right_formula_def = ltl_def["right_formula"]
 
-                left_atomic = LTLFormula(
-                    operator=None,
-                    predicate=left_predicate,
-                    sub_formulas=[],
-                    logical_op=None
-                )
+                # Use recursive builder
+                left_formula = build_formula_recursive(left_formula_def)
+                if left_formula is None:
+                    left_formula = LTLFormula(
+                        operator=None,
+                        predicate=left_formula_def,
+                        sub_formulas=[],
+                        logical_op=None
+                    )
 
-                right_atomic = LTLFormula(
-                    operator=None,
-                    predicate=right_predicate,
-                    sub_formulas=[],
-                    logical_op=None
-                )
+                right_formula = build_formula_recursive(right_formula_def)
+                if right_formula is None:
+                    right_formula = LTLFormula(
+                        operator=None,
+                        predicate=right_formula_def,
+                        sub_formulas=[],
+                        logical_op=None
+                    )
 
                 formula = LTLFormula(
                     operator=operator,
                     predicate=None,
-                    sub_formulas=[left_atomic, right_atomic],
+                    sub_formulas=[left_formula, right_formula],
                     logical_op=None
                 )
 
@@ -316,27 +358,32 @@ class NLToLTLfGenerator:
 
             elif ltl_def["type"] == "release":
                 operator = TemporalOperator.RELEASE
-                left_predicate = ltl_def["left_formula"]
-                right_predicate = ltl_def["right_formula"]
+                left_formula_def = ltl_def["left_formula"]
+                right_formula_def = ltl_def["right_formula"]
 
-                left_atomic = LTLFormula(
-                    operator=None,
-                    predicate=left_predicate,
-                    sub_formulas=[],
-                    logical_op=None
-                )
+                # Use recursive builder
+                left_formula = build_formula_recursive(left_formula_def)
+                if left_formula is None:
+                    left_formula = LTLFormula(
+                        operator=None,
+                        predicate=left_formula_def,
+                        sub_formulas=[],
+                        logical_op=None
+                    )
 
-                right_atomic = LTLFormula(
-                    operator=None,
-                    predicate=right_predicate,
-                    sub_formulas=[],
-                    logical_op=None
-                )
+                right_formula = build_formula_recursive(right_formula_def)
+                if right_formula is None:
+                    right_formula = LTLFormula(
+                        operator=None,
+                        predicate=right_formula_def,
+                        sub_formulas=[],
+                        logical_op=None
+                    )
 
                 formula = LTLFormula(
                     operator=operator,
                     predicate=None,
-                    sub_formulas=[left_atomic, right_atomic],
+                    sub_formulas=[left_formula, right_formula],
                     logical_op=None
                 )
 
@@ -345,14 +392,17 @@ class NLToLTLfGenerator:
             elif ltl_def["type"] == "nested":
                 outer_op = TemporalOperator(ltl_def["outer_operator"])
                 inner_op = TemporalOperator(ltl_def["inner_operator"])
-                predicate = ltl_def["formula"]
+                inner_formula_def = ltl_def["formula"]
 
-                atomic = LTLFormula(
-                    operator=None,
-                    predicate=predicate,
-                    sub_formulas=[],
-                    logical_op=None
-                )
+                # Use recursive builder for the innermost formula
+                atomic = build_formula_recursive(inner_formula_def)
+                if atomic is None:
+                    atomic = LTLFormula(
+                        operator=None,
+                        predicate=inner_formula_def,
+                        sub_formulas=[],
+                        logical_op=None
+                    )
 
                 inner_formula = LTLFormula(
                     operator=inner_op,
@@ -391,12 +441,25 @@ class NLToLTLfGenerator:
         def extract_predicates(formula: LTLFormula):
             """Recursively extract all predicates from a formula"""
             if formula.predicate and isinstance(formula.predicate, dict):
-                # This is an atomic predicate like {"on": ["a", "b"]}
-                for pred_name, args in formula.predicate.items():
-                    # Create propositional symbol
-                    symbol = create_propositional_symbol(pred_name, args)
-                    # Add to grounding map
-                    gmap.add_atom(symbol, pred_name, args)
+                # Check if this is a real atomic predicate or a nested formula structure
+                # Real predicates have predicate_name: [args] format
+                # Nested structures have "type", "formulas", "left_formula", etc.
+                special_keys = {"type", "formulas", "left_formula", "right_formula", "formula", "operator"}
+
+                is_atomic_predicate = True
+                for key in formula.predicate.keys():
+                    if key in special_keys:
+                        is_atomic_predicate = False
+                        break
+
+                if is_atomic_predicate:
+                    # This is an atomic predicate like {"on": ["a", "b"]}
+                    for pred_name, args in formula.predicate.items():
+                        if isinstance(args, list):  # Ensure args is a list
+                            # Create propositional symbol
+                            symbol = create_propositional_symbol(pred_name, args)
+                            # Add to grounding map
+                            gmap.add_atom(symbol, pred_name, args)
 
             # Recursively process sub-formulas
             for sub_formula in formula.sub_formulas:
