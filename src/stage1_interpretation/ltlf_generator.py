@@ -94,19 +94,10 @@ class NLToLTLfGenerator:
             actions_str = '\n'.join([f"- {action.to_description()}" for action in self.domain.actions])
         else:
             # Fallback to hardcoded blocksworld
-            domain_name = "Blocksworld"
-            types_str = "blocks (e.g., a, b, c, d)"
-            predicates_str = """- on(X, Y): block X is on block Y
-- ontable(X): block X is on the table
-- clear(X): block X has nothing on top
-- holding(X): robot arm is holding block X
-- handempty: robot arm is empty"""
-            actions_str = """- pick-up(?b1, ?b2)
-    Pre: hand empty, ?b1 is clear and on ?b2
-    Eff: holding ?b1 (or fails and ?b1 becomes ontable)
-- put-down(?b)
-    Pre: holding ?b
-    Eff: ?b is on table, hand empty"""
+            domain_name = "ERROR IN LTLF GENERATOR"
+            types_str = "ERROR IN LTLF GENERATOR"
+            predicates_str = "ERROR IN LTLF GENERATOR"
+            actions_str = "ERROR IN LTLF GENERATOR"
 
         system_prompt = get_ltl_system_prompt(domain_name, types_str, predicates_str, actions_str)
         user_prompt = get_ltl_user_prompt(nl_instruction)
@@ -294,6 +285,89 @@ class NLToLTLfGenerator:
                         logical_op=None
                     )
 
+                elif formula_type == "until":
+                    # Until operator (binary temporal)
+                    operator = TemporalOperator.UNTIL
+                    left_formula = build_formula_recursive(formula_def["left_formula"])
+                    right_formula = build_formula_recursive(formula_def["right_formula"])
+                    if left_formula is None:
+                        left_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["left_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    if right_formula is None:
+                        right_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["right_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    return LTLFormula(
+                        operator=operator,
+                        predicate=None,
+                        sub_formulas=[left_formula, right_formula],
+                        logical_op=None
+                    )
+
+                elif formula_type == "release":
+                    # Release operator (binary temporal)
+                    operator = TemporalOperator.RELEASE
+                    left_formula = build_formula_recursive(formula_def["left_formula"])
+                    right_formula = build_formula_recursive(formula_def["right_formula"])
+                    if left_formula is None:
+                        left_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["left_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    if right_formula is None:
+                        right_formula = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["right_formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+                    return LTLFormula(
+                        operator=operator,
+                        predicate=None,
+                        sub_formulas=[left_formula, right_formula],
+                        logical_op=None
+                    )
+
+                elif formula_type == "nested":
+                    # Nested temporal operators (e.g., F(G(...)))
+                    outer_op = TemporalOperator(formula_def["outer_operator"])
+                    inner_op = TemporalOperator(formula_def["inner_operator"])
+
+                    # Build innermost formula recursively
+                    innermost = build_formula_recursive(formula_def["formula"])
+                    if innermost is None:
+                        innermost = LTLFormula(
+                            operator=None,
+                            predicate=formula_def["formula"],
+                            sub_formulas=[],
+                            logical_op=None
+                        )
+
+                    # Create inner temporal formula
+                    inner_formula = LTLFormula(
+                        operator=inner_op,
+                        predicate=None,
+                        sub_formulas=[innermost],
+                        logical_op=None
+                    )
+
+                    # Create outer temporal formula
+                    return LTLFormula(
+                        operator=outer_op,
+                        predicate=None,
+                        sub_formulas=[inner_formula],
+                        logical_op=None
+                    )
+
             # Not a special type - return None to indicate it's an atomic predicate
             return None
 
@@ -463,8 +537,8 @@ class NLToLTLfGenerator:
                     # This is an atomic predicate like {"on": ["a", "b"]}
                     for pred_name, args in formula.predicate.items():
                         if isinstance(args, list):  # Ensure args is a list
-                            # Create propositional symbol
-                            symbol = create_propositional_symbol(pred_name, args)
+                            # Create propositional symbol using grounding map's normalizer
+                            symbol = create_propositional_symbol(pred_name, args, gmap.normalizer)
                             # Add to grounding map
                             gmap.add_atom(symbol, pred_name, args)
 
@@ -499,8 +573,8 @@ class NLToLTLfGenerator:
             predicate = atom_dict.get("predicate", "")
             args = atom_dict.get("args", [])
 
-            # Validate symbol naming convention
-            expected_symbol = create_propositional_symbol(predicate, args)
+            # Validate symbol naming convention using grounding map's normalizer
+            expected_symbol = create_propositional_symbol(predicate, args, gmap.normalizer)
             if symbol != expected_symbol:
                 print(f"⚠️  Warning: LLM provided symbol '{symbol}' doesn't match convention '{expected_symbol}'")
                 # Use the expected symbol for consistency

@@ -12,7 +12,11 @@ NOTE: ltlf2dfa uses PROPOSITIONAL variables, not predicates with arguments.
 # Add project root to path and setup MONA
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+# Add src to path (only once)
+_src_dir = str(Path(__file__).parent.parent / "src")
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from setup_mona_path import setup_mona
 setup_mona(verbose=True)

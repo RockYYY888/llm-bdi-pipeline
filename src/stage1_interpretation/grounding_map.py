@@ -14,6 +14,15 @@ parameterized predicates. The grounding map serves as a bridge between:
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 import json
+import sys
+from pathlib import Path
+
+# Add parent directory to path for utils import
+_parent = str(Path(__file__).parent.parent)
+if _parent not in sys.path:
+    sys.path.insert(0, _parent)
+
+from utils.symbol_normalizer import SymbolNormalizer
 
 
 @dataclass
@@ -72,10 +81,11 @@ class GroundingMap:
     }
     """
 
-    def __init__(self):
+    def __init__(self, normalizer: SymbolNormalizer = None):
         self.atoms: Dict[str, GroundedAtom] = {}
         self.predicates: Dict[str, int] = {}  # predicate -> arity
         self.objects: List[str] = []
+        self.normalizer = normalizer or SymbolNormalizer()
 
     def add_atom(self, symbol: str, predicate: str, args: List[str]) -> GroundedAtom:
         """
@@ -183,39 +193,43 @@ class GroundingMap:
         return cls.from_dict(data)
 
 
-def create_propositional_symbol(predicate: str, args: List[str]) -> str:
+def create_propositional_symbol(predicate: str, args: List[str], normalizer: SymbolNormalizer = None) -> str:
     """
     Create propositional symbol from predicate and arguments
+
+    Uses SymbolNormalizer to handle special characters (e.g., hyphens).
 
     Naming convention: predicate_arg1_arg2_...
     Examples:
         on(a, b) -> on_a_b
         clear(c) -> clear_c
         handempty -> handempty
+        on(block-1, block-2) -> on_blockhh1_blockhh2 (with hyphen encoding)
 
     Args:
         predicate: Predicate name
-        args: List of arguments
+        args: List of arguments (may contain hyphens or other special chars)
+        normalizer: Optional SymbolNormalizer instance (creates new one if not provided)
 
     Returns:
-        Propositional symbol string
+        Propositional symbol string with normalized encoding
     """
-    if not args:
-        return predicate.lower()
+    if normalizer is None:
+        normalizer = SymbolNormalizer()
 
-    # Join predicate and args with underscores, all lowercase
     # Ensure all args are strings (convert if needed)
     str_args = []
     for arg in args:
         if isinstance(arg, str):
-            str_args.append(arg.lower())
+            str_args.append(arg)
         elif isinstance(arg, dict):
             # Skip nested formulas - these shouldn't be in propositional symbols
             continue
         else:
-            str_args.append(str(arg).lower())
+            str_args.append(str(arg))
 
-    return f"{predicate.lower()}_{'_'.join(str_args)}"
+    # Use normalizer to create symbol (handles hyphens automatically)
+    return normalizer.create_propositional_symbol(predicate, str_args)
 
 
 def test_grounding_map():

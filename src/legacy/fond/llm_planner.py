@@ -18,7 +18,10 @@ import re
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add src directory to path (only once)
+_src_dir = str(Path(__file__).parent.parent.parent)
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from stage1_interpretation.ltlf_formula import LTLSpecification, TemporalOperator
 

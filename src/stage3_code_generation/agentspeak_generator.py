@@ -71,7 +71,8 @@ class AgentSpeakGenerator:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.2  # Lower for more consistent code generation
+                temperature=0.2,  # Lower for more consistent code generation
+                timeout=60.0  # 60 seconds timeout for API call (same as Stage 1)
             )
 
             response_text = response.choices[0].message.content

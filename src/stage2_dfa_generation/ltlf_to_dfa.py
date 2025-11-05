@@ -22,113 +22,82 @@ NOTE: Requires MONA (MONadic second-order logic Automata) to be installed.
 # Setup MONA path before importing ltlf2dfa
 import sys
 from pathlib import Path
-# Add parent src directory to path for setup_mona_path import
-sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Add parent src directory to path for setup_mona_path import (only once)
+_parent_dir = str(Path(__file__).parent.parent)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
 
 from setup_mona_path import setup_mona
 setup_mona()
 
 from typing import Dict, List, Any, Tuple
-import re
 from ltlf2dfa.parser.ltlf import LTLfParser
+from utils.symbol_normalizer import SymbolNormalizer
 
 
 class PredicateToProposition:
     """
     Converts predicate-based LTLf formulas to propositional encoding
 
-    on(a, b) → on_a_b
-    clear(a) → clear_a
-    holding(x) → holding_x
-    handempty → handempty (already propositional)
+    Now uses SymbolNormalizer for consistent symbol handling across the pipeline.
+
+    Examples:
+        on(a, b) → on_a_b
+        clear(a) → clear_a
+        on(block-1, block-2) → on_blockhh1_blockhh2 (with hyphen encoding)
+        handempty → handempty (already propositional)
     """
 
-    def __init__(self):
-        # Match predicates that don't contain nested parentheses
-        # This ensures we match inner predicates first
-        self.predicate_pattern = re.compile(r'(\w+)\(([^()]+)\)')
-        self.predicate_to_prop = {}  # Maps "on(a, b)" → "on_a_b"
-        self.prop_to_predicate = {}  # Reverse mapping
+    def __init__(self, normalizer: SymbolNormalizer = None):
+        """
+        Initialize with optional normalizer instance
+
+        Args:
+            normalizer: SymbolNormalizer instance (creates new one if not provided)
+        """
+        self.normalizer = normalizer or SymbolNormalizer()
 
     def encode_predicate(self, predicate_str: str) -> str:
         """
         Encode a single predicate to propositional variable
 
         Args:
-            predicate_str: e.g., "on(a, b)" or "clear(a)"
+            predicate_str: e.g., "on(a, b)" or "clear(block-1)"
 
         Returns:
-            Propositional variable: e.g., "on_a_b" or "clear_a"
+            Propositional variable: e.g., "on_a_b" or "clear_blockhh1"
         """
-        match = self.predicate_pattern.match(predicate_str.strip())
+        # Parse predicate string using normalizer
+        pred_name, args = self.normalizer.parse_predicate_string(predicate_str.strip())
 
-        if not match:
+        if not args:
             # Already propositional (e.g., "handempty", "a", "b")
             return predicate_str.strip()
 
-        pred_name = match.group(1)
-        args = match.group(2)
-
-        # Replace commas and spaces with underscores
-        prop_var = f"{pred_name}_" + "_".join(arg.strip() for arg in args.split(','))
-
-        # Store mappings
-        self.predicate_to_prop[predicate_str.strip()] = prop_var
-        self.prop_to_predicate[prop_var] = predicate_str.strip()
-
-        return prop_var
+        # Create propositional symbol using normalizer
+        return self.normalizer.create_propositional_symbol(pred_name, args)
 
     def convert_formula(self, ltlf_formula_str: str) -> str:
         """
         Convert entire LTLf formula from predicate to propositional form
 
         Args:
-            ltlf_formula_str: e.g., "F(on(a, b))" or "F(on(a, b)) & G(clear(c))"
+            ltlf_formula_str: e.g., "F(on(a, b))" or "F(on(block-1, block-2)) & G(clear(c))"
 
         Returns:
-            Propositional formula: e.g., "F(on_a_b)" or "F(on_a_b) & G(clear_c)"
+            Propositional formula: e.g., "F(on_a_b)" or "F(on_blockhh1_blockhh2) & G(clear_c)"
         """
-
-        # Reserved LTL operators that should NOT be replaced
-        ltl_operators = {'F', 'G', 'X', 'WX', 'U', 'R', 'W', 'M'}
-
-        def replacer(match):
-            full_match = match.group(0)  # e.g., "on(a, b)" or "F(x)"
-            pred_name = match.group(1)    # e.g., "on" or "F"
-
-            # Skip if it's an LTL operator (F, G, etc.)
-            if pred_name in ltl_operators:
-                return full_match
-
-            # Otherwise, encode the predicate: on(a, b) → on_a_b
-            return self.encode_predicate(full_match)
-
-        # Apply replacements iteratively until no more changes
-        # This handles nested structures like F(on(a, b))
-        prev_converted = ltlf_formula_str
-        max_iterations = 10  # Safety limit
-
-        for _ in range(max_iterations):
-            converted = self.predicate_pattern.sub(replacer, prev_converted)
-
-            if converted == prev_converted:
-                # No more changes, we're done
-                break
-
-            prev_converted = converted
-        else:
-            # Exceeded max iterations
-            raise RuntimeError(f"Failed to converge after {max_iterations} iterations")
-
-        return converted
+        # Use normalizer's formula normalization
+        return self.normalizer.normalize_formula_string(ltlf_formula_str)
 
     def get_mapping(self) -> Dict[str, str]:
-        """Get predicate → proposition mapping"""
-        return dict(self.predicate_to_prop)
+        """Get original → normalized mapping"""
+        return self.normalizer.get_original_to_normalized_map()
 
     def get_reverse_mapping(self) -> Dict[str, str]:
-        """Get proposition → predicate mapping"""
-        return dict(self.prop_to_predicate)
+        """Get normalized → original mapping"""
+        return self.normalizer.get_normalized_to_original_map()
 
 
 class LTLfToDFA:
@@ -209,8 +178,9 @@ class LTLfToDFA:
     def _extract_alphabet(self, dfa_dot: str) -> List[str]:
         """Extract alphabet (propositional variables) from DFA"""
         # This would require parsing DOT more carefully
-        # For now, return from our encoder mapping
-        return list(self.encoder.predicate_to_prop.values())
+        # For now, return from our encoder mapping (normalized symbols)
+        mapping = self.encoder.get_mapping()
+        return list(mapping.values()) if mapping else []
 
 
 def test_converter():

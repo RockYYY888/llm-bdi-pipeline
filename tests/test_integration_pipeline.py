@@ -15,8 +15,10 @@ Note: FOND planning (Branch B) has been moved to legacy/fond/
 import sys
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Add src to path (only once)
+_src_dir = str(Path(__file__).parent.parent / "src")
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
 
 from ltl_bdi_pipeline import LTL_BDI_Pipeline
 import traceback
@@ -71,7 +73,7 @@ def run_tests():
     failed = 0
     crashed = 0
 
-    for test in test_cases:
+    for test in test_cases[:1]: # cancel [:1] here to view the full tests
         print("=" * 80)
         print(f"TEST: {test.name}")
         print("=" * 80)

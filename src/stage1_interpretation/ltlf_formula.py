@@ -68,14 +68,54 @@ class LTLFormula:
     sub_formulas: List['LTLFormula']
     logical_op: Optional[LogicalOperator]
 
+    def _is_atomic(self) -> bool:
+        """Check if this formula is atomic (no operators, just a predicate/constant)"""
+        return (self.predicate is not None and
+                self.operator is None and
+                self.logical_op is None)
+
+    def _is_unary(self) -> bool:
+        """Check if this formula uses a unary operator"""
+        if self.logical_op == LogicalOperator.NOT:
+            return True
+        if self.operator in [TemporalOperator.NEXT, TemporalOperator.WEAK_NEXT,
+                             TemporalOperator.FINALLY, TemporalOperator.GLOBALLY]:
+            return True
+        return False
+
+    def _is_binary(self) -> bool:
+        """Check if this formula uses a binary operator"""
+        if self.operator in [TemporalOperator.UNTIL, TemporalOperator.RELEASE]:
+            return True
+        if self.logical_op in [LogicalOperator.AND, LogicalOperator.OR,
+                               LogicalOperator.IMPLIES, LogicalOperator.EQUIVALENCE]:
+            return True
+        return False
+
+    def _needs_parens(self) -> bool:
+        """
+        Determine if this formula needs parentheses when used as a sub-formula.
+
+        Rules:
+        - Atomic formulas: NO parentheses
+        - Unary operators (!, X, WX, F, G): NO parentheses (they have operator(...) format)
+        - Binary operators (&, |, ->, <->, U, R): YES parentheses when nested
+        """
+        return self._is_binary()
+
     def to_string(self) -> str:
-        """Convert LTL formula to string representation"""
+        """
+        Convert LTL formula to string representation with structural parenthesization.
+
+        Strategy: Add parentheses around binary operators when they appear as sub-formulas.
+        This ensures unambiguous parsing while keeping atomic/unary formulas clean.
+        """
         # Propositional constants: true, false
         if isinstance(self.predicate, str) and self.predicate in ["true", "false"]:
             return self.predicate
 
-        if self.predicate and not self.operator:
-            # Atomic proposition: on(a, b), clear(a), or handempty
+        # Atomic proposition: on(a, b), clear(a), or handempty
+        if self._is_atomic():
             if isinstance(self.predicate, dict):
                 pred_name = list(self.predicate.keys())[0]
                 args = self.predicate[pred_name]
@@ -83,32 +123,79 @@ class LTLFormula:
                     return pred_name
                 return f"{pred_name}({', '.join(args)})"
 
-        # Binary temporal operators: U (Until), R (Release)
-        if self.operator in [TemporalOperator.UNTIL, TemporalOperator.RELEASE] and len(self.sub_formulas) == 2:
-            left = self.sub_formulas[0].to_string()
-            right = self.sub_formulas[1].to_string()
-            op_symbol = self.operator.value
-            return f"({left} {op_symbol} {right})"
-
         # Unary temporal operators: X, WX, F, G
-        if self.operator and len(self.sub_formulas) == 1:
+        if self.operator in [TemporalOperator.NEXT, TemporalOperator.WEAK_NEXT,
+                             TemporalOperator.FINALLY, TemporalOperator.GLOBALLY]:
             inner = self.sub_formulas[0].to_string()
             return f"{self.operator.value}({inner})"
 
-        # Boolean operators
-        if self.logical_op and len(self.sub_formulas) >= 1:
-            parts = [f.to_string() for f in self.sub_formulas]
+        # Binary temporal operators: U (Until), R (Release)
+        if self.operator in [TemporalOperator.UNTIL, TemporalOperator.RELEASE]:
+            left = self.sub_formulas[0].to_string()
+            right = self.sub_formulas[1].to_string()
+            op_symbol = self.operator.value
 
-            if self.logical_op == LogicalOperator.AND:
-                return f"{' & '.join(parts)}"
+            # ALWAYS add parens to binary sub-formulas for clarity
+            if self.sub_formulas[0]._is_binary():
+                left = f"({left})"
+            if self.sub_formulas[1]._is_binary():
+                right = f"({right})"
+
+            # Wrap entire Until/Release in parens (they're binary operators)
+            return f"({left} {op_symbol} {right})"
+
+        # Boolean operators
+        if self.logical_op:
+            if self.logical_op == LogicalOperator.NOT:
+                # NOT is unary
+                inner = self.sub_formulas[0].to_string()
+                return f"!({inner})"
+
+            elif self.logical_op == LogicalOperator.AND:
+                parts = []
+                for f in self.sub_formulas:
+                    s = f.to_string()
+                    # ALWAYS add parens to binary sub-formulas (except AND)
+                    if f._is_binary() and not (f.logical_op == LogicalOperator.AND):
+                        s = f"({s})"
+                    parts.append(s)
+                # Wrap entire AND in parens
+                return f"({' & '.join(parts)})"
+
             elif self.logical_op == LogicalOperator.OR:
-                return f"{' | '.join(parts)}"
-            elif self.logical_op == LogicalOperator.NOT:
-                return f"!({parts[0]})"
+                parts = []
+                for f in self.sub_formulas:
+                    s = f.to_string()
+                    # ALWAYS add parens to binary sub-formulas (except OR)
+                    if f._is_binary() and not (f.logical_op == LogicalOperator.OR):
+                        s = f"({s})"
+                    parts.append(s)
+                # Wrap entire OR in parens
+                return f"({' | '.join(parts)})"
+
             elif self.logical_op == LogicalOperator.IMPLIES:
-                return f"{parts[0]} -> {parts[1]}"
+                left = self.sub_formulas[0].to_string()
+                right = self.sub_formulas[1].to_string()
+
+                # ALWAYS add parens to binary sub-formulas
+                if self.sub_formulas[0]._is_binary():
+                    left = f"({left})"
+                if self.sub_formulas[1]._is_binary():
+                    right = f"({right})"
+
+                return f"{left} -> {right}"
+
             elif self.logical_op == LogicalOperator.EQUIVALENCE:
-                return f"{parts[0]} <-> {parts[1]}"
+                left = self.sub_formulas[0].to_string()
+                right = self.sub_formulas[1].to_string()
+
+                # ALWAYS add parens to binary sub-formulas
+                if self.sub_formulas[0]._is_binary():
+                    left = f"({left})"
+                if self.sub_formulas[1]._is_binary():
+                    right = f"({right})"
+
+                return f"{left} <-> {right}"
 
         return "true"
 

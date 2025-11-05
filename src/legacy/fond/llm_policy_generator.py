@@ -214,8 +214,13 @@ def test_llm_policy_generator():
     """Test LLM policy generator"""
     import sys
     from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    from src.config import get_config
+
+    # Add src directory to path (only once)
+    _src_dir = str(Path(__file__).parent.parent.parent)
+    if _src_dir not in sys.path:
+        sys.path.insert(0, _src_dir)
+
+    from config import get_config
 
     print("="*80)
     print("LLM Policy Generator Test")

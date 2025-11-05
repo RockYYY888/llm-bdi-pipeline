@@ -164,6 +164,18 @@ based on the following precedence levels (higher number = higher precedence = bi
 
 Your JSON structure MUST reflect the correct operator precedence through proper nesting:
 
+**Example 0 (Propositional Constants):** "Goal is always achievable" → G(true)
+```json
+{{
+  "type": "temporal",
+  "operator": "G",
+  "formula": "true"
+}}
+```
+**CRITICAL**: Propositional constants "true" and "false" are represented as plain strings, NOT as dictionaries.
+- ✅ CORRECT: "formula": "true"
+- ❌ WRONG: "formula": {{"true": []}}, "formula": {{"true": "constant"}}, "formula": {{"constant": []}}
+
 **Example 1:** "F on(a,b) & clear(c)" → F(on(a,b)) & clear(c)
 ```json
 {{
@@ -418,6 +430,23 @@ Return ONLY valid JSON in this exact format (no markdown, no explanation):
     {{"symbol": "clear_c", "predicate": "clear", "args": ["c"]}}
   ]
 }}
+
+**Special Case - Propositional Constants (true/false):**
+{{
+  "objects": [],
+  "ltl_formulas": [
+    {{
+      "type": "temporal",
+      "operator": "G",
+      "formula": "true"
+    }}
+  ],
+  "atoms": []
+}}
+**CRITICAL**:
+- Use plain string "true" or "false", NOT a dictionary
+- Do NOT include "true" or "false" in the atoms list
+- Objects list should be empty if no domain objects are mentioned
 
 **For X (Next) operator:**
 {{

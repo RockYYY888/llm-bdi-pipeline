@@ -19,7 +19,11 @@ Key Concepts:
 # Setup MONA path before importing ltlf2dfa
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Add parent src directory to path for setup_mona_path import (only once)
+_parent_dir = str(Path(__file__).parent.parent)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
 
 from setup_mona_path import setup_mona
 setup_mona()
