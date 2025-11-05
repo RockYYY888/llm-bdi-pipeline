@@ -101,14 +101,22 @@ class AgentSpeakGenerator:
         self.last_prompt_dict = prompt_dict
 
         try:
-            response = self.client.chat.completions.create(
+            # Use streaming to avoid server-side timeouts with long responses
+            stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=0.2,  # Lower for more consistent code generation
-                timeout=120.0  # 120 seconds timeout for API call (double as Stage 1)
+                timeout=120.0,  # 120 seconds timeout for API call (double as Stage 1)
+                stream=True  # Enable streaming
             )
 
-            response_text = response.choices[0].message.content
+            # Collect response chunks
+            response_text = ""
+            for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, 'content') and delta.content:
+                        response_text += delta.content
 
             # Print response if verbose mode enabled
             if self.verbose:
