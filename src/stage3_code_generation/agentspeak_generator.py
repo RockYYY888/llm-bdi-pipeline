@@ -105,7 +105,7 @@ class AgentSpeakGenerator:
                 model=self.model,
                 messages=messages,
                 temperature=0.2,  # Lower for more consistent code generation
-                timeout=60.0  # 60 seconds timeout for API call (same as Stage 1)
+                timeout=120.0  # 120 seconds timeout for API call (double as Stage 1)
             )
 
             response_text = response.choices[0].message.content
