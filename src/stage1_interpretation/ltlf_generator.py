@@ -36,7 +36,7 @@ class NLToLTLfGenerator:
             domain_file: Path to PDDL domain file (for dynamic prompt construction)
         """
         self.api_key = api_key
-        self.model = model or "gpt-4o-mini"
+        self.model = model or "deepseek-chat"
         self.base_url = base_url
         self.domain_file = domain_file
         self.client = None

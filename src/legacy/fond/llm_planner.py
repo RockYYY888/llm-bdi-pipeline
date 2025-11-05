@@ -45,11 +45,11 @@ class LLMPlanner:
 
         Args:
             api_key: OpenAI API key
-            model: Model name (default: gpt-4o-mini)
+            model: Model name (default: deepseek-chat)
             base_url: Optional base URL for API
         """
         self.api_key = api_key
-        self.model = model or "gpt-4o-mini"
+        self.model = model or "deepseek-chat"
         self.base_url = base_url
         self.client = None
 

@@ -19,7 +19,7 @@ class LLMPolicyGenerator:
 
     def __init__(self,
                  api_key: Optional[str] = None,
-                 model: str = "gpt-4o-mini",
+                 model: str = "deepseek-chat",
                  base_url: Optional[str] = None):
         """
         Initialize LLM Policy Generator

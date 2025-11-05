@@ -34,8 +34,8 @@ class Config:
 
     @property
     def openai_model(self) -> str:
-        """Get OpenAI model (default: gpt-4o-mini)"""
-        return os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+        """Get OpenAI model (default: deepseek-chat)"""
+        return os.getenv('OPENAI_MODEL', 'deepseek-chat')
 
     @property
     def openai_timeout(self) -> int:

@@ -65,7 +65,7 @@ Note:
         print("   cp .env.example .env")
         print("\n2. Edit .env and add your API key:")
         print("   OPENAI_API_KEY=sk-proj-your-actual-key-here")
-        print("   OPENAI_MODEL=deepseek-chat  # or gpt-4o-mini")
+        print("   OPENAI_MODEL=deepseek-chat  # Default model")
         print("\n3. Run the pipeline again")
         print("\n" + "="*80)
         sys.exit(1)

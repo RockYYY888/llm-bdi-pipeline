@@ -18,7 +18,7 @@ class AgentSpeakGenerator:
 
     def __init__(self,
                  api_key: Optional[str] = None,
-                 model: str = "gpt-4",
+                 model: str = "deepseek-chat",
                  base_url: Optional[str] = None,
                  verbose: bool = False):
         """
