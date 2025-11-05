@@ -128,15 +128,30 @@ Natural Language Input ("Stack block C on block B")
 - Complete AgentSpeak (.asl) program generation from LTLf goals
 - Automatic plan library creation with context-sensitive plans
 - Declarative goal handling using LTL temporal operators
-- Support for F (eventually), G (always), U (until), X (next) operators
+- Support for F (eventually), G (always), U (until), X (next), R (release), W (weak until), M (strong release) operators
 - Domain-aware code generation with action preconditions
+- Propositional constant handling (true/false) in LTL formulas
+
+### Symbol Normalization and Grounding
+- Centralized symbol normalization with `SymbolNormalizer` utility class
+- Automatic hyphen handling: bidirectional encoding (`-` ↔ `hh`) for ltlf2dfa compatibility
+- Predicate-to-proposition conversion (e.g., `on(block-1, block-2)` → `on_blockhh1_blockhh2`)
+- Symbol mapping storage for restoration and debugging
+- Consistent symbol handling across all pipeline stages
 
 ### Formal DFA Conversion
-- LTLf to DFA conversion using ltlf2dfa library
-- Automatic predicate-to-proposition encoding (e.g., on(a,b) → on_a_b)
+- LTLf to DFA conversion using ltlf2dfa library with MONA backend
+- Recursive DFA generation with DFS-based goal decomposition
+- Automatic predicate grounding and propositionalization
 - DOT format output for visualization
 - Formal verification and analysis capabilities
-- Metadata tracking with predicate mappings
+- Complete transition label extraction for plan generation
+
+### Comprehensive Testing
+- 28 test cases covering all LTL operators and syntax combinations
+- Unit tests for symbol normalization with hyphen handling
+- Integration tests for end-to-end pipeline validation
+- Stage-specific test suites for isolated component testing
 
 ### Comprehensive Logging
 - Timestamped execution logs in JSON and human-readable formats
@@ -203,32 +218,52 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 ├── src/
 │   ├── main.py                          # Entry point
 │   ├── config.py                        # Configuration management
-│   ├── domain.pddl                      # Blocksworld PDDL domain (reference)
 │   ├── ltl_bdi_pipeline.py              # Main pipeline orchestration (3 stages)
-│   ├── dual_branch_pipeline.py          # DEPRECATED: Backward compatibility wrapper
 │   ├── pipeline_logger.py               # Logging utilities (3-stage logging)
 │   ├── setup_mona_path.py               # Automatic MONA PATH configuration
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   └── symbol_normalizer.py         # Symbol normalization with hyphen handling
 │   ├── stage1_interpretation/
-│   │   └── ltl_parser.py                # Stage 1: NL -> LTLf conversion (LLM)
+│   │   ├── __init__.py
+│   │   ├── ltlf_generator.py            # Stage 1: NL -> LTLf conversion (LLM)
+│   │   ├── ltlf_formula.py              # LTLf formula data structures
+│   │   ├── grounding_map.py             # Predicate grounding and propositionalization
+│   │   ├── pddl_parser.py               # PDDL domain parser
+│   │   └── prompts.py                   # LLM prompts for NL to LTLf
 │   ├── stage2_dfa_generation/
+│   │   ├── __init__.py
 │   │   ├── recursive_dfa_builder.py     # Stage 2: Recursive DFA generation (DFS)
-│   │   └── ltlf_to_dfa.py               # LTLf -> DFA conversion (ltlf2dfa)
+│   │   ├── ltlf_to_dfa.py               # LTLf -> DFA conversion (ltlf2dfa)
+│   │   └── dfa_dot_cleaner.py           # DFA DOT file cleaning utilities
 │   ├── stage3_code_generation/
-│   │   └── agentspeak_generator.py      # Stage 3: DFAs -> AgentSpeak (LLM)
+│   │   ├── __init__.py
+│   │   ├── agentspeak_generator.py      # Stage 3: DFAs -> AgentSpeak (LLM)
+│   │   └── prompts.py                   # LLM prompts for AgentSpeak generation
 │   ├── external/
-│   │   └── mona-1.4/                    # MONA automata tool (for ltlf2dfa)
+│   │   ├── mona-1.4/                    # MONA automata tool (for ltlf2dfa)
+│   │   └── pr2/                         # PR2 FOND planner
 │   └── legacy/
-│       ├── fond/                        # Legacy FOND planning (Branch B)
-│       │   ├── README.md                # Instructions for restoring FOND functionality
-│       │   ├── stage2_planning/         # PDDL and PR2 planner
-│       │   ├── stage2_translation/      # LTLf to PDDL conversion
-│       │   ├── domains/blocksworld/     # PDDL domain files
-│       │   └── external/pr2/            # PR2 FOND planner (Docker)
-│       └── stage4_execution/            # Future: Execution & evaluation
+│       └── fond/                        # Legacy FOND planning (Branch B)
+│           ├── llm_planner.py
+│           ├── llm_policy_generator.py
+│           ├── stage2_planning/         # PDDL and PR2 planner
+│           └── stage2_translation/      # LTLf to PDDL conversion
+├── tests/                               # Test suites
+│   ├── __init__.py
+│   ├── test_symbol_normalizer.py        # Symbol normalizer unit tests
+│   ├── test_integration_pipeline.py     # End-to-end integration tests
+│   ├── stage1_interpretation/
+│   │   └── test_nl_to_ltlf_generation.py    # Stage 1 NL -> LTLf tests (28 cases)
+│   ├── stage2_dfa_generation/
+│   │   ├── __init__.py
+│   │   └── test_ltlf2dfa.py             # Stage 2 LTLf -> DFA tests
+│   └── stage3_code_generation/
+│       └── __init__.py
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 ├── run_with_mona.sh                     # Wrapper script to run with MONA in PATH
-└── tests/                               # Test suites
-    └── test_complex_cases.py            # Complex test cases
+├── pyproject.toml                       # Project dependencies (uv managed)
+└── uv.lock                              # Dependency lock file
 ```
 
 ---
@@ -239,40 +274,25 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 
 **Important**: Tests that use ltlf2dfa require MONA to be available. The project automatically adds MONA to PATH when you import from `src/` modules.
 
-Run the comprehensive test suite with 3 complex scenarios based on FOND benchmarks:
-
 ```bash
-# Run all complex test cases (bw_5_1, bw_5_3, bw_5_5)
-python tests/test_complex_cases.py
+# Run Stage 1 tests: Natural Language -> LTLf (28 test cases)
+python tests/stage1_interpretation/test_nl_to_ltlf_generation.py
 
-# Run with output logging
-python tests/test_complex_cases.py 2>&1 | tee tests/test_results.log
-```
+# Run Stage 2 tests: LTLf -> DFA conversion
+python tests/stage2_dfa_generation/test_ltlf2dfa.py
 
-### Test Individual Components
+# Run symbol normalizer tests
+python tests/test_symbol_normalizer.py
 
-```bash
-# Test LTL parser (Stage 1)
-python src/stage1_interpretation/ltlf_parser.py
-
-# Test recursive DFA builder (Stage 2)
-python src/stage2_dfa_generation/recursive_dfa_builder.py
-
-# Test AgentSpeak generator (Stage 3)
-python src/stage3_code_generation/agentspeak_generator.py
-
-# Test ltlf2dfa integration (requires MONA)
-python temp/test_ltlf2dfa.py
+# Run integration tests (end-to-end pipeline)
+python tests/test_integration_pipeline.py
 ```
 
 **Alternative**: Use the wrapper script to run any Python script with MONA in PATH:
 
 ```bash
 # Run with explicit MONA path setup
-./run_with_mona.sh python tests/test_complex_cases.py
-
-# Run ltlf2dfa tests
-./run_with_mona.sh python temp/test_ltlf2dfa.py
+./run_with_mona.sh python tests/stage1_interpretation/test_nl_to_ltlf_generation.py
 ```
 
 ---
@@ -281,36 +301,51 @@ python temp/test_ltlf2dfa.py
 
 ### Stage 1: Natural Language → LTLf
 - **Input**: Natural language instruction (e.g., "Stack block C on block B")
-- **Process**: LLM-based parser extracts objects, initial state, and temporal goals
-- **Output**: LTLf specification with formula(s), objects, initial state
+- **Process**: LLM-based parser (`ltlf_generator.py`) extracts objects, predicates, and temporal goals
+  - Uses structured prompts with JSON output format
+  - Supports all LTL operators: F, G, U, X, R, W, M
+  - Handles propositional constants (true/false)
+  - Handles nested and complex temporal formulas
+  - Creates grounding map for predicate propositionalization
+- **Output**:
+  - LTLf formulas in JSON format
+  - Objects list
+  - Initial state (optional)
+  - Grounding map with predicate-to-proposition mappings
 - **LLM Model**: Configured via `OPENAI_MODEL` in `.env` (e.g., `deepseek-chat`, `gpt-4o-mini`)
+- **Testing**: 28 comprehensive test cases covering all operators and edge cases
 
 ### Stage 2: LTLf → Recursive DFA Generation
 - **Input**: LTLf specification from Stage 1
 - **Process**: Recursively decomposes LTLf goals into subgoals using DFS strategy
-  1. Generate DFA for root goal using ltlf2dfa
-  2. Analyze DFA transitions to identify subgoals
-  3. For each subgoal:
+  1. Normalize LTLf formula using `SymbolNormalizer` (hyphen encoding)
+  2. Generate DFA for root goal using ltlf2dfa + MONA
+  3. Analyze DFA transitions to identify subgoals
+  4. For each subgoal:
      - If physical action → mark as terminal (no further decomposition)
      - If DFA already exists → reuse cached DFA
      - Otherwise → recursively generate DFA (DFS deeper)
-  4. Continue until all paths reach physical actions or cached DFAs
+  5. Continue until all paths reach physical actions or cached DFAs
 - **Output**: `RecursiveDFAResult` containing:
   - All generated DFAs (root + subgoals) in breadth-first order
   - DFA transitions for each goal (key information for plan generation)
   - Physical actions identified (terminal nodes)
   - Decomposition tree structure with depth information
   - DFA dependency graph
+  - Symbol mappings (normalized ↔ original)
 - **Tools**:
   - ltlf2dfa library (Python interface for DFA generation)
-  - MONA v1.4 (underlying automata generator)
+  - MONA v1.4 (underlying automata generator - must be compiled)
+  - SymbolNormalizer (hyphen handling and propositionalization)
   - Custom recursive DFA builder with DFS decomposition
 - **Requirements**: MONA must be compiled and available (see Prerequisites above)
 - **Key Features**:
-  - Automatic predicate-to-proposition encoding (on(a,b) → on_a_b)
+  - Automatic predicate-to-proposition encoding with hyphen handling
+  - Example: `on(block-1, block-2)` → `on_blockhh1_blockhh2`
   - DFA caching to prevent regeneration
   - Cycle prevention through cache-before-recurse pattern
-  - Complete transition labels extraction
+  - Complete transition labels extraction from MONA output
+  - DOT file generation for DFA visualization
 
 ### Stage 3: DFAs → AgentSpeak Code
 - **Input**: All DFAs with transition information from Stage 2
@@ -329,17 +364,49 @@ python temp/test_ltlf2dfa.py
 
 ## Implementation Notes
 
+### Symbol Normalization Architecture
+The `SymbolNormalizer` utility class provides centralized symbol handling across all pipeline stages:
+
+**Key Design Decisions**:
+- **Hyphen Encoding**: Uses `hh` as replacement for `-` to avoid parsing issues in ltlf2dfa/MONA
+  - Example: `block-1` → `blockhh1` → `block-1` (bidirectional)
+  - Chosen `hh` because it's unlikely to appear naturally in domain symbols
+- **Bidirectional Mapping**: Stores both normalized → original and original → normalized mappings
+  - Enables symbol restoration for debugging and output
+  - Maintains consistency across pipeline stages
+- **Integration Points**:
+  - Stage 1: `GroundingMap` uses normalizer for propositional symbol creation
+  - Stage 2: `PredicateToProposition` uses normalizer for formula normalization
+  - Stage 2: `RecursiveDFABuilder` passes normalizer through DFA generation
+
+**Usage Example**:
+```python
+from utils.symbol_normalizer import SymbolNormalizer
+
+normalizer = SymbolNormalizer()
+
+# Encode hyphens for ltlf2dfa
+normalized = normalizer.normalize_formula_string("F(on(block-1, block-2))")
+# Result: "F(on_blockhh1_blockhh2)"
+
+# Decode back to original
+original = normalizer.denormalize_formula_string(normalized)
+# Result: "F(on(block-1, block-2))"
+```
+
 ### LTL-BDI Integration
 The pipeline demonstrates LLM-based generation of BDI agent code from declarative temporal goals:
 - **Declarative Goals**: LTLf formulas specify *what* should be achieved, not *how*
 - **Plan Generation**: LLM translates temporal goals into procedural AgentSpeak plans
 - **Domain Knowledge**: LLM incorporates domain actions and predicates into generated code
+- **Formal Verification**: DFA representation enables formal analysis of goal achievability
 
 ### Blocksworld Domain
 The blocksworld domain provides a testbed for:
 - Goal dependency analysis (stacking order)
 - State space exploration (block configurations)
 - Action precondition/effect reasoning
+- Symbol normalization with hyphenated identifiers
 
 **Domain Actions**: pickup, putdown, stack, unstack
 **Domain Predicates**: on(X, Y), ontable(X), clear(X), holding(X), handempty
@@ -350,20 +417,36 @@ The blocksworld domain provides a testbed for:
 
 ### Implemented Features (Stages 1-3)
 - ✓ **Stage 1**: Natural language → LTLf specification (LLM-based)
+  - 28 comprehensive test cases covering all LTL operators
+  - Propositional constant handling (true/false)
+  - Support for F, G, U, X, R, W, M temporal operators
+  - Complex nested formula support
+  - JSON structured output format
+  - Grounding map generation for propositionalization
 - ✓ **Stage 2**: LTLf → Recursive DFA generation (DFS-based decomposition)
   - Recursive goal decomposition until physical actions
+  - Symbol normalization with hyphen handling (`-` ↔ `hh`)
   - DFA caching and reuse to prevent regeneration
-  - Predicate-to-proposition encoding (on(a,b) → on_a_b)
-  - Complete DFA transitions extraction
+  - Predicate-to-proposition encoding with special character handling
+  - Complete DFA transitions extraction from MONA
   - Decomposition tree with depth tracking
   - DOT format output for visualization
+  - Bidirectional symbol mapping storage
 - ✓ **Stage 3**: DFAs → LLM AgentSpeak code generation
   - DFA-guided plan generation using transition information
   - Context-sensitive plan alternatives
   - Failure handling plans
+- ✓ **Utils**: Centralized symbol normalization utilities
+  - `SymbolNormalizer` class for consistent symbol handling
+  - Hyphen encoding/decoding for ltlf2dfa compatibility
+  - Symbol mapping storage and retrieval
+- ✓ **Testing Infrastructure**:
+  - Stage 1: 28 test cases for NL → LTLf conversion
+  - Symbol normalizer unit tests
+  - Integration tests for end-to-end pipeline
+  - Stage-specific test suites
 - ✓ Blocksworld domain support with physical action identification
 - ✓ Comprehensive JSON + text execution logs with full LLM prompts and DFA decomposition
-- ✓ Support for F, G, U, X temporal operators and nested formulas
 - ✓ AgentSpeak code output (.asl files)
 
 ### Not Yet Implemented
@@ -372,9 +455,10 @@ The blocksworld domain provides a testbed for:
   - Goal satisfaction verification
   - Performance metrics
   - (Code exists in `legacy/stage4_execution/` for future development)
+- ⏳ **Extended Domain Support**: Mars Rover, Logistics, other IPC domains
 
 ### Known Limitations
-1. **Single Domain**: Currently supports blocksworld only
+1. **Single Domain**: Currently tested primarily with blocksworld domain
 2. **No Execution**: Pipeline stops after code generation (Stage 3)
 3. **Subgoal Extraction**: Current implementation extracts subgoals from transition labels, which may not capture all domain-specific decomposition strategies
 
