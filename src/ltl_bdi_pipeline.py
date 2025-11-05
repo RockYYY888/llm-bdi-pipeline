@@ -39,7 +39,12 @@ class LTL_BDI_Pipeline:
             domain_file: Path to PDDL domain file. If None, uses default blocksworld domain.
         """
         self.config = get_config()
-        self.logger = PipelineLogger()
+
+        # Use absolute path for logs directory (project root/logs)
+        # This ensures logs go to same location regardless of where tests are run from
+        from pathlib import Path
+        project_root = Path(__file__).parent.parent  # src/ -> project root
+        self.logger = PipelineLogger(logs_dir=str(project_root / "logs"))
 
         # Domain file path
         if domain_file is None:
