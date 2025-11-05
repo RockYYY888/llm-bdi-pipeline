@@ -204,7 +204,8 @@ class LTL_BDI_Pipeline:
 
         generator = AgentSpeakGenerator(
             api_key=self.config.openai_api_key,
-            model=self.config.openai_model
+            model=self.config.openai_model,
+            verbose=True  # Enable verbose output to see prompts and responses
         )
 
         try:

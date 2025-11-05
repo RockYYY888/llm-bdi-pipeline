@@ -19,7 +19,8 @@ class AgentSpeakGenerator:
     def __init__(self,
                  api_key: Optional[str] = None,
                  model: str = "gpt-4",
-                 base_url: Optional[str] = None):
+                 base_url: Optional[str] = None,
+                 verbose: bool = False):
         """
         Initialize AgentSpeak generator
 
@@ -27,9 +28,11 @@ class AgentSpeakGenerator:
             api_key: OpenAI API key
             model: OpenAI model to use
             base_url: Optional custom base URL
+            verbose: If True, print prompts and responses to terminal
         """
         self.client = OpenAI(api_key=api_key, base_url=base_url) if api_key else None
         self.model = model
+        self.verbose = verbose
 
     def generate(self,
                  ltl_spec: Dict[str, Any],
@@ -67,6 +70,26 @@ class AgentSpeakGenerator:
             {"role": "user", "content": prompt}
         ]
 
+        # Print prompts if verbose mode enabled
+        if self.verbose:
+            print("\n" + "="*80)
+            print("STAGE 3: AgentSpeak Generation - LLM API Call")
+            print("="*80)
+            print(f"Model: {self.model}")
+            print(f"Temperature: 0.2")
+            print(f"Timeout: 60.0s")
+            print("\n" + "-"*80)
+            print("SYSTEM PROMPT:")
+            print("-"*80)
+            print(AGENTSPEAK_SYSTEM_PROMPT)
+            print("\n" + "-"*80)
+            print("USER PROMPT:")
+            print("-"*80)
+            print(prompt)
+            print("-"*80)
+            print("\nCalling LLM API...")
+            print("="*80 + "\n")
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -76,6 +99,14 @@ class AgentSpeakGenerator:
             )
 
             response_text = response.choices[0].message.content
+
+            # Print response if verbose mode enabled
+            if self.verbose:
+                print("\n" + "="*80)
+                print("LLM RESPONSE RECEIVED")
+                print("="*80)
+                print(response_text)
+                print("="*80 + "\n")
 
             # Extract .asl code from response
             asl_code = self._extract_asl_code(response_text)
