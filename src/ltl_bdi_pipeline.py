@@ -208,6 +208,8 @@ class LTL_BDI_Pipeline:
             verbose=True  # Enable verbose output to see prompts and responses
         )
 
+        prompt_dict = None  # Initialize to track prompt even if error occurs
+
         try:
             # Convert ltl_spec to dict format
             # Note: No initial_state - plans must work from ANY configuration
@@ -250,7 +252,17 @@ class LTL_BDI_Pipeline:
             return asl_code
 
         except Exception as e:
-            self.logger.log_stage3(ltl_spec, dfa_result, None, "Failed", str(e))
+            # Log failure with prompt if available (check generator's last_prompt_dict)
+            error_prompt = prompt_dict if prompt_dict else generator.last_prompt_dict
+            self.logger.log_stage3(
+                ltl_spec,
+                dfa_result,
+                None,
+                "Failed",
+                error=str(e),
+                model=self.config.openai_model,
+                llm_prompt=error_prompt
+            )
             print(f"✗ Stage 3 Failed: {e}")
             import traceback
             traceback.print_exc()

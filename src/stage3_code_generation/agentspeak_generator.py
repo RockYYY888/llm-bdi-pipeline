@@ -33,6 +33,7 @@ class AgentSpeakGenerator:
         self.client = OpenAI(api_key=api_key, base_url=base_url) if api_key else None
         self.model = model
         self.verbose = verbose
+        self.last_prompt_dict = None  # Store last prompt for error logging
 
     def generate(self,
                  ltl_spec: Dict[str, Any],
@@ -90,6 +91,15 @@ class AgentSpeakGenerator:
             print("\nCalling LLM API...")
             print("="*80 + "\n")
 
+        # Prepare prompt dict for logging (BEFORE try block so it's available even if error)
+        prompt_dict = {
+            "system": AGENTSPEAK_SYSTEM_PROMPT,
+            "user": prompt
+        }
+
+        # Store in instance variable so it's accessible even if exception occurs
+        self.last_prompt_dict = prompt_dict
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -111,16 +121,20 @@ class AgentSpeakGenerator:
             # Extract .asl code from response
             asl_code = self._extract_asl_code(response_text)
 
-            # Prepare prompt dict for logging
-            prompt_dict = {
-                "system": AGENTSPEAK_SYSTEM_PROMPT,
-                "user": prompt
-            }
-
             return asl_code, prompt_dict, response_text
 
         except Exception as e:
             ltl_formulas = ltl_spec.get('formulas_string', [])
+
+            # Print error if verbose mode enabled
+            if self.verbose:
+                print("\n" + "="*80)
+                print("LLM API CALL FAILED")
+                print("="*80)
+                print(f"Error Type: {type(e).__name__}")
+                print(f"Error Message: {str(e)}")
+                print("="*80 + "\n")
+
             raise RuntimeError(
                 f"LLM AgentSpeak generation failed: {type(e).__name__}: {str(e)}\n"
                 f"Domain: {domain_name}\n"

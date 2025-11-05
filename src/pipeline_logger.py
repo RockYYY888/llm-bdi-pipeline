@@ -149,6 +149,9 @@ class PipelineLogger:
             with open(grounding_map_path, 'w') as f:
                 json.dump(ltl_spec['grounding_map'], f, indent=2)
 
+        # IMMEDIATELY save current state to files
+        self._save_current_state()
+
     def log_stage1_error(self, error: str):
         """Log Stage 1 failure"""
         if not self.current_record:
@@ -156,6 +159,9 @@ class PipelineLogger:
 
         self.current_record.stage1_status = "failed"
         self.current_record.stage1_error = str(error)
+
+        # IMMEDIATELY save current state to files
+        self._save_current_state()
 
     # NEW: Stage 2 - DFA Generation logging
     def log_stage2_dfas(self, ltl_spec: Any, dfa_result: Any, status: str, error: str = None):
@@ -172,6 +178,9 @@ class PipelineLogger:
         elif error:
             self.current_record.stage2_status = "failed"
             self.current_record.stage2_error = str(error)
+
+        # IMMEDIATELY save current state to files
+        self._save_current_state()
 
     # NEW: Stage 3 - AgentSpeak Generation logging
     def log_stage3(self, ltl_spec: Any, dfa_result: Any, agentspeak_code: str, status: str,
@@ -192,6 +201,9 @@ class PipelineLogger:
             self.current_record.stage3_status = "failed"
             self.current_record.stage3_error = str(error)
 
+        # IMMEDIATELY save current state to files
+        self._save_current_state()
+
     # Simplified logging helper for Stage 1
     def log_stage1(self, nl_input: str, ltl_spec: Any, status: str, error: str = None,
                    model: str = None, llm_prompt: Dict[str, str] = None, llm_response: str = None):
@@ -208,31 +220,20 @@ class PipelineLogger:
             self.log_stage1_error(error)
 
 
-    def end_pipeline(self, success: bool = True) -> Path:
+    def _save_current_state(self):
         """
-        End logging and save the record
-
-        Args:
-            success: Whether the overall pipeline succeeded
-
-        Returns:
-            Path to the saved log file
+        IMMEDIATELY save current state to both JSON and TXT files
+        Called after each stage completion (success or failure)
         """
-        if not self.current_record or not self.start_time:
-            raise RuntimeError("No active pipeline record to end")
+        if not self.current_record or not self.current_log_dir:
+            return
 
-        # Calculate execution time
-        end_time = datetime.now()
-        self.current_record.execution_time_seconds = (
-            end_time - self.start_time
-        ).total_seconds()
-
-        # Set overall success status
-        self.current_record.success = success
-
-        # Save to timestamp directory
-        if not self.current_log_dir:
-            raise RuntimeError("Log directory not initialized")
+        # Calculate current execution time
+        if self.start_time:
+            current_time = datetime.now()
+            self.current_record.execution_time_seconds = (
+                current_time - self.start_time
+            ).total_seconds()
 
         # Save JSON log
         json_filepath = self.current_log_dir / "execution.json"
@@ -245,7 +246,30 @@ class PipelineLogger:
         txt_filepath = self.current_log_dir / "execution.txt"
         self._save_readable_format(txt_filepath, record_dict)
 
-        return json_filepath
+    def end_pipeline(self, success: bool = True) -> Path:
+        """
+        End logging and save the final record
+
+        Args:
+            success: Whether the overall pipeline succeeded
+
+        Returns:
+            Path to the saved log file
+        """
+        if not self.current_record or not self.start_time:
+            raise RuntimeError("No active pipeline record to end")
+
+        # Set overall success status
+        self.current_record.success = success
+
+        # Save final state (this will update execution time)
+        self._save_current_state()
+
+        # Return path to JSON log
+        if not self.current_log_dir:
+            raise RuntimeError("Log directory not initialized")
+
+        return self.current_log_dir / "execution.json"
 
     def _save_readable_format(self, filepath: Path, record: Dict[str, Any]):
         """Save a human-readable text version of the record"""
