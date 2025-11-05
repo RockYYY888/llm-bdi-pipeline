@@ -55,40 +55,35 @@ Predicates:
 
 **LTLf Syntax Reference**
 
-┌─────────────────────────────────────────────────────────────────┐
-│ PROPOSITIONAL SYMBOLS                                            │
-├──────────────────┬──────────────────────────────────────────────┤
-│ Symbol           │ Syntax                                        │
-├──────────────────┼──────────────────────────────────────────────┤
-│ true             │ True                                          │
-│ false            │ False                                         │
-│ [a-z][a-z0-9_]*  │ Atomic propositions                          │
-└──────────────────┴──────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│ BOOLEAN OPERATORS                                                │
-├──────────────────┬──────────────────────────────────────────────┤
-│ Symbol           │ Syntax                                        │
-├──────────────────┼──────────────────────────────────────────────┤
-│ &, &&            │ And (conjunction)                            │
-│ |, ||            │ Or (disjunction)                             │
-│ !, ~             │ Not (negation)                               │
-│ ->, =>           │ Implication                                  │
-│ <->, <=>         │ Equivalence                                  │
-└──────────────────┴──────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│ FUTURE TEMPORAL OPERATORS                                        │
-├──────────────────┬──────────────────────────────────────────────┤
-│ Symbol           │ Syntax                                        │
-├──────────────────┼──────────────────────────────────────────────┤
-│ X                │ Next (strong next state)                     │
-│ WX               │ WeakNext (next state or no next)             │
-│ U                │ Until (φ U ψ - φ holds until ψ)              │
-│ R                │ Release (φ R ψ - ψ holds until φ)            │
-│ F                │ Eventually (will be true at some point)      │
-│ G                │ Always (true at all future points)           │
-└──────────────────┴──────────────────────────────────────────────┘
+```json
+{{
+  "propositional_symbols": {{
+    "true": "True constant",
+    "false": "False constant",
+    "[a-z][a-z0-9_]*": "Atomic propositions"
+  }},
+  "boolean_operators": {{
+    "&": "And (conjunction)",
+    "&&": "And (conjunction)",
+    "|": "Or (disjunction)",
+    "||": "Or (disjunction)",
+    "!": "Not (negation)",
+    "~": "Not (negation)",
+    "->": "Implication",
+    "=>": "Implication",
+    "<->": "Equivalence",
+    "<=>": "Equivalence"
+  }},
+  "future_temporal_operators": {{
+    "X": "Next (strong next state)",
+    "WX": "WeakNext (next state or no next)",
+    "U": "Until (φ U ψ - φ holds until ψ)",
+    "R": "Release (φ R ψ - ψ holds until φ)",
+    "F": "Eventually (will be true at some point)",
+    "G": "Always (true at all future points)"
+  }}
+}}
+```
 
 **CRITICAL: These are the ONLY valid symbols. DO NOT use:**
 - Commas (,)
