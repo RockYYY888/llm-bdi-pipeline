@@ -47,11 +47,6 @@ class Config:
         """Get OpenAI base URL (for custom endpoints like DeepSeek)"""
         return os.getenv('OPENAI_BASE_URL')
 
-    @property
-    def use_llm_planner(self) -> bool:
-        """Use LLM-based planner instead of classical planner (default: False)"""
-        return os.getenv('USE_LLM_PLANNER', 'false').lower() == 'true'
-
     def validate(self) -> bool:
         """Validate configuration"""
         if not self.openai_api_key:
