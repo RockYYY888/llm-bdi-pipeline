@@ -190,13 +190,18 @@ class PipelineLogger:
         if not self.current_record:
             return
 
+        # ALWAYS log model and prompt if provided (regardless of success/failure)
+        if model:
+            self.current_record.stage3_used_llm = True
+            self.current_record.stage3_model = model
+        if llm_prompt:
+            self.current_record.stage3_llm_prompt = llm_prompt
+        if llm_response:
+            self.current_record.stage3_llm_response = llm_response
+
         if status == "Success" and agentspeak_code:
             self.current_record.stage3_status = "success"
             self.current_record.stage3_agentspeak = agentspeak_code
-            self.current_record.stage3_used_llm = True
-            self.current_record.stage3_model = model
-            self.current_record.stage3_llm_prompt = llm_prompt
-            self.current_record.stage3_llm_response = llm_response
         elif error:
             self.current_record.stage3_status = "failed"
             self.current_record.stage3_error = str(error)
