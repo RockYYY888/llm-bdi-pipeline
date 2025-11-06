@@ -14,7 +14,7 @@ from typing import Dict, Any
 
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
-from stage2_dfa_generation.recursive_dfa_builder import RecursiveDFABuilder
+from stage2_dfa_generation.dfa_builder import DFABuilder
 from stage3_code_generation.agentspeak_generator import AgentSpeakGenerator
 from utils.pipeline_logger import PipelineLogger
 
@@ -101,8 +101,8 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
 
-        # Stage 2: LTLf -> Recursive DFA Generation
-        dfa_result = self._stage2_recursive_dfa_generation(ltl_spec)
+        # Stage 2: LTLf -> DFA Generation
+        dfa_result = self._stage2_dfa_generation(ltl_spec)
         if not dfa_result:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -164,12 +164,12 @@ class LTL_BDI_Pipeline:
             print(f"✗ Stage 1 Failed: {e}")
             return None
 
-    def _stage2_recursive_dfa_generation(self, ltl_spec):
-        """Stage 2: LTLf -> Recursive DFA Generation"""
-        print("\n[STAGE 2] Recursive DFA Generation")
+    def _stage2_dfa_generation(self, ltl_spec):
+        """Stage 2: LTLf -> DFA Generation"""
+        print("\n[STAGE 2] DFA Generation")
         print("-"*80)
 
-        builder = RecursiveDFABuilder(domain_actions=self.domain_actions)
+        builder = DFABuilder()
 
         try:
             dfa_result = builder.build(ltl_spec)
@@ -181,16 +181,15 @@ class LTL_BDI_Pipeline:
                 "Success"
             )
 
-            print(f"✓ DFA Decomposition Complete")
-            print(f"  Root formula: {dfa_result.root_formula}")
-            print(f"  Total DFAs: {len(dfa_result.all_dfas)}")
-            print(f"  Physical actions: {len(dfa_result.physical_actions)}")
-            print(f"  Max depth: {dfa_result.max_depth}")
+            print(f"✓ DFA Generation Complete")
+            print(f"  Formula: {dfa_result['formula']}")
+            print(f"  States: {dfa_result['num_states']}")
+            print(f"  Transitions: {dfa_result['num_transitions']}")
 
             # Save DFA result to output
-            output_file = self.output_dir / "dfa_decomposition.json"
+            output_file = self.output_dir / "dfa.json"
             import json
-            output_file.write_text(json.dumps(dfa_result.to_dict(), indent=2))
+            output_file.write_text(json.dumps(dfa_result, indent=2))
             print(f"  Saved to: {output_file}")
 
             return dfa_result
