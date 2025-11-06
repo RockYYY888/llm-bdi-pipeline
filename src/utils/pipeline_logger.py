@@ -186,7 +186,7 @@ class PipelineLogger:
     def log_stage3(self, ltl_spec: Any, dfa_result: Any, agentspeak_code: str, status: str,
                    error: str = None, model: str = None, llm_prompt: Dict[str, str] = None,
                    llm_response: str = None):
-        """Log Stage 3: DFAs -> AgentSpeak Code Generation"""
+        """Log Stage 3: DFA -> AgentSpeak Code Generation"""
         if not self.current_record:
             return
 
@@ -375,7 +375,7 @@ class PipelineLogger:
 
             # Stage 3: AgentSpeak Generation
             f.write("-"*80 + "\n")
-            f.write("STAGE 3: DFAs → AgentSpeak Code Generation\n")
+            f.write("STAGE 3: DFA → AgentSpeak Code Generation\n")
             f.write("-"*80 + "\n")
             f.write(f"Status: {record.get('stage3_status', 'pending').upper()}\n")
 

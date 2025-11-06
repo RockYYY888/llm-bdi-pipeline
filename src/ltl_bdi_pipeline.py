@@ -202,8 +202,8 @@ class LTL_BDI_Pipeline:
             return None
 
     def _stage3_llm_agentspeak_generation(self, ltl_spec, dfa_result):
-        """Stage 3: DFAs -> LLM AgentSpeak Generation"""
-        print("\n[STAGE 3] LLM AgentSpeak Generation from DFAs")
+        """Stage 3: DFA -> LLM AgentSpeak Generation"""
+        print("\n[STAGE 3] LLM AgentSpeak Generation from DFA")
         print("-"*80)
 
         generator = AgentSpeakGenerator(
@@ -228,7 +228,7 @@ class LTL_BDI_Pipeline:
                 'blocksworld',
                 self.domain_actions,
                 self.domain_predicates,
-                dfa_result=dfa_result,  # Pass all DFAs with transitions
+                dfa_result=dfa_result,  # Pass DFA dict with formula, dfa_dot, states, transitions
                 domain=self.domain  # NEW: Pass full domain object for detailed action info
             )
 
