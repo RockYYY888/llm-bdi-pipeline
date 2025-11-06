@@ -147,11 +147,13 @@ Each pattern includes:
 |----------|------------|---------------|---------|---------|-------|
 | AND within temporal | "Eventually, {pred1} and {pred2}" | `F({pred1} & {pred2})` | Eventually, a is on b and c is clear | `['a', 'b', 'c']` | Use comma before "and" for clarity |
 | Multiple conditions | "Eventually both {pred1} and {pred2}" | `F({pred1} & {pred2})` | Eventually both a is clear and b is on table | `['a', 'b']` | Alternative phrasing |
+| Explicit conjunction | "Eventually the conjunction of {pred1} and {pred2}" | `F({pred1} & {pred2})` | Eventually the conjunction of a is on b and c is clear | `['a', 'b', 'c']` | Emphasizes structure |
 
 **Critical Notes:**
 - Use commas to separate clauses: "Eventually, X and Y" → `F(X & Y)`
 - Without comma: "Eventually X and eventually Y" → `F(X) & F(Y)` (different!)
 - Operator precedence: `&` binds tighter than `|`
+- For clarity in complex formulas: "the conjunction of X and Y" explicitly marks `&` grouping
 
 #### 2.2 Disjunction (OR)
 
@@ -159,10 +161,12 @@ Each pattern includes:
 |----------|------------|---------------|---------|---------|-------|
 | OR within temporal | "Eventually either {pred1} or {pred2}" | `F({pred1} \| {pred2})` | Eventually either a is on b or c is on d | `['a', 'b', 'c', 'd']` | Use "either...or" for clarity |
 | Alternative phrasing | "Eventually {pred1} or {pred2}" | `F({pred1} \| {pred2})` | Eventually a is clear or b is on table | `['a', 'b']` | Without "either" |
+| Explicit disjunction | "Eventually the disjunction of {pred1} or {pred2}" | `F({pred1} \| {pred2})` | Eventually the disjunction of a is clear or b is on table | `['a', 'b']` | Emphasizes structure |
 
 **Critical Notes:**
 - "Either...or" emphasizes mutual exclusivity
 - Precedence: `&` > `|`, so `F(A & B | C)` = `F((A & B) | C)`
+- For clarity: "the disjunction of X or Y" explicitly marks `|` grouping
 
 #### 2.3 Negation (NOT)
 
@@ -254,12 +258,14 @@ Each pattern includes:
 |----------|------------|---------------|---------|---------|-------|
 | Hold until | "Keep {pred1} until {pred2}" | `({pred1} U {pred2})` | Keep holding a until b is clear | `['a', 'b']` | Strong until (ψ must occur) |
 | Complex until | "Keep both {pred1} and {pred2} until {pred3}" | `(({pred1} & {pred2}) U {pred3})` | Keep both holding a and b clear until c is on d | `['a', 'b', 'c', 'd']` | Conjunction in left operand |
+| Explicit structure | "The state that {pred1} until {pred2}" | `({pred1} U {pred2})` | The state that holding a until b is clear | `['a', 'b']` | Emphasizes Until scope |
 
 **Critical Notes:**
 - `(φ U ψ)` requires ψ to eventually hold
 - φ must hold at all points before ψ
 - Precedence: `&` > `U`, so `A & B U C` = `(A & B) U C`
 - Use explicit parens for clarity: `((A & B) U C)`
+- "The state that X until Y" helps clarify Until formula boundaries
 
 #### 4.2 Release (R)
 
@@ -301,12 +307,14 @@ Each pattern includes:
 | Category | NL Pattern | Expected LTLf | Example | Objects | Notes |
 |----------|------------|---------------|---------|---------|-------|
 | Conditional temporal | "Always if {cond} then eventually {conseq}" | `G({cond} -> F({conseq}))` | Always if a is clear then eventually a is on b | `['a', 'b']` | Nested `F` in implication |
+| Structured nesting | "Always the following holds: if {cond} then eventually {conseq}" | `G({cond} -> F({conseq}))` | Always the following holds: if a is clear then eventually a is on b | `['a', 'b']` | Explicit structure marking |
 | Deep nesting | "{temporal1} {complex formula with temporal2}" | Complex nesting | See COMPLEX01 test case | Multiple | Requires careful phrasing |
 
 **Critical Notes:**
 - Break down complex formulas with explicit structure
 - Use punctuation (commas, colons) to clarify nesting
 - Explicitly state nesting levels: "the following disjunction holds: first disjunct is..."
+- Phrases like "the state that", "the conjunction of", "the following holds" help mark formula boundaries
 
 ---
 
@@ -340,6 +348,7 @@ Understanding precedence is critical for correct LTLf generation.
 1. **Use explicit grouping phrases:**
    - "the conjunction of X and Y" → `(X & Y)`
    - "the disjunction: either X or Y" → `(X | Y)`
+   - "the state that X" → clarifies temporal formula scope
    - "the following holds: X" → clarifies scope
 
 2. **Use punctuation:**
