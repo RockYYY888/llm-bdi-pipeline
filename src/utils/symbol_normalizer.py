@@ -283,6 +283,103 @@ class SymbolNormalizer:
 
         return pred_name, args
 
+    # ========== ANTI-GROUNDING (PROPOSITIONAL → PARAMETERIZED) ==========
+
+    def symbol_to_parameterized(self, propositional_symbol: str) -> str:
+        """
+        Convert propositional symbol to parameterized predicate format
+
+        This is the anti-grounding operation that converts flattened symbols
+        back to human-readable parameterized predicates.
+
+        Args:
+            propositional_symbol: e.g., "on_a_b", "clear_c", "handempty"
+
+        Returns:
+            Parameterized predicate format: e.g., "on(a, b)", "clear(c)", "handempty"
+
+        Examples:
+            "on_a_b" → "on(a, b)"
+            "on_blockhh1_blockhh2" → "on(block-1, block-2)"
+            "clear_c" → "clear(c)"
+            "handempty" → "handempty"
+            "at_roverhh1_locationhhbase" → "at(rover-1, location-base)"
+        """
+        # First restore hyphens if encoded
+        restored = self.restore_symbol_hyphens(propositional_symbol)
+
+        # Parse the symbol: predicate_arg1_arg2_...
+        parts = restored.split('_')
+
+        if len(parts) == 1:
+            # Nullary predicate (no arguments)
+            return parts[0]
+
+        # First part is predicate, rest are arguments
+        predicate = parts[0]
+        args = parts[1:]
+
+        # Format as predicate(arg1, arg2, ...)
+        return f"{predicate}({', '.join(args)})"
+
+    def format_grounding_map_for_antigrounding(self, grounding_map: Dict) -> str:
+        """
+        Format grounding map for anti-grounding reference in prompts
+
+        Creates a human-readable conversion table showing how to convert
+        propositional symbols back to parameterized predicates.
+
+        Args:
+            grounding_map: Dict with 'atoms' key containing symbol mappings
+
+        Returns:
+            Formatted string with conversion table grouped by predicate
+
+        Example output:
+            ```
+            **Grounding Map (Anti-Grounding Reference)**:
+            Use this to convert propositional symbols to parameterized predicates:
+
+              clear:
+                clear_b1 → clear(b1)
+                clear_b3 → clear(b3)
+
+              on:
+                on_b1_b2 → on(b1, b2)
+                on_b2_b5 → on(b2, b5)
+            ```
+        """
+        if not grounding_map or 'atoms' not in grounding_map:
+            return ""
+
+        atoms = grounding_map.get('atoms', {})
+        if not atoms:
+            return ""
+
+        info = "\n**Grounding Map (Anti-Grounding Reference)**:\n"
+        info += "Use this to convert propositional symbols to parameterized predicates:\n\n"
+
+        # Group by predicate for better readability
+        predicate_groups = {}
+        for symbol, atom_data in atoms.items():
+            predicate = atom_data.get('predicate', '')
+            if predicate not in predicate_groups:
+                predicate_groups[predicate] = []
+            predicate_groups[predicate].append((symbol, atom_data))
+
+        for predicate, group in sorted(predicate_groups.items()):
+            info += f"  {predicate}:\n"
+            for symbol, atom_data in sorted(group):
+                args = atom_data.get('args', [])
+                if args:
+                    param_form = f"{predicate}({', '.join(args)})"
+                else:
+                    param_form = predicate
+                info += f"    {symbol} → {param_form}\n"
+            info += "\n"
+
+        return info
+
     # ========== MAPPING UTILITIES ==========
 
     def get_normalized_to_original_map(self) -> Dict[str, str]:

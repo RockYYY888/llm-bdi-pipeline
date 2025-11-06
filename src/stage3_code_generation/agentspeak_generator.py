@@ -6,9 +6,18 @@ using LLM-based code generation.
 """
 
 import os
+import sys
+from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from openai import OpenAI
 import re
+
+# Add parent directory to path for utils import
+_parent = str(Path(__file__).parent.parent)
+if _parent not in sys.path:
+    sys.path.insert(0, _parent)
+
+from utils.symbol_normalizer import SymbolNormalizer
 
 
 class AgentSpeakGenerator:
@@ -34,6 +43,7 @@ class AgentSpeakGenerator:
         self.model = model
         self.verbose = verbose
         self.last_prompt_dict = None  # Store last prompt for error logging
+        self.normalizer = SymbolNormalizer()  # For anti-grounding operations
 
     def generate(self,
                  ltl_spec: Dict[str, Any],
@@ -196,39 +206,9 @@ class AgentSpeakGenerator:
         """
         Format grounding map for anti-grounding guidance
 
-        Converts grounding_map dict to human-readable format showing how to
-        convert propositional symbols back to parameterized predicates.
+        Delegates to SymbolNormalizer for consistent formatting.
         """
-        if not grounding_map or 'atoms' not in grounding_map:
-            return ""
-
-        atoms = grounding_map.get('atoms', {})
-        if not atoms:
-            return ""
-
-        info = "\n**Grounding Map (Anti-Grounding Reference)**:\n"
-        info += "Use this to convert propositional symbols to parameterized predicates:\n\n"
-
-        # Group by predicate for better readability
-        predicate_groups = {}
-        for symbol, atom_data in atoms.items():
-            predicate = atom_data.get('predicate', '')
-            if predicate not in predicate_groups:
-                predicate_groups[predicate] = []
-            predicate_groups[predicate].append((symbol, atom_data))
-
-        for predicate, group in sorted(predicate_groups.items()):
-            info += f"  {predicate}:\n"
-            for symbol, atom_data in sorted(group):
-                args = atom_data.get('args', [])
-                if args:
-                    param_form = f"{predicate}({', '.join(args)})"
-                else:
-                    param_form = predicate
-                info += f"    {symbol} → {param_form}\n"
-            info += "\n"
-
-        return info
+        return self.normalizer.format_grounding_map_for_antigrounding(grounding_map)
 
     def _format_dfa_information(self, dfa_result: Any) -> str:
         """Format DFA decomposition information for the prompt (using cleaned DFA)"""
