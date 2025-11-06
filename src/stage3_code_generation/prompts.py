@@ -70,7 +70,8 @@ def get_agentspeak_user_prompt(
     actions_str: str,
     predicates_str: str,
     formulas_str: str,
-    dfa_info: str = ""
+    dfa_info: str = "",
+    grounding_map_str: str = ""
 ) -> str:
     """
     Generate user prompt for AgentSpeak code generation
@@ -82,6 +83,7 @@ def get_agentspeak_user_prompt(
         predicates_str: Comma-separated string of available predicates
         formulas_str: Multi-line string of LTLf formulas (one per line with "  - " prefix)
         dfa_info: Optional DFA decomposition information string
+        grounding_map_str: Optional grounding map showing propositional to parameterized conversion
 
     Returns:
         User prompt string for AgentSpeak generation
@@ -104,7 +106,19 @@ Do NOT assume any specific initial state. Plans must handle all possible scenari
 **LTLf Temporal Goals**:
 {formulas_str}
 
+{grounding_map_str}
+
 {dfa_info}
+
+**CRITICAL: Use Parameterized Predicates, NOT Propositional Symbols**
+- The DFAs use flattened propositional symbols (e.g., on_b1_b2) for internal processing
+- Your AgentSpeak code MUST use the original parameterized predicates (e.g., on(b1, b2))
+- Use the Grounding Map above to convert propositional symbols back to parameterized form
+- Goal names should directly use PDDL action names or predicate names (NO "achieve_" prefix)
+- Examples:
+  - Propositional: on_b1_b2 → Parameterized: on(b1, b2)
+  - Propositional: clear_b1 → Parameterized: clear(b1)
+  - Goal: achieve_on_b1_b2 → CORRECT: on(b1, b2) or stack(b1, b2)
 
 **Requirements**:
 1. Use the DFA transitions as guidance for plan generation - transitions show which conditions/actions lead to goal achievement
@@ -112,36 +126,41 @@ Do NOT assume any specific initial state. Plans must handle all possible scenari
 3. Follow the DFA structure: each transition label indicates when to trigger specific plans
 4. Include multiple context-sensitive plans based on different DFA transitions
 5. Add failure handling plans (-!goal) for robustness
-6. Use clear, meaningful plan names matching the DFA structure
+6. Use PDDL action names or predicate names as goal names (NO "achieve_" prefix)
 7. Add brief comments explaining the DFA-guided logic
-8. Include belief updates after actions
+8. Include belief updates after actions using parameterized predicates
 9. Use declarative goals (!![state]) where appropriate for state-based goals
+10. ALWAYS use parameterized form: on(X, Y), clear(X), NOT on_x_y, clear_x
 
 **Example Plan Structure** (for reference):
 ```agentspeak
-// Main goal from LTLf F formula
-+!achieve_main_goal : true <-
-    !subgoal1;
-    !subgoal2;
-    !verify_success.
+// Main goal from LTLf F(on(a, b)) - use parameterized form
++!on(A, B) : true <-
+    !clear(A);
+    !clear(B);
+    !stack(A, B).
 
-// Subgoal with context adaptation
-+!subgoal1 : favorable_condition <-
-    action1;
-    +new_belief;
-    -old_belief.
+// Subgoal with context adaptation - parameterized predicates
++!stack(X, Y) : holding(X) & clear(Y) <-
+    put_on_block(X, Y);
+    +on(X, Y);
+    -holding(X);
+    +clear(X);
+    -clear(Y).
 
-+!subgoal1 : difficult_condition <-
-    alternative_action;
-    !recovery.
++!stack(X, Y) : on(X, Z) & clear(X) & handempty <-
+    pick_up(X, Z);
+    -on(X, Z);
+    +holding(X);
+    !stack(X, Y).
 
 // Failure handling
--!subgoal1 : true <-
-    .print("Subgoal failed, trying alternative");
+-!stack(X, Y) : true <-
+    .print("Stack ", X, " on ", Y, " failed");
     !alternative_approach.
 
 // G constraint monitoring (if any G formulas exist)
-+belief_change : violates_constraint <-
++on(X, Y) : violates_constraint(X, Y) <-
     .print("Constraint violated!");
     !recovery_action.
 ```

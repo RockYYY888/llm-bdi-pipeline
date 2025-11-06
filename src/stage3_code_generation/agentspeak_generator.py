@@ -172,7 +172,12 @@ class AgentSpeakGenerator:
         # Format predicates
         predicates_str = ", ".join(predicates)
 
-        # NEW: Format DFA information if available
+        # Format grounding map if available
+        grounding_map_str = ""
+        if 'grounding_map' in ltl_spec and ltl_spec['grounding_map']:
+            grounding_map_str = self._format_grounding_map(ltl_spec['grounding_map'])
+
+        # Format DFA information if available
         dfa_info = ""
         if dfa_result and hasattr(dfa_result, 'all_dfas'):
             dfa_info = self._format_dfa_information(dfa_result)
@@ -183,8 +188,47 @@ class AgentSpeakGenerator:
             actions_str,
             predicates_str,
             formulas_str,
-            dfa_info
+            dfa_info,
+            grounding_map_str
         )
+
+    def _format_grounding_map(self, grounding_map: Dict[str, Any]) -> str:
+        """
+        Format grounding map for anti-grounding guidance
+
+        Converts grounding_map dict to human-readable format showing how to
+        convert propositional symbols back to parameterized predicates.
+        """
+        if not grounding_map or 'atoms' not in grounding_map:
+            return ""
+
+        atoms = grounding_map.get('atoms', {})
+        if not atoms:
+            return ""
+
+        info = "\n**Grounding Map (Anti-Grounding Reference)**:\n"
+        info += "Use this to convert propositional symbols to parameterized predicates:\n\n"
+
+        # Group by predicate for better readability
+        predicate_groups = {}
+        for symbol, atom_data in atoms.items():
+            predicate = atom_data.get('predicate', '')
+            if predicate not in predicate_groups:
+                predicate_groups[predicate] = []
+            predicate_groups[predicate].append((symbol, atom_data))
+
+        for predicate, group in sorted(predicate_groups.items()):
+            info += f"  {predicate}:\n"
+            for symbol, atom_data in sorted(group):
+                args = atom_data.get('args', [])
+                if args:
+                    param_form = f"{predicate}({', '.join(args)})"
+                else:
+                    param_form = predicate
+                info += f"    {symbol} → {param_form}\n"
+            info += "\n"
+
+        return info
 
     def _format_dfa_information(self, dfa_result: Any) -> str:
         """Format DFA decomposition information for the prompt (using cleaned DFA)"""
