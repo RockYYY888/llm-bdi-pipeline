@@ -1,16 +1,14 @@
 """
-Stage 2: Recursive DFA Generation from LTLf Specifications
+Stage 2: DFA Generation from LTLf Specifications
 
-This module provides recursive DFA generation that breaks down high-level LTLf goals
-into subgoals until reaching physical actions using DFS search strategy.
+This module provides DFA generation from LTLf formulas using ltlf2dfa.
 """
 
-from .recursive_dfa_builder import RecursiveDFABuilder, DFANode, RecursiveDFAResult
-from .ltlf_to_dfa import PredicateToProposition
+from .dfa_builder import DFABuilder
+from .ltlf_to_dfa import PredicateToProposition, LTLfToDFA
 
 __all__ = [
-    'RecursiveDFABuilder',
-    'DFANode',
-    'RecursiveDFAResult',
-    'PredicateToProposition'
+    'DFABuilder',
+    'PredicateToProposition',
+    'LTLfToDFA'
 ]
