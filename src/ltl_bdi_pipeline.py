@@ -55,7 +55,7 @@ class LTL_BDI_Pipeline:
         self.domain_file = domain_file
 
         # Parse domain to extract actions and predicates
-        from stage1_interpretation.pddl_parser import PDDLParser
+        from utils.pddl_parser import PDDLParser
         self.domain = PDDLParser.parse_domain(domain_file)
         self.domain_actions = self.domain.get_action_names()
         self.domain_predicates = self.domain.get_predicate_signatures()
@@ -223,13 +223,14 @@ class LTL_BDI_Pipeline:
                 "formulas_string": [f.to_string() for f in ltl_spec.formulas]
             }
 
-            # Pass DFA result to generator
+            # Pass DFA result and domain to generator
             asl_code, prompt_dict, response_text = generator.generate(
                 ltl_dict,
                 'blocksworld',
                 self.domain_actions,
                 self.domain_predicates,
-                dfa_result=dfa_result  # NEW: Pass all DFAs with transitions
+                dfa_result=dfa_result,  # Pass all DFAs with transitions
+                domain=self.domain  # NEW: Pass full domain object for detailed action info
             )
 
             # Log Stage 3 success

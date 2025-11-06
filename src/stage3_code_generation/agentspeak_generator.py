@@ -50,7 +50,8 @@ class AgentSpeakGenerator:
                  domain_name: str,
                  domain_actions: list,
                  domain_predicates: list,
-                 dfa_result: Optional[Any] = None) -> Tuple[str, Dict, str]:
+                 dfa_result: Optional[Any] = None,
+                 domain: Optional[Any] = None) -> Tuple[str, Dict, str]:
         """
         Generate complete AgentSpeak plan library from DFAs
 
@@ -59,7 +60,8 @@ class AgentSpeakGenerator:
             domain_name: Domain name (e.g., "blocksworld")
             domain_actions: List of available actions
             domain_predicates: List of available predicates
-            dfa_result: RecursiveDFAResult with all generated DFAs and transitions (NEW)
+            dfa_result: RecursiveDFAResult with all generated DFAs and transitions
+            domain: PDDLDomain object with full action details (NEW)
 
         Returns:
             Tuple of (asl_code, prompt_dict, response_text)
@@ -72,8 +74,8 @@ class AgentSpeakGenerator:
                 "AgentSpeak generation requires LLM."
             )
 
-        # Build comprehensive prompt with DFA information
-        prompt = self._build_prompt(ltl_spec, domain_name, domain_actions, domain_predicates, dfa_result)
+        # Build comprehensive prompt with DFA information and domain details
+        prompt = self._build_prompt(ltl_spec, domain_name, domain_actions, domain_predicates, dfa_result, domain)
 
         # Call LLM
         messages = [
@@ -166,8 +168,9 @@ class AgentSpeakGenerator:
                       domain_name: str,
                       actions: list,
                       predicates: list,
-                      dfa_result: Optional[Any] = None) -> str:
-        """Build comprehensive prompt for AgentSpeak generation with DFA guidance"""
+                      dfa_result: Optional[Any] = None,
+                      domain: Optional[Any] = None) -> str:
+        """Build comprehensive prompt for AgentSpeak generation with DFA guidance and domain details"""
         from .prompts import get_agentspeak_user_prompt
 
         objects = ltl_spec.get('objects', [])
@@ -176,8 +179,12 @@ class AgentSpeakGenerator:
         # Format formulas nicely
         formulas_str = "\n".join([f"  - {f}" for f in formulas])
 
-        # Format actions
-        actions_str = ", ".join(actions)
+        # Format actions with detailed Pre/Eff if domain available
+        if domain and hasattr(domain, 'actions'):
+            actions_str = self._format_actions_detailed(domain.actions)
+        else:
+            # Fallback to simple action names
+            actions_str = ", ".join(actions)
 
         # Format predicates
         predicates_str = ", ".join(predicates)
@@ -201,6 +208,23 @@ class AgentSpeakGenerator:
             dfa_info,
             grounding_map_str
         )
+
+    def _format_actions_detailed(self, actions: list) -> str:
+        """
+        Format actions with detailed Pre/Eff information
+
+        Args:
+            actions: List of PDDLAction objects
+
+        Returns:
+            Formatted string with action details (like in Stage 1)
+        """
+        formatted_actions = []
+        for action in actions:
+            # Use PDDLAction's to_description() method
+            formatted_actions.append(action.to_description())
+
+        return "\n".join(formatted_actions)
 
     def _format_grounding_map(self, grounding_map: Dict[str, Any]) -> str:
         """
