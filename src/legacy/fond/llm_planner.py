@@ -263,7 +263,7 @@ Return ONLY the JSON array (no explanation, no markdown, no code blocks)."""
 
 def test_llm_planner():
     """Test LLM planner"""
-    from config import get_config
+    from utils.config import get_config
 
     print("="*80)
     print("LLM Planner Test")

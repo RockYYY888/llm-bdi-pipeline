@@ -19,7 +19,7 @@ _src_dir = str(Path(__file__).parent)
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from config import get_config
+from utils.config import get_config
 from ltl_bdi_pipeline import LTL_BDI_Pipeline
 
 

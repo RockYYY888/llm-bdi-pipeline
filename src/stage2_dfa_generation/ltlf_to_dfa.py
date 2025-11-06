@@ -28,7 +28,7 @@ _parent_dir = str(Path(__file__).parent.parent)
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
-from setup_mona_path import setup_mona
+from utils.setup_mona_path import setup_mona
 setup_mona()
 
 from typing import Dict, List, Any, Tuple

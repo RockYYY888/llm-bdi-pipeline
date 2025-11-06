@@ -305,7 +305,7 @@ Generate a complete PDDL problem file."""
 def test_converter():
     """Test LTL to PDDL converter"""
     from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
-    from config import get_config
+    from utils.config import get_config
 
     print("="*80)
     print("LTL to PDDL Converter Test")

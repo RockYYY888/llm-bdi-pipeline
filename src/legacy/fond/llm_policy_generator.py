@@ -220,7 +220,7 @@ def test_llm_policy_generator():
     if _src_dir not in sys.path:
         sys.path.insert(0, _src_dir)
 
-    from config import get_config
+    from utils.config import get_config
 
     print("="*80)
     print("LLM Policy Generator Test")

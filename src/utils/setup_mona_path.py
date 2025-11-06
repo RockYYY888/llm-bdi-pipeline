@@ -5,7 +5,7 @@ Automatically adds MONA binary to PATH for ltlf2dfa to work correctly.
 Import this module at the beginning of any script that uses ltlf2dfa.
 
 Usage:
-    from setup_mona_path import setup_mona
+    from utils.setup_mona_path import setup_mona
     setup_mona()  # Call before using ltlf2dfa
 """
 
@@ -24,8 +24,8 @@ def setup_mona(verbose=False):
     Returns:
         bool: True if MONA is available, False otherwise
     """
-    # Get project root (2 levels up from this file)
-    project_root = Path(__file__).parent.parent.absolute()
+    # Get project root (3 levels up from this file: utils/ -> src/ -> project)
+    project_root = Path(__file__).parent.parent.parent.absolute()
     mona_bin_dir = project_root / "src" / "external" / "mona-1.4" / "mona-install" / "bin"
 
     # Check if MONA binary exists

@@ -310,7 +310,7 @@ class AgentSpeakGenerator:
 
 if __name__ == "__main__":
     # Quick test
-    from config import get_config
+    from utils.config import get_config
 
     config = get_config()
     generator = AgentSpeakGenerator(

@@ -12,11 +12,11 @@ Note: FOND Planning (Branch B) has been moved to legacy/fond/
 from pathlib import Path
 from typing import Dict, Any
 
-from config import get_config
+from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.recursive_dfa_builder import RecursiveDFABuilder
 from stage3_code_generation.agentspeak_generator import AgentSpeakGenerator
-from pipeline_logger import PipelineLogger
+from utils.pipeline_logger import PipelineLogger
 
 
 class LTL_BDI_Pipeline:
