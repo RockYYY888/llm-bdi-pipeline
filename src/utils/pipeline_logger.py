@@ -35,12 +35,12 @@ class PipelineRecord:
     stage1_llm_prompt: Optional[Dict[str, str]] = None
     stage1_llm_response: Optional[str] = None
 
-    # Stage 2: LTLf -> Recursive DFA Generation
+    # Stage 2: LTLf -> DFA Generation
     stage2_status: str = "pending"
-    stage2_dfa_result: Optional[Dict[str, Any]] = None  # RecursiveDFAResult as dict
-    stage2_num_dfas: int = 0
-    stage2_max_depth: int = 0
-    stage2_physical_actions: Optional[list] = None
+    stage2_dfa_result: Optional[Dict[str, Any]] = None  # DFA dict (formula, dfa_dot, num_states, num_transitions)
+    stage2_formula: Optional[str] = None
+    stage2_num_states: int = 0
+    stage2_num_transitions: int = 0
     stage2_error: Optional[str] = None
 
     # Stage 3: DFAs -> AgentSpeak Code Generation
@@ -165,16 +165,16 @@ class PipelineLogger:
 
     # NEW: Stage 2 - DFA Generation logging
     def log_stage2_dfas(self, ltl_spec: Any, dfa_result: Any, status: str, error: str = None):
-        """Log Stage 2: LTLf -> Recursive DFA Generation"""
+        """Log Stage 2: LTLf -> DFA Generation"""
         if not self.current_record:
             return
 
         if status == "Success" and dfa_result:
             self.current_record.stage2_status = "success"
-            self.current_record.stage2_dfa_result = dfa_result.to_dict() if hasattr(dfa_result, 'to_dict') else dfa_result
-            self.current_record.stage2_num_dfas = len(dfa_result.all_dfas) if hasattr(dfa_result, 'all_dfas') else 0
-            self.current_record.stage2_max_depth = dfa_result.max_depth if hasattr(dfa_result, 'max_depth') else 0
-            self.current_record.stage2_physical_actions = dfa_result.physical_actions if hasattr(dfa_result, 'physical_actions') else []
+            self.current_record.stage2_dfa_result = dfa_result
+            self.current_record.stage2_formula = dfa_result.get('formula', 'N/A')
+            self.current_record.stage2_num_states = dfa_result.get('num_states', 0)
+            self.current_record.stage2_num_transitions = dfa_result.get('num_transitions', 0)
         elif error:
             self.current_record.stage2_status = "failed"
             self.current_record.stage2_error = str(error)
@@ -346,38 +346,25 @@ class PipelineLogger:
 
             # Stage 2: DFA Generation
             f.write("-"*80 + "\n")
-            f.write("STAGE 2: LTL Specification → Recursive DFA Generation\n")
+            f.write("STAGE 2: LTL Specification → DFA Generation\n")
             f.write("-"*80 + "\n")
             f.write(f"Status: {record['stage2_status'].upper()}\n")
 
             if record['stage2_status'] == 'success' and record.get('stage2_dfa_result'):
                 f.write("\n" + "~"*40 + "\n")
-                f.write("DFA DECOMPOSITION RESULT\n")
+                f.write("DFA GENERATION RESULT\n")
                 f.write("~"*40 + "\n")
 
+                f.write(f"Formula: {record.get('stage2_formula', 'N/A')}\n")
+                f.write(f"States: {record.get('stage2_num_states', 0)}\n")
+                f.write(f"Transitions: {record.get('stage2_num_transitions', 0)}\n")
+
+                # Optionally show a snippet of the DFA DOT format
                 dfa_result = record['stage2_dfa_result']
-                f.write(f"Root Formula: {dfa_result.get('root_formula', 'N/A')}\n")
-                f.write(f"Total DFAs Generated: {record.get('stage2_num_dfas', 0)}\n")
-                f.write(f"Max Decomposition Depth: {record.get('stage2_max_depth', 0)}\n")
-
-                physical_actions = record.get('stage2_physical_actions', [])
-                if physical_actions:
-                    f.write(f"Physical Actions Identified: {', '.join(physical_actions)}\n")
-
-                # Show DFA tree structure
-                all_dfas = dfa_result.get('all_dfas', [])
-                if all_dfas:
-                    f.write(f"\nDFA Decomposition Tree ({len(all_dfas)} nodes):\n")
-                    for i, dfa in enumerate(all_dfas, 1):
-                        indent = "  " * dfa.get('depth', 0)
-                        goal = dfa.get('goal_formula', 'N/A')
-                        is_physical = dfa.get('is_physical_action', False)
-                        action_marker = " [PHYSICAL ACTION]" if is_physical else ""
-                        f.write(f"{indent}{i}. {goal}{action_marker}\n")
-
-                        subgoals = dfa.get('subgoals', [])
-                        if subgoals and not is_physical:
-                            f.write(f"{indent}   Subgoals: {', '.join(subgoals)}\n")
+                dfa_dot = dfa_result.get('dfa_dot', '')
+                if dfa_dot:
+                    f.write(f"\nDFA DOT Format (first 300 chars):\n")
+                    f.write(dfa_dot[:300] + "...\n")
 
                 f.write("\n")
 

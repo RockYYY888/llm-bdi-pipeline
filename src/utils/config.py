@@ -17,7 +17,8 @@ class Config:
 
     def _load_env(self):
         """Load environment variables from .env file"""
-        env_path = Path(__file__).parent.parent / ".env"
+        # Path calculation: utils/ -> src/ -> project_root/
+        env_path = Path(__file__).parent.parent.parent / ".env"
 
         if env_path.exists():
             with open(env_path, 'r') as f:
