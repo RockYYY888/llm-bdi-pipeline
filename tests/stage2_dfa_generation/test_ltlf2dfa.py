@@ -18,7 +18,7 @@ _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from setup_mona_path import setup_mona
+from utils.setup_mona_path import setup_mona
 setup_mona(verbose=True)
 
 from ltlf2dfa.parser.ltlf import LTLfParser

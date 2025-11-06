@@ -60,7 +60,7 @@ class AgentSpeakGenerator:
             domain_name: Domain name (e.g., "blocksworld")
             domain_actions: List of available actions
             domain_predicates: List of available predicates
-            dfa_result: RecursiveDFAResult with all generated DFAs and transitions
+            dfa_result: Dict with DFA information (formula, dfa_dot, num_states, num_transitions)
             domain: PDDLDomain object with full action details (NEW)
 
         Returns:
@@ -196,7 +196,7 @@ class AgentSpeakGenerator:
 
         # Format DFA information if available
         dfa_info = ""
-        if dfa_result and hasattr(dfa_result, 'all_dfas'):
+        if dfa_result and isinstance(dfa_result, dict):
             dfa_info = self._format_dfa_information(dfa_result)
 
         return get_agentspeak_user_prompt(
@@ -235,37 +235,27 @@ class AgentSpeakGenerator:
         return self.normalizer.format_grounding_map_for_antigrounding(grounding_map)
 
     def _format_dfa_information(self, dfa_result: Any) -> str:
-        """Format DFA decomposition information for the prompt (using cleaned DFA)"""
+        """Format DFA information for the prompt (using cleaned DFA)"""
         from stage2_dfa_generation.dfa_dot_cleaner import format_dfa_for_prompt
 
-        if not dfa_result or not hasattr(dfa_result, 'all_dfas'):
+        # Handle new dict format from DFABuilder
+        if not dfa_result or not isinstance(dfa_result, dict):
             return ""
 
-        info = "\n**DFA Decomposition (KEY GUIDANCE FOR PLAN GENERATION)**:\n"
-        info += f"Total DFAs generated: {len(dfa_result.all_dfas)}\n"
-        info += f"Decomposition depth: {dfa_result.max_depth}\n\n"
+        info = "\n**DFA (KEY GUIDANCE FOR PLAN GENERATION)**:\n"
+        info += f"Formula: {dfa_result.get('formula', 'N/A')}\n"
+        info += f"States: {dfa_result.get('num_states', 0)}\n"
+        info += f"Transitions: {dfa_result.get('num_transitions', 0)}\n\n"
 
         info += "**DFA Structure and Transitions** (use these to guide plan creation):\n\n"
 
-        for i, dfa_node in enumerate(dfa_result.all_dfas, 1):
-            info += f"{i}. Goal: `{dfa_node.goal_formula}`\n"
-            if dfa_node.is_physical_action:
-                info += f"   Type: PHYSICAL ACTION (terminal - direct execution)\n"
-            else:
-                info += f"   Type: Subgoal (decompose further)\n"
-
-            info += f"   Depth: {dfa_node.depth}\n"
-
-            # Use cleaned DFA format (no Graphviz formatting)
-            cleaned_dfa = format_dfa_for_prompt(dfa_node.dfa_dot)
+        # Use cleaned DFA format (no Graphviz formatting)
+        dfa_dot = dfa_result.get('dfa_dot', '')
+        if dfa_dot:
+            cleaned_dfa = format_dfa_for_prompt(dfa_dot)
             # Indent each line
             indented_dfa = '\n'.join(f"   {line}" for line in cleaned_dfa.split('\n'))
-            info += f"\n{indented_dfa}\n"
-
-            if dfa_node.subgoals:
-                info += f"\n   Subgoals to achieve: {', '.join(dfa_node.subgoals)}\n"
-
-            info += "\n"
+            info += f"{indented_dfa}\n\n"
 
         info += "**IMPORTANT**: Use the transition conditions as plan contexts in AgentSpeak.\n"
         info += "For example, if a transition shows 'when [on_a_b & clear_c]', create a plan:\n"
