@@ -30,8 +30,8 @@ _parent = str(Path(__file__).parent.parent)
 if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
-from stage3_code_generation.state_space import PredicateAtom
-from stage1_interpretation.grounding_map import GroundingMap
+from src.stage3_code_generation.state_space import PredicateAtom
+from src.stage1_interpretation.grounding_map import GroundingMap
 
 
 class BoolOp(Enum):

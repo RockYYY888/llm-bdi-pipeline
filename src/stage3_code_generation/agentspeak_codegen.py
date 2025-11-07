@@ -62,6 +62,7 @@ class AgentSpeakCodeGenerator:
         self.objects = objects
         self.condition_parser = PDDLConditionParser()
         self.effect_parser = PDDLEffectParser()
+        self.goal_plan_count = 0  # Track number of goal plans generated
 
     def generate(self) -> str:
         """
@@ -72,23 +73,20 @@ class AgentSpeakCodeGenerator:
         """
         sections = []
 
-        # Header
+        # Generate sections first (to collect statistics)
+        initial_beliefs = self._generate_initial_beliefs()
+        action_plans = self._generate_action_plans()
+        goal_plans = self._generate_goal_plans()  # Updates self.goal_plan_count
+        success_plan = self._generate_success_plan()
+        failure_plan = self._generate_failure_plan()
+
+        # Header with accurate statistics
         sections.append(self._generate_header())
-
-        # Initial beliefs
-        sections.append(self._generate_initial_beliefs())
-
-        # PDDL action definitions (as AgentSpeak action goal plans)
-        sections.append(self._generate_action_plans())
-
-        # Goal achievement plans
-        sections.append(self._generate_goal_plans())
-
-        # Success handler
-        sections.append(self._generate_success_plan())
-
-        # Failure handler
-        sections.append(self._generate_failure_plan())
+        sections.append(initial_beliefs)
+        sections.append(action_plans)
+        sections.append(goal_plans)
+        sections.append(success_plan)
+        sections.append(failure_plan)
 
         return "\n\n".join(sections)
 
@@ -104,7 +102,7 @@ class AgentSpeakCodeGenerator:
  * Statistics:
  *   States: {stats['num_states']}
  *   Transitions: {stats['num_transitions']}
- *   Goal Plans: {len(self.graph.find_shortest_paths_to_goal()) - 1}
+ *   Goal Plans: {self.goal_plan_count}
  *   Action Plans: {len(self.domain.actions)}
  */"""
 
@@ -433,6 +431,9 @@ class AgentSpeakCodeGenerator:
             if plan:
                 lines.append(plan)
                 plan_count += 1
+
+        # Store count for statistics
+        self.goal_plan_count = plan_count
 
         if plan_count == 0:
             lines.append("/* No intermediate plans needed - goal directly achievable */")
