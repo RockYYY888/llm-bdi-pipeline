@@ -2,18 +2,24 @@
 Diagnostic test to understand why goal plans are not generated
 """
 
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 from src.stage3_code_generation.forward_planner import ForwardStatePlanner
 from src.stage3_code_generation.agentspeak_codegen import AgentSpeakCodeGenerator
 from src.stage3_code_generation.state_space import PredicateAtom
 from src.utils.pddl_parser import PDDLParser
-from pathlib import Path
 
 print("="*80)
 print("DIAGNOSTIC: Goal Plan Generation")
 print("="*80)
 
 # Load domain
-domain_path = Path('src/legacy/fond/domains/blocksworld/domain.pddl')
+domain_path = project_root / 'src' / 'legacy' / 'fond' / 'domains' / 'blocksworld' / 'domain.pddl'
 domain = PDDLParser.parse_domain(str(domain_path))
 objects = ['a', 'b']
 

@@ -8,10 +8,16 @@ Tests the complete backward planning pipeline:
 4. Syntax validation
 """
 
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 from src.stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator
 from src.utils.pddl_parser import PDDLParser
 from src.stage1_interpretation.grounding_map import GroundingMap
-from pathlib import Path
 
 
 def create_simple_dfa() -> tuple:
@@ -96,7 +102,7 @@ def test_simple_dfa():
     print("="*80)
 
     # Load domain
-    domain_path = Path(__file__).parent.parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
     print(f"\nDomain loaded: {domain.name}")
     print(f"  Actions: {len(domain.actions)}")
@@ -167,7 +173,7 @@ def test_complex_dfa():
     print("="*80)
 
     # Load domain
-    domain_path = Path(__file__).parent.parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Create DFA and grounding map
@@ -238,7 +244,7 @@ def test_state_graph_size():
     from src.stage3_code_generation.state_space import PredicateAtom
 
     # Load domain
-    domain_path = Path(__file__).parent.parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Test with simple goal
