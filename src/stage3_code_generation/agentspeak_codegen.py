@@ -418,6 +418,7 @@ class AgentSpeakCodeGenerator:
         paths = self.graph.find_shortest_paths_to_goal()
 
         # Generate plans for states that have paths to goal
+        # Per Design Decision #7: Generate one plan per non-goal state
         plan_count = 0
         for state, path in paths.items():
             if state == self.graph.goal_state:
@@ -426,13 +427,6 @@ class AgentSpeakCodeGenerator:
 
             if not path:
                 # No path to goal
-                continue
-
-            # Skip states where goal is already satisfied
-            # In destructive planning, many states contain goal predicates
-            goal_predicates = self.graph.goal_state.predicates
-            if goal_predicates.issubset(state.predicates):
-                # Goal already satisfied in this state, skip
                 continue
 
             plan = self._generate_plan_for_state(state, path)
@@ -475,19 +469,25 @@ class AgentSpeakCodeGenerator:
         # Format context
         context = state.to_agentspeak_context()
 
-        # Format action goal invocation (not direct action call)
+        # Generate precondition subgoals (per Design Algorithm 4, Line 701-708)
+        subgoals = []
+        for precond in next_transition.preconditions:
+            if precond not in state.predicates:
+                # Need to establish this precondition
+                subgoal_name = self._predicate_to_goal_name(precond)
+                subgoals.append(f"!{subgoal_name}")
+
+        # Format action goal invocation
         action_goal = self._format_action_goal_invocation(
             next_transition.action,
             next_transition.action_args
         )
 
-        # Build plan body
-        # Note: We don't generate precondition subgoals here because we have
-        # a complete path from this state to the goal. The path finding ensures
-        # that transitions are valid and preconditions will be met.
-        # Design ref: Decision #9 - path-based plan generation
+        # Build plan body (per Design Algorithm 4, Line 716-719)
+        # Structure: !precond1; !precond2; action(args); !goal.
         body_lines = []
-        body_lines.append(action_goal)    # Action goal invocation
+        body_lines.extend(subgoals)              # Precondition subgoals first
+        body_lines.append(action_goal)           # Then action goal
         body_lines.append(f"!{self.goal_name}")  # Recursive goal check
 
         # Format body
@@ -516,6 +516,18 @@ class AgentSpeakCodeGenerator:
             return f"!{action_name}({args_str})"
         return f"!{action_name}"
 
+    def _predicate_to_goal_name(self, predicate: PredicateAtom) -> str:
+        """
+        Convert predicate to goal name (without !)
+
+        Args:
+            predicate: PredicateAtom
+
+        Returns:
+            Goal name string (e.g., "clear(b)")
+        """
+        return predicate.to_agentspeak()
+
     def _predicate_to_goal_invocation(self, predicate: PredicateAtom) -> str:
         """
         Convert predicate to goal invocation
@@ -526,9 +538,7 @@ class AgentSpeakCodeGenerator:
         Returns:
             Goal invocation string (e.g., "!clear(b)")
         """
-        # For now, just use the predicate as goal name
-        # More sophisticated mapping could be added
-        return f"!{predicate.to_agentspeak()}"
+        return f"!{self._predicate_to_goal_name(predicate)}"
 
     def _generate_success_plan(self) -> str:
         """Generate plan for when goal is already achieved"""
