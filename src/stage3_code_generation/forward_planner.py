@@ -76,6 +76,57 @@ class ForwardStatePlanner:
         self.condition_parser = PDDLConditionParser()
         self.effect_parser = PDDLEffectParser()
 
+    def infer_complete_goal_state(self, goal_predicates: List[PredicateAtom]) -> Set[PredicateAtom]:
+        """
+        Infer the complete goal state from goal predicates.
+
+        Per Design Decision #3 and Q&A #3:
+        "NOT just predicates in original goal - include all relevant world state"
+
+        Strategy:
+        1. Find actions that ADD the goal predicates
+        2. Include ALL their add-effects in the goal state
+        3. This ensures the goal state is "achievable" and has all necessary predicates
+
+        Args:
+            goal_predicates: Core goal predicates (from DFA transition label)
+
+        Returns:
+            Complete set of predicates for the goal state
+        """
+        complete_goal = set(goal_predicates)
+
+        # For each goal predicate, find actions that produce it
+        for goal_pred in goal_predicates:
+            # Try all ground actions
+            for action in self.domain.actions:
+                for grounded in self._ground_action(action):
+                    try:
+                        # Parse effects
+                        effect_branches = self.effect_parser.parse(
+                            action.effects,
+                            grounded.bindings
+                        )
+
+                        # Check each branch
+                        for branch in effect_branches:
+                            # Does this branch add the goal predicate?
+                            adds_goal = any(
+                                eff.is_add and eff.predicate == goal_pred
+                                for eff in branch
+                            )
+
+                            if adds_goal:
+                                # Include ALL add-effects from this branch
+                                for eff in branch:
+                                    if eff.is_add:
+                                        complete_goal.add(eff.predicate)
+                    except Exception:
+                        # Skip actions that can't be parsed
+                        continue
+
+        return complete_goal
+
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
                          max_depth: Optional[int] = None) -> StateGraph:
         """
@@ -88,15 +139,19 @@ class ForwardStatePlanner:
         Returns:
             Complete state graph with all reachable states
         """
+        # Infer complete goal state (Design Decision #3)
+        complete_goal = self.infer_complete_goal_state(goal_predicates)
+
         # Calculate max depth if not provided
         if max_depth is None:
             max_depth = self.calculate_max_depth(goal_predicates)
 
         print(f"[Forward Planner] Starting exploration from goal with max_depth={max_depth}")
-        print(f"[Forward Planner] Goal predicates: {[str(p) for p in goal_predicates]}")
+        print(f"[Forward Planner] Input goal predicates: {[str(p) for p in goal_predicates]}")
+        print(f"[Forward Planner] Complete goal state: {[str(p) for p in sorted(complete_goal, key=str)]}")
 
-        # Initialize goal state
-        goal_state = WorldState(set(goal_predicates), depth=0)
+        # Initialize goal state with complete predicates
+        goal_state = WorldState(complete_goal, depth=0)
         graph = StateGraph(goal_state)
 
         # BFS exploration with optimized state lookup
@@ -114,11 +169,8 @@ class ForwardStatePlanner:
                 print(f"  Explored {states_explored} states, {transitions_added} transitions, "
                       f"queue size: {len(queue)}")
 
-            # Check depth limit
-            if current_state.depth >= max_depth:
-                continue
-
-            # Try all ground actions
+            # Try all ground actions from all states (to create bidirectional graph)
+            # We explore from states at all depths to find reverse transitions
             for grounded_action in self._ground_all_actions():
                 # Check preconditions
                 if not self._check_preconditions(grounded_action, current_state):
@@ -132,11 +184,17 @@ class ForwardStatePlanner:
                     new_pred_set = frozenset(new_state.predicates)
 
                     if new_pred_set in visited_map:
-                        # Use existing state
+                        # Use existing state (may be at any depth, including shallower - reverse transition!)
                         final_state = visited_map[new_pred_set]
                     else:
                         # Create new state with proper depth
-                        final_state = WorldState(new_state.predicates, depth=current_state.depth + 1)
+                        new_depth = current_state.depth + 1
+
+                        # Only add new states within depth limit
+                        if new_depth > max_depth:
+                            continue  # Skip creating states beyond max_depth
+
+                        final_state = WorldState(new_state.predicates, depth=new_depth)
                         visited_map[new_pred_set] = final_state
                         queue.append(final_state)
 
