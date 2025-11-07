@@ -140,10 +140,12 @@ class ForwardStatePlanner:
                         visited_map[new_pred_set] = final_state
                         queue.append(final_state)
 
-                    # Create transition
+                    # Create transition (REVERSED: final_state leads to current_state)
+                    # In destructive planning, we explore FROM goal TO new states
+                    # But for plan generation, we need to show how to GET TO goal FROM new states
                     transition = StateTransition(
-                        from_state=current_state,
-                        to_state=final_state,
+                        from_state=final_state,      # Reversed
+                        to_state=current_state,       # Reversed
                         action=grounded_action.action,
                         action_args=grounded_action.args,
                         belief_updates=belief_updates,
@@ -294,19 +296,32 @@ class ForwardStatePlanner:
 
         # Process each branch (for oneof)
         for effect_branch in effect_branches:
-            # Apply effects to current state
+            # Apply effects BACKWARD (reverse) for destructive planning
+            # In backward planning, we explore from goal to find predecessor states
             new_predicates = set(state.predicates)
             belief_updates = []
 
             for effect_atom in effect_branch:
                 if effect_atom.is_add:
-                    # Add effect: +on(a, b)
-                    new_predicates.add(effect_atom.predicate)
+                    # Add effect in forward = REMOVE in backward
+                    # E.g., if action adds on(a,b), going backward removes it
+                    new_predicates.discard(effect_atom.predicate)
+                    # Belief update is still recorded as what the action DOES (forward)
                     belief_updates.append(f"+{effect_atom.predicate.to_agentspeak()}")
                 else:
-                    # Delete effect: -ontable(a)
-                    new_predicates.discard(effect_atom.predicate)
+                    # Delete effect in forward = ADD in backward
+                    # E.g., if action deletes holding(a), going backward adds it back
+                    new_predicates.add(effect_atom.predicate)
+                    # Belief update is still recorded as what the action DOES (forward)
                     belief_updates.append(f"-{effect_atom.predicate.to_agentspeak()}")
+
+            # Add preconditions to the new state
+            # In backward planning, preconditions must be true BEFORE the action
+            for precond in preconditions:
+                if not precond.negated:
+                    new_predicates.add(precond)
+                # Negated preconditions mean the positive version should NOT be in state
+                # We don't explicitly add them
 
             # Create new state
             new_state = WorldState(new_predicates)
