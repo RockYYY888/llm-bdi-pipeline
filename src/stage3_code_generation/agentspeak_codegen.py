@@ -313,41 +313,60 @@ class AgentSpeakCodeGenerator:
 
     def _format_pddl_condition_as_agentspeak(self, condition: str, param_vars: List[str]) -> str:
         """
-        Convert PDDL condition to AgentSpeak format (simplified)
+        Convert PDDL condition to AgentSpeak format
 
         Args:
-            condition: PDDL condition string
-            param_vars: Parameter variables
+            condition: PDDL condition string (e.g., "and (handempty) (clear ?b1)")
+            param_vars: Parameter variables (e.g., ["?b1", "?b2"])
 
         Returns:
-            AgentSpeak context string
+            AgentSpeak context string (e.g., "handempty & clear(B1)")
         """
-        # Simplified conversion - just handle basic cases
-        # Replace '?var' with 'VAR'
-        result = condition
-        for var in param_vars:
-            if var.startswith('?'):
-                agentspeak_var = var.lstrip('?').upper()
-                result = result.replace(var, agentspeak_var)
+        if not condition or condition.strip() == "none":
+            return "true"
 
-        # Remove 'and' wrapper
-        result = result.strip()
-        if result.startswith('and'):
-            result = result[3:].strip()
+        try:
+            # Create variable bindings mapping ?var -> VAR (AgentSpeak style)
+            bindings = {}
+            for var in param_vars:
+                if var.startswith('?'):
+                    agentspeak_var = var.lstrip('?').upper()
+                    bindings[var] = agentspeak_var
+                else:
+                    bindings[var] = var.upper()
 
-        # Remove outer parentheses if present
-        if result.startswith('(') and result.endswith(')'):
-            result = result[1:-1].strip()
+            # Parse PDDL condition to get predicates
+            predicates = self.condition_parser.parse(condition, bindings)
 
-        # Convert predicates: (handempty) -> handempty
-        # (clear ?b1) -> clear(B1)
-        # This is simplified - full implementation would parse properly
-        result = result.replace('(', '').replace(')', '')
+            if not predicates:
+                return "true"
 
-        # Basic cleanup
-        result = result.replace('  ', ' ')
+            # Convert predicates to AgentSpeak format
+            # PredicateAtom.to_agentspeak() gives us "name(arg1, arg2)"
+            agentspeak_atoms = [pred.to_agentspeak() for pred in predicates]
 
-        return result if result else "true"
+            # Join with & connector
+            return " & ".join(agentspeak_atoms)
+
+        except Exception as e:
+            # Fallback to simplified parsing if proper parsing fails
+            print(f"Warning: Failed to parse condition '{condition}': {e}")
+            print(f"Using simplified fallback")
+
+            # Simplified fallback - replace variables only
+            result = condition
+            for var in param_vars:
+                if var.startswith('?'):
+                    result = result.replace(var, var.lstrip('?').upper())
+
+            # Remove outer and/parentheses
+            result = result.strip()
+            if result.startswith('and'):
+                result = result[3:].strip()
+            if result.startswith('(') and result.endswith(')'):
+                result = result[1:-1].strip()
+
+            return result if result else "true"
 
     def _extract_belief_updates_parametric(self, effects: str, param_vars: List[str]) -> List[str]:
         """
