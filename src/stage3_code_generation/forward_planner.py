@@ -367,34 +367,6 @@ class ForwardStatePlanner:
 
         return results
 
-    def calculate_max_depth(self, goal_predicates: List[PredicateAtom]) -> int:
-        """
-        DEPRECATED: Max depth limit has been removed.
-
-        This method is no longer used. State space exploration now continues
-        until all reachable states are discovered (queue becomes empty).
-
-        Kept for backward compatibility only.
-        """
-        num_predicates = len(goal_predicates)
-        num_objects = len(self.objects)
-
-        # Base depth on predicate count
-        if num_predicates == 1:
-            base_depth = 5
-        elif num_predicates <= 3:
-            base_depth = 10
-        elif num_predicates <= 6:
-            base_depth = 15
-        else:
-            base_depth = 20
-
-        # Adjust for object count (more objects = more complexity)
-        if num_objects > 5:
-            base_depth += 5
-
-        return base_depth
-
 
 # Test functions
 def test_forward_planner_simple():
