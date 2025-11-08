@@ -103,6 +103,18 @@ class PredicateAtom:
             return f"{neg_str}{self.name}({', '.join(self.args)})"
         return f"{neg_str}{self.name}"
 
+    def __hash__(self) -> int:
+        """Hash based on name, args, and negation"""
+        return hash((self.name, self.args, self.negated))
+
+    def __eq__(self, other) -> bool:
+        """Equality based on name, args, and negation"""
+        if not isinstance(other, PredicateAtom):
+            return False
+        return (self.name == other.name and
+                self.args == other.args and
+                self.negated == other.negated)
+
 
 @dataclass(frozen=True)
 class WorldState:
@@ -158,6 +170,16 @@ class WorldState:
 
     def __repr__(self) -> str:
         return f"WorldState(depth={self.depth}, n_predicates={len(self.predicates)})"
+
+    def __hash__(self) -> int:
+        """Hash based on predicates only (not depth)"""
+        return hash(self.predicates)
+
+    def __eq__(self, other) -> bool:
+        """Equality based on predicates only (not depth)"""
+        if not isinstance(other, WorldState):
+            return False
+        return self.predicates == other.predicates
 
 
 @dataclass

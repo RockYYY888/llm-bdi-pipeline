@@ -179,20 +179,38 @@ class BackwardPlannerGenerator:
         """
         dfa_info = DFAInfo()
 
-        # Extract states
-        state_pattern = r'(\w+)\s*\[.*?\]'
-        for match in re.finditer(state_pattern, dfa_dot):
-            state_id = match.group(1)
-            if state_id not in ['digraph', 'graph', 'node', 'edge']:
-                dfa_info.states.append(state_id)
+        # Extract states by parsing each line
+        # Node definition: state_id [attributes];
+        # Transition: from -> to [label="..."];
+        # We only want node definitions, not transitions
+        for line in dfa_dot.split('\n'):
+            line = line.strip()
 
-                # Check for initial state (usually has different shape or label)
-                if '__start' in match.group(0) or 'init' in match.group(0).lower():
-                    dfa_info.initial_state = state_id
+            # Skip transitions (contain ->)
+            if '->' in line:
+                continue
 
-                # Check for accepting state (usually doublecircle)
-                if 'doublecircle' in match.group(0):
-                    dfa_info.accepting_states.append(state_id)
+            # Match node definitions: state_id [attributes]
+            state_match = re.match(r'(\w+)\s*\[([^\]]*)\]', line)
+            if not state_match:
+                continue
+
+            state_id = state_match.group(1)
+            attributes = state_match.group(2)
+
+            # Skip node/graph/edge declarations and __start
+            if state_id in ['digraph', 'graph', 'node', 'edge', '__start']:
+                continue
+
+            dfa_info.states.append(state_id)
+
+            # Check for initial state (usually has different shape or label)
+            if 'init' in attributes.lower():
+                dfa_info.initial_state = state_id
+
+            # Check for accepting state (usually doublecircle)
+            if 'doublecircle' in attributes:
+                dfa_info.accepting_states.append(state_id)
 
         # Extract transitions
         transition_pattern = r'(\w+)\s*->\s*(\w+)\s*\[label="([^"]+)"\]'

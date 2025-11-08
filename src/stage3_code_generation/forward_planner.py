@@ -127,15 +127,18 @@ class ForwardStatePlanner:
 
         return complete_goal
 
-    def explore_from_goal(self, goal_predicates: List[PredicateAtom]) -> StateGraph:
+    def explore_from_goal(self, goal_predicates: List[PredicateAtom],
+                         max_states: int = 50000) -> StateGraph:
         """
         Explore state space from goal state using forward "destruction"
 
         Exploration continues until all reachable states are discovered.
-        Terminates naturally when the BFS queue is empty (all states visited).
+        Terminates naturally when the BFS queue is empty (all states visited),
+        or when max_states limit is reached.
 
         Args:
             goal_predicates: Predicates forming the goal state
+            max_states: Maximum number of states to explore (safety limit)
 
         Returns:
             Complete state graph with all reachable states
@@ -144,6 +147,7 @@ class ForwardStatePlanner:
         complete_goal = self.infer_complete_goal_state(goal_predicates)
 
         print(f"[Forward Planner] Starting complete state space exploration")
+        print(f"[Forward Planner] Max states limit: {max_states:,}")
         print(f"[Forward Planner] Input goal predicates: {[str(p) for p in goal_predicates]}")
         print(f"[Forward Planner] Complete goal state: {[str(p) for p in sorted(complete_goal, key=str)]}")
 
@@ -157,6 +161,8 @@ class ForwardStatePlanner:
 
         states_explored = 0
         transitions_added = 0
+        states_reused = 0
+        states_created = 0
 
         while queue:
             current_state = queue.popleft()
@@ -183,12 +189,22 @@ class ForwardStatePlanner:
                     if new_pred_set in visited_map:
                         # Use existing state (may be at any depth, including shallower - reverse transition!)
                         final_state = visited_map[new_pred_set]
+                        states_reused += 1
                     else:
+                        # Check if we've reached the max states limit
+                        if len(visited_map) >= max_states:
+                            print(f"  ⚠️  Reached max_states limit ({max_states:,}), stopping exploration")
+                            print(f"  This is a safety limit to prevent excessive memory usage.")
+                            print(f"  Returning partial state graph with {len(visited_map):,} states.")
+                            # Don't add this state, just continue with what we have
+                            continue
+
                         # Create new state with proper depth
                         new_depth = current_state.depth + 1
                         final_state = WorldState(new_state.predicates, depth=new_depth)
                         visited_map[new_pred_set] = final_state
                         queue.append(final_state)
+                        states_created += 1
 
                     # Create transition (Forward direction per Design Algorithm 1)
                     # From current_state, applying action leads to new state
