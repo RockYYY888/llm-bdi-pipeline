@@ -253,25 +253,24 @@ def test_state_graph_size():
 
     planner = ForwardStatePlanner(domain, objects)
 
-    # Test with different depths
-    for depth in [1, 2]:
-        print(f"\nDepth {depth}:")
-        graph = planner.explore_from_goal(goal_preds, max_depth=depth)
+    # Test complete exploration (no depth limit)
+    print(f"\nComplete exploration:")
+    graph = planner.explore_from_goal(goal_preds)
 
-        print(f"  States: {len(graph.states)}")
-        print(f"  Transitions: {len(graph.transitions)}")
-        print(f"  Leaf states: {len(graph.get_leaf_states())}")
+    print(f"  States: {len(graph.states)}")
+    print(f"  Transitions: {len(graph.transitions)}")
+    print(f"  Leaf states: {len(graph.get_leaf_states())}")
 
-        # Path finding
-        paths = graph.find_shortest_paths_to_goal()
-        non_trivial = [p for s, p in paths.items() if s != graph.goal_state and p]
-        print(f"  Non-trivial paths: {len(non_trivial)}")
+    # Path finding
+    paths = graph.find_shortest_paths_to_goal()
+    non_trivial = [p for s, p in paths.items() if s != graph.goal_state and p]
+    print(f"  Non-trivial paths: {len(non_trivial)}")
 
-        # Sample states
-        print(f"  Sample states:")
-        for i, state in enumerate(list(graph.states)[:3]):
-            preds = ', '.join(str(p) for p in sorted(state.predicates, key=str)[:3])
-            print(f"    {i+1}. {preds}...")
+    # Sample states
+    print(f"  Sample states:")
+    for i, state in enumerate(list(graph.states)[:3]):
+        preds = ', '.join(str(p) for p in sorted(state.predicates, key=str)[:3])
+        print(f"    {i+1}. {preds}...")
 
 
 if __name__ == "__main__":

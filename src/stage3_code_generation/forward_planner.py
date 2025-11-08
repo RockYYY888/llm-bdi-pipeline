@@ -127,14 +127,15 @@ class ForwardStatePlanner:
 
         return complete_goal
 
-    def explore_from_goal(self, goal_predicates: List[PredicateAtom],
-                         max_depth: Optional[int] = None) -> StateGraph:
+    def explore_from_goal(self, goal_predicates: List[PredicateAtom]) -> StateGraph:
         """
         Explore state space from goal state using forward "destruction"
 
+        Exploration continues until all reachable states are discovered.
+        Terminates naturally when the BFS queue is empty (all states visited).
+
         Args:
             goal_predicates: Predicates forming the goal state
-            max_depth: Maximum search depth (auto-calculated if None)
 
         Returns:
             Complete state graph with all reachable states
@@ -142,11 +143,7 @@ class ForwardStatePlanner:
         # Infer complete goal state (Design Decision #3)
         complete_goal = self.infer_complete_goal_state(goal_predicates)
 
-        # Calculate max depth if not provided
-        if max_depth is None:
-            max_depth = self.calculate_max_depth(goal_predicates)
-
-        print(f"[Forward Planner] Starting exploration from goal with max_depth={max_depth}")
+        print(f"[Forward Planner] Starting complete state space exploration")
         print(f"[Forward Planner] Input goal predicates: {[str(p) for p in goal_predicates]}")
         print(f"[Forward Planner] Complete goal state: {[str(p) for p in sorted(complete_goal, key=str)]}")
 
@@ -189,11 +186,6 @@ class ForwardStatePlanner:
                     else:
                         # Create new state with proper depth
                         new_depth = current_state.depth + 1
-
-                        # Only add new states within depth limit
-                        if new_depth > max_depth:
-                            continue  # Skip creating states beyond max_depth
-
                         final_state = WorldState(new_state.predicates, depth=new_depth)
                         visited_map[new_pred_set] = final_state
                         queue.append(final_state)
@@ -377,19 +369,12 @@ class ForwardStatePlanner:
 
     def calculate_max_depth(self, goal_predicates: List[PredicateAtom]) -> int:
         """
-        Calculate maximum search depth based on goal complexity
+        DEPRECATED: Max depth limit has been removed.
 
-        Heuristics:
-        - 1 predicate: depth = 5
-        - 2-3 predicates: depth = 10
-        - 4-6 predicates: depth = 15
-        - 7+ predicates: depth = 20
+        This method is no longer used. State space exploration now continues
+        until all reachable states are discovered (queue becomes empty).
 
-        Args:
-            goal_predicates: Goal predicates
-
-        Returns:
-            Maximum depth for exploration
+        Kept for backward compatibility only.
         """
         num_predicates = len(goal_predicates)
         num_objects = len(self.objects)
@@ -442,8 +427,8 @@ def test_forward_planner_simple():
     # Create planner
     planner = ForwardStatePlanner(domain, objects)
 
-    # Explore (use very small depth for testing)
-    graph = planner.explore_from_goal(goal_predicates, max_depth=1)
+    # Explore complete state space
+    graph = planner.explore_from_goal(goal_predicates)
 
     print(f"\nGraph statistics:")
     stats = graph.get_statistics()
@@ -502,12 +487,8 @@ def test_forward_planner_complex():
     # Create planner
     planner = ForwardStatePlanner(domain, objects)
 
-    # Calculate depth
-    max_depth = planner.calculate_max_depth(goal_predicates)
-    print(f"Calculated max_depth: {max_depth}")
-
-    # Explore
-    graph = planner.explore_from_goal(goal_predicates, max_depth=max_depth)
+    # Explore complete state space
+    graph = planner.explore_from_goal(goal_predicates)
 
     print(f"\nGraph statistics:")
     stats = graph.get_statistics()

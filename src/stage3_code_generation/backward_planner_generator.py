@@ -130,12 +130,7 @@ class BackwardPlannerGenerator:
                 # Run forward planning
                 try:
                     planner = ForwardStatePlanner(self.domain, objects)
-
-                    # Use smaller depth for complex goals (default limit to 2)
-                    max_depth = min(planner.calculate_max_depth(goal_predicates), 2)
-                    print(f"    Max depth: {max_depth}")
-
-                    state_graph = planner.explore_from_goal(goal_predicates, max_depth)
+                    state_graph = planner.explore_from_goal(goal_predicates)
                     print(f"    State graph: {state_graph}")
 
                     # Generate AgentSpeak code
