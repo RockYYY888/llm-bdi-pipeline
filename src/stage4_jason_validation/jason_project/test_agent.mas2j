@@ -1,0 +1,15 @@
+/*
+ * Stage 4 - Jason Validation Test Configuration
+ * Simple MAS project to verify Jason environment setup
+ */
+
+MAS test_agent_system {
+
+    infrastructure: Centralised
+
+    agents:
+        test_agent;  // Single agent for testing
+
+    aslSourcePath:
+        "src/asl";   // Path to AgentSpeak (.asl) files
+}

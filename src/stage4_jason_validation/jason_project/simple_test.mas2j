@@ -1,0 +1,9 @@
+/*
+ * Simple test MAS configuration
+ */
+
+MAS simple_test_system {
+    infrastructure: Centralised
+    agents: simple_test;
+    aslSourcePath: "src/asl";
+}
