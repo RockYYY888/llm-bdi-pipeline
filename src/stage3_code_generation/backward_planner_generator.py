@@ -99,6 +99,11 @@ class BackwardPlannerGenerator:
         dfa_info = self._parse_dfa(dfa_result['dfa_dot'])
         print(f"DFA: {len(dfa_info.states)} states, {len(dfa_info.transitions)} transitions")
 
+        # OPTIMIZATION: Cache goal exploration results to avoid duplicate work
+        goal_cache = {}  # goal_key -> state_graph
+        cache_hits = 0
+        cache_misses = 0
+
         # Generate code for each transition
         all_code_sections = []
 
@@ -127,13 +132,34 @@ class BackwardPlannerGenerator:
                 goal_name = self._format_goal_name(goal_predicates)
                 print(f"    Goal name: {goal_name}")
 
-                # Run forward planning
-                try:
-                    planner = ForwardStatePlanner(self.domain, objects)
-                    state_graph = planner.explore_from_goal(goal_predicates)
-                    print(f"    State graph: {state_graph}")
+                # OPTIMIZATION: Check if we've already explored this goal
+                goal_key = self._serialize_goal(goal_predicates)
 
-                    # Generate AgentSpeak code
+                if goal_key in goal_cache:
+                    # Reuse cached state graph
+                    state_graph = goal_cache[goal_key]
+                    cache_hits += 1
+                    print(f"    ✓ Cache HIT! Reusing exploration for {goal_name}")
+                    print(f"    State graph: {state_graph}")
+                else:
+                    # First time seeing this goal - run forward planning
+                    cache_misses += 1
+                    print(f"    Cache MISS - running exploration...")
+
+                    try:
+                        planner = ForwardStatePlanner(self.domain, objects)
+                        state_graph = planner.explore_from_goal(goal_predicates)
+                        goal_cache[goal_key] = state_graph  # Cache for future use
+                        print(f"    State graph: {state_graph}")
+
+                    except Exception as e:
+                        print(f"    Error during exploration: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        continue
+
+                # Generate AgentSpeak code (for both cache hit and miss)
+                try:
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
                         goal_name=goal_name,
@@ -146,7 +172,7 @@ class BackwardPlannerGenerator:
                     print(f"    Generated {len(code)} characters of code")
 
                 except Exception as e:
-                    print(f"    Error during planning/codegen: {e}")
+                    print(f"    Error during codegen: {e}")
                     import traceback
                     traceback.print_exc()
                     continue
@@ -163,6 +189,12 @@ class BackwardPlannerGenerator:
 
         print(f"\n[Backward Planner Generator] Code generation complete")
         print(f"Total code length: {len(final_code)} characters")
+        print(f"Goal exploration cache:")
+        print(f"  Cache hits: {cache_hits}")
+        print(f"  Cache misses: {cache_misses}")
+        print(f"  Total explorations needed: {cache_misses} (saved {cache_hits})")
+        if cache_hits + cache_misses > 0:
+            print(f"  Cache hit rate: {cache_hits / (cache_hits + cache_misses) * 100:.1f}%")
         print("="*80)
 
         return final_code
@@ -258,6 +290,20 @@ class BackwardPlannerGenerator:
             # Multiple predicates: combine
             names = [p.to_agentspeak().replace(" ", "_").replace("(", "_").replace(")", "").replace(",", "") for p in predicates]
             return "_and_".join(names)
+
+    def _serialize_goal(self, predicates: List[PredicateAtom]) -> str:
+        """
+        Serialize goal predicates to a hashable cache key
+
+        Args:
+            predicates: List of predicates
+
+        Returns:
+            String key for caching
+        """
+        # Sort predicates for consistency (order shouldn't matter)
+        sorted_preds = sorted([p.to_agentspeak() for p in predicates])
+        return "|".join(sorted_preds)
 
     def _generate_main_header(self, ltl_dict: Dict[str, Any], dfa_info: DFAInfo) -> str:
         """Generate main file header"""
