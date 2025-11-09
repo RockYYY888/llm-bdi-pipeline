@@ -249,14 +249,13 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 .
 ├── src/
 │   ├── main.py                          # Entry point
-│   ├── config.py                        # Configuration management
 │   ├── ltl_bdi_pipeline.py              # Main pipeline orchestration (3 stages)
-│   ├── pipeline_logger.py               # Logging utilities (3-stage logging)
-│   ├── setup_mona_path.py               # Automatic MONA PATH configuration
 │   ├── utils/
 │   │   ├── __init__.py
+│   │   ├── config.py                    # Configuration management
 │   │   ├── pddl_parser.py               # PDDL domain parser
 │   │   ├── pipeline_logger.py           # Enhanced logging with backward planning stats
+│   │   ├── setup_mona_path.py           # Automatic MONA PATH configuration
 │   │   └── symbol_normalizer.py         # Symbol normalization with hyphen handling
 │   ├── stage1_interpretation/
 │   │   ├── __init__.py
@@ -266,7 +265,7 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   │   └── prompts.py                   # LLM prompts for NL to LTLf
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
-│   │   ├── recursive_dfa_builder.py     # Stage 2: Recursive DFA generation (DFS)
+│   │   ├── dfa_builder.py               # Stage 2: Recursive DFA generation (DFS)
 │   │   ├── ltlf_to_dfa.py               # LTLf -> DFA conversion (ltlf2dfa)
 │   │   └── dfa_dot_cleaner.py           # DFA DOT file cleaning utilities
 │   ├── stage3_code_generation/
@@ -296,16 +295,24 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
 │   │   └── test_ltlf2dfa.py             # Stage 2 LTLf -> DFA tests
-│   └── stage3_code_generation/          # Stage 3 comprehensive test suite (14+ tests)
-│       ├── README.md                    # Test documentation
-│       ├── agentspeak_validator.py      # Code validation utility
+│   └── stage3_code_generation/          # Stage 3 comprehensive test suite (14 tests)
+│       ├── README.md                             # Test documentation
+│       ├── agentspeak_validator.py               # Code validation utility
 │       ├── test_integration_backward_planner.py  # Main integration test
 │       ├── test_stress_backward_planner.py       # Stress tests (4 scenarios)
-│       ├── test_multi_transition_flow.py         # Multi-transition DFA tests
-│       ├── test_scalability.py                   # Scalability analysis
+│       ├── test_multi_transition_flow.py         # Full multi-transition flow
+│       ├── test_multi_transition_simple.py       # Simple multi-transition demo
 │       ├── test_goal_caching.py                  # Goal cache verification
 │       ├── test_measure_redundancy.py            # Performance measurements
-│       └── ...                                   # Additional tests
+│       ├── test_scalability.py                   # Scalability analysis
+│       ├── test_debug_state_explosion.py         # State explosion debugging
+│       ├── test_explain_states.py                # State space explanation
+│       ├── test_show_ground_actions.py           # Ground actions display
+│       ├── test_show_real_code.py                # Real code examples
+│       ├── test_visualize_3blocks.py             # 3-block visualization
+│       ├── test_visualize_multi_transition.py    # Multi-transition visualization
+│       ├── test_simple_2blocks.py                # Simple 2-block test
+│       └── test_agentspeak_validator.py          # Validator unit tests
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 ├── run_with_mona.sh                     # Wrapper script to run with MONA in PATH
 ├── pyproject.toml                       # Project dependencies (uv managed)
@@ -328,12 +335,38 @@ python tests/stage1_interpretation/test_nl_to_ltlf_generation.py
 python tests/stage2_dfa_generation/test_ltlf2dfa.py
 
 # Run Stage 3 tests: Backward Planning -> AgentSpeak
+
+# Core integration and stress tests
 python tests/stage3_code_generation/test_integration_backward_planner.py  # Main integration test
 python tests/stage3_code_generation/test_stress_backward_planner.py       # Stress tests (4 scenarios)
-python tests/stage3_code_generation/test_multi_transition_flow.py         # Multi-transition handling
 
-# Run all Stage 3 tests (14+ tests)
-bash run_stage3_tests.sh
+# Multi-transition and flow tests
+python tests/stage3_code_generation/test_multi_transition_flow.py         # Full multi-transition flow
+python tests/stage3_code_generation/test_multi_transition_simple.py       # Simple multi-transition demo
+
+# Performance and optimization tests
+python tests/stage3_code_generation/test_goal_caching.py                  # Goal cache verification
+python tests/stage3_code_generation/test_measure_redundancy.py            # Redundancy measurements
+python tests/stage3_code_generation/test_scalability.py                   # Scalability analysis
+
+# Debugging and analysis tests
+python tests/stage3_code_generation/test_debug_state_explosion.py         # State explosion analysis
+python tests/stage3_code_generation/test_explain_states.py                # State space explanation
+python tests/stage3_code_generation/test_show_ground_actions.py           # Ground actions demo
+python tests/stage3_code_generation/test_show_real_code.py                # Real code example
+
+# Visualization tests
+python tests/stage3_code_generation/test_visualize_3blocks.py             # 3-block visualization
+python tests/stage3_code_generation/test_visualize_multi_transition.py    # Multi-transition viz
+
+# Basic tests
+python tests/stage3_code_generation/test_simple_2blocks.py                # Simple 2-block test
+
+# Code validation
+python tests/stage3_code_generation/test_agentspeak_validator.py          # Validator unit tests
+
+# Run all Stage 3 tests at once (if script exists)
+bash run_stage3_tests.sh 2>/dev/null || echo "Use individual test commands above"
 
 # Run symbol normalizer tests
 python tests/test_symbol_normalizer.py
