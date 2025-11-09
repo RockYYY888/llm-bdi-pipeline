@@ -10,9 +10,9 @@ This pipeline converts natural language instructions into executable AgentSpeak 
 
 1. **Stage 1**: Natural Language → LTLf (Linear Temporal Logic on Finite Traces) Specification
 2. **Stage 2**: LTLf → Recursive DFA Generation (DFS-based decomposition until physical actions)
-3. **Stage 3**: DFAs → AgentSpeak Code Generation (LLM-guided by DFA transitions)
+3. **Stage 3**: DFA → AgentSpeak Code Generation (Backward Planning with state space exploration)
 
-**Note**: This project previously supported a dual-branch comparison with FOND planning (Branch B). That functionality has been moved to `src/legacy/fond/` to focus development on LLM-based AgentSpeak generation.
+**Note**: This project originally used LLM-based code generation for Stage 3. The current implementation uses **Backward Planning** (forward state-space destruction) for deterministic, optimized code generation. The LLM-based Stage 1 (NL→LTLf) is retained. FOND planning functionality has been moved to `src/legacy/fond/`.
 
 ---
 
@@ -109,14 +109,26 @@ Natural Language Input ("Stack block C on block B")
          |
          v
 +------------------------------------------------+
-|  STAGE 3: DFAs -> AgentSpeak Code              |
-|  agentspeak_generator.py (LLM-based)           |
+|  STAGE 3: DFA -> AgentSpeak Code               |
+|  backward_planner_generator.py (Non-LLM)       |
 |                                                |
-|  Input: All DFAs with transition information   |
+|  Input: DFA with transition labels             |
+|  Process: Backward Planning (State Space)      |
+|  1. Parse DFA transition labels -> goals       |
+|  2. For each goal: Run backward planning       |
+|     - Complete state space exploration (BFS)   |
+|     - Generate plans for all reachable states  |
+|  3. Merge plans into AgentSpeak code           |
+|                                                |
 |  Output: Complete AgentSpeak (.asl) program    |
-|          - Plans guided by DFA transitions     |
-|          - Context-sensitive plan alternatives |
-|          - Belief updates and actions          |
+|          - Plans for achieving each goal       |
+|          - Context-sensitive (state-based)     |
+|          - Action preconditions verified       |
+|                                                |
+|  Optimizations:                                |
+|  - Ground actions caching (99.9% reduction)    |
+|  - Goal exploration caching (66.7% hit rate)   |
+|  - Code deduplication (20-40% reduction)       |
 +------------------------------------------------+
 ```
 
@@ -124,13 +136,23 @@ Natural Language Input ("Stack block C on block B")
 
 ## Key Features
 
-### LLM-Based AgentSpeak Generation
-- Complete AgentSpeak (.asl) program generation from LTLf goals
-- Automatic plan library creation with context-sensitive plans
-- Declarative goal handling using LTL temporal operators
+### Backward Planning-Based AgentSpeak Generation (Non-LLM)
+- **Complete state-space exploration** from goal states using backward planning (forward destruction)
+- **Deterministic code generation** - no LLM randomness in Stage 3
+- **Guaranteed correctness** - all plans verified through state space exploration
+- **Context-sensitive plans** - generated for every reachable state
+- **Multi-goal support** - handles DFAs with multiple transitions
+- **Boolean expression parsing** - supports `&`, `|`, `~`, `->`, `<->` in transition labels
+- **Performance optimizations**:
+  - Ground actions caching: 99.9% redundancy elimination
+  - Goal exploration caching: 66.7% cache hit rate for duplicate goals
+  - Code structure optimization: 20-40% code size reduction
+
+### LLM-Based Natural Language Understanding (Stage 1 Only)
+- Natural language → LTLf conversion using LLMs
 - Support for F (eventually), G (always), U (until), X (next), R (release), W (weak until), M (strong release) operators
-- Domain-aware code generation with action preconditions
 - Propositional constant handling (true/false) in LTL formulas
+- Domain-aware predicate extraction
 
 ### Symbol Normalization and Grounding
 - Centralized symbol normalization with `SymbolNormalizer` utility class
@@ -148,14 +170,24 @@ Natural Language Input ("Stack block C on block B")
 - Complete transition label extraction for plan generation
 
 ### Comprehensive Testing
-- 28 test cases covering all LTL operators and syntax combinations
+- **Stage 1**: 28 test cases covering all LTL operators and syntax combinations
+- **Stage 3**: 14+ comprehensive tests including:
+  - Stress tests (2-block scenarios with complex goals)
+  - Multi-transition DFA handling
+  - Scalability tests (state space explosion analysis)
+  - AgentSpeak code validation
+  - Goal caching verification
+  - Performance measurement (redundancy, reuse ratio)
 - Unit tests for symbol normalization with hyphen handling
 - Integration tests for end-to-end pipeline validation
-- Stage-specific test suites for isolated component testing
+- All tests include detailed output analysis and verification
 
 ### Comprehensive Logging
 - Timestamped execution logs in JSON and human-readable formats
-- Full LLM prompts and responses recorded for reproducibility
+- **Backward planning statistics**: states explored, transitions generated, cache metrics
+- **Complete AgentSpeak code** saved to both JSON and separate `.asl` file
+- Full LLM prompts and responses recorded for reproducibility (Stage 1)
+- Performance metrics: reuse ratio, cache hit rate, redundancy eliminated
 - Separate log directories for each execution
 - Complete trace of NL → LTLf → DFA → AgentSpeak transformation
 
@@ -223,13 +255,14 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── setup_mona_path.py               # Automatic MONA PATH configuration
 │   ├── utils/
 │   │   ├── __init__.py
+│   │   ├── pddl_parser.py               # PDDL domain parser
+│   │   ├── pipeline_logger.py           # Enhanced logging with backward planning stats
 │   │   └── symbol_normalizer.py         # Symbol normalization with hyphen handling
 │   ├── stage1_interpretation/
 │   │   ├── __init__.py
 │   │   ├── ltlf_generator.py            # Stage 1: NL -> LTLf conversion (LLM)
 │   │   ├── ltlf_formula.py              # LTLf formula data structures
 │   │   ├── grounding_map.py             # Predicate grounding and propositionalization
-│   │   ├── pddl_parser.py               # PDDL domain parser
 │   │   └── prompts.py                   # LLM prompts for NL to LTLf
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
@@ -238,8 +271,12 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   │   └── dfa_dot_cleaner.py           # DFA DOT file cleaning utilities
 │   ├── stage3_code_generation/
 │   │   ├── __init__.py
-│   │   ├── agentspeak_generator.py      # Stage 3: DFAs -> AgentSpeak (LLM)
-│   │   └── prompts.py                   # LLM prompts for AgentSpeak generation
+│   │   ├── backward_planner_generator.py   # Stage 3: Main entry point (non-LLM)
+│   │   ├── forward_planner.py              # Backward planning (forward destruction)
+│   │   ├── agentspeak_codegen.py           # AgentSpeak code generation
+│   │   ├── boolean_expression_parser.py    # Parse transition labels (DNF conversion)
+│   │   ├── state_space.py                  # State representation and graph
+│   │   └── pddl_condition_parser.py        # PDDL precondition/effect parsing
 │   ├── external/
 │   │   ├── mona-1.4/                    # MONA automata tool (for ltlf2dfa)
 │   │   └── pr2/                         # PR2 FOND planner
@@ -253,13 +290,22 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── __init__.py
 │   ├── test_symbol_normalizer.py        # Symbol normalizer unit tests
 │   ├── test_integration_pipeline.py     # End-to-end integration tests
+│   ├── test_logger_backward_planning.py # Logger integration tests
 │   ├── stage1_interpretation/
 │   │   └── test_nl_to_ltlf_generation.py    # Stage 1 NL -> LTLf tests (28 cases)
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
 │   │   └── test_ltlf2dfa.py             # Stage 2 LTLf -> DFA tests
-│   └── stage3_code_generation/
-│       └── __init__.py
+│   └── stage3_code_generation/          # Stage 3 comprehensive test suite (14+ tests)
+│       ├── README.md                    # Test documentation
+│       ├── agentspeak_validator.py      # Code validation utility
+│       ├── test_integration_backward_planner.py  # Main integration test
+│       ├── test_stress_backward_planner.py       # Stress tests (4 scenarios)
+│       ├── test_multi_transition_flow.py         # Multi-transition DFA tests
+│       ├── test_scalability.py                   # Scalability analysis
+│       ├── test_goal_caching.py                  # Goal cache verification
+│       ├── test_measure_redundancy.py            # Performance measurements
+│       └── ...                                   # Additional tests
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 ├── run_with_mona.sh                     # Wrapper script to run with MONA in PATH
 ├── pyproject.toml                       # Project dependencies (uv managed)
@@ -281,8 +327,19 @@ python tests/stage1_interpretation/test_nl_to_ltlf_generation.py
 # Run Stage 2 tests: LTLf -> DFA conversion
 python tests/stage2_dfa_generation/test_ltlf2dfa.py
 
+# Run Stage 3 tests: Backward Planning -> AgentSpeak
+python tests/stage3_code_generation/test_integration_backward_planner.py  # Main integration test
+python tests/stage3_code_generation/test_stress_backward_planner.py       # Stress tests (4 scenarios)
+python tests/stage3_code_generation/test_multi_transition_flow.py         # Multi-transition handling
+
+# Run all Stage 3 tests (14+ tests)
+bash run_stage3_tests.sh
+
 # Run symbol normalizer tests
 python tests/test_symbol_normalizer.py
+
+# Run logger tests
+python tests/test_logger_backward_planning.py
 
 # Run integration tests (end-to-end pipeline)
 python tests/test_integration_pipeline.py
@@ -347,18 +404,35 @@ python tests/test_integration_pipeline.py
   - Complete transition labels extraction from MONA output
   - DOT file generation for DFA visualization
 
-### Stage 3: DFAs → AgentSpeak Code
-- **Input**: All DFAs with transition information from Stage 2
-- **Process**: LLM generates complete AgentSpeak program guided by DFA decomposition:
-  - Uses DFA transitions as plan context conditions
-  - Generates plans for each subgoal in decomposition tree
-  - Creates context-sensitive plan alternatives based on different DFA transitions
-  - Incorporates initial beliefs (from Stage 1 initial state)
-  - Adds belief updates and action sequences
-  - Includes failure handling plans (-!goal)
+### Stage 3: DFA → AgentSpeak Code (Backward Planning)
+- **Input**: DFA with transition labels from Stage 2
+- **Process**: Backward planning (forward state-space destruction) for deterministic code generation:
+  1. **Parse transition labels**: Extract goals from DFA transitions using boolean expression parser
+     - Supports: `&` (AND), `|` (OR), `~` (NOT), `->` (IMPLIES), `<->` (IFF)
+     - Converts to Disjunctive Normal Form (DNF)
+     - Anti-grounds propositions back to predicates
+  2. **Backward planning** for each goal:
+     - Start from goal state
+     - Apply actions in reverse (preconditions → effects swapped)
+     - Complete BFS exploration of reachable state space
+     - Generate plans for all states that can reach the goal
+  3. **Code generation**:
+     - Create AgentSpeak plans for each (state, action, next_state) transition
+     - Context-sensitive: plans check current beliefs before executing actions
+     - Shared components (initial beliefs, action plans) generated once
+     - Goal-specific plans merged together
 - **Output**: Complete AgentSpeak code (.asl) ready for Jason/JAdex execution
-- **LLM Model**: Same as Stage 1
-- **Guidance Strategy**: DFA transitions provide explicit conditions for when plans should be triggered, enabling more accurate and context-aware plan generation
+- **Performance**:
+  - **States explored**: 1,000+ for simple 2-block scenarios
+  - **Reuse ratio**: 57.1:1 (states reused vs created due to deduplication)
+  - **Cache optimizations**: 99.9% ground actions caching, 66.7% goal cache hit rate
+  - **Code size**: Typically 2,000-5,000 characters for 2-block problems
+- **Key Features**:
+  - ✅ Deterministic (no LLM randomness)
+  - ✅ Guaranteed correctness (all plans verified)
+  - ✅ Complete coverage (all reachable states)
+  - ✅ Multi-transition DFA support
+  - ✅ Conjunctive and disjunctive goal handling
 
 ---
 
@@ -432,22 +506,44 @@ The blocksworld domain provides a testbed for:
   - Decomposition tree with depth tracking
   - DOT format output for visualization
   - Bidirectional symbol mapping storage
-- ✓ **Stage 3**: DFAs → LLM AgentSpeak code generation
-  - DFA-guided plan generation using transition information
-  - Context-sensitive plan alternatives
-  - Failure handling plans
-- ✓ **Utils**: Centralized symbol normalization utilities
+- ✓ **Stage 3**: DFA → Backward Planning AgentSpeak code generation (Non-LLM)
+  - Complete backward planning algorithm with state space exploration
+  - Boolean expression parsing for transition labels (DNF conversion)
+  - PDDL action parsing with precondition/effect handling
+  - Context-sensitive plan generation for all reachable states
+  - Multi-transition DFA support
+  - **Performance Optimizations**:
+    - Ground actions caching (99.9% redundancy elimination)
+    - Goal exploration caching (66.7% cache hit rate)
+    - Code structure optimization (20-40% size reduction)
+  - Comprehensive testing suite (14+ tests)
+  - AgentSpeak code validation
+- ✓ **Utils**: Centralized utilities and enhanced logging
   - `SymbolNormalizer` class for consistent symbol handling
   - Hyphen encoding/decoding for ltlf2dfa compatibility
-  - Symbol mapping storage and retrieval
+  - `PipelineLogger` with backward planning statistics
+  - PDDL domain parser
+  - Complete AgentSpeak code saved to `.asl` files
 - ✓ **Testing Infrastructure**:
   - Stage 1: 28 test cases for NL → LTLf conversion
+  - Stage 3: 14+ comprehensive tests covering:
+    - Integration tests
+    - Stress tests (4 scenarios with 2 blocks)
+    - Multi-transition DFA handling
+    - Scalability analysis
+    - Goal caching verification
+    - Performance measurements
+    - AgentSpeak code validation
   - Symbol normalizer unit tests
+  - Logger integration tests
   - Integration tests for end-to-end pipeline
-  - Stage-specific test suites
 - ✓ Blocksworld domain support with physical action identification
-- ✓ Comprehensive JSON + text execution logs with full LLM prompts and DFA decomposition
-- ✓ AgentSpeak code output (.asl files)
+- ✓ Comprehensive JSON + text execution logs with:
+  - Full LLM prompts and responses (Stage 1)
+  - DFA decomposition structure
+  - **Backward planning statistics** (states, transitions, cache metrics)
+  - Performance metrics (reuse ratio, redundancy eliminated)
+- ✓ AgentSpeak code output (.asl files) with complete plan library
 
 ### Not Yet Implemented
 - ⏳ **Stage 4**: Execution & Comparative Evaluation
@@ -460,7 +556,39 @@ The blocksworld domain provides a testbed for:
 ### Known Limitations
 1. **Single Domain**: Currently tested primarily with blocksworld domain
 2. **No Execution**: Pipeline stops after code generation (Stage 3)
-3. **Subgoal Extraction**: Current implementation extracts subgoals from transition labels, which may not capture all domain-specific decomposition strategies
+3. **State Space Explosion**: Backward planning explores complete state space
+   - 2 blocks: ~1,000 states
+   - 3 blocks: ~30,000+ states (exponential growth)
+   - See `docs/stage3_production_limitations.md` for detailed analysis
+4. **Memory Requirements**: Complete state graphs stored in memory
+5. **Code Size**: Generated AgentSpeak code can be large for complex goals (2,000-5,000 characters for 2-block problems)
+
+---
+
+## Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+- **`stage3_integration_test_results.md`**: Complete test results for Stage 3 backward planning
+  - Integration test outputs
+  - Performance metrics
+  - Code examples
+
+- **`stage3_optimization_opportunities.md`**: Detailed analysis of implemented optimizations
+  - Priority 1: Ground actions caching (99.9% reduction)
+  - Priority 2: Goal exploration caching (66.7% hit rate)
+  - Priority 3: Code structure optimization (20-40% reduction)
+  - Performance impact analysis
+
+- **`stage3_production_limitations.md`**: Production deployment considerations
+  - State space explosion analysis
+  - Scalability challenges
+  - Memory requirements
+  - Alternative approaches
+
+- **`stage3_technical_debt.md`**: Technical implementation details and future improvements
+
+- **`tests/stage3_code_generation/README.md`**: Stage 3 test suite documentation
 
 ---
 
@@ -482,30 +610,52 @@ The blocksworld domain provides a testbed for:
    - Replanning on goal violations
 
 ### Medium Priority
-4. **Performance Optimization**
-   - LLM response caching
-   - Incremental plan generation
-   - Parallel LLM calls for independent subgoals
+4. **Backward Planning Scalability**
+   - Partial state space exploration strategies
+   - Heuristic-guided search (A*, greedy best-first)
+   - Abstract planning for large domains
+   - State abstraction techniques
+   - Incremental plan refinement
 
 5. **Enhanced LTL Support**
    - Complex nested temporal formulas
    - Quantified LTL (QLTL)
    - Probabilistic temporal logic
 
+6. **Hybrid Approaches**
+   - Combine backward planning with LLM-guided heuristics
+   - Use LLMs for state abstraction
+   - LLM-based plan verification
+
 ---
 
-## Legacy: FOND Planning (Branch B)
+## Legacy Components
 
-The project originally included a **Branch B** that used FOND (Fully Observable Non-Deterministic) planning with the PR2 planner. This has been **moved to `src/legacy/fond/`** to focus development on LLM-based approaches.
+### FOND Planning (Branch B)
+The project originally included a **Branch B** that used FOND (Fully Observable Non-Deterministic) planning with the PR2 planner. This has been **moved to `src/legacy/fond/`**.
 
-### Why Moved to Legacy?
-- Direct LLM-to-BDI code generation is more aligned with modern LLM capabilities
-- Simpler architecture without requiring classical planners and PDDL engineering
-- Easier to extend to multiple domains
-- More suitable for pure LLM-based research
-
-### Restoring FOND Functionality
 See `src/legacy/fond/README.md` for detailed instructions on restoring the FOND planning branch if needed.
+
+### LLM-Based Stage 3 (Previous Implementation)
+The original Stage 3 used LLMs to generate AgentSpeak code from DFAs. This was **replaced with backward planning** for deterministic, verifiable code generation.
+
+**Why Changed to Backward Planning?**
+- ✅ **Deterministic**: No LLM randomness, reproducible results
+- ✅ **Guaranteed Correctness**: All plans verified through state space exploration
+- ✅ **Complete Coverage**: Plans generated for all reachable states
+- ✅ **No API Costs**: No LLM calls for Stage 3
+- ✅ **Testability**: Easier to validate and debug
+
+**Trade-offs:**
+- ⚠️ State space explosion for large domains (3+ blocks)
+- ⚠️ Requires PDDL domain specification
+- ⚠️ Limited to classical planning domains
+
+**When LLM Might Be Better:**
+- Complex domain-specific heuristics
+- Natural language action descriptions
+- Domains without formal PDDL specifications
+- Need for creative problem-solving
 
 ---
 
