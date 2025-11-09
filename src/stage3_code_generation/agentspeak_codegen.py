@@ -66,7 +66,7 @@ class AgentSpeakCodeGenerator:
 
     def generate(self) -> str:
         """
-        Generate complete AgentSpeak code
+        Generate complete AgentSpeak code (legacy method for single-goal case)
 
         Returns:
             AgentSpeak .asl file content
@@ -87,6 +87,91 @@ class AgentSpeakCodeGenerator:
         sections.append(goal_plans)
         sections.append(success_plan)
         sections.append(failure_plan)
+
+        return "\n\n".join(sections)
+
+    def generate_goal_specific_section(self) -> str:
+        """
+        Generate ONLY goal-specific plans (for multi-goal optimization)
+
+        This method generates only the parts that differ between goals:
+        - Goal achievement plans
+        - Success/failure handlers for this specific goal
+
+        Returns:
+            Goal-specific AgentSpeak code section
+        """
+        sections = []
+
+        # Generate goal-specific parts
+        goal_plans = self._generate_goal_plans()  # Updates self.goal_plan_count
+        success_plan = self._generate_success_plan()
+        failure_plan = self._generate_failure_plan()
+
+        # Add comment header for this goal
+        sections.append(f"/* ========== Goal: {self.goal_name} ========== */")
+        sections.append("")
+        sections.append(f"/* Goal Achievement Plans ({self.goal_plan_count} plans) */")
+        sections.append(goal_plans)
+        sections.append(success_plan)
+        sections.append(failure_plan)
+
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def generate_shared_section(domain: PDDLDomain, objects: List[str],
+                               all_state_graphs: List['StateGraph']) -> str:
+        """
+        Generate shared components (initial beliefs + action plans)
+
+        These components are identical across all goals and only need to be
+        generated once for the entire multi-goal AgentSpeak file.
+
+        Args:
+            domain: PDDL domain
+            objects: List of objects
+            all_state_graphs: All state graphs (to collect used actions)
+
+        Returns:
+            Shared AgentSpeak code section
+        """
+        sections = []
+
+        # Initial beliefs
+        sections.append("/* ========== Shared Components ========== */")
+        sections.append("")
+        sections.append("/* Initial Beliefs */")
+        for obj in objects:
+            sections.append(f"ontable({obj}).")
+            sections.append(f"clear({obj}).")
+        sections.append("handempty.")
+
+        # Collect all used actions from all state graphs
+        used_actions = set()
+        for graph in all_state_graphs:
+            for transition in graph.transitions:
+                used_actions.add(transition.action.name)
+
+        # Generate action plans
+        sections.append("")
+        sections.append("/* PDDL Action Plans (as AgentSpeak goals) */")
+        sections.append("/* Each PDDL action is converted to an AgentSpeak goal plan */")
+        sections.append("/* with explicit belief updates from PDDL effects */")
+
+        # Create temporary instance to use helper methods
+        temp_codegen = AgentSpeakCodeGenerator(
+            state_graph=all_state_graphs[0],  # Just need any graph for helper methods
+            goal_name="temp",
+            domain=domain,
+            objects=objects
+        )
+
+        for action in domain.actions:
+            if action.name not in used_actions:
+                continue
+
+            action_plans = temp_codegen._generate_action_plan_variants(action)
+            sections.extend(action_plans)
 
         return "\n\n".join(sections)
 
