@@ -71,3 +71,7 @@ dmypy.json
 *.sublime-project
 *.sublime-workspace
 external/
+
+# Test outputs (stage3 backward planning)
+src/stage3_code_generation/test_*.asl
+src/stage3_code_generation/test_*.dot

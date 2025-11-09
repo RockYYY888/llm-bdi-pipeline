@@ -52,6 +52,18 @@ class PipelineRecord:
     stage3_llm_prompt: Optional[Dict[str, str]] = None
     stage3_llm_response: Optional[str] = None
 
+    # Stage 3: Backward Planning Statistics (non-LLM method)
+    stage3_method: str = "llm"  # "llm" or "backward_planning"
+    stage3_states_explored: int = 0
+    stage3_transitions_generated: int = 0
+    stage3_goal_plans_count: int = 0
+    stage3_action_plans_count: int = 0
+    stage3_cache_hits: int = 0
+    stage3_cache_misses: int = 0
+    stage3_ground_actions_cached: int = 0
+    stage3_code_size_chars: int = 0
+    stage3_redundancy_eliminated_pct: float = 0.0
+
     # Metadata
     domain_file: str = "domains/blocksworld/domain.pddl"
     output_dir: str = "output"
@@ -185,10 +197,39 @@ class PipelineLogger:
     # NEW: Stage 3 - AgentSpeak Generation logging
     def log_stage3(self, ltl_spec: Any, dfa_result: Any, agentspeak_code: str, status: str,
                    error: str = None, model: str = None, llm_prompt: Dict[str, str] = None,
-                   llm_response: str = None):
-        """Log Stage 3: DFA -> AgentSpeak Code Generation"""
+                   llm_response: str = None,
+                   # Backward planning statistics
+                   method: str = "llm", states_explored: int = 0, transitions_generated: int = 0,
+                   goal_plans_count: int = 0, action_plans_count: int = 0,
+                   cache_hits: int = 0, cache_misses: int = 0, ground_actions_cached: int = 0,
+                   redundancy_eliminated_pct: float = 0.0):
+        """
+        Log Stage 3: DFA -> AgentSpeak Code Generation
+
+        Args:
+            ltl_spec: LTL specification
+            dfa_result: DFA result dictionary
+            agentspeak_code: Generated AgentSpeak code (MUST be complete)
+            status: "Success" or "Failed"
+            error: Error message if failed
+            model: LLM model name (if using LLM method)
+            llm_prompt: LLM prompt dict (if using LLM method)
+            llm_response: LLM response text (if using LLM method)
+            method: "llm" or "backward_planning"
+            states_explored: Number of states explored (backward planning)
+            transitions_generated: Number of transitions generated
+            goal_plans_count: Number of goal achievement plans generated
+            action_plans_count: Number of action plans generated
+            cache_hits: Number of goal exploration cache hits
+            cache_misses: Number of goal exploration cache misses
+            ground_actions_cached: Number of ground actions cached
+            redundancy_eliminated_pct: Percentage of redundancy eliminated
+        """
         if not self.current_record:
             return
+
+        # Set generation method
+        self.current_record.stage3_method = method
 
         # ALWAYS log model and prompt if provided (regardless of success/failure)
         if model:
@@ -202,9 +243,28 @@ class PipelineLogger:
         if status == "Success" and agentspeak_code:
             self.current_record.stage3_status = "success"
             self.current_record.stage3_agentspeak = agentspeak_code
+            self.current_record.stage3_code_size_chars = len(agentspeak_code)
+
+            # Save AgentSpeak code to .asl file
+            if self.current_log_dir:
+                asl_filepath = self.current_log_dir / "generated_code.asl"
+                with open(asl_filepath, 'w') as f:
+                    f.write(agentspeak_code)
+
         elif error:
             self.current_record.stage3_status = "failed"
             self.current_record.stage3_error = str(error)
+
+        # Log backward planning statistics
+        if method == "backward_planning":
+            self.current_record.stage3_states_explored = states_explored
+            self.current_record.stage3_transitions_generated = transitions_generated
+            self.current_record.stage3_goal_plans_count = goal_plans_count
+            self.current_record.stage3_action_plans_count = action_plans_count
+            self.current_record.stage3_cache_hits = cache_hits
+            self.current_record.stage3_cache_misses = cache_misses
+            self.current_record.stage3_ground_actions_cached = ground_actions_cached
+            self.current_record.stage3_redundancy_eliminated_pct = redundancy_eliminated_pct
 
         # IMMEDIATELY save current state to files
         self._save_current_state()
@@ -378,9 +438,12 @@ class PipelineLogger:
             f.write("STAGE 3: DFA → AgentSpeak Code Generation\n")
             f.write("-"*80 + "\n")
             f.write(f"Status: {record.get('stage3_status', 'pending').upper()}\n")
+            f.write(f"Method: {record.get('stage3_method', 'N/A').upper()}\n")
 
             if record.get('stage3_used_llm'):
                 f.write(f"Generator: LLM ({record.get('stage3_model', 'N/A')})\n")
+            elif record.get('stage3_method') == 'backward_planning':
+                f.write("Generator: Backward Planning (non-LLM)\n")
 
             # LLM Prompt/Response for Stage 3
             if record.get('stage3_used_llm') and record.get('stage3_llm_prompt'):
@@ -402,9 +465,32 @@ class PipelineLogger:
                 f.write(record['stage3_llm_response'])
                 f.write("\n")
 
+            # Backward Planning Statistics
+            if record.get('stage3_method') == 'backward_planning' and record.get('stage3_status') == 'success':
+                f.write("\n" + "~"*40 + "\n")
+                f.write("BACKWARD PLANNING STATISTICS\n")
+                f.write("~"*40 + "\n")
+                f.write(f"States Explored: {record.get('stage3_states_explored', 0):,}\n")
+                f.write(f"Transitions Generated: {record.get('stage3_transitions_generated', 0):,}\n")
+                f.write(f"Goal Plans: {record.get('stage3_goal_plans_count', 0)}\n")
+                f.write(f"Action Plans: {record.get('stage3_action_plans_count', 0)}\n")
+                f.write(f"\nOptimization Metrics:\n")
+                f.write(f"  Ground Actions Cached: {record.get('stage3_ground_actions_cached', 0)}\n")
+                f.write(f"  Goal Cache Hits: {record.get('stage3_cache_hits', 0)}\n")
+                f.write(f"  Goal Cache Misses: {record.get('stage3_cache_misses', 0)}\n")
+                total_goals = record.get('stage3_cache_hits', 0) + record.get('stage3_cache_misses', 0)
+                if total_goals > 0:
+                    hit_rate = record.get('stage3_cache_hits', 0) / total_goals * 100
+                    f.write(f"  Cache Hit Rate: {hit_rate:.1f}%\n")
+                f.write(f"  Code Redundancy Eliminated: {record.get('stage3_redundancy_eliminated_pct', 0):.1f}%\n")
+                f.write(f"\nCode Size: {record.get('stage3_code_size_chars', 0):,} characters\n")
+                f.write("\n")
+
             if record.get('stage3_status') == 'success' and record.get('stage3_agentspeak'):
                 f.write("\n" + "~"*40 + "\n")
                 f.write("GENERATED AGENTSPEAK CODE (Stage 3)\n")
+                f.write("~"*40 + "\n")
+                f.write("NOTE: Complete AgentSpeak code saved to generated_code.asl\n")
                 f.write("~"*40 + "\n")
                 f.write(record['stage3_agentspeak'])
                 f.write("\n")
