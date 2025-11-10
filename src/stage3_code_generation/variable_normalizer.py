@@ -1,11 +1,17 @@
 """
-Variable Normalizer for Backward Planning
+Variable Normalizer for Backward Planning (Schema-Level Abstraction)
 
 This module provides functionality to normalize grounded predicates into
-variable-based predicates for backward planning optimization.
+schema-level variable predicates for backward planning optimization.
 
-Key idea: on(a, b) and on(c, d) should both normalize to on(?v0, ?v1),
-allowing them to share the same state space exploration.
+Key idea (Position-Based Normalization):
+- on(a, b) → on(?arg0, ?arg1)
+- on(c, d) → on(?arg0, ?arg1)  ✓ SAME SCHEMA!
+- on(b, a) → on(?arg0, ?arg1)  ✓ SAME SCHEMA!
+
+All goals with the same predicate structure share the same abstract plan,
+regardless of which specific objects are involved. This achieves TRUE
+schema-level abstraction and massive cache hit rates.
 """
 
 from typing import List, Dict, Tuple, Set
@@ -37,17 +43,22 @@ class VariableMapping:
 
 class VariableNormalizer:
     """
-    Normalizes grounded predicates to variable-based predicates
+    Normalizes grounded predicates to schema-level variable predicates
 
-    This enables variable-level caching in backward planning:
-    - on(a, b) → on(?v0, ?v1)
-    - on(c, d) → on(?v0, ?v1)
+    Uses POSITION-BASED normalization for TRUE schema-level abstraction:
+    - on(a, b) → on(?arg0, ?arg1)
+    - on(c, d) → on(?arg0, ?arg1)  ✓ SAME SCHEMA - Cache hit!
+    - on(b, a) → on(?arg0, ?arg1)  ✓ SAME SCHEMA - Cache hit!
 
-    Both map to the same variable pattern and can share state graphs.
+    All goals with same predicate structure share the same abstract plan,
+    regardless of which specific objects are used.
+
+    Key Insight: We care about the STRUCTURE (on(?X, ?Y)), not the
+    specific objects (a, b vs c, d). This is the essence of lifted planning.
 
     Attributes:
         domain: PDDL domain (for type information)
-        object_list: List of all objects in the problem
+        object_list: List of all objects in the problem (for reference)
         object_types: Map from object name to type
     """
 
@@ -87,20 +98,24 @@ class VariableNormalizer:
 
     def normalize_predicates(self, predicates: List[PredicateAtom]) -> Tuple[List[PredicateAtom], VariableMapping]:
         """
-        Normalize a list of grounded predicates to variable form
+        Normalize a list of grounded predicates to variable form using SCHEMA-LEVEL abstraction
 
-        Strategy:
-        1. Use GLOBAL object list (from self.object_list) for consistent variable assignment
-        2. Assign variables based on global object order: ?v0, ?v1, ?v2, ...
-        3. Replace object arguments with corresponding variables
+        Strategy (Position-Based Normalization):
+        1. Assign variables based on FIRST OCCURRENCE ORDER across all predicates
+        2. Use ?arg0, ?arg1, ?arg2, ... (position-based, not object-based)
+        3. Same object in different predicates maps to SAME variable
 
-        This ensures that the same objects ALWAYS map to the same variables,
-        regardless of the order they appear in the predicates.
+        This enables TRUE schema-level caching where goals with different objects
+        but same structure share the same abstract plan!
 
-        Example (with global objects=['a', 'b', 'c']):
-            Input: [on(a, b)]     → Output: [on(?v0, ?v1)]
-            Input: [on(b, a)]     → Output: [on(?v1, ?v0)]
-            Input: [on(c, b)]     → Output: [on(?v2, ?v1)]
+        Example:
+            Input: [on(a, b)]           → Output: [on(?arg0, ?arg1)]
+            Input: [on(c, d)]           → Output: [on(?arg0, ?arg1)]  ✓ SAME SCHEMA!
+            Input: [on(b, a)]           → Output: [on(?arg0, ?arg1)]  ✓ SAME SCHEMA!
+            Input: [on(a, b), clear(a)] → Output: [on(?arg0, ?arg1), clear(?arg0)]  ✓ Consistency!
+
+        Key Insight: We don't care about WHICH specific objects (a vs c),
+        only the STRUCTURE of the goal pattern.
 
         Args:
             predicates: List of grounded predicates
@@ -108,17 +123,28 @@ class VariableNormalizer:
         Returns:
             Tuple of (normalized predicates, variable mapping)
         """
-        # Use GLOBAL object list for consistent variable assignment
-        # This ensures a→?v0, b→?v1, c→?v2 etc. regardless of predicate order
-        obj_to_var = {obj: f"?v{i}" for i, obj in enumerate(self.object_list)}
+        # SCHEMA-LEVEL: Assign variables based on first occurrence order
+        # This ensures same structure → same schema, regardless of specific objects
+        obj_to_var = {}
+        var_counter = 0
+
+        # First pass: collect objects in order of first appearance
+        for pred in predicates:
+            for arg in pred.args:
+                # Skip if already a variable or already mapped
+                if not arg.startswith('?') and arg not in obj_to_var:
+                    obj_to_var[arg] = f"?arg{var_counter}"
+                    var_counter += 1
+
+        # Create reverse mapping
         var_to_obj = {var: obj for obj, var in obj_to_var.items()}
 
         mapping = VariableMapping(obj_to_var=obj_to_var, var_to_obj=var_to_obj)
 
-        # Normalize each predicate
+        # Second pass: normalize predicates using the mapping
         normalized_predicates = []
         for pred in predicates:
-            # Replace object arguments with variables
+            # Replace object arguments with schema variables
             new_args = [obj_to_var.get(arg, arg) for arg in pred.args]
             normalized_pred = PredicateAtom(pred.name, new_args, pred.negated)
             normalized_predicates.append(normalized_pred)
