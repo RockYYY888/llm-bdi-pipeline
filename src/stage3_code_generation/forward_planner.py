@@ -173,7 +173,7 @@ class ForwardStatePlanner:
             current_state = queue.popleft()
             states_explored += 1
 
-            if states_explored % 10 == 0:
+            if states_explored % 1000 == 0:
                 print(f"  Explored {states_explored} states, {transitions_added} transitions, "
                       f"queue size: {len(queue)}")
 

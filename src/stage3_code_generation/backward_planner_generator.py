@@ -228,6 +228,15 @@ class BackwardPlannerGenerator:
         """
         Parse DFA from DOT format
 
+        Supports two formats:
+        1. MONA format (from ltlf2dfa, used in real pipeline):
+           node [shape = doublecircle]; 4;
+           node [shape = circle]; 1;
+           init -> 1;
+        2. Mock test format:
+           state1 [label="1", shape=doublecircle];
+           __start -> state0;
+
         Args:
             dfa_dot: DFA in DOT format
 
@@ -236,18 +245,42 @@ class BackwardPlannerGenerator:
         """
         dfa_info = DFAInfo()
 
+        # Track accepting state IDs from MONA format: node [shape = doublecircle]; state_ids;
+        mona_accepting_states = []
+
         # Extract states by parsing each line
         # Node definition: state_id [attributes];
         # Transition: from -> to [label="..."];
-        # We only want node definitions, not transitions
         for line in dfa_dot.split('\n'):
             line = line.strip()
 
-            # Skip transitions (contain ->)
+            # MONA Format: Check for "node [shape = doublecircle]; state_ids;" pattern
+            mona_accepting_match = re.match(r'node\s*\[.*doublecircle.*\]\s*;\s*([0-9\s,;]+)', line)
+            if mona_accepting_match:
+                # Extract state IDs (can be comma or space separated, ends with ;)
+                state_ids_str = mona_accepting_match.group(1).rstrip(';').strip()
+                # Split by comma or space
+                state_ids = [s.strip() for s in re.split(r'[,\s]+', state_ids_str) if s.strip() and s.strip().isdigit()]
+                mona_accepting_states.extend(state_ids)
+                continue
+
+            # MONA Format: Check for "node [shape = circle]; state_ids;" pattern (regular states)
+            mona_circle_match = re.match(r'node\s*\[.*circle.*\]\s*;\s*([0-9\s,;]+)', line)
+            if mona_circle_match:
+                # Extract state IDs
+                state_ids_str = mona_circle_match.group(1).rstrip(';').strip()
+                state_ids = [s.strip() for s in re.split(r'[,\s]+', state_ids_str) if s.strip() and s.strip().isdigit()]
+                # Add to states if not already in accepting states
+                for sid in state_ids:
+                    if sid not in dfa_info.states and sid not in mona_accepting_states:
+                        dfa_info.states.append(sid)
+                continue
+
+            # Skip transitions for now (process later)
             if '->' in line:
                 continue
 
-            # Match node definitions: state_id [attributes]
+            # Match standard node definitions: state_id [attributes]
             state_match = re.match(r'(\w+)\s*\[([^\]]*)\]', line)
             if not state_match:
                 continue
@@ -265,20 +298,49 @@ class BackwardPlannerGenerator:
             if 'init' in attributes.lower():
                 dfa_info.initial_state = state_id
 
-            # Check for accepting state (usually doublecircle)
+            # Check for accepting state (usually doublecircle) - Mock test format
             if 'doublecircle' in attributes:
                 dfa_info.accepting_states.append(state_id)
 
-        # Extract transitions
-        transition_pattern = r'(\w+)\s*->\s*(\w+)\s*\[label="([^"]+)"\]'
-        for match in re.finditer(transition_pattern, dfa_dot):
-            from_state = match.group(1)
-            to_state = match.group(2)
-            label = match.group(3)
+        # Add MONA accepting states
+        for state_id in mona_accepting_states:
+            if state_id not in dfa_info.states:
+                dfa_info.states.append(state_id)
+            if state_id not in dfa_info.accepting_states:
+                dfa_info.accepting_states.append(state_id)
 
-            # Filter out __start transitions
-            if from_state != '__start' and to_state != '__start':
-                dfa_info.transitions.append((from_state, to_state, label))
+        # Extract transitions and initial state
+        for line in dfa_dot.split('\n'):
+            line = line.strip()
+
+            # MONA Format: Check for "init -> state_id;" pattern
+            mona_init_match = re.match(r'init\s*->\s*(\d+)', line)
+            if mona_init_match:
+                initial_state = mona_init_match.group(1)
+                if initial_state not in dfa_info.states:
+                    dfa_info.states.append(initial_state)
+                dfa_info.initial_state = initial_state
+                continue
+
+            # Mock test format: Check for "__start -> state_id" (with or without label)
+            mock_init_match = re.match(r'__start\s*->\s*(\w+)', line)
+            if mock_init_match:
+                initial_state = mock_init_match.group(1)
+                if initial_state not in dfa_info.states:
+                    dfa_info.states.append(initial_state)
+                dfa_info.initial_state = initial_state
+                continue
+
+            # Standard transition pattern (with label)
+            transition_match = re.match(r'(\w+)\s*->\s*(\w+)\s*\[label="([^"]+)"\]', line)
+            if transition_match:
+                from_state = transition_match.group(1)
+                to_state = transition_match.group(2)
+                label = transition_match.group(3)
+
+                # Filter out __start and init transitions (already handled above)
+                if from_state not in ['__start', 'init'] and to_state not in ['__start', 'init']:
+                    dfa_info.transitions.append((from_state, to_state, label))
 
         return dfa_info
 
