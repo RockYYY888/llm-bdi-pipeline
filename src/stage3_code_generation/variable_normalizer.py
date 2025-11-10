@@ -96,54 +96,49 @@ class VariableNormalizer:
 
         return {obj: default_type for obj in self.object_list}
 
-    def _is_constant(self, arg: str) -> bool:
+    def _should_preserve(self, arg: str) -> bool:
         """
-        Determine if an argument is a constant (not an object to abstract)
+        Determine if an argument should be preserved as-is (not abstracted)
 
-        Constants include:
-        - Already variables: ?var, ?x
-        - Numbers: -2, 3.14, 10
+        CORE PRINCIPLE: object_list is the single source of truth
+        - Strict check: in object_list → abstract (return False)
+        - Strict check: not in object_list → preserve (return True)
+
+        Special cases (literals - always preserve regardless of object_list):
+        - PDDL variables: ?var, ?x (already in variable form)
+        - Numeric literals: -2, 3.14, 10
         - String literals with quotes: 'Left', "Right"
-        - Boolean/null: true, false, nil, null
-        - Uppercase identifiers (often constants): LEFT, RIGHT, UP, DOWN
 
-        Objects (to abstract):
-        - Items in object_list
-        - Lowercase identifiers not matching above patterns
+        Note: Do NOT use any heuristics (case, naming conventions, etc.)
+              Only rely on object_list as the single source of truth
 
         Args:
             arg: Argument string to check
 
         Returns:
-            True if argument is a constant (should NOT be abstracted)
+            True if argument should be preserved (NOT abstracted)
+            False if argument should be abstracted (is in object_list)
         """
-        # Already a variable - keep as-is
+        # 1. Already a PDDL variable form (?...) → always preserve
         if arg.startswith('?'):
             return True
 
-        # Try parsing as number (int or float)
+        # 2. Numeric literals → always preserve
         try:
             float(arg)
             return True
         except ValueError:
             pass
 
-        # String literals with quotes
+        # 3. String literals with quotes → always preserve
         if (arg.startswith("'") and arg.endswith("'")) or \
            (arg.startswith('"') and arg.endswith('"')):
             return True
 
-        # Boolean/null keywords
-        if arg.lower() in ['true', 'false', 'nil', 'null', 'none']:
-            return True
-
-        # Uppercase identifiers (common constant convention)
-        # e.g., LEFT, RIGHT, UP, DOWN
-        if arg.isupper() and arg.isalpha():
-            return True
-
-        # Otherwise, treat as object to be abstracted
-        return False
+        # 4. CORE CHECK: Single source of truth - object_list
+        #    in object_list → abstract (return False)
+        #    not in object_list → preserve (return True)
+        return arg not in self.object_list
 
     def normalize_predicates(self, predicates: List[PredicateAtom]) -> Tuple[List[PredicateAtom], VariableMapping]:
         """
@@ -183,8 +178,8 @@ class VariableNormalizer:
         # First pass: collect OBJECTS (not constants) in order of first appearance
         for pred in predicates:
             for arg in pred.args:
-                # Skip constants and already-mapped objects
-                if self._is_constant(arg) or arg in obj_to_var:
+                # Skip if should preserve (constants/literals) or already mapped
+                if self._should_preserve(arg) or arg in obj_to_var:
                     continue
 
                 # This is an object - assign a variable
@@ -201,8 +196,8 @@ class VariableNormalizer:
         for pred in predicates:
             new_args = []
             for arg in pred.args:
-                if self._is_constant(arg):
-                    # Keep constants as-is
+                if self._should_preserve(arg):
+                    # Keep constants/literals as-is
                     new_args.append(arg)
                 else:
                     # Replace objects with schema variables
