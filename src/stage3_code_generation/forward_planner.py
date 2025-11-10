@@ -167,8 +167,9 @@ class ForwardStatePlanner:
         transitions_added = 0
         states_reused = 0
         states_created = 0
+        max_states_reached = False  # Flag to stop exploration
 
-        while queue:
+        while queue and not max_states_reached:
             current_state = queue.popleft()
             states_explored += 1
 
@@ -180,6 +181,8 @@ class ForwardStatePlanner:
             # We explore from states at all depths to find reverse transitions
             # OPTIMIZATION: Use cached ground actions instead of recomputing
             for grounded_action in self._cached_grounded_actions:
+                if max_states_reached:
+                    break  # Exit grounded_action loop if limit reached
                 # Check preconditions
                 if not self._check_preconditions(grounded_action, current_state):
                     continue
@@ -201,8 +204,8 @@ class ForwardStatePlanner:
                             print(f"  ⚠️  Reached max_states limit ({max_states:,}), stopping exploration")
                             print(f"  This is a safety limit to prevent excessive memory usage.")
                             print(f"  Returning partial state graph with {len(visited_map):,} states.")
-                            # Don't add this state, just continue with what we have
-                            continue
+                            max_states_reached = True
+                            break  # Exit the new_states_data loop
 
                         # Create new state with proper depth
                         new_depth = current_state.depth + 1
