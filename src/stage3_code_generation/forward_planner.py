@@ -174,8 +174,8 @@ class ForwardStatePlanner:
             states_explored += 1
 
             if states_explored % 1000 == 0:
-                print(f"  Explored {states_explored} states, {transitions_added} transitions, "
-                      f"queue size: {len(queue)}")
+                print(f"  Processed {states_explored} states, generated {len(visited_map)} unique states, "
+                      f"{transitions_added} transitions, queue size: {len(queue)}")
 
             # Try all ground actions from all states (to create bidirectional graph)
             # We explore from states at all depths to find reverse transitions
@@ -228,9 +228,10 @@ class ForwardStatePlanner:
                     transitions_added += 1
 
         print(f"[Forward Planner] Exploration complete:")
-        print(f"  States: {len(graph.states)}")
-        print(f"  Transitions: {len(graph.transitions)}")
-        print(f"  Leaf states: {len(graph.get_leaf_states())}")
+        print(f"  States processed: {states_explored:,}")
+        print(f"  Unique states generated: {len(graph.states):,}")
+        print(f"  Transitions: {len(graph.transitions):,}")
+        print(f"  Leaf states: {len(graph.get_leaf_states()):,}")
         print(f"  Max depth reached: {max(s.depth for s in graph.states)}")
         print(f"  Performance:")
         print(f"    States reused: {states_reused:,}")

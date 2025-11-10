@@ -340,6 +340,12 @@ class BackwardPlannerGenerator:
 
                 # Filter out __start and init transitions (already handled above)
                 if from_state not in ['__start', 'init'] and to_state not in ['__start', 'init']:
+                    # Add states from transitions (MONA doesn't declare all states explicitly)
+                    if from_state not in dfa_info.states:
+                        dfa_info.states.append(from_state)
+                    if to_state not in dfa_info.states:
+                        dfa_info.states.append(to_state)
+
                     dfa_info.transitions.append((from_state, to_state, label))
 
         return dfa_info
