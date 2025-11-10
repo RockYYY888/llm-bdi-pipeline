@@ -78,12 +78,46 @@ class VariableNormalizer:
         # In general, we'd need to infer or receive type information
         self.object_types = self._infer_object_types()
 
+    def _extract_predicate_type_signatures(self) -> Dict[str, List[str]]:
+        """
+        Extract type signatures from domain predicates
+
+        Example:
+            Predicate: (on ?b1 ?b2 - block)
+            Returns: {"on": ["block", "block"]}
+
+        Returns:
+            Map from predicate name to list of parameter types
+        """
+        type_signatures = {}
+
+        for pred in self.domain.predicates:
+            param_types = []
+            for param_str in pred.parameters:
+                # Parse "?var - type" format
+                if ' - ' in param_str:
+                    _, type_name = param_str.split(' - ', 1)
+                    param_types.append(type_name.strip())
+                else:
+                    param_types.append("object")  # Default type
+
+            type_signatures[pred.name] = param_types
+
+        return type_signatures
+
     def _infer_object_types(self) -> Dict[str, str]:
         """
         Infer object types from domain
 
-        For blocksworld, all objects are "block" type.
-        In future, this could be extended to handle multiple types.
+        CURRENT LIMITATION: This is a simplified implementation for single-type domains.
+        All objects are assigned to the first domain type.
+
+        FUTURE WORK: For multi-type domains, we would need:
+        1. Object type declarations from problem file (not currently parsed)
+        2. Or type information from Stage 1 LLM output (not currently provided)
+        3. Or type inference from predicate usage patterns
+
+        For blocksworld (single type "block"), this works correctly.
 
         Returns:
             Map from object name to type name
