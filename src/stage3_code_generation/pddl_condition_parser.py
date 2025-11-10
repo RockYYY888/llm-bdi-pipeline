@@ -28,7 +28,7 @@ _parent = str(Path(__file__).parent.parent)
 if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
-from src.stage3_code_generation.state_space import PredicateAtom
+from stage3_code_generation.state_space import PredicateAtom
 
 
 @dataclass

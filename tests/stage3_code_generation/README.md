@@ -22,19 +22,6 @@ Tests the complete backward planning pipeline:
 
 ---
 
-### 2. test_diagnostic_plans.py
-**Diagnostic tool for debugging plan generation**
-
-Provides detailed analysis of:
-- Goal state inference
-- State graph construction
-- Path finding
-- Plan generation statistics
-
-Use this when debugging issues with the backward planning system.
-
----
-
 ## Running the Tests
 
 ### Run All Integration Tests
@@ -54,20 +41,6 @@ State Graph Test:     ✅ PASS
 
 ✅ ALL INTEGRATION TESTS PASSED
 ```
-
----
-
-### Run Diagnostic Test
-```bash
-# From project root
-python tests/stage3_code_generation/test_diagnostic_plans.py
-```
-
-**Expected Output**:
-- Goal state inference results
-- State graph statistics
-- Path finding analysis
-- Code generation metrics
 
 ---
 
