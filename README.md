@@ -18,6 +18,23 @@ This pipeline converts natural language instructions into executable AgentSpeak 
 
 ## Quick Start
 
+### Installation
+
+#### Clone Repository with Submodules
+
+```bash
+# Option 1: Clone with submodules (recommended)
+git clone --recursive https://github.com/RockYYY888/llm-bdi-pipeline.git
+cd llm-bdi-pipeline
+
+# Option 2: Clone then initialize submodules
+git clone https://github.com/RockYYY888/llm-bdi-pipeline.git
+cd llm-bdi-pipeline
+git submodule update --init --recursive
+```
+
+**Note**: This repository uses Git submodules for external dependencies (Jason framework). If you cloned without `--recursive`, the submodule directories will be empty until you run `git submodule update --init --recursive`.
+
 ### Prerequisites
 
 #### 1. Install MONA (Required for ltlf2dfa)
