@@ -160,10 +160,16 @@ Natural Language Input ("Stack block C on block B")
 - **Context-sensitive plans** - generated for every reachable state
 - **Multi-goal support** - handles DFAs with multiple transitions
 - **Boolean expression parsing** - supports `&`, `|`, `~`, `->`, `<->` in transition labels
+- **Variable Abstraction & Schema-Level Caching**:
+  - Objects abstracted to schema variables for plan reuse
+  - True schema-level abstraction: on(a,b), on(c,d), on(b,a) all share same exploration
+  - Position-based normalization for consistent variable mapping
+  - 62.5% cache hit rate for similar goals (5 out of 8 explorations eliminated)
 - **Performance optimizations**:
   - Ground actions caching: 99.9% redundancy elimination
-  - Goal exploration caching: 66.7% cache hit rate for duplicate goals
+  - Goal exploration caching: Schema-level with 62.5% cache hit rate
   - Code structure optimization: 20-40% code size reduction
+  - Constants preserved during normalization (semantic-based detection)
 
 ### LLM-Based Natural Language Understanding (Stage 1 Only)
 - Natural language → LTLf conversion using LLMs
@@ -188,15 +194,18 @@ Natural Language Input ("Stack block C on block B")
 
 ### Comprehensive Testing
 - **Stage 1**: 28 test cases covering all LTL operators and syntax combinations
-- **Stage 3**: 14+ comprehensive tests including:
-  - Stress tests (2-block scenarios with complex goals)
+- **Stage 3**: 17+ comprehensive tests including:
+  - Integration and stress tests (2-block scenarios with complex goals)
   - Multi-transition DFA handling
   - Scalability tests (state space explosion analysis)
   - AgentSpeak code validation
+  - Variable abstraction and schema-level caching tests
+  - Constant handling verification (semantic-based detection)
   - Goal caching verification
   - Performance measurement (redundancy, reuse ratio)
 - Unit tests for symbol normalization with hyphen handling
 - Integration tests for end-to-end pipeline validation
+- Logger integration tests for backward planning statistics
 - All tests include detailed output analysis and verification
 
 ### Comprehensive Logging
@@ -305,30 +314,29 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── __init__.py
 │   ├── test_symbol_normalizer.py        # Symbol normalizer unit tests
 │   ├── test_integration_pipeline.py     # End-to-end integration tests
-│   ├── test_logger_backward_planning.py # Logger integration tests
 │   ├── stage1_interpretation/
 │   │   └── test_nl_to_ltlf_generation.py    # Stage 1 NL -> LTLf tests (28 cases)
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
 │   │   └── test_ltlf2dfa.py             # Stage 2 LTLf -> DFA tests
-│   └── stage3_code_generation/          # Stage 3 comprehensive test suite (14 tests)
-│       ├── README.md                             # Test documentation
-│       ├── agentspeak_validator.py               # Code validation utility
-│       ├── test_integration_backward_planner.py  # Main integration test
-│       ├── test_stress_backward_planner.py       # Stress tests (4 scenarios)
-│       ├── test_multi_transition_flow.py         # Full multi-transition flow
-│       ├── test_multi_transition_simple.py       # Simple multi-transition demo
-│       ├── test_goal_caching.py                  # Goal cache verification
-│       ├── test_measure_redundancy.py            # Performance measurements
-│       ├── test_scalability.py                   # Scalability analysis
-│       ├── test_debug_state_explosion.py         # State explosion debugging
-│       ├── test_explain_states.py                # State space explanation
-│       ├── test_show_ground_actions.py           # Ground actions display
-│       ├── test_show_real_code.py                # Real code examples
-│       ├── test_visualize_3blocks.py             # 3-block visualization
-│       ├── test_visualize_multi_transition.py    # Multi-transition visualization
-│       ├── test_simple_2blocks.py                # Simple 2-block test
-│       └── test_agentspeak_validator.py          # Validator unit tests
+│   └── stage3_code_generation/          # Stage 3 comprehensive test suite (17 tests)
+│       ├── README.md                                   # Test documentation
+│       ├── agentspeak_validator.py                     # Code validation utility
+│       ├── test_integration_backward_planner.py        # Main integration test
+│       ├── test_stress_backward_planner.py             # Stress tests (4 scenarios)
+│       ├── test_multi_transition_flow.py               # Full multi-transition flow
+│       ├── test_multi_transition_simple.py             # Simple multi-transition demo
+│       ├── test_goal_caching.py                        # Goal cache verification
+│       ├── test_scalability.py                         # Scalability analysis
+│       ├── test_simple_2blocks.py                      # Simple 2-block test
+│       ├── test_parameterization_validation.py         # Parameterization checks
+│       ├── test_agentspeak_validator.py                # Validator unit tests
+│       ├── test_logger_backward_planning.py            # Logger integration tests
+│       ├── test_variable_abstraction.py                # Variable abstraction tests
+│       ├── test_variable_abstraction_correct.py        # Schema-level caching tests
+│       ├── test_constant_handling.py                   # Constant detection tests
+│       ├── test_semantic_constant_detection.py         # Semantic constant tests
+│       └── test_schema_level_quick.py                  # Quick schema verification
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 ├── pyproject.toml                       # Project dependencies (uv managed)
 └── uv.lock                              # Dependency lock file
@@ -359,35 +367,34 @@ python tests/stage3_code_generation/test_stress_backward_planner.py       # Stre
 python tests/stage3_code_generation/test_multi_transition_flow.py         # Full multi-transition flow
 python tests/stage3_code_generation/test_multi_transition_simple.py       # Simple multi-transition demo
 
+# Variable abstraction and schema-level caching tests
+python tests/stage3_code_generation/test_variable_abstraction.py          # Variable abstraction
+python tests/stage3_code_generation/test_variable_abstraction_correct.py  # Schema-level caching
+python tests/stage3_code_generation/test_schema_level_quick.py            # Quick schema verification
+
+# Constant handling tests
+python tests/stage3_code_generation/test_constant_handling.py             # Constant detection
+python tests/stage3_code_generation/test_semantic_constant_detection.py   # Semantic constant tests
+
 # Performance and optimization tests
 python tests/stage3_code_generation/test_goal_caching.py                  # Goal cache verification
-python tests/stage3_code_generation/test_measure_redundancy.py            # Redundancy measurements
 python tests/stage3_code_generation/test_scalability.py                   # Scalability analysis
 
-# Debugging and analysis tests
-python tests/stage3_code_generation/test_debug_state_explosion.py         # State explosion analysis
-python tests/stage3_code_generation/test_explain_states.py                # State space explanation
-python tests/stage3_code_generation/test_show_ground_actions.py           # Ground actions demo
-python tests/stage3_code_generation/test_show_real_code.py                # Real code example
-
-# Visualization tests
-python tests/stage3_code_generation/test_visualize_3blocks.py             # 3-block visualization
-python tests/stage3_code_generation/test_visualize_multi_transition.py    # Multi-transition viz
+# Parameterization and validation tests
+python tests/stage3_code_generation/test_parameterization_validation.py   # Parameterization checks
+python tests/stage3_code_generation/test_agentspeak_validator.py          # Validator unit tests
 
 # Basic tests
 python tests/stage3_code_generation/test_simple_2blocks.py                # Simple 2-block test
 
-# Code validation
-python tests/stage3_code_generation/test_agentspeak_validator.py          # Validator unit tests
+# Logger tests
+python tests/stage3_code_generation/test_logger_backward_planning.py      # Logger integration
 
 # Run all Stage 3 tests at once (if script exists)
 bash run_stage3_tests.sh 2>/dev/null || echo "Use individual test commands above"
 
 # Run symbol normalizer tests
 python tests/test_symbol_normalizer.py
-
-# Run logger tests
-python tests/test_logger_backward_planning.py
 
 # Run integration tests (end-to-end pipeline)
 python tests/test_integration_pipeline.py
@@ -447,17 +454,22 @@ python tests/test_integration_pipeline.py
 
 ### Stage 3: DFA → AgentSpeak Code (Backward Planning)
 - **Input**: DFA with transition labels from Stage 2
-- **Process**: Backward planning (forward state-space destruction) for deterministic code generation:
+- **Process**: Backward planning (forward state-space destruction) with variable abstraction for deterministic code generation:
   1. **Parse transition labels**: Extract goals from DFA transitions using boolean expression parser
      - Supports: `&` (AND), `|` (OR), `~` (NOT), `->` (IMPLIES), `<->` (IFF)
      - Converts to Disjunctive Normal Form (DNF)
      - Anti-grounds propositions back to predicates
-  2. **Backward planning** for each goal:
+  2. **Variable abstraction and normalization**:
+     - Objects abstracted to schema variables (position-based normalization)
+     - Constants preserved using semantic detection (object_list-based)
+     - Schema-level caching: goals with same structure share exploration
+     - Example: on(a,b), on(c,d), on(b,a) → all normalize to on(?arg0, ?arg1)
+  3. **Backward planning** for each unique schema:
      - Start from goal state
      - Apply actions in reverse (preconditions → effects swapped)
      - Complete BFS exploration of reachable state space
      - Generate plans for all states that can reach the goal
-  3. **Code generation**:
+  4. **Code generation**:
      - Create AgentSpeak plans for each (state, action, next_state) transition
      - Context-sensitive: plans check current beliefs before executing actions
      - Shared components (initial beliefs, action plans) generated once
@@ -466,7 +478,10 @@ python tests/test_integration_pipeline.py
 - **Performance**:
   - **States explored**: 1,000+ for simple 2-block scenarios
   - **Reuse ratio**: 57.1:1 (states reused vs created due to deduplication)
-  - **Cache optimizations**: 99.9% ground actions caching, 66.7% goal cache hit rate
+  - **Cache optimizations**:
+    - 99.9% ground actions caching
+    - 62.5% schema-level cache hit rate (5 out of 8 explorations eliminated)
+    - Constants correctly preserved during normalization
   - **Code size**: Typically 2,000-5,000 characters for 2-block problems
 - **Key Features**:
   - ✅ Deterministic (no LLM randomness)
@@ -474,6 +489,8 @@ python tests/test_integration_pipeline.py
   - ✅ Complete coverage (all reachable states)
   - ✅ Multi-transition DFA support
   - ✅ Conjunctive and disjunctive goal handling
+  - ✅ Schema-level caching for similar goals
+  - ✅ Semantic constant detection
 
 ---
 
@@ -553,11 +570,16 @@ The blocksworld domain provides a testbed for:
   - PDDL action parsing with precondition/effect handling
   - Context-sensitive plan generation for all reachable states
   - Multi-transition DFA support
+  - **Variable Abstraction & Schema-Level Caching**:
+    - Position-based normalization for consistent variable mapping
+    - Semantic constant detection using object_list
+    - Schema-level caching for goals with same structure
+    - 62.5% cache hit rate for similar goals
   - **Performance Optimizations**:
     - Ground actions caching (99.9% redundancy elimination)
-    - Goal exploration caching (66.7% cache hit rate)
+    - Schema-level goal caching (62.5% cache hit rate)
     - Code structure optimization (20-40% size reduction)
-  - Comprehensive testing suite (14+ tests)
+  - Comprehensive testing suite (17+ tests)
   - AgentSpeak code validation
 - ✓ **Utils**: Centralized utilities and enhanced logging
   - `SymbolNormalizer` class for consistent symbol handling
@@ -604,32 +626,74 @@ The blocksworld domain provides a testbed for:
 4. **Memory Requirements**: Complete state graphs stored in memory
 5. **Code Size**: Generated AgentSpeak code can be large for complex goals (2,000-5,000 characters for 2-block problems)
 
+### Known Issues (Documented & Tracked)
+See `docs/CRITICAL_DESIGN_ISSUES.md` for detailed analysis and fix priorities:
+
+1. **Object-Specific Goal Plans** (CRITICAL):
+   - Current: `+!on(a, b) : on(a, b) <- ...` (specific to objects a, b)
+   - Expected: `+!on(X, Y) : on(X, Y) <- ...` (parameterized for any objects)
+   - Impact: Generated plans only work for specific object instances mentioned during generation
+   - Status: Documented, fix estimated 2-3 days
+
+2. **Incomplete Type System** (HIGH PRIORITY):
+   - Current: All objects assigned to first domain type
+   - Expected: Proper type inference from PDDL domain specification
+   - Impact: Cannot handle domains with multiple object types correctly
+   - Status: Documented, fix estimated 1-2 days
+
+3. **Variable Naming Inconsistency** (MEDIUM):
+   - Normalization uses `?arg0`, `?arg1` but planner uses `?v0`, `?v1`
+   - Causes goal inference to fail in variable mode (1152 states vs 1093 states)
+   - Status: Documented in `docs/state_count_analysis.md` (now removed, integrated into other docs)
+
+For complete details, roadmaps, and fix priorities, see:
+- `docs/CRITICAL_DESIGN_ISSUES.md` - Main issue tracker
+- `docs/stage3_technical_debt.md` - Technical debt and future improvements
+- `docs/constant_variable_distinction_analysis.md` - Variable/constant handling analysis
+
 ---
 
 ## Documentation
 
-Comprehensive documentation is available in the `docs/` directory:
+Comprehensive documentation is available in the `docs/` directory. See `docs/file_order.md` for a complete navigation guide with three reading paths (Quick Start, Deep Dive, Problem Diagnosis).
 
-- **`stage3_integration_test_results.md`**: Complete test results for Stage 3 backward planning
-  - Integration test outputs
-  - Performance metrics
-  - Code examples
+### Core Design Documents
+- **`stage3_backward_planning_design.md`**: Complete design specification (most important)
+  - 16 core design decisions
+  - Complete Q&A record
+  - Technical architecture
+  - Implementation plan
 
-- **`stage3_optimization_opportunities.md`**: Detailed analysis of implemented optimizations
-  - Priority 1: Ground actions caching (99.9% reduction)
-  - Priority 2: Goal exploration caching (66.7% hit rate)
-  - Priority 3: Code structure optimization (20-40% reduction)
-  - Performance impact analysis
+- **`stage3_schema_level_abstraction.md`**: Schema-level abstraction implementation (COMPLETED ✅)
+  - Position-based normalization algorithm
+  - Performance results: 62.5% cache hit rate
+  - True schema-level abstraction
 
-- **`stage3_production_limitations.md`**: Production deployment considerations
-  - State space explosion analysis
-  - Scalability challenges
-  - Memory requirements
-  - Alternative approaches
+### Implementation Status
+- **`stage3_variable_abstraction_summary.md`**: Variable abstraction Phase 1 completion
+- **`stage3_optimization_opportunities.md`**: Optimization status (Priority 1-3 completed)
+  - Ground actions caching (99.9% reduction)
+  - Schema-level goal caching (62.5% hit rate)
+  - Code structure optimization (20-40% reduction)
 
-- **`stage3_technical_debt.md`**: Technical implementation details and future improvements
+### Issues & Limitations
+- **`CRITICAL_DESIGN_ISSUES.md`**: Known issues requiring fixes (⚠️ IMPORTANT)
+  - Object-specific goal plans (critical)
+  - Incomplete type system (high priority)
+  - Variable naming inconsistency (medium)
+- **`stage3_production_limitations.md`**: Production deployment limitations (long-term)
+- **`stage3_technical_debt.md`**: Technical debt tracking
 
+### Problem Resolution History
+- **`issue_ab_resolution.md`**: Issue A & B resolution report (both fixed ✅)
+- **`constant_variable_distinction_analysis.md`**: Constant vs variable analysis
+- **`variable_abstraction_soundness_analysis.md`**: Initial soundness analysis
+
+### Technical References
+- **`object_list_propagation_path.md`**: How object_list flows through pipeline
+- **`pddl_vs_agentspeak_variables.md`**: Variable concept clarification
 - **`tests/stage3_code_generation/README.md`**: Stage 3 test suite documentation
+- **`file_order.md`**: Complete documentation navigation guide (⭐ START HERE)
 
 ---
 
