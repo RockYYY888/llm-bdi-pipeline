@@ -54,18 +54,49 @@ class PredicateAtom:
         object.__setattr__(self, 'args', tuple(args) if args else ())
         object.__setattr__(self, 'negated', negated)
 
-    def to_agentspeak(self) -> str:
+    def to_agentspeak(self, convert_vars: bool = False) -> str:
         """
         Convert to AgentSpeak format
 
+        Args:
+            convert_vars: If True, convert PDDL variables (?v0) to AgentSpeak variables (V0)
+
         Returns:
-            String like "on(a, b)" or "not clear(c)"
+            String like "on(a, b)" or "not clear(c)" or "on(V0, V1)" if convert_vars=True
         """
         prefix = "not " if self.negated else ""
         if self.args:
-            args_str = ", ".join(self.args)
+            if convert_vars:
+                args_str = ", ".join(self._pddl_var_to_agentspeak(arg) for arg in self.args)
+            else:
+                args_str = ", ".join(self.args)
             return f"{prefix}{self.name}({args_str})"
         return f"{prefix}{self.name}"
+
+    def _pddl_var_to_agentspeak(self, arg: str) -> str:
+        """
+        Convert PDDL variable to AgentSpeak variable
+
+        Examples:
+            ?v0 → V0
+            ?v1 → V1
+            ?x → X
+            a → a (constants/objects unchanged)
+
+        Args:
+            arg: PDDL argument string
+
+        Returns:
+            AgentSpeak format argument
+        """
+        if arg.startswith('?'):
+            # Remove ? and capitalize
+            var_name = arg[1:]
+            # Capitalize first letter, keep rest as-is
+            if var_name:
+                return var_name[0].upper() + var_name[1:]
+            return var_name
+        return arg  # Not a variable, return as-is
 
     def to_pddl(self) -> str:
         """
@@ -203,19 +234,23 @@ class WorldState:
         """Check if state has no predicates"""
         return len(self.predicates) == 0
 
-    def to_agentspeak_context(self) -> str:
+    def to_agentspeak_context(self, convert_vars: bool = False) -> str:
         """
         Convert to AgentSpeak context condition
 
+        Args:
+            convert_vars: If True, convert PDDL variables to AgentSpeak variables
+
         Returns:
             String like "on(a, b) & clear(c) & handempty" or "true" if empty
+            With convert_vars=True: "on(Arg0, Arg1) & clear(Arg0)" etc.
         """
         if self.is_empty():
             return "true"
 
         # Sort for deterministic output
         sorted_preds = sorted(self.predicates, key=lambda p: (p.name, p.args))
-        return " & ".join(p.to_agentspeak() for p in sorted_preds)
+        return " & ".join(p.to_agentspeak(convert_vars=convert_vars) for p in sorted_preds)
 
     def __str__(self) -> str:
         if self.is_empty():

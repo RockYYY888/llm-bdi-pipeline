@@ -102,6 +102,31 @@ class AgentSpeakCodeGenerator:
         instantiated = [self.var_mapping.var_to_obj.get(arg, arg) for arg in args]
         return tuple(instantiated)
 
+    def _get_parameterized_goal_pattern(self) -> str:
+        """
+        Get parameterized goal pattern from goal state predicates
+
+        Converts PDDL variables to AgentSpeak variables for goal definition.
+
+        Example:
+            Goal state: [on(?v0, ?v1)]
+            Returns: "on(V0, V1)"
+
+        Returns:
+            Parameterized goal pattern string
+        """
+        # Get goal predicates (with variables)
+        goal_preds = list(self.graph.goal_state.predicates)
+
+        if len(goal_preds) == 1:
+            # Single predicate goal - use it directly with variable conversion
+            return goal_preds[0].to_agentspeak(convert_vars=True)
+        else:
+            # Multiple predicates - create compound goal name
+            # Convert each predicate with variables
+            pred_strs = [p.to_agentspeak(convert_vars=True) for p in sorted(goal_preds, key=lambda x: (x.name, x.args))]
+            return "_and_".join(pred_strs).replace("(", "_").replace(")", "").replace(", ", "_")
+
     def generate(self) -> str:
         """
         Generate complete AgentSpeak code (legacy method for single-goal case)
@@ -546,13 +571,20 @@ class AgentSpeakCodeGenerator:
         """
         Generate plans for achieving the goal
 
+        NOW GENERATES PARAMETERIZED PLANS with AgentSpeak variables.
+
         Design ref: Decision #9, Q&A #16
 
         For each non-goal state, generate a plan showing how to progress
         toward the goal with precondition subgoals.
+
+        Plans use AgentSpeak variables (e.g., +!on(X, Y)) so they work
+        for ANY objects of the correct type, not just specific instances.
         """
-        lines = [f"/* Goal Achievement Plans for: {self.goal_name} */"]
+        param_goal_pattern = self._get_parameterized_goal_pattern()
+        lines = [f"/* Goal Achievement Plans for: {param_goal_pattern} */"]
         lines.append("/* Each plan handles a specific state and invokes action goals */")
+        lines.append("/* Plans are PARAMETERIZED - work for any objects of correct type */")
 
         # Find shortest paths to goal for all states
         paths = self.graph.find_shortest_paths_to_goal()
@@ -587,21 +619,26 @@ class AgentSpeakCodeGenerator:
         """
         Generate AgentSpeak plan for a specific state
 
-        Design ref: Decision #9
+        This now generates PARAMETERIZED plans with AgentSpeak variables.
 
         Plan structure:
-        +!goal_name : context <-
+        +!goal_pattern(Vars) : context <-
             !precond1;      // Precondition subgoals
             !precond2;
             !action_goal(args);  // Action goal invocation
-            !goal_name.     // Recursive check
+            !goal_pattern(Vars).     // Recursive check
+
+        Example:
+            +!on(X, Y) : holding(X) & clear(Y) <-
+                !put_on_block(X, Y);
+                !on(X, Y).
 
         Args:
-            state: Current state
+            state: Current state (with variables)
             path: Path to goal (list of transitions)
 
         Returns:
-            AgentSpeak plan string
+            AgentSpeak plan string with parameterized goals
         """
         if not path:
             return None
@@ -609,45 +646,50 @@ class AgentSpeakCodeGenerator:
         # Get next transition in path
         next_transition = path[0]
 
-        # VARIABLE INSTANTIATION: Instantiate state predicates if using variables
-        instantiated_state_preds = {self._instantiate_predicate(pred) for pred in state.predicates}
-        instantiated_state = WorldState(instantiated_state_preds, depth=state.depth)
+        # Get parameterized goal pattern
+        param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # Format context (using instantiated predicates)
-        context = instantiated_state.to_agentspeak_context()
+        # Format context (with AgentSpeak variables, NO instantiation)
+        context = state.to_agentspeak_context(convert_vars=True)
 
         # Generate precondition subgoals (per Design Algorithm 4, Line 701-708)
         subgoals = []
         for precond in next_transition.preconditions:
-            # Instantiate precondition
-            instantiated_precond = self._instantiate_predicate(precond)
-
-            if instantiated_precond not in instantiated_state_preds:
+            # Convert precondition to AgentSpeak format with variables
+            if precond not in state.predicates:
                 # Need to establish this precondition
-                subgoal_name = self._predicate_to_goal_name(instantiated_precond)
+                subgoal_name = precond.to_agentspeak(convert_vars=True)
                 subgoals.append(f"!{subgoal_name}")
 
-        # VARIABLE INSTANTIATION: Instantiate action arguments
-        instantiated_action_args = self._instantiate_action_args(next_transition.action_args)
+        # Format action goal invocation
+        # Action args may contain variables - convert them to AgentSpeak format
+        action_args_as = []
+        for arg in next_transition.action_args:
+            if arg.startswith('?'):
+                # Convert PDDL variable to AgentSpeak
+                var_name = arg[1:]
+                action_args_as.append(var_name[0].upper() + var_name[1:] if var_name else var_name)
+            else:
+                action_args_as.append(arg)
 
-        # Format action goal invocation (with instantiated args)
+        # Format action goal invocation
         action_goal = self._format_action_goal_invocation(
             next_transition.action,
-            instantiated_action_args
+            action_args_as
         )
 
         # Build plan body (per Design Algorithm 4, Line 716-719)
-        # Structure: !precond1; !precond2; action(args); !goal.
+        # Structure: !precond1; !precond2; action(args); !goal_pattern.
         body_lines = []
-        body_lines.extend(subgoals)              # Precondition subgoals first
-        body_lines.append(action_goal)           # Then action goal
-        body_lines.append(f"!{self.goal_name}")  # Recursive goal check
+        body_lines.extend(subgoals)                    # Precondition subgoals first
+        body_lines.append(action_goal)                 # Then action goal
+        body_lines.append(f"!{param_goal_pattern}")    # Recursive goal check (parameterized)
 
         # Format body
         body = ";\n    ".join(body_lines)
 
-        # Generate plan
-        plan = f"+!{self.goal_name} : {context} <-\n    {body}."
+        # Generate plan (PARAMETERIZED)
+        plan = f"+!{param_goal_pattern} : {context} <-\n    {body}."
 
         return plan
 
@@ -694,20 +736,35 @@ class AgentSpeakCodeGenerator:
         return f"!{self._predicate_to_goal_name(predicate)}"
 
     def _generate_success_plan(self) -> str:
-        """Generate plan for when goal is already achieved"""
-        # VARIABLE INSTANTIATION: Instantiate goal state predicates
-        instantiated_goal_preds = {self._instantiate_predicate(pred) for pred in self.graph.goal_state.predicates}
-        instantiated_goal_state = WorldState(instantiated_goal_preds, depth=self.graph.goal_state.depth)
+        """
+        Generate plan for when goal is already achieved
 
-        context = instantiated_goal_state.to_agentspeak_context()
+        This plan uses PARAMETERIZED goal pattern with AgentSpeak variables.
 
-        return f"""+!{self.goal_name} : {context} <-
-    .print("Goal {self.goal_name} already achieved!")."""
+        Example:
+            +!on(X, Y) : on(X, Y) <- .print("Goal on(", X, ", ", Y, ") achieved!").
+        """
+        # Get parameterized goal pattern (with AgentSpeak variables)
+        param_goal_pattern = self._get_parameterized_goal_pattern()
+
+        # Get context condition (also with AgentSpeak variables)
+        context = self.graph.goal_state.to_agentspeak_context(convert_vars=True)
+
+        return f"""+!{param_goal_pattern} : {context} <-
+    .print("Goal {param_goal_pattern} already achieved!")."""
 
     def _generate_failure_plan(self) -> str:
-        """Generate failure handler"""
-        return f"""-!{self.goal_name} : true <-
-    .print("Failed to achieve goal {self.goal_name}");
+        """
+        Generate failure handler for parameterized goal
+
+        Example:
+            -!on(X, Y) : true <- .print("Failed to achieve on(", X, ", ", Y, ")"); .fail.
+        """
+        # Get parameterized goal pattern
+        param_goal_pattern = self._get_parameterized_goal_pattern()
+
+        return f"""-!{param_goal_pattern} : true <-
+    .print("Failed to achieve goal {param_goal_pattern}");
     .fail."""
 
 

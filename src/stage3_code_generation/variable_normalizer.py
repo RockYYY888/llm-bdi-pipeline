@@ -5,9 +5,9 @@ This module provides functionality to normalize grounded predicates into
 schema-level variable predicates for backward planning optimization.
 
 Key idea (Position-Based Normalization):
-- on(a, b) → on(?arg0, ?arg1)
-- on(c, d) → on(?arg0, ?arg1)  ✓ SAME SCHEMA!
-- on(b, a) → on(?arg0, ?arg1)  ✓ SAME SCHEMA!
+- on(a, b) → on(?v0, ?v1)
+- on(c, d) → on(?v0, ?v1)  ✓ SAME SCHEMA!
+- on(b, a) → on(?v0, ?v1)  ✓ SAME SCHEMA!
 
 All goals with the same predicate structure share the same abstract plan,
 regardless of which specific objects are involved. This achieves TRUE
@@ -46,9 +46,9 @@ class VariableNormalizer:
     Normalizes grounded predicates to schema-level variable predicates
 
     Uses POSITION-BASED normalization for TRUE schema-level abstraction:
-    - on(a, b) → on(?arg0, ?arg1)
-    - on(c, d) → on(?arg0, ?arg1)  ✓ SAME SCHEMA - Cache hit!
-    - on(b, a) → on(?arg0, ?arg1)  ✓ SAME SCHEMA - Cache hit!
+    - on(a, b) → on(?v0, ?v1)
+    - on(c, d) → on(?v0, ?v1)  ✓ SAME SCHEMA - Cache hit!
+    - on(b, a) → on(?v0, ?v1)  ✓ SAME SCHEMA - Cache hit!
 
     All goals with same predicate structure share the same abstract plan,
     regardless of which specific objects are used.
@@ -148,18 +148,18 @@ class VariableNormalizer:
         1. Identify constants vs objects in arguments
         2. Abstract only OBJECTS (preserve constants)
         3. Assign variables based on FIRST OCCURRENCE ORDER of objects
-        4. Use ?arg0, ?arg1, ?arg2, ... for objects only
+        4. Use ?v0, ?v1, ?v2, ... for objects only
         5. Same object in different predicates maps to SAME variable
 
         This enables TRUE schema-level caching where goals with different objects
         but same structure AND constants share the same abstract plan!
 
         Examples:
-            Input: [on(a, b)]             → Output: [on(?arg0, ?arg1)]
-            Input: [on(c, d)]             → Output: [on(?arg0, ?arg1)]  ✓ SAME SCHEMA!
-            Input: [move(a, -2, 'Left')]  → Output: [move(?arg0, -2, 'Left')]  ✓ Constants preserved!
-            Input: [move(b, -2, 'Left')]  → Output: [move(?arg0, -2, 'Left')]  ✓ Shares schema!
-            Input: [move(a, 5, 'Right')]  → Output: [move(?arg0, 5, 'Right')]  ✓ Different schema (diff constants)!
+            Input: [on(a, b)]             → Output: [on(?v0, ?v1)]
+            Input: [on(c, d)]             → Output: [on(?v0, ?v1)]  ✓ SAME SCHEMA!
+            Input: [move(a, -2, 'Left')]  → Output: [move(?v0, -2, 'Left')]  ✓ Constants preserved!
+            Input: [move(b, -2, 'Left')]  → Output: [move(?v0, -2, 'Left')]  ✓ Shares schema!
+            Input: [move(a, 5, 'Right')]  → Output: [move(?v0, 5, 'Right')]  ✓ Different schema (diff constants)!
 
         Key Insight: We abstract object IDENTITIES, not constant VALUES.
         Constants are part of the schema definition.
@@ -183,7 +183,8 @@ class VariableNormalizer:
                     continue
 
                 # This is an object - assign a variable
-                obj_to_var[arg] = f"?arg{var_counter}"
+                # Use ?v{i} naming to match forward planner convention
+                obj_to_var[arg] = f"?v{var_counter}"
                 var_counter += 1
 
         # Create reverse mapping (only for objects that were abstracted)
