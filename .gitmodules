@@ -1,0 +1,3 @@
+[submodule "src/stage4_jason_validation/jason_src"]
+	path = src/stage4_jason_validation/jason_src
+	url = https://github.com/jason-lang/jason.git
