@@ -115,6 +115,61 @@ class PredicateAtom:
                 self.args == other.args and
                 self.negated == other.negated)
 
+    def is_variable_arg(self, arg: str) -> bool:
+        """
+        Check if an argument is a variable (starts with ?)
+
+        Args:
+            arg: Argument string
+
+        Returns:
+            True if argument is a variable
+        """
+        return arg.startswith('?')
+
+    def is_grounded(self) -> bool:
+        """
+        Check if predicate is fully grounded (no variables)
+
+        Returns:
+            True if all arguments are grounded (not variables)
+        """
+        return all(not self.is_variable_arg(arg) for arg in self.args)
+
+    def is_variable_predicate(self) -> bool:
+        """
+        Check if predicate uses variables
+
+        Returns:
+            True if any argument is a variable
+        """
+        return any(self.is_variable_arg(arg) for arg in self.args)
+
+    def get_variables(self) -> List[str]:
+        """
+        Get all variable arguments in this predicate
+
+        Returns:
+            List of variable names (e.g., ["?v0", "?v1"])
+        """
+        return [arg for arg in self.args if self.is_variable_arg(arg)]
+
+    def instantiate(self, var_mapping: Dict[str, str]) -> 'PredicateAtom':
+        """
+        Instantiate variables in this predicate with concrete objects
+
+        Example:
+            on(?v0, ?v1) with {?v0: a, ?v1: b} → on(a, b)
+
+        Args:
+            var_mapping: Dictionary mapping variables to objects
+
+        Returns:
+            New PredicateAtom with variables replaced
+        """
+        new_args = [var_mapping.get(arg, arg) for arg in self.args]
+        return PredicateAtom(self.name, new_args, self.negated)
+
 
 @dataclass(frozen=True)
 class WorldState:

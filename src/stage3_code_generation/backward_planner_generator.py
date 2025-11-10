@@ -27,6 +27,7 @@ from stage3_code_generation.state_space import PredicateAtom, StateGraph
 from stage3_code_generation.forward_planner import ForwardStatePlanner
 from stage3_code_generation.boolean_expression_parser import BooleanExpressionParser
 from stage3_code_generation.agentspeak_codegen import AgentSpeakCodeGenerator
+from stage3_code_generation.variable_normalizer import VariableNormalizer, VariableMapping
 from utils.pddl_parser import PDDLDomain
 from stage1_interpretation.grounding_map import GroundingMap
 
@@ -99,8 +100,14 @@ class BackwardPlannerGenerator:
         dfa_info = self._parse_dfa(dfa_result['dfa_dot'])
         print(f"DFA: {len(dfa_info.states)} states, {len(dfa_info.transitions)} transitions")
 
-        # OPTIMIZATION: Cache goal exploration results to avoid duplicate work
-        goal_cache = {}  # goal_key -> state_graph
+        # VARIABLE ABSTRACTION: Create variable normalizer
+        # This enables variable-level caching instead of object-level caching
+        normalizer = VariableNormalizer(self.domain, objects)
+        print(f"Variable abstraction enabled: using {len(objects)} variables")
+
+        # OPTIMIZATION: Cache goal exploration results at VARIABLE LEVEL
+        # Same goal pattern (e.g., on(?v0, ?v1)) reused for all object instances
+        variable_goal_cache = {}  # variable_goal_key -> (state_graph, variable_mapping)
         cache_hits = 0
         cache_misses = 0
 
@@ -130,29 +137,41 @@ class BackwardPlannerGenerator:
                     print(f"    Skipping empty disjunct")
                     continue
 
-                # Create goal name
+                # VARIABLE ABSTRACTION: Normalize goal to variable form
+                normalized_goal, obj_to_var_mapping = normalizer.normalize_predicates(goal_predicates)
+                variable_goal_key = normalizer.serialize_goal(normalized_goal)
+
+                # Create goal name (using original grounded predicates)
                 goal_name = self._format_goal_name(goal_predicates)
                 print(f"    Goal name: {goal_name}")
+                print(f"    Normalized: {[str(p) for p in normalized_goal]}")
+                print(f"    Variable mapping: {obj_to_var_mapping.obj_to_var}")
 
-                # OPTIMIZATION: Check if we've already explored this goal
-                goal_key = self._serialize_goal(goal_predicates)
-
-                if goal_key in goal_cache:
-                    # Reuse cached state graph
-                    state_graph = goal_cache[goal_key]
+                # OPTIMIZATION: Check if we've already explored this VARIABLE-LEVEL goal
+                if variable_goal_key in variable_goal_cache:
+                    # Reuse cached variable-level state graph
+                    state_graph, canonical_var_mapping = variable_goal_cache[variable_goal_key]
                     cache_hits += 1
-                    print(f"    ✓ Cache HIT! Reusing exploration for {goal_name}")
+                    print(f"    ✓ VARIABLE-LEVEL Cache HIT! Reusing exploration")
                     print(f"    State graph: {state_graph}")
                 else:
-                    # First time seeing this goal - run forward planning
+                    # First time seeing this variable pattern - run forward planning with variables
                     cache_misses += 1
-                    print(f"    Cache MISS - running exploration...")
+                    print(f"    Cache MISS - running VARIABLE-LEVEL exploration...")
 
                     try:
-                        planner = ForwardStatePlanner(self.domain, objects)
-                        state_graph = planner.explore_from_goal(goal_predicates)
-                        goal_cache[goal_key] = state_graph  # Cache for future use
+                        # Get variable list for this problem size
+                        variables = normalizer.get_variable_list(len(objects))
+
+                        # Create planner with variables instead of objects
+                        planner = ForwardStatePlanner(self.domain, variables, use_variables=True)
+
+                        # Explore using normalized (variable) goal
+                        state_graph = planner.explore_from_goal(normalized_goal)
                         print(f"    State graph: {state_graph}")
+
+                        # Cache the variable-level state graph with its canonical mapping
+                        variable_goal_cache[variable_goal_key] = (state_graph, obj_to_var_mapping)
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
@@ -168,11 +187,13 @@ class BackwardPlannerGenerator:
                     all_state_graphs.append(state_graph)
 
                     # Generate goal-specific section only
+                    # Pass variable mapping to instantiate variables during code gen
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
                         goal_name=goal_name,
                         domain=self.domain,
-                        objects=objects
+                        objects=objects,
+                        var_mapping=obj_to_var_mapping  # NEW: Pass variable mapping
                     )
 
                     goal_section = codegen.generate_goal_specific_section()
@@ -214,12 +235,14 @@ class BackwardPlannerGenerator:
         print(f"  Shared section generated: 1 time (initial beliefs + action plans)")
         print(f"  Goal-specific sections: {len(all_goal_sections)}")
         print(f"  Redundancy eliminated: ~{(len(all_goal_sections) - 1) * 30:.0f}% of shared code")
-        print(f"Goal exploration cache:")
+        print(f"Variable-level goal exploration cache:")
         print(f"  Cache hits: {cache_hits}")
         print(f"  Cache misses: {cache_misses}")
-        print(f"  Total explorations needed: {cache_misses} (saved {cache_hits})")
+        print(f"  Total explorations needed: {cache_misses} (saved {cache_hits} explorations)")
         if cache_hits + cache_misses > 0:
             print(f"  Cache hit rate: {cache_hits / (cache_hits + cache_misses) * 100:.1f}%")
+        if cache_hits > 0:
+            print(f"  💡 Variable abstraction saved {cache_hits} state space explorations!")
         print("="*80)
 
         return final_code

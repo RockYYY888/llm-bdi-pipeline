@@ -46,23 +46,61 @@ class AgentSpeakCodeGenerator:
     """
 
     def __init__(self, state_graph: StateGraph, goal_name: str,
-                 domain: PDDLDomain, objects: List[str]):
+                 domain: PDDLDomain, objects: List[str], var_mapping=None):
         """
         Initialize code generator
 
         Args:
-            state_graph: State graph from forward planning
+            state_graph: State graph from forward planning (may use variables)
             goal_name: Name of the goal (e.g., "on(a, b)")
             domain: PDDL domain (for action definitions)
             objects: List of objects in domain
+            var_mapping: VariableMapping for instantiating variables (optional)
+                        If provided, state graph uses variables and needs instantiation
         """
         self.graph = state_graph
         self.goal_name = goal_name
         self.domain = domain
         self.objects = objects
+        self.var_mapping = var_mapping  # NEW: Variable mapping for instantiation
         self.condition_parser = PDDLConditionParser()
         self.effect_parser = PDDLEffectParser()
         self.goal_plan_count = 0  # Track number of goal plans generated
+
+    def _instantiate_predicate(self, pred: 'PredicateAtom') -> 'PredicateAtom':
+        """
+        Instantiate a predicate by replacing variables with objects
+
+        If var_mapping is None, returns predicate as-is (already grounded).
+        Otherwise, uses var_mapping to replace variables with concrete objects.
+
+        Args:
+            pred: PredicateAtom (may contain variables)
+
+        Returns:
+            PredicateAtom with variables instantiated
+        """
+        if self.var_mapping is None:
+            return pred  # Already grounded
+
+        # Use var_to_obj mapping to replace variables
+        return pred.instantiate(self.var_mapping.var_to_obj)
+
+    def _instantiate_action_args(self, args: Tuple[str, ...]) -> Tuple[str, ...]:
+        """
+        Instantiate action arguments by replacing variables with objects
+
+        Args:
+            args: Tuple of argument strings (may contain variables)
+
+        Returns:
+            Tuple with variables instantiated
+        """
+        if self.var_mapping is None:
+            return args  # Already grounded
+
+        instantiated = [self.var_mapping.var_to_obj.get(arg, arg) for arg in args]
+        return tuple(instantiated)
 
     def generate(self) -> str:
         """
@@ -571,21 +609,31 @@ class AgentSpeakCodeGenerator:
         # Get next transition in path
         next_transition = path[0]
 
-        # Format context
-        context = state.to_agentspeak_context()
+        # VARIABLE INSTANTIATION: Instantiate state predicates if using variables
+        instantiated_state_preds = {self._instantiate_predicate(pred) for pred in state.predicates}
+        instantiated_state = WorldState(instantiated_state_preds, depth=state.depth)
+
+        # Format context (using instantiated predicates)
+        context = instantiated_state.to_agentspeak_context()
 
         # Generate precondition subgoals (per Design Algorithm 4, Line 701-708)
         subgoals = []
         for precond in next_transition.preconditions:
-            if precond not in state.predicates:
+            # Instantiate precondition
+            instantiated_precond = self._instantiate_predicate(precond)
+
+            if instantiated_precond not in instantiated_state_preds:
                 # Need to establish this precondition
-                subgoal_name = self._predicate_to_goal_name(precond)
+                subgoal_name = self._predicate_to_goal_name(instantiated_precond)
                 subgoals.append(f"!{subgoal_name}")
 
-        # Format action goal invocation
+        # VARIABLE INSTANTIATION: Instantiate action arguments
+        instantiated_action_args = self._instantiate_action_args(next_transition.action_args)
+
+        # Format action goal invocation (with instantiated args)
         action_goal = self._format_action_goal_invocation(
             next_transition.action,
-            next_transition.action_args
+            instantiated_action_args
         )
 
         # Build plan body (per Design Algorithm 4, Line 716-719)
@@ -647,7 +695,11 @@ class AgentSpeakCodeGenerator:
 
     def _generate_success_plan(self) -> str:
         """Generate plan for when goal is already achieved"""
-        context = self.graph.goal_state.to_agentspeak_context()
+        # VARIABLE INSTANTIATION: Instantiate goal state predicates
+        instantiated_goal_preds = {self._instantiate_predicate(pred) for pred in self.graph.goal_state.predicates}
+        instantiated_goal_state = WorldState(instantiated_goal_preds, depth=self.graph.goal_state.depth)
+
+        context = instantiated_goal_state.to_agentspeak_context()
 
         return f"""+!{self.goal_name} : {context} <-
     .print("Goal {self.goal_name} already achieved!")."""

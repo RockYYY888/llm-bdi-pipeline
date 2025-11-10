@@ -63,21 +63,25 @@ class ForwardStatePlanner:
         effect_parser: Parser for effects
     """
 
-    def __init__(self, domain: PDDLDomain, objects: List[str]):
+    def __init__(self, domain: PDDLDomain, objects: List[str], use_variables: bool = False):
         """
         Initialize forward planner
 
         Args:
             domain: PDDL domain definition
-            objects: List of objects to ground actions with
+            objects: List of objects to ground actions with (or variables if use_variables=True)
+            use_variables: If True, use variable-level planning instead of object-level
+                          In this mode, 'objects' should be variable names like ["?v0", "?v1"]
         """
         self.domain = domain
         self.objects = objects
+        self.use_variables = use_variables
         self.condition_parser = PDDLConditionParser()
         self.effect_parser = PDDLEffectParser()
 
         # OPTIMIZATION: Cache ground actions (computed once instead of per-state)
         # This eliminates 99.9% of grounding redundancy
+        # When use_variables=True, these are "variable actions" (e.g., pick-up(?v0, ?v1))
         self._cached_grounded_actions = self._ground_all_actions()
 
     def infer_complete_goal_state(self, goal_predicates: List[PredicateAtom]) -> Set[PredicateAtom]:
@@ -151,6 +155,11 @@ class ForwardStatePlanner:
         complete_goal = self.infer_complete_goal_state(goal_predicates)
 
         print(f"[Forward Planner] Starting complete state space exploration")
+        print(f"[Forward Planner] Mode: {'VARIABLE-LEVEL' if self.use_variables else 'OBJECT-LEVEL'}")
+        if self.use_variables:
+            print(f"[Forward Planner] Variables: {self.objects}")
+        else:
+            print(f"[Forward Planner] Objects: {self.objects}")
         print(f"[Forward Planner] Max states limit: {max_states:,}")
         print(f"[Forward Planner] Input goal predicates: {[str(p) for p in goal_predicates]}")
         print(f"[Forward Planner] Complete goal state: {[str(p) for p in sorted(complete_goal, key=str)]}")
