@@ -283,8 +283,7 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
 │   │   ├── dfa_builder.py               # Stage 2: Recursive DFA generation (DFS)
-│   │   ├── ltlf_to_dfa.py               # LTLf -> DFA conversion (ltlf2dfa)
-│   │   └── dfa_dot_cleaner.py           # DFA DOT file cleaning utilities
+│   │   └── ltlf_to_dfa.py               # LTLf -> DFA conversion (ltlf2dfa)
 │   ├── stage3_code_generation/
 │   │   ├── __init__.py
 │   │   ├── backward_planner_generator.py   # Stage 3: Main entry point (non-LLM)

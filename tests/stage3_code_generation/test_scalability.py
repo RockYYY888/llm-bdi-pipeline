@@ -87,31 +87,20 @@ digraph {{
 
     start_time = time.time()
     try:
-        asl_code = generator.generate(ltl_dict, dfa_result)
+        asl_code, truncated = generator.generate(ltl_dict, dfa_result)
         elapsed = time.time() - start_time
 
-        # Check if we hit the max_states limit by capturing stdout
-        # Note: The actual states count is printed to stdout during generation,
-        # not embedded in the generated code. We'll check the expected state space
-        # vs max_states to determine if termination likely occurred.
-        import re
-
-        # Estimate if this test likely hit the limit
-        # (this is approximate - actual detection would require modifying generator)
-        expected_states = estimate_state_space(n)
-        hit_limit = expected_states > max_states * 0.8  # Conservative estimate
-
-        if hit_limit:
-            print(f"\n⚠️  TERMINATED: Likely hit max_states limit ({max_states:,})")
+        # Check if exploration was truncated due to max_states limit
+        if truncated:
+            print(f"\n⚠️  TERMINATED: Hit max_states limit ({max_states:,})")
             print(f"⏱️  Time: {elapsed:.2f}s ({elapsed/60:.1f} minutes)")
-            print(f"📊 Expected states: ~{expected_states:,.0f}")
             print(f"💡 This is a safety limit to prevent excessive memory usage")
             print(f"💡 See console output above for actual states explored")
             return "terminated", elapsed, asl_code
         else:
             print(f"\n✅ Code generated: {len(asl_code):,} chars")
             print(f"⏱️  Time: {elapsed:.2f}s ({elapsed/60:.1f} minutes)")
-            print(f"📊 Expected states: ~{expected_states:,.0f} (within limit)")
+            print(f"📊 Completed successfully within limits")
             return True, elapsed, asl_code
 
     except Exception as e:

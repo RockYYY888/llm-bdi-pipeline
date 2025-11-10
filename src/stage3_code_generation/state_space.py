@@ -252,6 +252,7 @@ class StateGraph:
         transitions: All transitions (edges)
         state_to_outgoing: Adjacency list (state -> outgoing transitions)
         state_to_incoming: Reverse adjacency list (state -> incoming transitions)
+        truncated: Whether exploration was stopped due to max_states limit
     """
 
     def __init__(self, goal_state: WorldState):
@@ -266,6 +267,7 @@ class StateGraph:
         self.transitions: List[StateTransition] = []
         self.state_to_outgoing: Dict[WorldState, List[StateTransition]] = {goal_state: []}
         self.state_to_incoming: Dict[WorldState, List[StateTransition]] = {goal_state: []}
+        self.truncated: bool = False  # Set to True if max_states limit reached
 
     def add_transition(self, transition: StateTransition) -> None:
         """

@@ -13,7 +13,7 @@ This module integrates all components:
 Replaces the LLM-based AgentSpeakGenerator.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import re
 import sys
@@ -71,7 +71,7 @@ class BackwardPlannerGenerator:
         self.domain = domain
         self.grounding_map = grounding_map
 
-    def generate(self, ltl_dict: Dict[str, Any], dfa_result: Dict[str, Any]) -> str:
+    def generate(self, ltl_dict: Dict[str, Any], dfa_result: Dict[str, Any]) -> Tuple[str, bool]:
         """
         Generate AgentSpeak code from DFA
 
@@ -86,7 +86,9 @@ class BackwardPlannerGenerator:
                 - other metadata
 
         Returns:
-            Complete AgentSpeak .asl code
+            Tuple of (AgentSpeak .asl code, truncated flag)
+            - code: Complete AgentSpeak .asl code string
+            - truncated: True if any state graph hit max_states limit
         """
         print("\n[Backward Planner Generator] Starting code generation")
         print("="*80)
@@ -103,6 +105,9 @@ class BackwardPlannerGenerator:
         goal_cache = {}  # goal_key -> state_graph
         cache_hits = 0
         cache_misses = 0
+
+        # Track if any state graph was truncated due to max_states limit
+        any_truncated = False
 
         # OPTIMIZATION 3: Collect state graphs and generate goal-specific sections
         # to avoid duplicating shared components (initial beliefs + action plans)
@@ -154,6 +159,10 @@ class BackwardPlannerGenerator:
                         goal_cache[goal_key] = state_graph  # Cache for future use
                         print(f"    State graph: {state_graph}")
 
+                        # Check if this graph was truncated
+                        if state_graph.truncated:
+                            any_truncated = True
+
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
                         import traceback
@@ -188,7 +197,7 @@ class BackwardPlannerGenerator:
         # OPTIMIZATION 3: Combine shared + goal-specific sections
         if not all_goal_sections:
             print("\nWarning: No code generated!")
-            return self._generate_empty_code()
+            return self._generate_empty_code(), any_truncated
 
         print(f"\n[Code Generation] Combining sections...")
         print(f"  Goal-specific sections: {len(all_goal_sections)}")
@@ -222,7 +231,7 @@ class BackwardPlannerGenerator:
             print(f"  Cache hit rate: {cache_hits / (cache_hits + cache_misses) * 100:.1f}%")
         print("="*80)
 
-        return final_code
+        return final_code, any_truncated
 
     def _parse_dfa(self, dfa_dot: str) -> DFAInfo:
         """

@@ -351,7 +351,7 @@ src/stage3_code_generation/
 
 **Tasks**:
 1. Implement `BackwardPlannerGenerator`
-2. Integrate with DFA parsing (reuse `dfa_dot_cleaner`)
+2. Implement DFA parser to extract transitions from raw MONA DOT format
 3. Handle multiple transitions
 4. Integrate into main pipeline
 5. End-to-end testing

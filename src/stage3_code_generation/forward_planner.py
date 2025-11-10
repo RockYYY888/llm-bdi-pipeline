@@ -163,7 +163,11 @@ class ForwardStatePlanner:
         queue = deque([goal_state])
         visited_map: Dict[FrozenSet[PredicateAtom], WorldState] = {goal_state.predicates: goal_state}
 
-        states_explored = 0
+        # Statistics counters:
+        # - states_explored: states popped from queue and expanded (processed)
+        # - len(visited_map): total unique states discovered (including those still in queue)
+        # - Note: len(visited_map) >= states_explored in BFS (many states are discovered but not yet explored)
+        states_explored = 0  # States popped from queue and expanded
         transitions_added = 0
         states_reused = 0
         states_created = 0
@@ -174,7 +178,7 @@ class ForwardStatePlanner:
             states_explored += 1
 
             if states_explored % 1000 == 0:
-                print(f"  Processed {states_explored} states, generated {len(visited_map)} unique states, "
+                print(f"  Explored {states_explored} states, discovered {len(visited_map)} unique states, "
                       f"{transitions_added} transitions, queue size: {len(queue)}")
 
             # Try all ground actions from all states (to create bidirectional graph)
@@ -205,6 +209,7 @@ class ForwardStatePlanner:
                             print(f"  This is a safety limit to prevent excessive memory usage.")
                             print(f"  Returning partial state graph with {len(visited_map):,} states.")
                             max_states_reached = True
+                            graph.truncated = True  # Mark graph as truncated
                             break  # Exit the new_states_data loop
 
                         # Create new state with proper depth
@@ -228,8 +233,8 @@ class ForwardStatePlanner:
                     transitions_added += 1
 
         print(f"[Forward Planner] Exploration complete:")
-        print(f"  States processed: {states_explored:,}")
-        print(f"  Unique states generated: {len(graph.states):,}")
+        print(f"  States explored (expanded): {states_explored:,}")
+        print(f"  States discovered (total unique): {len(graph.states):,}")
         print(f"  Transitions: {len(graph.transitions):,}")
         print(f"  Leaf states: {len(graph.get_leaf_states()):,}")
         print(f"  Max depth reached: {max(s.depth for s in graph.states)}")
