@@ -24,7 +24,16 @@ Tests the complete backward planning pipeline:
 
 ## Running the Tests
 
-### Run All Integration Tests
+### Using the Test Runner Script (Recommended)
+```bash
+# From tests/stage3_code_generation directory
+cd tests/stage3_code_generation
+./run_tests.sh                    # Run all tests
+./run_tests.sh integration        # Run integration tests only
+./run_tests.sh diagnostic         # Run diagnostic tests only
+```
+
+### Run Individual Tests
 ```bash
 # From project root
 python tests/stage3_code_generation/test_integration_backward_planner.py

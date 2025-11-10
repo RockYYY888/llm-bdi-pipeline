@@ -49,7 +49,7 @@ case $test_type in
         echo "Running integration tests only..."
         echo ""
 
-        run_test "Integration Tests" "tests/stage3_code_generation/test_integration_backward_planner.py"
+        run_test "Integration Tests" "test_integration_backward_planner.py"
         exit_code=$?
         total_tests=1
         if [ $exit_code -eq 0 ]; then
@@ -63,7 +63,7 @@ case $test_type in
         echo "Running diagnostic test only..."
         echo ""
 
-        run_test "Diagnostic Test" "tests/stage3_code_generation/test_diagnostic_plans.py"
+        run_test "Diagnostic Test" "test_diagnostic_plans.py"
         exit_code=$?
         total_tests=1
         if [ $exit_code -eq 0 ]; then
@@ -78,7 +78,7 @@ case $test_type in
         echo ""
 
         # Run integration tests
-        run_test "Integration Tests" "tests/stage3_code_generation/test_integration_backward_planner.py"
+        run_test "Integration Tests" "test_integration_backward_planner.py"
         if [ $? -eq 0 ]; then
             ((passed_tests++))
         else
@@ -89,7 +89,7 @@ case $test_type in
         echo ""
 
         # Run diagnostic test
-        run_test "Diagnostic Test" "tests/stage3_code_generation/test_diagnostic_plans.py"
+        run_test "Diagnostic Test" "test_diagnostic_plans.py"
         if [ $? -eq 0 ]; then
             ((passed_tests++))
         else
