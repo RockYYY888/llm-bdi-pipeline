@@ -20,7 +20,7 @@ def test_goal_caching():
     print()
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Create grounding map with SAME goal repeated 3 times

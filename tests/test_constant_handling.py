@@ -25,7 +25,7 @@ def test_constant_handling():
     print("=" * 80)
 
     # Load domain
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     # Create normalizer
@@ -152,7 +152,7 @@ def test_cache_sharing_with_constants():
     print("CACHE SHARING WITH CONSTANTS")
     print("=" * 80)
 
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
     normalizer = VariableNormalizer(domain, ['robot1', 'robot2'])
 

@@ -102,7 +102,7 @@ def test_simple_dfa():
     print("="*80)
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
     print(f"\nDomain loaded: {domain.name}")
     print(f"  Actions: {len(domain.actions)}")
@@ -173,7 +173,7 @@ def test_complex_dfa():
     print("="*80)
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Create DFA and grounding map
@@ -244,7 +244,7 @@ def test_state_graph_size():
     from src.stage3_code_generation.state_space import PredicateAtom
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Test with simple goal

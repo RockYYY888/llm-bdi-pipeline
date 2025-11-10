@@ -34,7 +34,7 @@ def test_variable_abstraction_cache():
     print("="*80)
 
     # Load domain
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     # Create grounding map
@@ -103,7 +103,7 @@ def test_three_identical_patterns():
     print("="*80)
 
     # Load domain
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     # Create grounding map

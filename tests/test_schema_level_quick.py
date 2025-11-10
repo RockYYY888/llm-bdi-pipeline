@@ -23,7 +23,7 @@ def test_schema_level_caching():
     print("="*80)
 
     # Load domain
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     # Create normalizer with 4 objects

@@ -12,7 +12,7 @@ from utils.pddl_parser import PDDLParser
 from stage1_interpretation.grounding_map import GroundingMap, GroundedAtom
 
 # Load domain
-domain_file = Path('src/legacy/fond/domains/blocksworld/domain.pddl')
+domain_file = Path('src/domains/blocksworld/domain.pddl')
 domain = PDDLParser.parse_domain(str(domain_file))
 
 # Create grounding map

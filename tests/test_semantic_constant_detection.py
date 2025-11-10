@@ -27,7 +27,7 @@ def test_uppercase_object_names():
     print("TEST: Uppercase Object Names (Critical Bug Fix)")
     print("=" * 80)
 
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     # Test with purely uppercase object names
@@ -72,7 +72,7 @@ def test_mixed_case_objects():
     print("TEST: Mixed Case and Special Characters in Object Names")
     print("=" * 80)
 
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     test_cases = [
@@ -123,7 +123,7 @@ def test_domain_constants_vs_objects():
     print("TEST: Domain Constants vs Problem Objects")
     print("=" * 80)
 
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     print("\nScenario: Objects are lowercase, constants are uppercase")
@@ -177,7 +177,7 @@ def test_object_list_is_ground_truth():
     print("TEST: object_list as Ground Truth")
     print("=" * 80)
 
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     print("\nPrinciple: Only what's in object_list gets abstracted")

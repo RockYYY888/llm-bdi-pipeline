@@ -49,7 +49,7 @@ State Graph Test:     ✅ PASS
 All tests require:
 - Python 3.8+
 - Project dependencies installed
-- Access to `src/legacy/fond/domains/blocksworld/domain.pddl`
+- Access to `src/domains/blocksworld/domain.pddl`
 
 No external test frameworks (pytest, unittest) required - tests are self-contained.
 
@@ -74,7 +74,7 @@ If you see `ModuleNotFoundError: No module named 'src'`:
 
 ### Path Errors
 If you see `FileNotFoundError` for domain.pddl:
-- Ensure `src/legacy/fond/domains/blocksworld/domain.pddl` exists
+- Ensure `src/domains/blocksworld/domain.pddl` exists
 - Tests use `project_root / 'src' / 'legacy' / 'fond' / ...`
 
 ### Test Failures

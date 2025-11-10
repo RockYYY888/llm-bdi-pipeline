@@ -39,7 +39,7 @@ def test_same_structure_different_objects():
     print("="*80)
 
     # Load domain
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     # Create grounding map
@@ -115,7 +115,7 @@ def test_clear_vs_on():
     print("TEST: Different Predicates (No Sharing Expected)")
     print("="*80)
 
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_file = Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
     gmap = GroundingMap()

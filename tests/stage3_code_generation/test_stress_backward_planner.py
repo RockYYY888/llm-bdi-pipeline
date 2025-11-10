@@ -34,7 +34,7 @@ def test_tower_goal_3_blocks():
     print("=" * 80)
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Create grounding map
@@ -105,7 +105,7 @@ def test_sequential_goals():
     print("STRESS TEST 2: Sequential Goals (2 blocks)")
     print("=" * 80)
 
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     grounding_map = GroundingMap()
@@ -176,7 +176,7 @@ def test_4_blocks():
     print("STRESS TEST 3: Conjunctive Goal (2 blocks)")
     print("=" * 80)
 
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     grounding_map = GroundingMap()
@@ -257,7 +257,7 @@ def test_complex_conjunctive_goal():
     print("STRESS TEST 4: Multiple Predicates Goal (2 blocks)")
     print("=" * 80)
 
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     grounding_map = GroundingMap()
