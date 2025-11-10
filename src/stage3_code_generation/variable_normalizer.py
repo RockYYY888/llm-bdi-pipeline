@@ -96,26 +96,78 @@ class VariableNormalizer:
 
         return {obj: default_type for obj in self.object_list}
 
+    def _is_constant(self, arg: str) -> bool:
+        """
+        Determine if an argument is a constant (not an object to abstract)
+
+        Constants include:
+        - Already variables: ?var, ?x
+        - Numbers: -2, 3.14, 10
+        - String literals with quotes: 'Left', "Right"
+        - Boolean/null: true, false, nil, null
+        - Uppercase identifiers (often constants): LEFT, RIGHT, UP, DOWN
+
+        Objects (to abstract):
+        - Items in object_list
+        - Lowercase identifiers not matching above patterns
+
+        Args:
+            arg: Argument string to check
+
+        Returns:
+            True if argument is a constant (should NOT be abstracted)
+        """
+        # Already a variable - keep as-is
+        if arg.startswith('?'):
+            return True
+
+        # Try parsing as number (int or float)
+        try:
+            float(arg)
+            return True
+        except ValueError:
+            pass
+
+        # String literals with quotes
+        if (arg.startswith("'") and arg.endswith("'")) or \
+           (arg.startswith('"') and arg.endswith('"')):
+            return True
+
+        # Boolean/null keywords
+        if arg.lower() in ['true', 'false', 'nil', 'null', 'none']:
+            return True
+
+        # Uppercase identifiers (common constant convention)
+        # e.g., LEFT, RIGHT, UP, DOWN
+        if arg.isupper() and arg.isalpha():
+            return True
+
+        # Otherwise, treat as object to be abstracted
+        return False
+
     def normalize_predicates(self, predicates: List[PredicateAtom]) -> Tuple[List[PredicateAtom], VariableMapping]:
         """
         Normalize a list of grounded predicates to variable form using SCHEMA-LEVEL abstraction
 
-        Strategy (Position-Based Normalization):
-        1. Assign variables based on FIRST OCCURRENCE ORDER across all predicates
-        2. Use ?arg0, ?arg1, ?arg2, ... (position-based, not object-based)
-        3. Same object in different predicates maps to SAME variable
+        Strategy (Position-Based Normalization with Constant Preservation):
+        1. Identify constants vs objects in arguments
+        2. Abstract only OBJECTS (preserve constants)
+        3. Assign variables based on FIRST OCCURRENCE ORDER of objects
+        4. Use ?arg0, ?arg1, ?arg2, ... for objects only
+        5. Same object in different predicates maps to SAME variable
 
         This enables TRUE schema-level caching where goals with different objects
-        but same structure share the same abstract plan!
+        but same structure AND constants share the same abstract plan!
 
-        Example:
-            Input: [on(a, b)]           → Output: [on(?arg0, ?arg1)]
-            Input: [on(c, d)]           → Output: [on(?arg0, ?arg1)]  ✓ SAME SCHEMA!
-            Input: [on(b, a)]           → Output: [on(?arg0, ?arg1)]  ✓ SAME SCHEMA!
-            Input: [on(a, b), clear(a)] → Output: [on(?arg0, ?arg1), clear(?arg0)]  ✓ Consistency!
+        Examples:
+            Input: [on(a, b)]             → Output: [on(?arg0, ?arg1)]
+            Input: [on(c, d)]             → Output: [on(?arg0, ?arg1)]  ✓ SAME SCHEMA!
+            Input: [move(a, -2, 'Left')]  → Output: [move(?arg0, -2, 'Left')]  ✓ Constants preserved!
+            Input: [move(b, -2, 'Left')]  → Output: [move(?arg0, -2, 'Left')]  ✓ Shares schema!
+            Input: [move(a, 5, 'Right')]  → Output: [move(?arg0, 5, 'Right')]  ✓ Different schema (diff constants)!
 
-        Key Insight: We don't care about WHICH specific objects (a vs c),
-        only the STRUCTURE of the goal pattern.
+        Key Insight: We abstract object IDENTITIES, not constant VALUES.
+        Constants are part of the schema definition.
 
         Args:
             predicates: List of grounded predicates
@@ -124,28 +176,38 @@ class VariableNormalizer:
             Tuple of (normalized predicates, variable mapping)
         """
         # SCHEMA-LEVEL: Assign variables based on first occurrence order
-        # This ensures same structure → same schema, regardless of specific objects
+        # BUT only for objects, not constants
         obj_to_var = {}
         var_counter = 0
 
-        # First pass: collect objects in order of first appearance
+        # First pass: collect OBJECTS (not constants) in order of first appearance
         for pred in predicates:
             for arg in pred.args:
-                # Skip if already a variable or already mapped
-                if not arg.startswith('?') and arg not in obj_to_var:
-                    obj_to_var[arg] = f"?arg{var_counter}"
-                    var_counter += 1
+                # Skip constants and already-mapped objects
+                if self._is_constant(arg) or arg in obj_to_var:
+                    continue
 
-        # Create reverse mapping
+                # This is an object - assign a variable
+                obj_to_var[arg] = f"?arg{var_counter}"
+                var_counter += 1
+
+        # Create reverse mapping (only for objects that were abstracted)
         var_to_obj = {var: obj for obj, var in obj_to_var.items()}
 
         mapping = VariableMapping(obj_to_var=obj_to_var, var_to_obj=var_to_obj)
 
-        # Second pass: normalize predicates using the mapping
+        # Second pass: normalize predicates
         normalized_predicates = []
         for pred in predicates:
-            # Replace object arguments with schema variables
-            new_args = [obj_to_var.get(arg, arg) for arg in pred.args]
+            new_args = []
+            for arg in pred.args:
+                if self._is_constant(arg):
+                    # Keep constants as-is
+                    new_args.append(arg)
+                else:
+                    # Replace objects with schema variables
+                    new_args.append(obj_to_var.get(arg, arg))
+
             normalized_pred = PredicateAtom(pred.name, new_args, pred.negated)
             normalized_predicates.append(normalized_pred)
 
