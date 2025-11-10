@@ -38,7 +38,7 @@ def test_two_transition_dfa():
     print()
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Create grounding map for BOTH goals
@@ -226,7 +226,7 @@ def test_conjunctive_transition():
     print()
 
     # Load domain
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     # Create grounding map

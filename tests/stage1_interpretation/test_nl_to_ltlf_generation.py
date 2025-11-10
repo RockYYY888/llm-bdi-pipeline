@@ -423,7 +423,7 @@ def run_all_tests(csv_path: Path, output_path: Path):
     # Initialize generator using the actual pipeline's domain configuration
     config = get_config()
     # Use default blocksworld domain (same as main pipeline)
-    domain_file = str(Path(__file__).parent.parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl")
+    domain_file = str(Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl")
 
     generator = NLToLTLfGenerator(
         api_key=config.openai_api_key,

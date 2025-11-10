@@ -24,7 +24,16 @@ Tests the complete backward planning pipeline:
 
 ## Running the Tests
 
-### Run All Integration Tests
+### Using the Test Runner Script (Recommended)
+```bash
+# From tests/stage3_code_generation directory
+cd tests/stage3_code_generation
+./run_tests.sh                    # Run all tests
+./run_tests.sh integration        # Run integration tests only
+./run_tests.sh diagnostic         # Run diagnostic tests only
+```
+
+### Run Individual Tests
 ```bash
 # From project root
 python tests/stage3_code_generation/test_integration_backward_planner.py
@@ -49,7 +58,7 @@ State Graph Test:     ✅ PASS
 All tests require:
 - Python 3.8+
 - Project dependencies installed
-- Access to `src/legacy/fond/domains/blocksworld/domain.pddl`
+- Access to `src/domains/blocksworld/domain.pddl`
 
 No external test frameworks (pytest, unittest) required - tests are self-contained.
 
@@ -74,7 +83,7 @@ If you see `ModuleNotFoundError: No module named 'src'`:
 
 ### Path Errors
 If you see `FileNotFoundError` for domain.pddl:
-- Ensure `src/legacy/fond/domains/blocksworld/domain.pddl` exists
+- Ensure `src/domains/blocksworld/domain.pddl` exists
 - Tests use `project_root / 'src' / 'legacy' / 'fond' / ...`
 
 ### Test Failures

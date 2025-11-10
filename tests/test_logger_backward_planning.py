@@ -76,7 +76,7 @@ digraph {
 
     # Stage 3: Run actual backward planning
     print("Running backward planning...")
-    domain_path = project_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_path))
 
     generator = BackwardPlannerGenerator(domain, grounding_map)

@@ -330,7 +330,6 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │       ├── test_simple_2blocks.py                # Simple 2-block test
 │       └── test_agentspeak_validator.py          # Validator unit tests
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
-├── run_with_mona.sh                     # Wrapper script to run with MONA in PATH
 ├── pyproject.toml                       # Project dependencies (uv managed)
 └── uv.lock                              # Dependency lock file
 ```
@@ -392,13 +391,6 @@ python tests/test_logger_backward_planning.py
 
 # Run integration tests (end-to-end pipeline)
 python tests/test_integration_pipeline.py
-```
-
-**Alternative**: Use the wrapper script to run any Python script with MONA in PATH:
-
-```bash
-# Run with explicit MONA path setup
-./run_with_mona.sh python tests/stage1_interpretation/test_nl_to_ltlf_generation.py
 ```
 
 ---

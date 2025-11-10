@@ -54,18 +54,49 @@ class PredicateAtom:
         object.__setattr__(self, 'args', tuple(args) if args else ())
         object.__setattr__(self, 'negated', negated)
 
-    def to_agentspeak(self) -> str:
+    def to_agentspeak(self, convert_vars: bool = False) -> str:
         """
         Convert to AgentSpeak format
 
+        Args:
+            convert_vars: If True, convert PDDL variables (?v0) to AgentSpeak variables (V0)
+
         Returns:
-            String like "on(a, b)" or "not clear(c)"
+            String like "on(a, b)" or "not clear(c)" or "on(V0, V1)" if convert_vars=True
         """
         prefix = "not " if self.negated else ""
         if self.args:
-            args_str = ", ".join(self.args)
+            if convert_vars:
+                args_str = ", ".join(self._pddl_var_to_agentspeak(arg) for arg in self.args)
+            else:
+                args_str = ", ".join(self.args)
             return f"{prefix}{self.name}({args_str})"
         return f"{prefix}{self.name}"
+
+    def _pddl_var_to_agentspeak(self, arg: str) -> str:
+        """
+        Convert PDDL variable to AgentSpeak variable
+
+        Examples:
+            ?v0 → V0
+            ?v1 → V1
+            ?x → X
+            a → a (constants/objects unchanged)
+
+        Args:
+            arg: PDDL argument string
+
+        Returns:
+            AgentSpeak format argument
+        """
+        if arg.startswith('?'):
+            # Remove ? and capitalize
+            var_name = arg[1:]
+            # Capitalize first letter, keep rest as-is
+            if var_name:
+                return var_name[0].upper() + var_name[1:]
+            return var_name
+        return arg  # Not a variable, return as-is
 
     def to_pddl(self) -> str:
         """
@@ -115,6 +146,61 @@ class PredicateAtom:
                 self.args == other.args and
                 self.negated == other.negated)
 
+    def is_variable_arg(self, arg: str) -> bool:
+        """
+        Check if an argument is a variable (starts with ?)
+
+        Args:
+            arg: Argument string
+
+        Returns:
+            True if argument is a variable
+        """
+        return arg.startswith('?')
+
+    def is_grounded(self) -> bool:
+        """
+        Check if predicate is fully grounded (no variables)
+
+        Returns:
+            True if all arguments are grounded (not variables)
+        """
+        return all(not self.is_variable_arg(arg) for arg in self.args)
+
+    def is_variable_predicate(self) -> bool:
+        """
+        Check if predicate uses variables
+
+        Returns:
+            True if any argument is a variable
+        """
+        return any(self.is_variable_arg(arg) for arg in self.args)
+
+    def get_variables(self) -> List[str]:
+        """
+        Get all variable arguments in this predicate
+
+        Returns:
+            List of variable names (e.g., ["?v0", "?v1"])
+        """
+        return [arg for arg in self.args if self.is_variable_arg(arg)]
+
+    def instantiate(self, var_mapping: Dict[str, str]) -> 'PredicateAtom':
+        """
+        Instantiate variables in this predicate with concrete objects
+
+        Example:
+            on(?v0, ?v1) with {?v0: a, ?v1: b} → on(a, b)
+
+        Args:
+            var_mapping: Dictionary mapping variables to objects
+
+        Returns:
+            New PredicateAtom with variables replaced
+        """
+        new_args = [var_mapping.get(arg, arg) for arg in self.args]
+        return PredicateAtom(self.name, new_args, self.negated)
+
 
 @dataclass(frozen=True)
 class WorldState:
@@ -148,19 +234,23 @@ class WorldState:
         """Check if state has no predicates"""
         return len(self.predicates) == 0
 
-    def to_agentspeak_context(self) -> str:
+    def to_agentspeak_context(self, convert_vars: bool = False) -> str:
         """
         Convert to AgentSpeak context condition
 
+        Args:
+            convert_vars: If True, convert PDDL variables to AgentSpeak variables
+
         Returns:
             String like "on(a, b) & clear(c) & handempty" or "true" if empty
+            With convert_vars=True: "on(Arg0, Arg1) & clear(Arg0)" etc.
         """
         if self.is_empty():
             return "true"
 
         # Sort for deterministic output
         sorted_preds = sorted(self.predicates, key=lambda p: (p.name, p.args))
-        return " & ".join(p.to_agentspeak() for p in sorted_preds)
+        return " & ".join(p.to_agentspeak(convert_vars=convert_vars) for p in sorted_preds)
 
     def __str__(self) -> str:
         if self.is_empty():
