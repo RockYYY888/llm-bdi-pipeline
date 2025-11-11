@@ -229,14 +229,41 @@ class BackwardPlannerGenerator:
                             full_goal_cache[variable_goal_key] = (state_graph, obj_to_var_mapping)
                             print(f"    → Cached in full-goal cache")
 
-                            # BONUS: Also cache individual predicates if not already cached
+                            # OPTIMIZATION: Proactively explore and cache individual predicates
+                            # This enables future cache hits when single predicates appear in other disjuncts
+                            # Example: [on(?v0,?v1), clear(?v2)] explored → also cache on(?v0,?v1) and clear(?v2) separately
+                            print(f"    → Proactively caching individual predicates from multi-predicate goal...")
                             for pred in normalized_goal:
                                 pred_key = (pred.to_agentspeak(), len(objects))
                                 if pred_key not in predicate_cache:
-                                    # Note: We don't actually have the state graph for individual predicates
-                                    # This is a placeholder for future enhancement
-                                    # For now, we only cache when we explore single predicates directly
-                                    pass
+                                    try:
+                                        # Independently explore this single predicate
+                                        # This is SAFE: we're not extracting from multi-predicate state graph,
+                                        # but doing a fresh exploration with correct complete goal state
+                                        single_pred_planner = ForwardStatePlanner(self.domain, variables, use_variables=True)
+                                        single_pred_graph = single_pred_planner.explore_from_goal([pred])
+
+                                        # Cache the single predicate exploration
+                                        # Create minimal variable mapping for this single predicate
+                                        single_pred_obj_to_var = {obj: var for obj, var in obj_to_var_mapping.obj_to_var.items()
+                                                                 if var in pred.args}
+                                        single_pred_var_to_obj = {var: obj for var, obj in obj_to_var_mapping.var_to_obj.items()
+                                                                 if var in pred.args}
+                                        from stage3_code_generation.variable_normalizer import VariableMapping
+                                        single_pred_mapping = VariableMapping(single_pred_obj_to_var, single_pred_var_to_obj)
+
+                                        predicate_cache[pred_key] = (single_pred_graph, single_pred_mapping)
+                                        print(f"      ✓ Cached single predicate: {pred_key[0]} ({single_pred_graph.num_states} states)")
+
+                                        # Check if truncated
+                                        if single_pred_graph.truncated:
+                                            any_truncated = True
+                                    except Exception as e:
+                                        print(f"      ⚠ Failed to cache single predicate {pred}: {e}")
+                                        # Continue with other predicates even if one fails
+                                        continue
+                                else:
+                                    print(f"      ✓ Single predicate already cached: {pred_key[0]}")
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
