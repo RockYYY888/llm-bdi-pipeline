@@ -83,16 +83,14 @@ class DFABuilder:
         """Count number of states in DFA"""
         import re
         # Match state declarations like: node [shape = doublecircle]; 2;
-        state_pattern = r'\b(\d+)\b'
+        # Only count lines that have the pattern: node [...]; <number>;
+        state_pattern = r'node\s+\[.*?\];\s*(\d+);'
         states = set()
-        
+
         for line in dfa_dot.split('\n'):
-            # Skip init and label lines
-            if 'init' in line or 'label' in line or '->' in line:
-                continue
             matches = re.findall(state_pattern, line)
             states.update(matches)
-        
+
         return len(states)
     
     def _count_transitions(self, dfa_dot: str) -> int:
