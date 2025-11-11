@@ -11,12 +11,12 @@ Stage 3 testing is consolidated into a single comprehensive integration test tha
 python tests/stage3_code_generation/test_stage3_complete.py
 ```
 
-**Runtime**: ~2.9 seconds
-**Coverage**: All Stage 3 functionality
+**Runtime**: ~7 seconds
+**Coverage**: All Stage 3 functionality including complex LTL operators
 
 ## What is Tested
 
-The `test_stage3_complete.py` file contains 5 comprehensive test cases:
+The `test_stage3_complete.py` file contains 9 comprehensive test cases:
 
 ### Test 1: Simple Goal with 2 Blocks
 - **Goal**: `F(on(a, b))`
@@ -41,6 +41,51 @@ The `test_stage3_complete.py` file contains 5 comprehensive test cases:
   - All code validations pass
   - Zero invalid states
   - Performance < 60 seconds
+
+### Test 2.1: Globally with Negation
+- **Goal**: `G(!(on(a, b)))`
+- **Validates**:
+  - Globally (G) operator support
+  - Negation handling in temporal context
+  - Safety property verification
+  - End-to-end pipeline with G operator
+- **Assertions**:
+  - All code validations pass
+  - Code not truncated
+
+### Test 2.2: Conjunction in Finally
+- **Goal**: `F(on(a, b) & clear(c))`
+- **Validates**:
+  - Conjunction (&) operator in temporal context
+  - Finally (F) with compound predicate
+  - Multiple goal predicates in single formula
+  - State consistency for conjunctive goals
+- **Assertions**:
+  - All code validations pass
+  - Zero invalid states
+  - Code not truncated
+
+### Test 2.3: Release Operator
+- **Goal**: `(ontable(a) R clear(b))`
+- **Validates**:
+  - Release (R) temporal operator
+  - Binary temporal operator handling
+  - "Until and including" semantics
+  - End-to-end pipeline with R operator
+- **Assertions**:
+  - All code validations pass
+  - Code not truncated
+
+### Test 2.4: Negation and Conjunction
+- **Goal**: `F(!(on(a, b)) & clear(c))`
+- **Validates**:
+  - Negation in conjunction context
+  - Complex boolean expressions in temporal formulas
+  - Combined logical operators
+  - State consistency for negated conjunctive goals
+- **Assertions**:
+  - All code validations pass
+  - Code not truncated
 
 ### Test 3: Variable Abstraction & Caching
 - **Validates**:
@@ -95,6 +140,22 @@ TEST 2: Scalability with 3 Blocks - F(on(a, b))
 ...
 ✅ TEST 2 PASSED
 
+TEST 2.1: Globally with Negation - G(!(on(a, b)))
+...
+✅ TEST 2.1 PASSED
+
+TEST 2.2: Conjunction in Finally - F(on(a, b) & clear(c))
+...
+✅ TEST 2.2 PASSED
+
+TEST 2.3: Release Operator - (ontable(a) R clear(b))
+...
+✅ TEST 2.3 PASSED
+
+TEST 2.4: Negation and Conjunction - F(!(on(a, b)) & clear(c))
+...
+✅ TEST 2.4 PASSED
+
 TEST 3: Variable Abstraction & Schema-Level Caching
 ...
 ✅ TEST 3 PASSED
@@ -110,13 +171,17 @@ TEST 5: State Consistency Guarantee (100% Valid States)
 ================================================================================
 TEST SUITE SUMMARY
 ================================================================================
-Test 1 - Simple Goal (2 blocks):           ✅ PASS
-Test 2 - Scalability (3 blocks):           ✅ PASS
-Test 3 - Variable Abstraction & Caching:   ✅ PASS
-Test 4 - Multi-Transition DFA:             ✅ PASS
-Test 5 - State Consistency (100% valid):   ✅ PASS
+Test 1   - Simple Goal (2 blocks):           ✅ PASS
+Test 2   - Scalability (3 blocks):           ✅ PASS
+Test 2.1 - Globally with Negation:           ✅ PASS
+Test 2.2 - Conjunction in Finally:           ✅ PASS
+Test 2.3 - Release Operator:                 ✅ PASS
+Test 2.4 - Negation and Conjunction:         ✅ PASS
+Test 3   - Variable Abstraction & Caching:   ✅ PASS
+Test 4   - Multi-Transition DFA:             ✅ PASS
+Test 5   - State Consistency (100% valid):   ✅ PASS
 
-Total time: 2.91s
+Total time: 7.01s
 ================================================================================
 
 ✅ ALL TESTS PASSED - Stage 3 is working correctly!

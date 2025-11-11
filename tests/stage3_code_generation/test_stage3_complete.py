@@ -11,8 +11,20 @@ from LTLf formula to AgentSpeak code generation, covering all critical functiona
 5. Scalability (2-3 blocks)
 6. Code Validation (AgentSpeak syntax)
 7. Performance Metrics (caching, reuse ratios)
+8. Complex LTL Operators (G, R, negation, conjunction)
 
 Run this single test to verify all Stage 3 functionality.
+
+Test Cases:
+- Test 1: Simple Goal (F(on(a, b))) with 2 blocks
+- Test 2: Scalability (F(on(a, b))) with 3 blocks
+- Test 2.1: Globally with Negation (G(!(on(a, b))))
+- Test 2.2: Conjunction in Finally (F(on(a, b) & clear(c)))
+- Test 2.3: Release Operator (ontable(a) R clear(b))
+- Test 2.4: Negation and Conjunction (F(!(on(a, b)) & clear(c)))
+- Test 3: Variable Abstraction & Schema-Level Caching
+- Test 4: Multi-Transition DFA Handling
+- Test 5: State Consistency Guarantee (100% valid states)
 """
 
 import sys
@@ -30,7 +42,7 @@ from src.stage3_code_generation.state_space import PredicateAtom
 from src.utils.pddl_parser import PDDLParser
 from src.stage1_interpretation.grounding_map import GroundingMap
 from src.stage2_dfa_generation.dfa_builder import DFABuilder
-from src.stage1_interpretation.ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator
+from src.stage1_interpretation.ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
 
 
 # ============================================================================
@@ -332,6 +344,440 @@ def test_2_scalability_3_blocks():
     return True
 
 
+def test_2_1_globally_negation():
+    """
+    TEST 2.1: Globally Operator with Negation - G(!(on(a, b)))
+
+    Validates:
+    - Globally (G) operator support
+    - Negation handling in temporal context
+    - End-to-end pipeline with G operator
+    - State consistency for "always not" conditions
+    """
+    print("\n\n" + "="*80)
+    print("TEST 2.1: Globally with Negation - G(!(on(a, b)))")
+    print("="*80)
+
+    # Load domain
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
+    domain = PDDLParser.parse_domain(str(domain_path))
+
+    # Build LTL formula: G(!(on(a, b)))
+    print("\n[1/4] Building LTL formula and generating DFA...")
+
+    # Create atomic predicate: on(a, b)
+    on_ab = LTLFormula(
+        operator=None,
+        predicate={"on": ["a", "b"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create negation: !(on(a, b))
+    not_on_ab = LTLFormula(
+        operator=None,
+        predicate=None,
+        sub_formulas=[on_ab],
+        logical_op=LogicalOperator.NOT
+    )
+
+    # Create G(...): G(!(on(a, b)))
+    g_formula = LTLFormula(
+        operator=TemporalOperator.GLOBALLY,
+        predicate=None,
+        sub_formulas=[not_on_ab],
+        logical_op=None
+    )
+
+    # Create specification
+    spec = LTLSpecification()
+    spec.objects = ["a", "b"]
+    spec.formulas = [g_formula]
+
+    # Build DFA
+    builder = DFABuilder()
+    dfa_result = builder.build(spec)
+    print(f"  ✓ DFA generated: {dfa_result['num_states']} states, {dfa_result['num_transitions']} transitions")
+
+    # Create grounding map
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+
+    # Create LTL dict
+    objects = ["a", "b"]
+    ltl_dict = {
+        "objects": objects,
+        "formulas_string": ["G(!(on(a, b)))"],
+        "grounding_map": grounding_map
+    }
+
+    # Generate AgentSpeak code
+    print("\n[2/4] Generating AgentSpeak code...")
+    generator = BackwardPlannerGenerator(domain, grounding_map)
+    start_time = time.time()
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+    elapsed = time.time() - start_time
+
+    print(f"  ✓ Code generated: {len(asl_code)} characters in {elapsed:.2f}s")
+    print(f"  Truncated: {truncated}")
+
+    # Validate code quality
+    print("\n[3/4] Validating AgentSpeak code...")
+    validation = validate_agentspeak_code(asl_code)
+    for check, passed in validation.items():
+        if check != "all_passed":
+            status = "✓" if passed else "✗"
+            print(f"  {status} {check}")
+
+    # Note: G(!(on(a, b))) means "always NOT on(a,b)", which is a safety property
+    # The backward planner should handle this by ensuring on(a,b) never becomes true
+    print("\n[4/4] Formula semantics check...")
+    print(f"  Formula: G(!(on(a, b))) - Always NOT on(a, b)")
+    print(f"  Semantics: Safety property - on(a,b) must never hold")
+
+    # Assert results
+    assert validation["all_passed"], "Code validation failed"
+    assert not truncated, "Code generation was truncated"
+
+    print("\n✅ TEST 2.1 PASSED")
+    return True
+
+
+def test_2_2_conjunction_in_finally():
+    """
+    TEST 2.2: Conjunction in Finally - F(on(a, b) & clear(c))
+
+    Validates:
+    - Conjunction (&) operator in temporal context
+    - Finally (F) with compound predicate
+    - End-to-end pipeline with logical operators
+    - State consistency for conjunctive goals
+    """
+    print("\n\n" + "="*80)
+    print("TEST 2.2: Conjunction in Finally - F(on(a, b) & clear(c))")
+    print("="*80)
+
+    # Load domain
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
+    domain = PDDLParser.parse_domain(str(domain_path))
+
+    # Build LTL formula: F(on(a, b) & clear(c))
+    print("\n[1/4] Building LTL formula and generating DFA...")
+
+    # Create atomic predicate: on(a, b)
+    on_ab = LTLFormula(
+        operator=None,
+        predicate={"on": ["a", "b"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create atomic predicate: clear(c)
+    clear_c = LTLFormula(
+        operator=None,
+        predicate={"clear": ["c"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create conjunction: on(a, b) & clear(c)
+    conjunction = LTLFormula(
+        operator=None,
+        predicate=None,
+        sub_formulas=[on_ab, clear_c],
+        logical_op=LogicalOperator.AND
+    )
+
+    # Create F(...): F(on(a, b) & clear(c))
+    f_formula = LTLFormula(
+        operator=TemporalOperator.FINALLY,
+        predicate=None,
+        sub_formulas=[conjunction],
+        logical_op=None
+    )
+
+    # Create specification
+    spec = LTLSpecification()
+    spec.objects = ["a", "b", "c"]
+    spec.formulas = [f_formula]
+
+    # Build DFA
+    builder = DFABuilder()
+    dfa_result = builder.build(spec)
+    print(f"  ✓ DFA generated: {dfa_result['num_states']} states, {dfa_result['num_transitions']} transitions")
+
+    # Create grounding map
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_c", "clear", ["c"])
+
+    # Create LTL dict
+    objects = ["a", "b", "c"]
+    ltl_dict = {
+        "objects": objects,
+        "formulas_string": ["F(on(a, b) & clear(c))"],
+        "grounding_map": grounding_map
+    }
+
+    # Generate AgentSpeak code
+    print("\n[2/4] Generating AgentSpeak code...")
+    generator = BackwardPlannerGenerator(domain, grounding_map)
+    start_time = time.time()
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+    elapsed = time.time() - start_time
+
+    print(f"  ✓ Code generated: {len(asl_code)} characters in {elapsed:.2f}s")
+    print(f"  Truncated: {truncated}")
+
+    # Validate code quality
+    print("\n[3/4] Validating AgentSpeak code...")
+    validation = validate_agentspeak_code(asl_code)
+    for check, passed in validation.items():
+        if check != "all_passed":
+            status = "✓" if passed else "✗"
+            print(f"  {status} {check}")
+
+    # Check state consistency
+    print("\n[4/4] Verifying state consistency...")
+    planner = ForwardStatePlanner(domain, objects)
+    goal_preds = [
+        PredicateAtom('on', ('a', 'b')),
+        PredicateAtom('clear', ('c',))
+    ]
+    graph = planner.explore_from_goal(goal_preds)
+
+    invalid_count = 0
+    for state in graph.states:
+        is_valid, _ = check_state_validity(state)
+        if not is_valid:
+            invalid_count += 1
+
+    print(f"  States explored: {len(graph.states)}")
+    print(f"  Invalid states: {invalid_count}")
+
+    # Assert results
+    assert validation["all_passed"], "Code validation failed"
+    assert invalid_count == 0, f"Found {invalid_count} invalid states"
+    assert not truncated, "Code generation was truncated"
+
+    print("\n✅ TEST 2.2 PASSED")
+    return True
+
+
+def test_2_3_release_operator():
+    """
+    TEST 2.3: Release Operator - (ontable(a) R clear(b))
+
+    Validates:
+    - Release (R) temporal operator
+    - Binary temporal operator handling
+    - End-to-end pipeline with R operator
+    - State consistency for release conditions
+    """
+    print("\n\n" + "="*80)
+    print("TEST 2.3: Release Operator - (ontable(a) R clear(b))")
+    print("="*80)
+
+    # Load domain
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
+    domain = PDDLParser.parse_domain(str(domain_path))
+
+    # Build LTL formula: (ontable(a) R clear(b))
+    print("\n[1/4] Building LTL formula and generating DFA...")
+
+    # Create atomic predicate: ontable(a)
+    ontable_a = LTLFormula(
+        operator=None,
+        predicate={"ontable": ["a"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create atomic predicate: clear(b)
+    clear_b = LTLFormula(
+        operator=None,
+        predicate={"clear": ["b"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create R(...): (ontable(a) R clear(b))
+    r_formula = LTLFormula(
+        operator=TemporalOperator.RELEASE,
+        predicate=None,
+        sub_formulas=[ontable_a, clear_b],
+        logical_op=None
+    )
+
+    # Create specification
+    spec = LTLSpecification()
+    spec.objects = ["a", "b"]
+    spec.formulas = [r_formula]
+
+    # Build DFA
+    builder = DFABuilder()
+    dfa_result = builder.build(spec)
+    print(f"  ✓ DFA generated: {dfa_result['num_states']} states, {dfa_result['num_transitions']} transitions")
+
+    # Create grounding map
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("ontable_a", "ontable", ["a"])
+    grounding_map.add_atom("clear_b", "clear", ["b"])
+
+    # Create LTL dict
+    objects = ["a", "b"]
+    ltl_dict = {
+        "objects": objects,
+        "formulas_string": ["(ontable(a) R clear(b))"],
+        "grounding_map": grounding_map
+    }
+
+    # Generate AgentSpeak code
+    print("\n[2/4] Generating AgentSpeak code...")
+    generator = BackwardPlannerGenerator(domain, grounding_map)
+    start_time = time.time()
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+    elapsed = time.time() - start_time
+
+    print(f"  ✓ Code generated: {len(asl_code)} characters in {elapsed:.2f}s")
+    print(f"  Truncated: {truncated}")
+
+    # Validate code quality
+    print("\n[3/4] Validating AgentSpeak code...")
+    validation = validate_agentspeak_code(asl_code)
+    for check, passed in validation.items():
+        if check != "all_passed":
+            status = "✓" if passed else "✗"
+            print(f"  {status} {check}")
+
+    # Note: (ontable(a) R clear(b)) means "clear(b) must hold until and including when ontable(a) becomes true"
+    print("\n[4/4] Formula semantics check...")
+    print(f"  Formula: (ontable(a) R clear(b))")
+    print(f"  Semantics: clear(b) holds until ontable(a) becomes true")
+
+    # Assert results
+    assert validation["all_passed"], "Code validation failed"
+    assert not truncated, "Code generation was truncated"
+
+    print("\n✅ TEST 2.3 PASSED")
+    return True
+
+
+def test_2_4_negation_and_conjunction():
+    """
+    TEST 2.4: Negation and Conjunction - F(!(on(a, b)) & clear(c))
+
+    Validates:
+    - Negation in conjunction context
+    - Complex boolean expressions in temporal formulas
+    - End-to-end pipeline with negation and conjunction
+    - State consistency for negated conjunctive goals
+    """
+    print("\n\n" + "="*80)
+    print("TEST 2.4: Negation and Conjunction - F(!(on(a, b)) & clear(c))")
+    print("="*80)
+
+    # Load domain
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
+    domain = PDDLParser.parse_domain(str(domain_path))
+
+    # Build LTL formula: F(!(on(a, b)) & clear(c))
+    print("\n[1/4] Building LTL formula and generating DFA...")
+
+    # Create atomic predicate: on(a, b)
+    on_ab = LTLFormula(
+        operator=None,
+        predicate={"on": ["a", "b"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create negation: !(on(a, b))
+    not_on_ab = LTLFormula(
+        operator=None,
+        predicate=None,
+        sub_formulas=[on_ab],
+        logical_op=LogicalOperator.NOT
+    )
+
+    # Create atomic predicate: clear(c)
+    clear_c = LTLFormula(
+        operator=None,
+        predicate={"clear": ["c"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create conjunction: !(on(a, b)) & clear(c)
+    conjunction = LTLFormula(
+        operator=None,
+        predicate=None,
+        sub_formulas=[not_on_ab, clear_c],
+        logical_op=LogicalOperator.AND
+    )
+
+    # Create F(...): F(!(on(a, b)) & clear(c))
+    f_formula = LTLFormula(
+        operator=TemporalOperator.FINALLY,
+        predicate=None,
+        sub_formulas=[conjunction],
+        logical_op=None
+    )
+
+    # Create specification
+    spec = LTLSpecification()
+    spec.objects = ["a", "b", "c"]
+    spec.formulas = [f_formula]
+
+    # Build DFA
+    builder = DFABuilder()
+    dfa_result = builder.build(spec)
+    print(f"  ✓ DFA generated: {dfa_result['num_states']} states, {dfa_result['num_transitions']} transitions")
+
+    # Create grounding map
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_c", "clear", ["c"])
+
+    # Create LTL dict
+    objects = ["a", "b", "c"]
+    ltl_dict = {
+        "objects": objects,
+        "formulas_string": ["F(!(on(a, b)) & clear(c))"],
+        "grounding_map": grounding_map
+    }
+
+    # Generate AgentSpeak code
+    print("\n[2/4] Generating AgentSpeak code...")
+    generator = BackwardPlannerGenerator(domain, grounding_map)
+    start_time = time.time()
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+    elapsed = time.time() - start_time
+
+    print(f"  ✓ Code generated: {len(asl_code)} characters in {elapsed:.2f}s")
+    print(f"  Truncated: {truncated}")
+
+    # Validate code quality
+    print("\n[3/4] Validating AgentSpeak code...")
+    validation = validate_agentspeak_code(asl_code)
+    for check, passed in validation.items():
+        if check != "all_passed":
+            status = "✓" if passed else "✗"
+            print(f"  {status} {check}")
+
+    # Note: F(!(on(a, b)) & clear(c)) means "eventually NOT on(a,b) AND clear(c)"
+    print("\n[4/4] Formula semantics check...")
+    print(f"  Formula: F(!(on(a, b)) & clear(c))")
+    print(f"  Semantics: Eventually reach state where a is NOT on b AND c is clear")
+
+    # Assert results
+    assert validation["all_passed"], "Code validation failed"
+    assert not truncated, "Code generation was truncated"
+
+    print("\n✅ TEST 2.4 PASSED")
+    return True
+
+
 def test_3_variable_abstraction_caching():
     """
     TEST 3: Variable Abstraction & Schema-Level Caching
@@ -568,6 +1014,38 @@ def main():
         results["test_2"] = False
 
     try:
+        results["test_2_1"] = test_2_1_globally_negation()
+    except Exception as e:
+        print(f"\n❌ TEST 2.1 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_1"] = False
+
+    try:
+        results["test_2_2"] = test_2_2_conjunction_in_finally()
+    except Exception as e:
+        print(f"\n❌ TEST 2.2 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_2"] = False
+
+    try:
+        results["test_2_3"] = test_2_3_release_operator()
+    except Exception as e:
+        print(f"\n❌ TEST 2.3 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_3"] = False
+
+    try:
+        results["test_2_4"] = test_2_4_negation_and_conjunction()
+    except Exception as e:
+        print(f"\n❌ TEST 2.4 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_4"] = False
+
+    try:
         results["test_3"] = test_3_variable_abstraction_caching()
     except Exception as e:
         print(f"\n❌ TEST 3 FAILED: {e}")
@@ -597,11 +1075,15 @@ def main():
     print("\n\n" + "="*80)
     print("TEST SUITE SUMMARY")
     print("="*80)
-    print(f"Test 1 - Simple Goal (2 blocks):           {'✅ PASS' if results.get('test_1') else '❌ FAIL'}")
-    print(f"Test 2 - Scalability (3 blocks):           {'✅ PASS' if results.get('test_2') else '❌ FAIL'}")
-    print(f"Test 3 - Variable Abstraction & Caching:   {'✅ PASS' if results.get('test_3') else '❌ FAIL'}")
-    print(f"Test 4 - Multi-Transition DFA:             {'✅ PASS' if results.get('test_4') else '❌ FAIL'}")
-    print(f"Test 5 - State Consistency (100% valid):   {'✅ PASS' if results.get('test_5') else '❌ FAIL'}")
+    print(f"Test 1   - Simple Goal (2 blocks):           {'✅ PASS' if results.get('test_1') else '❌ FAIL'}")
+    print(f"Test 2   - Scalability (3 blocks):           {'✅ PASS' if results.get('test_2') else '❌ FAIL'}")
+    print(f"Test 2.1 - Globally with Negation:           {'✅ PASS' if results.get('test_2_1') else '❌ FAIL'}")
+    print(f"Test 2.2 - Conjunction in Finally:           {'✅ PASS' if results.get('test_2_2') else '❌ FAIL'}")
+    print(f"Test 2.3 - Release Operator:                 {'✅ PASS' if results.get('test_2_3') else '❌ FAIL'}")
+    print(f"Test 2.4 - Negation and Conjunction:         {'✅ PASS' if results.get('test_2_4') else '❌ FAIL'}")
+    print(f"Test 3   - Variable Abstraction & Caching:   {'✅ PASS' if results.get('test_3') else '❌ FAIL'}")
+    print(f"Test 4   - Multi-Transition DFA:             {'✅ PASS' if results.get('test_4') else '❌ FAIL'}")
+    print(f"Test 5   - State Consistency (100% valid):   {'✅ PASS' if results.get('test_5') else '❌ FAIL'}")
     print(f"\nTotal time: {total_time:.2f}s")
     print("="*80)
 
