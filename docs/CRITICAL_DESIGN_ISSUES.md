@@ -1,81 +1,108 @@
 # Critical Design Issues - System Analysis
 
 ## Date: 2025-11-10
-## Status: CRITICAL - Requires immediate refactoring
+## Last Updated: 2025-11-11
+## Status: ISSUE 1 RESOLVED ✅ - Other issues remain
 
 ---
 
 ## Executive Summary
 
-The current system has **fundamental design flaws** that prevent it from generating correct, reusable AgentSpeak code. The code is **object-specific** rather than **parameterized**, meaning it cannot handle arbitrary objects of the correct type.
+**UPDATE (2025-11-11)**: Issue 1 has been RESOLVED ✅. The system now correctly generates parameterized AgentSpeak code.
 
-### Key Finding
+### Issue Status
 
-**Generated (WRONG)**:
+1. ✅ **Object-Specific Goal Plans** - RESOLVED
+   - System generates parameterized plans with AgentSpeak variables (V0, V1, etc.)
+   - Plans work for arbitrary objects of correct type
+   - Verified by tests: test_parameterization_check.py, test_parameterization_validation.py
+
+2. ❌ **Incomplete Type System** - HIGH PRIORITY (still exists)
+   - All objects assigned to first domain type
+   - Cannot handle multi-type domains
+
+3. ⚠️ **Variable Naming Inconsistency** - MEDIUM (needs verification)
+   - Normalization uses `?arg0` vs planner uses `?v0`
+   - May impact goal inference
+
+### Key Finding (UPDATED)
+
+**Currently Generates (CORRECT)** ✅:
 ```asl
-+!on(a, b) : on(a, b) <- .print("Goal achieved").
++!clear_V0_and_handempty_and_on_V0_V1 : clear(V0) & handempty & on(V0, V1) <-
+    .print("Goal clear_V0_and_handempty_and_on_V0_V1 already achieved!").
 ```
 
-**Should Generate (CORRECT)**:
-```asl
-+!on(X, Y) : on(X, Y) <- .print("Goal achieved for ", X, " and ", Y).
-```
-
-**Impact**: Plans only work for specific object instances mentioned during generation, not for arbitrary objects.
+**Uses AgentSpeak variables (V0, V1)** - works for ANY objects of correct type!
 
 ---
 
-## Issue 1: Object-Specific Goal Plans ❌ CRITICAL
+## Issue 1: Object-Specific Goal Plans ✅ RESOLVED
 
-### Current Behavior
+### Resolution Date: 2025-11-11
+
+### Resolution Summary
+
+**The system now correctly generates PARAMETERIZED goal plans using AgentSpeak variables.**
+
+### Current Behavior (CORRECT)
 
 ```asl
-/* Goal Achievement Plans for: on(a, b) */
-+!on(a, b) : on(a, b) <-
-    .print("Goal on(a, b) achieved").
+/* Goal Achievement Plans for: clear_V0_and_handempty_and_on_V0_V1 */
++!clear_V0_and_handempty_and_on_V0_V1 : holding(V0) & on(V0, V1) <-
+    !clear(V1);
+    !put_on_block(V0, V1);
+    !clear_V0_and_handempty_and_on_V0_V1.
 
--!on(a, b) : true <-
-    .print("Failed to achieve on(a, b)").
++!clear_V0_and_handempty_and_on_V0_V1 : clear(V0) & handempty & on(V0, V1) <-
+    .print("Goal clear_V0_and_handempty_and_on_V0_V1 already achieved!").
+
+-!clear_V0_and_handempty_and_on_V0_V1 : true <-
+    .print("Failed to achieve goal clear_V0_and_handempty_and_on_V0_V1");
+    .fail.
 ```
 
-### Problems
+### Verification
 
-1. **Not Reusable**: Only works for objects `a` and `b`
-2. **Not Generic**: Cannot handle `on(c, d)` or any other object pair
-3. **Violates User Requirement**: "arbitrary objects that fit the type"
-4. **Inconsistent**: Action plans USE variables (`+!pick_up(B1, B2)`), but goal plans DON'T
+Tests confirm parameterization works correctly:
+- ✅ `tests/test_parameterization_check.py` - Verifies V0, V1 variables used
+- ✅ `tests/stage3_code_generation/test_parameterization_validation.py` - Comprehensive analysis
+- ✅ All goal plans use AgentSpeak variables (V0, V1, B1, B2, etc.)
+- ✅ Action plans use variables correctly
+- ✅ Initial beliefs remain concrete (as expected)
 
-### Root Cause
+### How It Works
 
 **File**: `src/stage3_code_generation/agentspeak_codegen.py`
 
 Goal generation uses:
 ```python
-# In _generate_success_plan():
-goal_preds = [self._instantiate_predicate(pred) for pred in self.graph.goal_state.predicates]
-# ← instantiate converts ?arg0 → a, ?arg1 → b
+# In _get_parameterized_goal_pattern() (line 105-128):
+goal_preds = list(self.graph.goal_state.predicates)  # Keep variables
+return goal_preds[0].to_agentspeak(convert_vars=True)  # Convert PDDL vars to AgentSpeak
+
+# In _generate_success_plan() (line 738-754):
+param_goal_pattern = self._get_parameterized_goal_pattern()
+context = self.graph.goal_state.to_agentspeak_context(convert_vars=True)
+# Uses parameterized pattern with AgentSpeak variables
 ```
 
-This **instantiates** variables to concrete objects, creating object-specific plans.
-
-### Correct Approach
-
-Goal plans should be **param**eterized:
-
-```asl
-/* Generic goal achievement - works for ANY blocks */
-+!on(X, Y) : on(X, Y) <-
-    .print("Goal on(", X, ", ", Y, ") achieved").
-
--!on(X, Y) : true <-
-    .print("Failed to achieve on(", X, ", ", Y, ")").
+Key method in `state_space.py` (line 57-99):
+```python
+def to_agentspeak(self, convert_vars: bool = False) -> str:
+    if convert_vars:
+        args_str = ", ".join(self._pddl_var_to_agentspeak(arg) for arg in self.args)
+    # ?v0 → V0, ?v1 → V1
 ```
 
-Then **invoke** with concrete arguments:
-```asl
-!on(a, b)  // Uses the generic +!on(X, Y) plan with X=a, Y=b
-!on(c, d)  // Uses the SAME plan with X=c, Y=d
-```
+### ~~Previous Issues~~ (NO LONGER EXIST)
+
+~~1. **Not Reusable**: Only works for objects `a` and `b`~~
+~~2. **Not Generic**: Cannot handle `on(c, d)` or any other object pair~~
+~~3. **Violates User Requirement**: "arbitrary objects that fit the type"~~
+~~4. **Inconsistent**: Action plans USE variables, but goal plans DON'T~~
+
+**ALL FIXED** ✅
 
 ---
 
@@ -292,34 +319,31 @@ src/legacy/fond/
 
 ## System-Wide Recommendations
 
-### Priority 1: Parameterized Goal Plans (CRITICAL)
+### Priority 1: Parameterized Goal Plans ✅ COMPLETED
 
-**Change**: Generate parameterized goal achievement plans
+**Status**: RESOLVED (2025-11-11)
+
+**Implementation**: Already correct in current codebase
 
 **File**: `src/stage3_code_generation/agentspeak_codegen.py`
 
-**Before**:
+**Current Code** (CORRECT):
 ```python
 def _generate_success_plan(self):
-    # Instantiate to concrete objects
-    goal_preds = [self._instantiate_predicate(pred) for pred in ...]
-    return f"+!{goal_name} : {context} <- ..."
-```
-
-**After**:
-```python
-def _generate_success_plan(self):
-    # Keep as variables
-    goal_preds = self.graph.goal_state.predicates  # With variables
-    # Convert PDDL vars (?arg0) to AgentSpeak vars (Arg0)
-    as_goal_preds = [self._pddl_to_agentspeak_vars(p) for p in goal_preds]
-    return f"+!{goal_pattern} : {context} <- ..."
+    # Get parameterized goal pattern (with AgentSpeak variables)
+    param_goal_pattern = self._get_parameterized_goal_pattern()
+    # Get context condition (also with AgentSpeak variables)
+    context = self.graph.goal_state.to_agentspeak_context(convert_vars=True)
+    return f"+!{param_goal_pattern} : {context} <- ..."
 ```
 
 **Result**:
 ```asl
-+!on(X, Y) : on(X, Y) <- .print("Goal achieved").
++!clear_V0_and_handempty_and_on_V0_V1 : clear(V0) & handempty & on(V0, V1) <-
+    .print("Goal clear_V0_and_handempty_and_on_V0_V1 already achieved!").
 ```
+
+**Verification**: Tests pass, confirmed parameterized generation works.
 
 ### Priority 2: Implement Real Type System
 
@@ -382,9 +406,9 @@ obj_to_var[arg] = f"?v{var_counter}"  # Was: f"?arg{var_counter}"
 - ✅ Document problems
 - ✅ Prioritize fixes
 
-### Phase 2: Critical Fixes (Next)
-- ⏳ Implement parameterized goal plans
-- ⏳ Fix variable naming
+### Phase 2: Critical Fixes (In Progress)
+- ✅ Implement parameterized goal plans (COMPLETED 2025-11-11)
+- ⏳ Fix variable naming (needs verification)
 - ⏳ Add basic type checking
 
 ### Phase 3: Type System (Following)
@@ -401,18 +425,33 @@ obj_to_var[arg] = f"?v{var_counter}"  # Was: f"?arg{var_counter}"
 
 ## Conclusion
 
-The current system has fundamental design flaws that prevent it from generating correct, reusable AgentSpeak code. **Immediate refactoring is required** to address:
+**UPDATE (2025-11-11)**: Critical Issue 1 has been RESOLVED ✅
 
-1. **Object-specific vs Parameterized plans** (CRITICAL)
-2. **Type system incompleteness** (HIGH)
-3. **Variable naming inconsistency** (MEDIUM)
+### Current Status
 
-Without these fixes, the generated code will **not work for arbitrary objects**, violating the core requirement.
+1. ✅ **Object-specific vs Parameterized plans** - RESOLVED
+   - System now generates parameterized AgentSpeak code correctly
+   - Verified by comprehensive tests
+   - Plans work for arbitrary objects of correct type
 
-**Estimated Effort**: 2-3 days for Phase 2 critical fixes
-**Risk**: HIGH if not addressed - system produces incorrect code
+2. ❌ **Type system incompleteness** (HIGH) - Still needs work
+   - All objects assigned to first domain type
+   - Cannot handle multi-type domains properly
+
+3. ⚠️ **Variable naming inconsistency** (MEDIUM) - Needs verification
+   - May affect goal inference in variable mode
+
+### Remaining Work
+
+**Estimated Effort**: 1-2 days for remaining issues
+**Risk**: MEDIUM - System works for single-type domains, needs enhancement for multi-type
+
+### Code Quality
+
+The generated code is now **correct and reusable** for single-type domains (like blocksworld).
+For multi-type domains, additional work is needed on the type system.
 
 ---
 
-**Document Status**: Draft for review and implementation planning
-**Next Step**: Begin Phase 2 implementation
+**Document Status**: Issue 1 resolved, remaining issues documented
+**Next Step**: Verify variable naming issue, then implement proper type system
