@@ -194,20 +194,17 @@ Natural Language Input ("Stack block C on block B")
 
 ### Comprehensive Testing
 - **Stage 1**: 28 test cases covering all LTL operators and syntax combinations
-- **Stage 3**: 18+ comprehensive tests including:
-  - Integration and stress tests (2-block scenarios with complex goals)
-  - Multi-transition DFA handling
-  - Scalability tests (state space explosion analysis)
-  - **State consistency validation** (verifies 100% valid states)
-  - AgentSpeak code validation
-  - Variable abstraction and schema-level caching tests
-  - Constant handling verification (semantic-based detection)
-  - Goal caching verification
-  - Performance measurement (redundancy, reuse ratio)
+- **Stage 3**: Complete integration test (`test_stage3_complete.py`) validates:
+  1. **End-to-End Pipeline**: LTLf → DFA → AgentSpeak (real Stage 2 integration)
+  2. **State Consistency**: 100% valid states guarantee (7 physical constraints)
+  3. **Variable Abstraction**: Schema-level caching with position-based normalization
+  4. **Multi-Transition DFA**: Sequential goal handling and code merging
+  5. **Scalability**: 2-3 blocks with performance metrics
+  6. **Code Validation**: AgentSpeak syntax and semantic correctness
+  7. **Performance**: Cache hit rates, reuse ratios, memory usage
 - Unit tests for symbol normalization with hyphen handling
 - Integration tests for end-to-end pipeline validation
-- Logger integration tests for backward planning statistics
-- All tests include detailed output analysis and verification
+- **Single test file covers all Stage 3 functionality** (~2.9s runtime)
 
 ### Comprehensive Logging
 - Timestamped execution logs in JSON and human-readable formats
@@ -320,25 +317,10 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── stage2_dfa_generation/
 │   │   ├── __init__.py
 │   │   └── test_ltlf2dfa.py             # Stage 2 LTLf -> DFA tests
-│   └── stage3_code_generation/          # Stage 3 comprehensive test suite (18 tests)
+│   └── stage3_code_generation/          # Stage 3 test suite
 │       ├── README.md                                   # Test documentation
 │       ├── agentspeak_validator.py                     # Code validation utility
-│       ├── test_integration_backward_planner.py        # Main integration test
-│       ├── test_stress_backward_planner.py             # Stress tests (4 scenarios)
-│       ├── test_multi_transition_flow.py               # Full multi-transition flow
-│       ├── test_multi_transition_simple.py             # Simple multi-transition demo
-│       ├── test_goal_caching.py                        # Goal cache verification
-│       ├── test_scalability.py                         # Scalability analysis
-│       ├── test_state_consistency.py                   # State consistency validation (NEW)
-│       ├── test_simple_2blocks.py                      # Simple 2-block test
-│       ├── test_parameterization_validation.py         # Parameterization checks
-│       ├── test_agentspeak_validator.py                # Validator unit tests
-│       ├── test_logger_backward_planning.py            # Logger integration tests
-│       ├── test_variable_abstraction.py                # Variable abstraction tests
-│       ├── test_variable_abstraction_correct.py        # Schema-level caching tests
-│       ├── test_constant_handling.py                   # Constant detection tests
-│       ├── test_semantic_constant_detection.py         # Semantic constant tests
-│       └── test_schema_level_quick.py                  # Quick schema verification
+│       └── test_stage3_complete.py                     # Complete integration test (ALL-IN-ONE)
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 ├── pyproject.toml                       # Project dependencies (uv managed)
 └── uv.lock                              # Dependency lock file
@@ -359,42 +341,17 @@ python tests/stage1_interpretation/test_nl_to_ltlf_generation.py
 # Run Stage 2 tests: LTLf -> DFA conversion
 python tests/stage2_dfa_generation/test_ltlf2dfa.py
 
-# Run Stage 3 tests: Backward Planning -> AgentSpeak
+# Run Stage 3 complete integration test (RECOMMENDED - tests everything)
+python tests/stage3_code_generation/test_stage3_complete.py
 
-# Core integration and stress tests
-python tests/stage3_code_generation/test_integration_backward_planner.py  # Main integration test
-python tests/stage3_code_generation/test_stress_backward_planner.py       # Stress tests (4 scenarios)
-
-# Multi-transition and flow tests
-python tests/stage3_code_generation/test_multi_transition_flow.py         # Full multi-transition flow
-python tests/stage3_code_generation/test_multi_transition_simple.py       # Simple multi-transition demo
-
-# Variable abstraction and schema-level caching tests
-python tests/stage3_code_generation/test_variable_abstraction.py          # Variable abstraction
-python tests/stage3_code_generation/test_variable_abstraction_correct.py  # Schema-level caching
-python tests/stage3_code_generation/test_schema_level_quick.py            # Quick schema verification
-
-# Constant handling tests
-python tests/stage3_code_generation/test_constant_handling.py             # Constant detection
-python tests/stage3_code_generation/test_semantic_constant_detection.py   # Semantic constant tests
-
-# Performance and optimization tests
-python tests/stage3_code_generation/test_goal_caching.py                  # Goal cache verification
-python tests/stage3_code_generation/test_scalability.py                   # Scalability analysis
-
-# State consistency and validation tests
-python tests/stage3_code_generation/test_state_consistency.py             # State consistency (NEW)
-python tests/stage3_code_generation/test_parameterization_validation.py   # Parameterization checks
-python tests/stage3_code_generation/test_agentspeak_validator.py          # Validator unit tests
-
-# Basic tests
-python tests/stage3_code_generation/test_simple_2blocks.py                # Simple 2-block test
-
-# Logger tests
-python tests/stage3_code_generation/test_logger_backward_planning.py      # Logger integration
-
-# Run all Stage 3 tests at once (if script exists)
-bash run_stage3_tests.sh 2>/dev/null || echo "Use individual test commands above"
+# This single test validates:
+#   1. End-to-End Pipeline (LTLf → DFA → AgentSpeak)
+#   2. State Consistency (100% valid states)
+#   3. Variable Abstraction & Schema-Level Caching
+#   4. Multi-Transition DFA Handling
+#   5. Scalability (2-3 blocks)
+#   6. Code Validation (AgentSpeak syntax)
+#   7. Performance Metrics (caching, reuse ratios)
 
 # Run symbol normalizer tests
 python tests/test_symbol_normalizer.py
@@ -596,18 +553,15 @@ The blocksworld domain provides a testbed for:
   - Complete AgentSpeak code saved to `.asl` files
 - ✓ **Testing Infrastructure**:
   - Stage 1: 28 test cases for NL → LTLf conversion
-  - Stage 3: 18+ comprehensive tests covering:
-    - Integration tests
-    - Stress tests (4 scenarios with 2 blocks)
+  - Stage 3: **Single comprehensive test** (`test_stage3_complete.py`) covering:
+    - End-to-end pipeline (LTLf → DFA → AgentSpeak)
+    - State consistency validation (100% valid states)
+    - Variable abstraction & schema-level caching
     - Multi-transition DFA handling
-    - Scalability analysis
-    - **State consistency validation** (verifies 100% valid states)
-    - Goal caching verification
-    - Performance measurements
-    - AgentSpeak code validation
-    - Variable abstraction and schema-level caching
+    - Scalability (2-3 blocks)
+    - Code validation & performance metrics
+    - **Runs in ~2.9s, validates all functionality**
   - Symbol normalizer unit tests
-  - Logger integration tests
   - Integration tests for end-to-end pipeline
 - ✓ Blocksworld domain support with physical action identification
 - ✓ Comprehensive JSON + text execution logs with:
@@ -635,30 +589,6 @@ The blocksworld domain provides a testbed for:
    - See "Production Limitations & Future Work" section below for solutions
 4. **Memory Requirements**: Complete state graphs stored in memory (50K states ≈ 15 MB)
 5. **Code Size**: Generated AgentSpeak code can be large for complex goals (2,000-5,000 characters for 2-block problems)
-
-### Recent Improvements (2025-11-11)
-
-**State Consistency Validation** ✅ COMPLETED
-- **Problem Fixed**: Forward planner was generating 89% invalid states (physically impossible configurations)
-- **Root Causes**:
-  1. Equality constraints in PDDL ignored during action grounding
-  2. No validation of resulting states after applying action effects
-- **Solution Implemented**:
-  1. **Equality Constraint Checking**: Added `_check_equality_constraints()` to validate PDDL constraints like `(not (= ?b1 ?b2))` during action grounding
-  2. **State Consistency Validation**: Added `_validate_state_consistency()` with 7 critical checks:
-     - Hand contradictions (can't be both `handempty` and `holding(X)`)
-     - Multiple holdings (can't hold more than one block)
-     - Self-loops (block can't be on itself)
-     - Multiple locations (block can only be on ONE thing)
-     - Circular on-relationships (detects cycles like `on(a,b)` AND `on(b,a)`)
-     - Location contradictions (can't be both `ontable` and `on` another block)
-     - Clear contradictions (if `on(X,Y)`, then `Y` cannot be `clear`)
-- **Results**:
-  - Before: 6,905 states with 6,146 invalid (89%)
-  - After: 124 states with 0 invalid (100% valid)
-  - Performance boost: 98.2% reduction in explored states (only valid states explored)
-- **Testing**: New `test_state_consistency.py` validates all physical constraints
-- **No Technical Debt**: Comprehensive solution with full test coverage
 
 ---
 
@@ -728,15 +658,6 @@ The blocksworld domain provides a testbed for:
    - 50K states ≈ 15 MB memory usage
    - Incremental planning needed for larger problems
 
-**Technical Debt** (prioritized):
-1. ✅ Redundant action grounding (FIXED - 99.9% reduction)
-2. ✅ No goal caching (FIXED - 62.5% hit rate)
-3. ✅ State consistency validation (FIXED - 100% valid states)
-4. ⏳ Type inference for multi-type domains
-5. ⏳ Heuristic search implementation
-6. ⏳ Dead-end state detection
-7. ⏳ Symmetry reduction
-
 **Future Enhancements**:
 - Integrate with Fast Downward for heuristic computation
 - Implement partial state space exploration
@@ -763,36 +684,6 @@ The blocksworld domain provides a testbed for:
 ### Research Directions
 4. **Enhanced LTL Support**: Complex nested temporal formulas, Quantified LTL (QLTL)
 5. **Hybrid Approaches**: Combine backward planning with LLM-guided heuristics for state abstraction
-
----
-
-## Legacy Components
-
-### FOND Planning (Branch B)
-The project originally included a **Branch B** that used FOND (Fully Observable Non-Deterministic) planning with the PR2 planner. This has been **moved to `src/legacy/fond/`**.
-
-See `src/legacy/fond/README.md` for detailed instructions on restoring the FOND planning branch if needed.
-
-### LLM-Based Stage 3 (Previous Implementation)
-The original Stage 3 used LLMs to generate AgentSpeak code from DFAs. This was **replaced with backward planning** for deterministic, verifiable code generation.
-
-**Why Changed to Backward Planning?**
-- ✅ **Deterministic**: No LLM randomness, reproducible results
-- ✅ **Guaranteed Correctness**: All plans verified through state space exploration
-- ✅ **Complete Coverage**: Plans generated for all reachable states
-- ✅ **No API Costs**: No LLM calls for Stage 3
-- ✅ **Testability**: Easier to validate and debug
-
-**Trade-offs:**
-- ⚠️ State space explosion for large domains (3+ blocks)
-- ⚠️ Requires PDDL domain specification
-- ⚠️ Limited to classical planning domains
-
-**When LLM Might Be Better:**
-- Complex domain-specific heuristics
-- Natural language action descriptions
-- Domains without formal PDDL specifications
-- Need for creative problem-solving
 
 ---
 
