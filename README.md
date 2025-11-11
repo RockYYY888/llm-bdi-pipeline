@@ -310,8 +310,8 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │           └── stage2_translation/      # LTLf to PDDL conversion
 ├── tests/                               # Test suites
 │   ├── __init__.py
-│   ├── test_symbol_normalizer.py        # Symbol normalizer unit tests
-│   ├── test_integration_pipeline.py     # End-to-end integration tests
+│   ├── utils/                           # Utils tests
+│   │   └── test_symbol_normalizer.py    # Symbol normalizer unit tests (6 test cases)
 │   ├── stage1_interpretation/
 │   │   └── test_nl_to_ltlf_generation.py    # Stage 1 NL -> LTLf tests (28 cases)
 │   ├── stage2_dfa_generation/
@@ -320,7 +320,7 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   └── stage3_code_generation/          # Stage 3 test suite
 │       ├── README.md                                   # Test documentation
 │       ├── agentspeak_validator.py                     # Code validation utility
-│       └── test_stage3_complete.py                     # Complete integration test (ALL-IN-ONE)
+│       └── test_stage3_complete.py                     # Complete integration test (5 test cases)
 ├── logs/                                # Execution logs (timestamped JSON + TXT)
 ├── pyproject.toml                       # Project dependencies (uv managed)
 └── uv.lock                              # Dependency lock file
@@ -353,11 +353,11 @@ python tests/stage3_code_generation/test_stage3_complete.py
 #   6. Code Validation (AgentSpeak syntax)
 #   7. Performance Metrics (caching, reuse ratios)
 
-# Run symbol normalizer tests
-python tests/test_symbol_normalizer.py
+# Run Stage 3 comprehensive integration test (RECOMMENDED)
+python tests/stage3_code_generation/test_stage3_complete.py
 
-# Run integration tests (end-to-end pipeline)
-python tests/test_integration_pipeline.py
+# Run utils tests (symbol normalizer)
+python tests/utils/test_symbol_normalizer.py
 ```
 
 ---
