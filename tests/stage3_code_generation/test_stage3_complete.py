@@ -506,6 +506,13 @@ def test_2_2_conjunction_in_finally():
     dfa_result = builder.build(spec)
     print(f"  ✓ DFA generated: {dfa_result['num_states']} states, {dfa_result['num_transitions']} transitions")
 
+    # Print DFA dot string for inspection
+    print("\n  DFA Structure (DOT format):")
+    print("  " + "-"*76)
+    for line in dfa_result['dfa_dot'].strip().split('\n'):
+        print(f"  {line}")
+    print("  " + "-"*76)
+
     # Create grounding map
     grounding_map = GroundingMap()
     grounding_map.add_atom("on_a_b", "on", ["a", "b"])
