@@ -629,10 +629,11 @@ The blocksworld domain provides a testbed for:
 1. **Single Domain**: Currently tested primarily with blocksworld domain
 2. **No Execution**: Pipeline stops after code generation (Stage 3)
 3. **State Space Explosion**: Backward planning explores complete state space
-   - 2 blocks: ~1,000 states
-   - 3 blocks: ~30,000+ states (exponential growth)
-   - See `docs/stage3_production_limitations.md` for detailed analysis
-4. **Memory Requirements**: Complete state graphs stored in memory
+   - 2 blocks: ~1,000 states (0.85s)
+   - 3 blocks: ~30,000+ states (36s, exponential growth)
+   - 4+ blocks: Hits 50K state limit
+   - See "Production Limitations & Future Work" section below for solutions
+4. **Memory Requirements**: Complete state graphs stored in memory (50K states ≈ 15 MB)
 5. **Code Size**: Generated AgentSpeak code can be large for complex goals (2,000-5,000 characters for 2-block problems)
 
 ### Recent Improvements (2025-11-11)
@@ -661,86 +662,107 @@ The blocksworld domain provides a testbed for:
 
 ---
 
-## Documentation
+## Core Design Principles
 
-Comprehensive documentation is available in the `docs/` directory. See `docs/file_order.md` for a complete navigation guide with three reading paths (Quick Start, Deep Dive, Problem Resolution Reference).
+### Stage 3 Backward Planning Architecture
 
-### Core Design Documents
-- **`stage3_backward_planning_design.md`**: Complete design specification (most important)
-  - 16 core design decisions
-  - Complete Q&A record
-  - Technical architecture
-  - Implementation plan
+**Design Philosophy**: Forward state-space destruction (backward planning) for deterministic, verifiable AgentSpeak code generation.
 
-- **`stage3_schema_level_abstraction.md`**: Schema-level abstraction implementation (COMPLETED ✅)
-  - Position-based normalization algorithm
-  - Performance results: 62.5% cache hit rate
-  - True schema-level abstraction
+**Key Design Decisions**:
+1. **State Representation**: Closed-world assumption with frozen predicates
+2. **Search Direction**: Backward from goal states (forward destruction semantics)
+3. **Completeness**: BFS explores all reachable states
+4. **Action Grounding**: Cached for 99.9% redundancy elimination
+5. **Variable Abstraction**: Position-based normalization for schema-level caching
+6. **State Validation**: 7 critical physical constraints checked on every state
+7. **Code Generation**: Context-sensitive plans for all (state, action, transition) tuples
 
-### Implementation Status
-- **`stage3_variable_abstraction_summary.md`**: Variable abstraction Phase 1 completion
-- **`stage3_optimization_opportunities.md`**: Optimization status (Priority 1-3 completed)
-  - Ground actions caching (99.9% reduction)
-  - Schema-level goal caching (62.5% hit rate)
-  - Code structure optimization (20-40% reduction)
+**Variable Abstraction System**:
+- **Position-Based Normalization**: `on(a,b)`, `on(c,d)`, `on(b,a)` → all normalize to `on(?v0, ?v1)`
+- **Constant Detection**: Semantic-based using `object_list` to distinguish constants from variables
+- **Schema-Level Caching**: Goals with same structure share exploration (62.5% cache hit rate)
+- **AgentSpeak Generation**: Plans use actual AgentSpeak variables (V0, V1, etc.)
 
-### Limitations & Technical Debt
-- **`stage3_production_limitations.md`**: Production deployment limitations (long-term)
-  - State space explosion for 4+ blocks
-  - No heuristic search (currently BFS only)
-  - Domain-specific hardcoding
-- **`stage3_technical_debt.md`**: Technical debt tracking and future improvements
+**Performance Optimizations**:
+1. **Ground Actions Caching** (Priority 1): 99.9% redundancy elimination
+2. **Schema-Level Goal Caching** (Priority 2): 62.5% cache hit rate for similar goals
+3. **Code Structure Optimization** (Priority 3): 20-40% code size reduction via shared components
+4. **State Consistency Validation**: 98.2% invalid states eliminated early
 
-### Technical References
-- **`object_list_propagation_path.md`**: How object_list flows through pipeline
-- **`pddl_vs_agentspeak_variables.md`**: Variable concept clarification
-- **`nl_instruction_template.md`**: Stage 1 LTL instruction templates
-- **`tests/stage3_code_generation/README.md`**: Stage 3 test suite documentation
-- **`file_order.md`**: Complete documentation navigation guide (⭐ START HERE)
+### Technical Implementation Details
 
-### Recently Removed (Issues Resolved)
-The following docs have been removed as all critical issues are now fixed:
-- ~~`CRITICAL_DESIGN_ISSUES.md`~~ - All critical issues resolved (2025-11-11)
-- ~~`issue_ab_resolution.md`~~ - Historical resolution record
-- ~~`variable_abstraction_soundness_analysis.md`~~ - Historical analysis
-- ~~`constant_variable_distinction_analysis.md`~~ - Analysis integrated into implementation
+**Object List Propagation**:
+- Stage 1: Extracted from natural language → `ltl_dict["objects"]`
+- Stage 2: Passed through DFA generation unchanged
+- Stage 3: Used for constant detection and variable abstraction
+- Constants: Objects NOT in `object_list` (e.g., `table`)
+- Variables: Objects IN `object_list` (e.g., `a`, `b`, `c`)
+
+**PDDL vs AgentSpeak Variables**:
+- **PDDL**: Uses `?var` syntax (e.g., `?b1`, `?b2`) for action parameters
+- **AgentSpeak**: Uses plain identifiers (e.g., `B1`, `B2`) in plan heads and uppercase variables
+- **Pipeline**: Normalizes to `?v0`, `?v1` internally, converts to `V0`, `V1` in generated code
+
+### Production Limitations & Future Work
+
+**Known Limitations**:
+1. **State Space Explosion** (Blocksworld):
+   - 2 blocks: ~1,000 states (0.85s)
+   - 3 blocks: ~30,000+ states (36s)
+   - 4+ blocks: Exponential growth, hits 50K limit
+   - **Root Cause**: Complete BFS exploration without heuristics
+   - **Solution**: Implement A* with delete relaxation heuristic
+
+2. **No Heuristic Search**:
+   - Currently: Pure BFS
+   - Needed: A*, greedy best-first, or bidirectional search
+   - Landmarks-based heuristics for goal decomposition
+
+3. **Domain-Specific Assumptions**:
+   - Hardcoded blocksworld predicates (e.g., `handempty`, `holding`)
+   - Single-type domain support (all objects same type)
+   - Multi-type domains (robot + block + location) need type inference
+
+4. **Memory Requirements**:
+   - Complete state graph stored in memory
+   - 50K states ≈ 15 MB memory usage
+   - Incremental planning needed for larger problems
+
+**Technical Debt** (prioritized):
+1. ✅ Redundant action grounding (FIXED - 99.9% reduction)
+2. ✅ No goal caching (FIXED - 62.5% hit rate)
+3. ✅ State consistency validation (FIXED - 100% valid states)
+4. ⏳ Type inference for multi-type domains
+5. ⏳ Heuristic search implementation
+6. ⏳ Dead-end state detection
+7. ⏳ Symmetry reduction
+
+**Future Enhancements**:
+- Integrate with Fast Downward for heuristic computation
+- Implement partial state space exploration
+- Add domain-independent state abstraction
+- Support for multi-type PDDL domains
+- Incremental plan refinement
 
 ---
 
-## Future Work
+## Additional Documentation
 
-### High Priority
-1. **Extended Domain Support**
-   - Mars Rover domain
-   - Logistics domain
-   - Additional IPC benchmark domains
+- **Stage 1 Templates**: See `docs/nl_instruction_template.md` for LTL instruction templates
+- **Stage 3 Tests**: See `tests/stage3_code_generation/README.md` for comprehensive test documentation
 
-2. **Jason/JAdex Integration**
-   - Full BDI platform integration
-   - Actual code execution and verification
-   - Multi-agent scenarios
+---
 
-3. **Runtime LTL Monitoring**
-   - Dynamic goal satisfaction checking during execution
-   - Replanning on goal violations
+## Future Directions
 
-### Medium Priority
-4. **Backward Planning Scalability**
-   - Partial state space exploration strategies
-   - Heuristic-guided search (A*, greedy best-first)
-   - Abstract planning for large domains
-   - State abstraction techniques
-   - Incremental plan refinement
+### Immediate Next Steps
+1. **Extended Domain Support**: Mars Rover, Logistics, additional IPC benchmark domains
+2. **Jason/JAdex Integration**: Full BDI platform integration and execution verification
+3. **Runtime LTL Monitoring**: Dynamic goal satisfaction checking and replanning
 
-5. **Enhanced LTL Support**
-   - Complex nested temporal formulas
-   - Quantified LTL (QLTL)
-   - Probabilistic temporal logic
-
-6. **Hybrid Approaches**
-   - Combine backward planning with LLM-guided heuristics
-   - Use LLMs for state abstraction
-   - LLM-based plan verification
+### Research Directions
+4. **Enhanced LTL Support**: Complex nested temporal formulas, Quantified LTL (QLTL)
+5. **Hybrid Approaches**: Combine backward planning with LLM-guided heuristics for state abstraction
 
 ---
 
