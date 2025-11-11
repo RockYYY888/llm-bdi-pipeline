@@ -127,6 +127,10 @@ class BackwardPlannerGenerator:
         # Track if any state graph was truncated due to max_states limit
         any_truncated = False
 
+        # OPTIMIZATION 4: Track generated parameterized patterns to avoid duplicates
+        # Example: on(a,b) and on(c,d) both normalize to on(?v0,?v1) - only generate once
+        generated_patterns = set()
+
         # OPTIMIZATION 3: Collect state graphs and generate goal-specific sections
         # to avoid duplicating shared components (initial beliefs + action plans)
         all_state_graphs = []  # For generating shared section once
@@ -244,10 +248,20 @@ class BackwardPlannerGenerator:
                 # Shared components (initial beliefs + action plans) will be
                 # generated once at the end
                 try:
-                    # Add state graph to collection (for shared section generation)
+                    # OPTIMIZATION 4: Check if this parameterized pattern was already generated
+                    # Multiple grounded goals (e.g., on(a,b), on(c,d)) normalize to same pattern (on(?v0,?v1))
+                    # We should only generate the plan suite once, not duplicate for each grounded instance
+                    param_pattern = self._get_pattern_from_normalized_goal(normalized_goal)
+
+                    # Always add state graph (needed for shared section)
                     all_state_graphs.append(state_graph)
 
-                    # Generate goal-specific section only
+                    if param_pattern in generated_patterns:
+                        # This parameterized pattern already generated, skip duplicate plan generation
+                        print(f"    ✓ Pattern '{param_pattern}' already generated, skipping duplicate plans")
+                        continue
+
+                    # Generate goal-specific section only if pattern not already generated
                     # Pass variable mapping to instantiate variables during code gen
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
@@ -259,7 +273,8 @@ class BackwardPlannerGenerator:
 
                     goal_section = codegen.generate_goal_specific_section()
                     all_goal_sections.append(goal_section)
-                    print(f"    Generated {len(goal_section)} characters of goal-specific code")
+                    generated_patterns.add(param_pattern)  # Mark pattern as generated
+                    print(f"    Generated {len(goal_section)} characters of goal-specific code (pattern: {param_pattern})")
 
                 except Exception as e:
                     print(f"    Error during codegen: {e}")
@@ -502,6 +517,32 @@ class BackwardPlannerGenerator:
         # Sort predicates for consistency (order shouldn't matter)
         sorted_preds = sorted([p.to_agentspeak() for p in predicates])
         return "|".join(sorted_preds)
+
+    def _get_pattern_from_normalized_goal(self, normalized_goal: List[PredicateAtom]) -> str:
+        """
+        Get parameterized pattern from normalized goal for deduplication
+
+        This is used to detect duplicate plan generation. For example:
+        - on(a,b) normalizes to on(?v0,?v1) → pattern "on_V0_V1"
+        - on(c,d) normalizes to on(?v0,?v1) → pattern "on_V0_V1" (SAME!)
+
+        We only want to generate the plan suite once for each unique pattern.
+
+        Args:
+            normalized_goal: List of normalized predicates (with ?v variables)
+
+        Returns:
+            Pattern string for deduplication
+        """
+        if len(normalized_goal) == 1:
+            # Single predicate: convert to AgentSpeak with V variables
+            return normalized_goal[0].to_agentspeak(convert_vars=True)
+        else:
+            # Multiple predicates: combine with sorted order
+            pred_strs = [p.to_agentspeak(convert_vars=True)
+                        for p in sorted(normalized_goal, key=lambda x: (x.name, x.args))]
+            # Convert to a clean pattern string
+            return "_and_".join(pred_strs).replace("(", "_").replace(")", "").replace(", ", "_")
 
     def _generate_main_header(self, ltl_dict: Dict[str, Any], dfa_info: DFAInfo) -> str:
         """Generate main file header"""
