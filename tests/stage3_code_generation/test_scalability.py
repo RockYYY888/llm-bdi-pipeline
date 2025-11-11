@@ -21,9 +21,73 @@ sys.path.insert(0, str(project_root))
 from src.stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator
 from src.utils.pddl_parser import PDDLParser
 from src.stage1_interpretation.grounding_map import GroundingMap
+from src.stage2_dfa_generation.dfa_builder import DFABuilder
+from src.stage1_interpretation.ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator
 
 
-def test_n_blocks(n: int, goal_formula: str, goal_predicates: list, max_states: int = 50000):
+def generate_dfa_from_formula(goal_formula: str, goal_predicates: list):
+    """
+    Generate DFA from LTLf formula using stage2 methods
+
+    Args:
+        goal_formula: LTL formula string (e.g., "F(on(a, b))")
+        goal_predicates: List of goal predicate strings for creating LTL spec
+
+    Returns:
+        DFA result dict with formula, dfa_dot, num_states, num_transitions
+    """
+    # Create LTL specification
+    spec = LTLSpecification()
+    spec.objects = []  # Objects not needed for DFA generation
+
+    # Parse the goal formula to create LTLFormula objects
+    # For simplicity, we'll handle the common case: F(predicate)
+    # Extract predicate from formula like "F(on(a, b))"
+    import re
+    match = re.match(r'F\((.+)\)', goal_formula)
+    if not match:
+        raise ValueError(f"Unsupported formula format: {goal_formula}. Expected F(...)")
+
+    predicate_str = match.group(1)
+
+    # Parse predicate_str to get predicate name and arguments
+    # e.g., "on(a, b)" -> name="on", args=["a", "b"]
+    pred_match = re.match(r'(\w+)\((.+)\)', predicate_str)
+    if pred_match:
+        pred_name = pred_match.group(1)
+        args_str = pred_match.group(2)
+        args = [arg.strip() for arg in args_str.split(',')]
+        predicate_dict = {pred_name: args}
+    else:
+        # No arguments, just a propositional symbol
+        predicate_dict = {predicate_str: []}
+
+    # Create atomic formula using dict format (required by to_string)
+    atom = LTLFormula(
+        operator=None,
+        predicate=predicate_dict,  # Use dict format: {"on": ["a", "b"]}
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create F(...) formula
+    f_formula = LTLFormula(
+        operator=TemporalOperator.FINALLY,
+        predicate=None,
+        sub_formulas=[atom],
+        logical_op=None
+    )
+
+    spec.formulas = [f_formula]
+
+    # Build DFA using stage2 DFABuilder
+    builder = DFABuilder()
+    dfa_result = builder.build(spec)
+
+    return dfa_result
+
+
+def test_n_blocks(n: int, goal_formula: str, goal_predicates: list, max_states: int = 50000, dfa_result: dict = None):
     """
     Generic test for N blocks
 
@@ -32,6 +96,7 @@ def test_n_blocks(n: int, goal_formula: str, goal_predicates: list, max_states: 
         goal_formula: LTL formula string
         goal_predicates: List of goal predicate strings for grounding map
         max_states: Maximum states to explore (safety limit)
+        dfa_result: Pre-generated DFA result (if None, will generate on the fly)
     """
     print("=" * 80)
     print(f"SCALABILITY TEST: {n} Blocks")
@@ -49,26 +114,9 @@ def test_n_blocks(n: int, goal_formula: str, goal_predicates: list, max_states: 
     for pred in goal_predicates:
         grounding_map.add_atom(pred, "on", objects[:2])  # Simple on(a, b) goal
 
-    # Simple DFA: state0 -> state1 with goal
-    label = " & ".join(goal_predicates)
-    dfa_dot = f"""
-digraph {{
-    rankdir=LR;
-    node [shape=circle];
-    __start [shape=point];
-    __start -> state0;
-    state0 [label="0"];
-    state1 [label="1", shape=doublecircle];
-    state0 -> state1 [label="{label}"];
-}}
-"""
-
-    dfa_result = {
-        "formula": goal_formula,
-        "dfa_dot": dfa_dot,
-        "num_states": 2,
-        "num_transitions": 1
-    }
+    # Generate DFA if not provided
+    if dfa_result is None:
+        dfa_result = generate_dfa_from_formula(goal_formula, goal_predicates)
 
     ltl_dict = {
         "objects": objects,
@@ -131,6 +179,29 @@ if __name__ == "__main__":
     print("NOTE: Tests with 4+ blocks are commented out due to hitting max_states limit.")
     print("Press Ctrl+C at any time to stop.\n")
 
+    # Generate DFA once before all tests
+    goal_formula = "F(on(a, b))"
+    goal_predicates = ["on_a_b"]
+
+    print("=" * 80)
+    print("GENERATING DFA FROM LTLf FORMULA")
+    print("=" * 80)
+    print(f"Formula: {goal_formula}")
+    print(f"Goal predicates: {goal_predicates}")
+    print()
+
+    dfa_result = generate_dfa_from_formula(goal_formula, goal_predicates)
+
+    print(f"✓ DFA Generated Successfully")
+    print(f"  States: {dfa_result['num_states']}")
+    print(f"  Transitions: {dfa_result['num_transitions']}")
+    print()
+    print("DFA DOT representation:")
+    print("-" * 80)
+    print(dfa_result['dfa_dot'])
+    print("-" * 80)
+    print()
+
     results = []
 
     # Test 2 blocks (baseline)
@@ -139,9 +210,10 @@ if __name__ == "__main__":
     print("="*80)
     passed, time_taken, _ = test_n_blocks(
         n=2,
-        goal_formula="F(on(a, b))",
-        goal_predicates=["on_a_b"],
-        max_states=50000
+        goal_formula=goal_formula,
+        goal_predicates=goal_predicates,
+        max_states=50000,
+        dfa_result=dfa_result
     )
     results.append(("2 blocks", passed, time_taken))
 
@@ -151,9 +223,10 @@ if __name__ == "__main__":
     print("="*80)
     passed, time_taken, _ = test_n_blocks(
         n=3,
-        goal_formula="F(on(a, b))",
-        goal_predicates=["on_a_b"],
-        max_states=50000
+        goal_formula=goal_formula,
+        goal_predicates=goal_predicates,
+        max_states=50000,
+        dfa_result=dfa_result
     )
     results.append(("3 blocks", passed, time_taken))
 

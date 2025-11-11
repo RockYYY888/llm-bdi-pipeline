@@ -547,6 +547,8 @@ class AgentSpeakCodeGenerator:
             pred_name = match.group(1)
             pred_args = match.group(2).strip()
             if pred_args:
+                # Convert PDDL format (spaces) to AgentSpeak format (commas)
+                pred_args = ', '.join(pred_args.split())
                 updates.append(f"-{pred_name}({pred_args})")
             else:
                 updates.append(f"-{pred_name}")
@@ -561,6 +563,8 @@ class AgentSpeakCodeGenerator:
             # Check if already captured as negative
             if not any(f"-{pred_name}" in u for u in updates):
                 if pred_args:
+                    # Convert PDDL format (spaces) to AgentSpeak format (commas)
+                    pred_args = ', '.join(pred_args.split())
                     updates.append(f"+{pred_name}({pred_args})")
                 else:
                     updates.append(f"+{pred_name}")

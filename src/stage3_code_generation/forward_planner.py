@@ -174,8 +174,8 @@ class ForwardStatePlanner:
 
         # Statistics counters:
         # - states_explored: states popped from queue and expanded (processed)
-        # - len(visited_map): total unique states discovered (including those still in queue)
-        # - Note: len(visited_map) >= states_explored in BFS (many states are discovered but not yet explored)
+        # - len(visited_map): total unique states in memory (explored + in queue)
+        # - max_states limits states_explored to control actual work done
         states_explored = 0  # States popped from queue and expanded
         transitions_added = 0
         states_reused = 0
@@ -183,19 +183,26 @@ class ForwardStatePlanner:
         max_states_reached = False  # Flag to stop exploration
 
         while queue and not max_states_reached:
+            # Check if we've reached the max states limit before processing next state
+            if states_explored >= max_states:
+                print(f"  ⚠️  Reached max_states limit ({max_states:,}), stopping exploration")
+                print(f"  This is a safety limit to prevent excessive computation.")
+                print(f"  Processed {states_explored:,} states, {len(visited_map):,} total in memory.")
+                max_states_reached = True
+                graph.truncated = True
+                break
+
             current_state = queue.popleft()
             states_explored += 1
 
-            if states_explored % 1000 == 0:
-                print(f"  Explored {states_explored} states, discovered {len(visited_map)} unique states, "
+            if states_explored % 10000 == 0:
+                print(f"  Processed {states_explored} states, total in memory: {len(visited_map)} unique states, "
                       f"{transitions_added} transitions, queue size: {len(queue)}")
 
             # Try all ground actions from all states (to create bidirectional graph)
             # We explore from states at all depths to find reverse transitions
             # OPTIMIZATION: Use cached ground actions instead of recomputing
             for grounded_action in self._cached_grounded_actions:
-                if max_states_reached:
-                    break  # Exit grounded_action loop if limit reached
                 # Check preconditions
                 if not self._check_preconditions(grounded_action, current_state):
                     continue
@@ -212,18 +219,10 @@ class ForwardStatePlanner:
                         final_state = visited_map[new_pred_set]
                         states_reused += 1
                     else:
-                        # Check if we've reached the max states limit
-                        if len(visited_map) >= max_states:
-                            print(f"  ⚠️  Reached max_states limit ({max_states:,}), stopping exploration")
-                            print(f"  This is a safety limit to prevent excessive memory usage.")
-                            print(f"  Returning partial state graph with {len(visited_map):,} states.")
-                            max_states_reached = True
-                            graph.truncated = True  # Mark graph as truncated
-                            break  # Exit the new_states_data loop
-
                         # Create new state with proper depth
+                        # Pass frozenset directly to avoid creating duplicate frozenset in memory
                         new_depth = current_state.depth + 1
-                        final_state = WorldState(new_state.predicates, depth=new_depth)
+                        final_state = WorldState(new_pred_set, depth=new_depth)
                         visited_map[new_pred_set] = final_state
                         queue.append(final_state)
                         states_created += 1
@@ -241,15 +240,20 @@ class ForwardStatePlanner:
                     graph.add_transition(transition)
                     transitions_added += 1
 
+        # Print final state if not already printed (i.e., didn't land on 10000 multiple)
+        if states_explored % 10000 != 0:
+            print(f"  Processed {states_explored} states, total in memory: {len(visited_map)} unique states, "
+                  f"{transitions_added} transitions, queue size: {len(queue)}")
+
         print(f"[Forward Planner] Exploration complete:")
-        print(f"  States explored (expanded): {states_explored:,}")
-        print(f"  States discovered (total unique): {len(graph.states):,}")
+        print(f"  States processed (popped from queue): {states_explored:,}")
+        print(f"  Total unique states in memory: {len(graph.states):,}")
         print(f"  Transitions: {len(graph.transitions):,}")
         print(f"  Leaf states: {len(graph.get_leaf_states()):,}")
         print(f"  Max depth reached: {max(s.depth for s in graph.states)}")
         print(f"  Performance:")
-        print(f"    States reused: {states_reused:,}")
-        print(f"    States created: {states_created:,}")
+        print(f"    States reused (cache hits): {states_reused:,}")
+        print(f"    States created (cache misses): {states_created:,}")
         print(f"    Reuse ratio: {states_reused / max(states_created, 1):.1f}:1")
         print(f"    Ground actions cached: {len(self._cached_grounded_actions)}")
 
@@ -300,6 +304,12 @@ class ForwardStatePlanner:
             # Create bindings
             bindings = {var: obj for var, obj in zip(param_vars, obj_tuple)}
 
+            # Check equality constraints in preconditions
+            # Format: (not (= ?b1 ?b2)) means ?b1 and ?b2 must be different
+            if not self._check_equality_constraints(action.preconditions, bindings):
+                # Skip this grounding - violates equality constraint
+                continue
+
             grounded_actions.append(GroundedAction(
                 action=action,
                 args=list(obj_tuple),
@@ -307,6 +317,50 @@ class ForwardStatePlanner:
             ))
 
         return grounded_actions
+
+    def _check_equality_constraints(self, preconditions: str, bindings: Dict[str, str]) -> bool:
+        """
+        Check if bindings satisfy equality constraints in preconditions
+
+        Handles patterns like:
+        - (not (= ?b1 ?b2)) means ?b1 != ?b2
+        - (= ?b1 ?b2) means ?b1 == ?b2 (rare)
+
+        Args:
+            preconditions: PDDL precondition string
+            bindings: Variable to object mapping
+
+        Returns:
+            True if constraints satisfied, False if violated
+        """
+        import re
+
+        # Find all equality constraints: (not (= ?var1 ?var2)) or (= ?var1 ?var2)
+        # Pattern for: (not (= ?b1 ?b2))
+        not_equal_pattern = r'\(not\s+\(=\s+(\?\w+)\s+(\?\w+)\)\)'
+        # Pattern for: (= ?b1 ?b2)
+        equal_pattern = r'\(=\s+(\?\w+)\s+(\?\w+)\)'
+
+        # Check (not (= ?var1 ?var2)) - variables must be different
+        for match in re.finditer(not_equal_pattern, preconditions):
+            var1, var2 = match.group(1), match.group(2)
+            if var1 in bindings and var2 in bindings:
+                if bindings[var1] == bindings[var2]:
+                    # Constraint violated: variables must be different but are same
+                    return False
+
+        # Check (= ?var1 ?var2) - variables must be same
+        for match in re.finditer(equal_pattern, preconditions):
+            var1, var2 = match.group(1), match.group(2)
+            # Skip if this is part of (not (= ...)) - already handled above
+            if f'(not (= {var1} {var2}))' in preconditions:
+                continue
+            if var1 in bindings and var2 in bindings:
+                if bindings[var1] != bindings[var2]:
+                    # Constraint violated: variables must be same but are different
+                    return False
+
+        return True
 
     def _check_preconditions(self, grounded_action: GroundedAction,
                             state: WorldState) -> bool:
@@ -349,6 +403,94 @@ class ForwardStatePlanner:
                 # If state is non-empty and predicate not present, it's potentially achievable
                 # So we allow it (subgoal will be generated later)
                 pass
+
+        return True
+
+    def _validate_state_consistency(self, predicates: Set[PredicateAtom]) -> bool:
+        """
+        Validate that a state is physically consistent (no contradictions)
+
+        Checks for violations of blocksworld physics:
+        1. Hand contradictions: Can't have both handempty and holding(X)
+        2. Multiple holdings: Can't hold more than one block
+        3. Circular on-relationships: Can't have on(a,b) and on(b,a)
+        4. Location contradictions: Block can't be both ontable and on another block
+        5. Clear contradictions: If block X is on block Y, then Y cannot be clear
+
+        Args:
+            predicates: Set of predicates representing the state
+
+        Returns:
+            True if state is consistent, False if any violation detected
+        """
+        # Convert to list for easier inspection
+        pred_list = list(predicates)
+
+        # Extract predicates by type
+        handempty = any(p.name == 'handempty' for p in pred_list)
+        holding = [p for p in pred_list if p.name == 'holding']
+        ontable = [p for p in pred_list if p.name == 'ontable']
+        on = [p for p in pred_list if p.name == 'on']
+        clear = [p for p in pred_list if p.name == 'clear']
+
+        # Check 1: Hand contradictions
+        if handempty and len(holding) > 0:
+            # Can't have both handempty and holding something
+            return False
+
+        # Check 2: Multiple holdings
+        if len(holding) > 1:
+            # Can't hold more than one block
+            return False
+
+        # Check 3: Circular on-relationships, self-loops, and multiple locations
+        # Build on-relationship map: block -> what it's on
+        on_map = {}
+        for pred in on:
+            if len(pred.args) == 2:
+                block, base = pred.args
+                # Self-loop: on(a, a) - block can't be on itself
+                if block == base:
+                    return False
+                # Multiple locations: block can only be on ONE thing
+                if block in on_map:
+                    # Block already has a location - can't be on two things
+                    return False
+                on_map[block] = base
+
+        # Check for cycles (e.g., a on b, b on a)
+        for block, base in on_map.items():
+            # Direct cycle: on(a,b) and on(b,a)
+            if base in on_map and on_map[base] == block:
+                return False
+            # Indirect cycle: on(a,b), on(b,c), on(c,a)
+            visited = set()
+            current = base
+            while current in on_map:
+                if current in visited:
+                    return False  # Cycle detected
+                visited.add(current)
+                current = on_map[current]
+                if current == block:
+                    return False  # Cycle back to original block
+
+        # Check 4: Location contradictions
+        # A block can't be both on table and on another block
+        ontable_blocks = {pred.args[0] for pred in ontable if len(pred.args) == 1}
+        on_blocks = {pred.args[0] for pred in on if len(pred.args) == 2}
+
+        if ontable_blocks & on_blocks:
+            # Some block is both ontable and on another block
+            return False
+
+        # Check 5: Clear contradictions
+        # If on(X, Y), then Y should not be clear
+        clear_blocks = {pred.args[0] for pred in clear if len(pred.args) == 1}
+        base_blocks = {pred.args[1] for pred in on if len(pred.args) == 2}  # Blocks that have something on them
+
+        if clear_blocks & base_blocks:
+            # Some block is marked clear but has another block on top
+            return False
 
         return True
 
@@ -403,6 +545,11 @@ class ForwardStatePlanner:
                     # Delete effect: -ontable(a)
                     new_predicates.discard(effect_atom.predicate)
                     belief_updates.append(f"-{effect_atom.predicate.to_agentspeak()}")
+
+            # Validate state consistency before creating new state
+            if not self._validate_state_consistency(new_predicates):
+                # State violates physical constraints - skip this branch
+                continue
 
             # Create new state (Design: Line 668)
             new_state = WorldState(new_predicates)

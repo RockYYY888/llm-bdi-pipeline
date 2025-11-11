@@ -217,9 +217,21 @@ class WorldState:
     predicates: FrozenSet[PredicateAtom]
     depth: int = 0
 
-    def __init__(self, predicates: Set[PredicateAtom], depth: int = 0):
-        """Initialize WorldState"""
-        object.__setattr__(self, 'predicates', frozenset(predicates))
+    def __init__(self, predicates, depth: int = 0):
+        """
+        Initialize WorldState
+
+        Args:
+            predicates: Either a Set[PredicateAtom] or FrozenSet[PredicateAtom]
+                       If already a frozenset, reuse it to save memory
+            depth: Distance from goal state
+        """
+        if isinstance(predicates, frozenset):
+            # Reuse existing frozenset to avoid duplication
+            object.__setattr__(self, 'predicates', predicates)
+        else:
+            # Convert set to frozenset
+            object.__setattr__(self, 'predicates', frozenset(predicates))
         object.__setattr__(self, 'depth', depth)
 
     def contains(self, predicate: PredicateAtom) -> bool:
