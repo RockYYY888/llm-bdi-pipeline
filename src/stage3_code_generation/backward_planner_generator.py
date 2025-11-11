@@ -107,11 +107,22 @@ class BackwardPlannerGenerator:
         normalizer = VariableNormalizer(self.domain, objects)
         print(f"Variable abstraction enabled: using {len(objects)} variables")
 
-        # OPTIMIZATION: Cache goal exploration results at VARIABLE LEVEL
-        # Same goal pattern (e.g., on(?v0, ?v1)) reused for all object instances
-        variable_goal_cache = {}  # variable_goal_key -> (state_graph, variable_mapping)
-        cache_hits = 0
-        cache_misses = 0
+        # OPTIMIZATION: Two-tier caching for DNF disjuncts
+        # Tier 1: Single predicate cache - enables reuse across different disjuncts
+        #   Key: (single_predicate_pattern, num_objects)
+        #   Example: ("on(?v0, ?v1)", 5) -> StateGraph
+        predicate_cache = {}  # (predicate_pattern, num_objects) -> (state_graph, variable_mapping)
+
+        # Tier 2: Full goal cache - for multi-predicate goals
+        #   Key: full_goal_serialized
+        #   Example: "not clear(?v2)|not on(?v0, ?v1)" -> StateGraph
+        full_goal_cache = {}  # variable_goal_key -> (state_graph, variable_mapping)
+
+        # Statistics
+        predicate_cache_hits = 0
+        predicate_cache_misses = 0
+        full_goal_cache_hits = 0
+        full_goal_cache_misses = 0
 
         # Track if any state graph was truncated due to max_states limit
         any_truncated = False
@@ -152,17 +163,40 @@ class BackwardPlannerGenerator:
                 print(f"    Normalized: {[str(p) for p in normalized_goal]}")
                 print(f"    Variable mapping: {obj_to_var_mapping.obj_to_var}")
 
-                # OPTIMIZATION: Check if we've already explored this VARIABLE-LEVEL goal
-                if variable_goal_key in variable_goal_cache:
-                    # Reuse cached variable-level state graph
-                    state_graph, canonical_var_mapping = variable_goal_cache[variable_goal_key]
-                    cache_hits += 1
-                    print(f"    ✓ VARIABLE-LEVEL Cache HIT! Reusing exploration")
-                    print(f"    State graph: {state_graph}")
-                else:
-                    # First time seeing this variable pattern - run forward planning with variables
-                    cache_misses += 1
-                    print(f"    Cache MISS - running VARIABLE-LEVEL exploration...")
+                # OPTIMIZATION: Two-tier cache lookup
+                state_graph = None
+                cache_hit = False
+
+                # Tier 1: If single predicate, check predicate cache first
+                if len(normalized_goal) == 1:
+                    single_pred = normalized_goal[0]
+                    single_pred_key = (single_pred.to_agentspeak(), len(objects))
+
+                    if single_pred_key in predicate_cache:
+                        # Cache HIT for single predicate!
+                        state_graph, canonical_var_mapping = predicate_cache[single_pred_key]
+                        predicate_cache_hits += 1
+                        cache_hit = True
+                        print(f"    ✓ PREDICATE Cache HIT! Reusing single-predicate exploration")
+                        print(f"    State graph: {state_graph}")
+
+                # Tier 2: Check full goal cache (for multi-predicate or if predicate cache missed)
+                if not cache_hit:
+                    if variable_goal_key in full_goal_cache:
+                        state_graph, canonical_var_mapping = full_goal_cache[variable_goal_key]
+                        full_goal_cache_hits += 1
+                        cache_hit = True
+                        print(f"    ✓ FULL-GOAL Cache HIT! Reusing exploration")
+                        print(f"    State graph: {state_graph}")
+
+                # Cache MISS: Need to explore
+                if not cache_hit:
+                    if len(normalized_goal) == 1:
+                        predicate_cache_misses += 1
+                        print(f"    Cache MISS (predicate) - running exploration...")
+                    else:
+                        full_goal_cache_misses += 1
+                        print(f"    Cache MISS (full goal) - running exploration...")
 
                     try:
                         # Get variable list for this problem size
@@ -179,8 +213,26 @@ class BackwardPlannerGenerator:
                         if state_graph.truncated:
                             any_truncated = True
 
-                        # Cache the variable-level state graph with its canonical mapping
-                        variable_goal_cache[variable_goal_key] = (state_graph, obj_to_var_mapping)
+                        # Update caches based on goal type
+                        if len(normalized_goal) == 1:
+                            # Single predicate: cache in predicate cache
+                            single_pred = normalized_goal[0]
+                            single_pred_key = (single_pred.to_agentspeak(), len(objects))
+                            predicate_cache[single_pred_key] = (state_graph, obj_to_var_mapping)
+                            print(f"    → Cached in predicate cache: {single_pred_key[0]}")
+                        else:
+                            # Multi-predicate: cache in full goal cache
+                            full_goal_cache[variable_goal_key] = (state_graph, obj_to_var_mapping)
+                            print(f"    → Cached in full-goal cache")
+
+                            # BONUS: Also cache individual predicates if not already cached
+                            for pred in normalized_goal:
+                                pred_key = (pred.to_agentspeak(), len(objects))
+                                if pred_key not in predicate_cache:
+                                    # Note: We don't actually have the state graph for individual predicates
+                                    # This is a placeholder for future enhancement
+                                    # For now, we only cache when we explore single predicates directly
+                                    pass
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
@@ -244,14 +296,35 @@ class BackwardPlannerGenerator:
         print(f"  Shared section generated: 1 time (initial beliefs + action plans)")
         print(f"  Goal-specific sections: {len(all_goal_sections)}")
         print(f"  Redundancy eliminated: ~{(len(all_goal_sections) - 1) * 30:.0f}% of shared code")
-        print(f"Variable-level goal exploration cache:")
-        print(f"  Cache hits: {cache_hits}")
-        print(f"  Cache misses: {cache_misses}")
-        print(f"  Total explorations needed: {cache_misses} (saved {cache_hits} explorations)")
-        if cache_hits + cache_misses > 0:
-            print(f"  Cache hit rate: {cache_hits / (cache_hits + cache_misses) * 100:.1f}%")
-        if cache_hits > 0:
-            print(f"  💡 Variable abstraction saved {cache_hits} state space explorations!")
+
+        # Two-tier cache statistics
+        print(f"\nTwo-tier cache statistics:")
+        print(f"  Tier 1 - Predicate cache (single predicates):")
+        print(f"    Hits: {predicate_cache_hits}")
+        print(f"    Misses: {predicate_cache_misses}")
+        total_predicate = predicate_cache_hits + predicate_cache_misses
+        if total_predicate > 0:
+            print(f"    Hit rate: {predicate_cache_hits / total_predicate * 100:.1f}%")
+
+        print(f"  Tier 2 - Full-goal cache (multi-predicate goals):")
+        print(f"    Hits: {full_goal_cache_hits}")
+        print(f"    Misses: {full_goal_cache_misses}")
+        total_full = full_goal_cache_hits + full_goal_cache_misses
+        if total_full > 0:
+            print(f"    Hit rate: {full_goal_cache_hits / total_full * 100:.1f}%")
+
+        total_hits = predicate_cache_hits + full_goal_cache_hits
+        total_misses = predicate_cache_misses + full_goal_cache_misses
+        total_queries = total_hits + total_misses
+
+        print(f"  Overall:")
+        print(f"    Total cache queries: {total_queries}")
+        print(f"    Total hits: {total_hits}")
+        print(f"    Total misses: {total_misses}")
+        if total_queries > 0:
+            print(f"    Overall hit rate: {total_hits / total_queries * 100:.1f}%")
+        if total_hits > 0:
+            print(f"    💡 Predicate-level caching saved {total_hits} state space explorations!")
         print("="*80)
 
         return final_code, any_truncated
