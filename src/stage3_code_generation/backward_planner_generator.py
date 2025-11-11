@@ -253,7 +253,7 @@ class BackwardPlannerGenerator:
                                         single_pred_mapping = VariableMapping(single_pred_obj_to_var, single_pred_var_to_obj)
 
                                         predicate_cache[pred_key] = (single_pred_graph, single_pred_mapping)
-                                        print(f"      ✓ Cached single predicate: {pred_key[0]} ({single_pred_graph.num_states} states)")
+                                        print(f"      ✓ Cached single predicate: {pred_key[0]} ({len(single_pred_graph.states)} states)")
 
                                         # Check if truncated
                                         if single_pred_graph.truncated:
