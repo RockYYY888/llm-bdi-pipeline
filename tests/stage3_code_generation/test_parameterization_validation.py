@@ -40,7 +40,7 @@ dfa_result = {
 
 # Generate code
 print("Generating AgentSpeak code...")
-code = generator.generate(ltl_dict, dfa_result)
+code, truncated = generator.generate(ltl_dict, dfa_result)
 
 print("\n" + "=" * 80)
 print("ANALYSIS OF GENERATED CODE")
