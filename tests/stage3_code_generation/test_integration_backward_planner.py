@@ -131,7 +131,7 @@ def test_simple_dfa():
 
     # Generate code
     print("\nGenerating AgentSpeak code...")
-    asl_code = generator.generate(ltl_dict, dfa_result)
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
 
     # Display results
     print("\n" + "="*80)
@@ -147,7 +147,7 @@ def test_simple_dfa():
     validations = {
         "Has initial beliefs": "ontable(" in asl_code and "handempty" in asl_code,
         "Has action definitions": "+!" in asl_code and "<-" in asl_code,
-        "Has goal plans": ("!on(a, b)" in asl_code or "!on_a_b" in asl_code or "!achieve" in asl_code or "Goal Plans:" in asl_code),
+        "Has goal plans": ("Goal Achievement Plans" in asl_code or "+!clear_" in asl_code or "+!on(" in asl_code),
         "Has belief updates": ("+holding" in asl_code or "-handempty" in asl_code),
         "Non-empty code": len(asl_code) > 100
     }
@@ -195,7 +195,7 @@ def test_complex_dfa():
 
     # Generate code
     print("\nGenerating AgentSpeak code...")
-    asl_code = generator.generate(ltl_dict, dfa_result)
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
 
     # Display results (first 50 lines)
     print("\n" + "="*80)
