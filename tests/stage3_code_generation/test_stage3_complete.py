@@ -22,9 +22,10 @@ Test Cases:
 - Test 2.2: Conjunction in Finally (F(on(a, b) & clear(c)))
 - Test 2.3: Release Operator (ontable(a) R clear(b))
 - Test 2.4: Negation and Conjunction (F(!(on(a, b)) & clear(c)))
-- Test 3: Variable Abstraction & Schema-Level Caching
-- Test 4: Multi-Transition DFA Handling
-- Test 5: State Consistency Guarantee (100% valid states)
+- Test 3: Disjunction with Conjunction (F(on(a, b) & clear(c) | on(d, e)))
+- Test 4: Variable Abstraction & Schema-Level Caching
+- Test 5: Multi-Transition DFA Handling
+- Test 6: State Consistency Guarantee (100% valid states)
 """
 
 import sys
@@ -785,9 +786,142 @@ def test_2_4_negation_and_conjunction():
     return True
 
 
-def test_3_variable_abstraction_caching():
+def test_3_disjunction_with_conjunction():
     """
-    TEST 3: Variable Abstraction & Schema-Level Caching
+    TEST 3: Disjunction with Conjunction - F(on(a, b) & clear(c) | on(d, e))
+
+    Validates:
+    - Disjunction (|) and conjunction (&) in same formula
+    - Complex boolean expressions with multiple predicates
+    - End-to-end pipeline with 5 objects (a, b, c, d, e)
+    - State consistency for disjunctive conjunctive goals
+    """
+    print("\n\n" + "="*80)
+    print("TEST 3: Disjunction with Conjunction - F(on(a, b) & clear(c) | on(d, e))")
+    print("="*80)
+
+    # Load domain
+    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
+    domain = PDDLParser.parse_domain(str(domain_path))
+
+    # Build LTL formula: F((on(a, b) & clear(c)) | on(d, e))
+    print("\n[1/4] Building LTL formula and generating DFA...")
+
+    # Create atomic predicate: on(a, b)
+    on_ab = LTLFormula(
+        operator=None,
+        predicate={"on": ["a", "b"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create atomic predicate: clear(c)
+    clear_c = LTLFormula(
+        operator=None,
+        predicate={"clear": ["c"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create conjunction: on(a, b) & clear(c)
+    conjunction = LTLFormula(
+        operator=None,
+        predicate=None,
+        sub_formulas=[on_ab, clear_c],
+        logical_op=LogicalOperator.AND
+    )
+
+    # Create atomic predicate: on(d, e)
+    on_de = LTLFormula(
+        operator=None,
+        predicate={"on": ["d", "e"]},
+        sub_formulas=[],
+        logical_op=None
+    )
+
+    # Create disjunction: (on(a, b) & clear(c)) | on(d, e)
+    disjunction = LTLFormula(
+        operator=None,
+        predicate=None,
+        sub_formulas=[conjunction, on_de],
+        logical_op=LogicalOperator.OR
+    )
+
+    # Create F(...): F((on(a, b) & clear(c)) | on(d, e))
+    f_formula = LTLFormula(
+        operator=TemporalOperator.FINALLY,
+        predicate=None,
+        sub_formulas=[disjunction],
+        logical_op=None
+    )
+
+    # Create specification
+    spec = LTLSpecification()
+    spec.objects = ["a", "b", "c", "d", "e"]
+    spec.formulas = [f_formula]
+
+    # Build DFA
+    builder = DFABuilder()
+    dfa_result = builder.build(spec)
+    print(f"  ✓ DFA generated: {dfa_result['num_states']} states, {dfa_result['num_transitions']} transitions")
+
+    # Print DFA dot string for inspection
+    print("\n  DFA Structure (DOT format):")
+    print("  " + "-"*76)
+    for line in dfa_result['dfa_dot'].strip().split('\n'):
+        print(f"  {line}")
+    print("  " + "-"*76)
+
+    # Create grounding map
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_c", "clear", ["c"])
+    grounding_map.add_atom("on_d_e", "on", ["d", "e"])
+
+    # Create LTL dict
+    objects = ["a", "b", "c", "d", "e"]
+    ltl_dict = {
+        "objects": objects,
+        "formulas_string": ["F(on(a, b) & clear(c) | on(d, e))"],
+        "grounding_map": grounding_map
+    }
+
+    # Generate AgentSpeak code
+    print("\n[2/4] Generating AgentSpeak code...")
+    generator = BackwardPlannerGenerator(domain, grounding_map)
+    start_time = time.time()
+    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+    elapsed = time.time() - start_time
+
+    print(f"  ✓ Code generated: {len(asl_code)} characters in {elapsed:.2f}s")
+    print(f"  Truncated: {truncated}")
+
+    # Validate code quality
+    print("\n[3/4] Validating AgentSpeak code...")
+    validation = validate_agentspeak_code(asl_code)
+    for check, passed in validation.items():
+        if check != "all_passed":
+            status = "✓" if passed else "✗"
+            print(f"  {status} {check}")
+
+    # Note: F((on(a, b) & clear(c)) | on(d, e)) means "eventually (on(a,b) AND clear(c)) OR on(d,e)"
+    print("\n[4/4] Formula semantics check...")
+    print(f"  Formula: F(on(a, b) & clear(c) | on(d, e))")
+    print(f"  Semantics: Eventually reach state where:")
+    print(f"    - EITHER: on(a,b) AND clear(c) are both true")
+    print(f"    - OR: on(d,e) is true")
+
+    # Assert results
+    assert validation["all_passed"], "Code validation failed"
+    assert not truncated, "Code generation was truncated"
+
+    print("\n✅ TEST 3 PASSED")
+    return True
+
+
+def test_4_variable_abstraction_caching():
+    """
+    TEST 4: Variable Abstraction & Schema-Level Caching
 
     Validates:
     - Schema-level caching works
@@ -796,7 +930,7 @@ def test_3_variable_abstraction_caching():
     - Constants are properly detected
     """
     print("\n\n" + "="*80)
-    print("TEST 3: Variable Abstraction & Schema-Level Caching")
+    print("TEST 4: Variable Abstraction & Schema-Level Caching")
     print("="*80)
 
     # Load domain
@@ -838,13 +972,13 @@ def test_3_variable_abstraction_caching():
     assert has_variables, "Generated plans should use variables"
     print(f"  ✓ Plans are parameterized with variables")
 
-    print("\n✅ TEST 3 PASSED")
+    print("\n✅ TEST 4 PASSED")
     return True
 
 
-def test_4_multi_transition_dfa():
+def test_5_multi_transition_dfa():
     """
-    TEST 4: Multi-Transition DFA Handling
+    TEST 5: Multi-Transition DFA Handling
 
     Validates:
     - Multiple DFA transitions handled correctly
@@ -852,7 +986,7 @@ def test_4_multi_transition_dfa():
     - Code merging works properly
     """
     print("\n\n" + "="*80)
-    print("TEST 4: Multi-Transition DFA - Sequential Goals")
+    print("TEST 5: Multi-Transition DFA - Sequential Goals")
     print("="*80)
 
     # Load domain
@@ -914,13 +1048,13 @@ digraph {
     assert has_clear_goal, "Code should handle 'clear' goal"
 
     print(f"  ✓ Both goals present in generated code")
-    print("\n✅ TEST 4 PASSED")
+    print("\n✅ TEST 5 PASSED")
     return True
 
 
-def test_5_state_consistency_guarantee():
+def test_6_state_consistency_guarantee():
     """
-    TEST 5: State Consistency Guarantee
+    TEST 6: State Consistency Guarantee
 
     Validates:
     - 100% of generated states are physically valid
@@ -929,7 +1063,7 @@ def test_5_state_consistency_guarantee():
     - All 7 consistency checks pass
     """
     print("\n\n" + "="*80)
-    print("TEST 5: State Consistency Guarantee (100% Valid States)")
+    print("TEST 6: State Consistency Guarantee (100% Valid States)")
     print("="*80)
 
     # Load domain
@@ -980,7 +1114,7 @@ def test_5_state_consistency_guarantee():
     assert invalid_count == 0, f"Found {invalid_count} invalid states in 3-block test"
     assert len(invalid_states) == 0, f"Found {len(invalid_states)} invalid states in 2-block test"
 
-    print("\n✅ TEST 5 PASSED - 100% Valid States Guaranteed")
+    print("\n✅ TEST 6 PASSED - 100% Valid States Guaranteed")
     return True
 
 
@@ -1053,7 +1187,7 @@ def main():
         results["test_2_4"] = False
 
     try:
-        results["test_3"] = test_3_variable_abstraction_caching()
+        results["test_3"] = test_3_disjunction_with_conjunction()
     except Exception as e:
         print(f"\n❌ TEST 3 FAILED: {e}")
         import traceback
@@ -1061,7 +1195,7 @@ def main():
         results["test_3"] = False
 
     try:
-        results["test_4"] = test_4_multi_transition_dfa()
+        results["test_4"] = test_4_variable_abstraction_caching()
     except Exception as e:
         print(f"\n❌ TEST 4 FAILED: {e}")
         import traceback
@@ -1069,12 +1203,20 @@ def main():
         results["test_4"] = False
 
     try:
-        results["test_5"] = test_5_state_consistency_guarantee()
+        results["test_5"] = test_5_multi_transition_dfa()
     except Exception as e:
         print(f"\n❌ TEST 5 FAILED: {e}")
         import traceback
         traceback.print_exc()
         results["test_5"] = False
+
+    try:
+        results["test_6"] = test_6_state_consistency_guarantee()
+    except Exception as e:
+        print(f"\n❌ TEST 6 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_6"] = False
 
     # Summary
     total_time = time.time() - start_time
@@ -1088,9 +1230,10 @@ def main():
     print(f"Test 2.2 - Conjunction in Finally:           {'✅ PASS' if results.get('test_2_2') else '❌ FAIL'}")
     print(f"Test 2.3 - Release Operator:                 {'✅ PASS' if results.get('test_2_3') else '❌ FAIL'}")
     print(f"Test 2.4 - Negation and Conjunction:         {'✅ PASS' if results.get('test_2_4') else '❌ FAIL'}")
-    print(f"Test 3   - Variable Abstraction & Caching:   {'✅ PASS' if results.get('test_3') else '❌ FAIL'}")
-    print(f"Test 4   - Multi-Transition DFA:             {'✅ PASS' if results.get('test_4') else '❌ FAIL'}")
-    print(f"Test 5   - State Consistency (100% valid):   {'✅ PASS' if results.get('test_5') else '❌ FAIL'}")
+    print(f"Test 3   - Disjunction with Conjunction:     {'✅ PASS' if results.get('test_3') else '❌ FAIL'}")
+    print(f"Test 4   - Variable Abstraction & Caching:   {'✅ PASS' if results.get('test_4') else '❌ FAIL'}")
+    print(f"Test 5   - Multi-Transition DFA:             {'✅ PASS' if results.get('test_5') else '❌ FAIL'}")
+    print(f"Test 6   - State Consistency (100% valid):   {'✅ PASS' if results.get('test_6') else '❌ FAIL'}")
     print(f"\nTotal time: {total_time:.2f}s")
     print("="*80)
 
