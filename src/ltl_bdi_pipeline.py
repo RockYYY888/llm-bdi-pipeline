@@ -15,7 +15,7 @@ from typing import Dict, Any
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.dfa_builder import DFABuilder
-from stage3_code_generation.agentspeak_generator import AgentSpeakGenerator
+from stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator
 from utils.pipeline_logger import PipelineLogger
 
 
@@ -25,10 +25,10 @@ class LTL_BDI_Pipeline:
 
     Stage 1: Natural Language -> LTLf Specification
     Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
-    Stage 3: LTLf -> AgentSpeak Code Generation (LLM)
+    Stage 3: DFA -> AgentSpeak Code Generation (Backward Planning)
 
     Legacy Note: FOND Planning (Branch B) has been deprecated and moved to src/legacy/fond/
-    The pipeline now focuses exclusively on DFA-AgentSpeak generation.
+    The pipeline now focuses exclusively on DFA-AgentSpeak generation using backward planning.
     """
 
     def __init__(self, domain_file: str = None):
@@ -50,7 +50,7 @@ class LTL_BDI_Pipeline:
         if domain_file is None:
             # Default to blocksworld domain
             from pathlib import Path
-            domain_file = str(Path(__file__).parent / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl")
+            domain_file = str(Path(__file__).parent / "domains" / "blocksworld" / "domain.pddl")
 
         self.domain_file = domain_file
 
@@ -108,8 +108,8 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
 
-        # Stage 3: DFAs -> AgentSpeak Code
-        asl_code = self._stage3_llm_agentspeak_generation(ltl_spec, dfa_result)
+        # Stage 3: DFA -> AgentSpeak Code (Backward Planning)
+        asl_code, stage3_stats = self._stage3_backward_planning_generation(ltl_spec, dfa_result)
         if not asl_code:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -201,74 +201,84 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None
 
-    def _stage3_llm_agentspeak_generation(self, ltl_spec, dfa_result):
-        """Stage 3: DFA -> LLM AgentSpeak Generation"""
-        print("\n[STAGE 3] LLM AgentSpeak Generation from DFA")
+    def _stage3_backward_planning_generation(self, ltl_spec, dfa_result):
+        """Stage 3: DFA -> Backward Planning AgentSpeak Generation (Non-LLM)"""
+        print("\n[STAGE 3] Backward Planning AgentSpeak Generation")
         print("-"*80)
 
-        generator = AgentSpeakGenerator(
-            api_key=self.config.openai_api_key,
-            model=self.config.openai_model,
-            verbose=True  # Enable verbose output to see prompts and responses
-        )
-
-        prompt_dict = None  # Initialize to track prompt even if error occurs
-
         try:
-            # Convert ltl_spec to dict format
-            # Note: No initial_state - plans must work from ANY configuration
+            # Create grounding map from ltl_spec
+            grounding_map = ltl_spec.grounding_map
+
+            # Initialize backward planner generator
+            generator = BackwardPlannerGenerator(self.domain, grounding_map)
+
+            # Convert ltl_spec to dict format for generator
             ltl_dict = {
                 "objects": ltl_spec.objects,
-                "formulas_string": [f.to_string() for f in ltl_spec.formulas]
+                "formulas_string": [f.to_string() for f in ltl_spec.formulas],
+                "grounding_map": grounding_map
             }
 
-            # Pass DFA result and domain to generator
-            asl_code, prompt_dict, response_text = generator.generate(
-                ltl_dict,
-                'blocksworld',
-                self.domain_actions,
-                self.domain_predicates,
-                dfa_result=dfa_result,  # Pass DFA dict with formula, dfa_dot, states, transitions
-                domain=self.domain  # NEW: Pass full domain object for detailed action info
-            )
+            # Generate AgentSpeak code
+            import time
+            start_time = time.time()
+            asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+            elapsed = time.time() - start_time
 
-            # Log Stage 3 success
+            # Extract statistics from generator output (printed during generation)
+            # Note: BackwardPlannerGenerator prints statistics but doesn't return them yet
+            # We'll capture what we can from the generation process
+            stage3_stats = {
+                "method": "backward_planning",
+                "code_size_chars": len(asl_code),
+                "truncated": truncated,
+                "generation_time_seconds": elapsed
+            }
+
+            # Log Stage 3 success with backward planning statistics
             self.logger.log_stage3(
                 ltl_spec,
                 dfa_result,
                 asl_code,
                 "Success",
-                model=self.config.openai_model,
-                llm_prompt=prompt_dict,
-                llm_response=response_text
+                method="backward_planning",
+                states_explored=0,  # TODO: Extract from generator
+                transitions_generated=0,  # TODO: Extract from generator
+                goal_plans_count=0,  # TODO: Extract from generator
+                action_plans_count=0,  # TODO: Extract from generator
+                cache_hits=0,  # TODO: Extract from generator
+                cache_misses=0,  # TODO: Extract from generator
+                ground_actions_cached=0,  # TODO: Extract from generator
+                redundancy_eliminated_pct=0.0  # TODO: Extract from generator
             )
 
-            print(f"✓ AgentSpeak Code Generated")
-            print("  First few lines:")
-            for line in asl_code.split('\n')[:5]:
+            print(f"\n✓ AgentSpeak Code Generated ({len(asl_code)} characters in {elapsed:.2f}s)")
+            print(f"  Method: Backward Planning (non-LLM)")
+            print(f"  Truncated: {truncated}")
+            print("\n  First 10 lines of generated code:")
+            for i, line in enumerate(asl_code.split('\n')[:10], 1):
                 if line.strip():
-                    print(f"    {line}")
+                    print(f"    {i:2d}. {line}")
 
-            # Save to output
+            # Save complete AgentSpeak code to output
             output_file = self.output_dir / "agentspeak_generated.asl"
             output_file.write_text(asl_code)
-            print(f"  Saved to: {output_file}")
+            print(f"\n  ✓ Complete AgentSpeak code saved to: {output_file}")
 
-            return asl_code
+            return asl_code, stage3_stats
 
         except Exception as e:
-            # Log failure with prompt if available (check generator's last_prompt_dict)
-            error_prompt = prompt_dict if prompt_dict else generator.last_prompt_dict
+            # Log failure
             self.logger.log_stage3(
                 ltl_spec,
                 dfa_result,
                 None,
                 "Failed",
                 error=str(e),
-                model=self.config.openai_model,
-                llm_prompt=error_prompt
+                method="backward_planning"
             )
             print(f"✗ Stage 3 Failed: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return None, None
