@@ -204,8 +204,8 @@ class BackwardPlannerGenerator:
                         continue
 
                     # Generate goal-specific section with object→variable parameterization
-                    # Create mapping for parameterization
-                    obj_to_var_mapping = self._create_parameterization_mapping(goal_predicates)
+                    # Create mapping for parameterization (only map domain objects, preserve constants/literals)
+                    obj_to_var_mapping = self._create_parameterization_mapping(goal_predicates, objects)
 
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
@@ -468,30 +468,69 @@ class BackwardPlannerGenerator:
             pattern_parts.append(f"{negation}{pred.name}({args_pattern})")
         return '&'.join(pattern_parts)
 
-    def _create_parameterization_mapping(self, goal: List[PredicateAtom]):
+    def _create_parameterization_mapping(self, goal: List[PredicateAtom], objects: List[str]):
         """
         Create object→variable mapping for parameterizing AgentSpeak code
 
+        Only objects from the domain are parameterized. Constants and literals are preserved.
+
         Args:
-            goal: List of grounded predicates (e.g., [on(a, b), clear(c)])
+            goal: List of grounded predicates (e.g., [move(a, -1, 'Left')])
+            objects: List of domain objects (e.g., ['a', 'b', 'c'])
 
         Returns:
             VariableMapping with obj_to_var and var_to_obj dictionaries
+            Example: move(a, -1, 'Left') with objects=['a','b','c']
+                     → mapping={'a': '?v0'} → generates move(V0, -1, 'Left')
         """
         from stage3_code_generation.variable_normalizer import VariableMapping
 
-        # Extract all unique objects from goal predicates
+        # Extract unique objects from goal predicates (excluding constants/literals)
         objects_in_goal = []
         for pred in goal:
             for arg in pred.args:
-                if arg not in objects_in_goal:
-                    objects_in_goal.append(arg)
+                # Only map domain objects, preserve constants/literals
+                if self._should_parameterize_arg(arg, objects):
+                    if arg not in objects_in_goal:
+                        objects_in_goal.append(arg)
 
-        # Create mapping: objects → V0, V1, V2, ...
+        # Create mapping: objects → ?v0, ?v1, ?v2, ...
         obj_to_var = {obj: f"?v{i}" for i, obj in enumerate(objects_in_goal)}
         var_to_obj = {var: obj for obj, var in obj_to_var.items()}
 
         return VariableMapping(obj_to_var=obj_to_var, var_to_obj=var_to_obj)
+
+    def _should_parameterize_arg(self, arg: str, objects: List[str]) -> bool:
+        """
+        Determine if an argument should be parameterized to a variable
+
+        Args:
+            arg: Argument string to check
+            objects: List of domain objects
+
+        Returns:
+            True if arg should be parameterized (is a domain object)
+            False if arg should be preserved (constant/literal)
+        """
+        # 1. Already a PDDL variable (?...) → don't parameterize (already abstract)
+        if arg.startswith('?'):
+            return False
+
+        # 2. Numeric literals → preserve as constants
+        try:
+            float(arg)
+            return False
+        except ValueError:
+            pass
+
+        # 3. String literals with quotes → preserve as literals
+        if (arg.startswith("'") and arg.endswith("'")) or \
+           (arg.startswith('"') and arg.endswith('"')):
+            return False
+
+        # 4. Check if it's a domain object
+        # Only parameterize if in objects list
+        return arg in objects
 
     def _generate_main_header(self, ltl_dict: Dict[str, Any], dfa_info: DFAInfo) -> str:
         """Generate main file header"""
