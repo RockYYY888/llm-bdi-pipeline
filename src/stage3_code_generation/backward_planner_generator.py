@@ -102,27 +102,19 @@ class BackwardPlannerGenerator:
         dfa_info = self._parse_dfa(dfa_result['dfa_dot'])
         print(f"DFA: {len(dfa_info.states)} states, {len(dfa_info.transitions)} transitions")
 
-        # VARIABLE ABSTRACTION: Create variable normalizer
-        # This enables variable-level caching instead of object-level caching
-        normalizer = VariableNormalizer(self.domain, objects)
-        print(f"Variable abstraction enabled: using {len(objects)} variables")
+        # OBJECT-LEVEL PLANNING: Use concrete objects instead of variables
+        # This avoids state space explosion from irrelevant variable combinations
+        print(f"Object-level planning enabled: using {len(objects)} concrete objects")
 
-        # OPTIMIZATION: Two-tier caching for DNF disjuncts
-        # Tier 1: Single predicate cache - enables reuse across different disjuncts
-        #   Key: (single_predicate_pattern, num_objects)
-        #   Example: ("on(?v0, ?v1)", 5) -> StateGraph
-        predicate_cache = {}  # (predicate_pattern, num_objects) -> (state_graph, variable_mapping)
-
-        # Tier 2: Full goal cache - for multi-predicate goals
-        #   Key: full_goal_serialized
-        #   Example: "not clear(?v2)|not on(?v0, ?v1)" -> StateGraph
-        full_goal_cache = {}  # variable_goal_key -> (state_graph, variable_mapping)
+        # OPTIMIZATION: Pattern-based caching for goals
+        # Cache using grounded goal predicates, deduplicate by structural pattern
+        # Example: on(a,b) and on(c,d) have same pattern "on_2args"
+        goal_cache = {}  # goal_key -> state_graph
+        pattern_to_goals = {}  # pattern -> list of (goal, state_graph)
 
         # Statistics
-        predicate_cache_hits = 0
-        predicate_cache_misses = 0
-        full_goal_cache_hits = 0
-        full_goal_cache_misses = 0
+        cache_hits = 0
+        cache_misses = 0
 
         # Track if any state graph was truncated due to max_states limit
         any_truncated = False
@@ -157,79 +149,39 @@ class BackwardPlannerGenerator:
                     print(f"    Skipping empty disjunct")
                     continue
 
-                # VARIABLE ABSTRACTION: Normalize goal to variable form
-                normalized_goal, obj_to_var_mapping = normalizer.normalize_predicates(goal_predicates)
-                variable_goal_key = normalizer.serialize_goal(normalized_goal)
-
-                # Create goal name (using original grounded predicates)
+                # Create goal name and serialization key
                 goal_name = self._format_goal_name(goal_predicates)
+                goal_key = self._serialize_goal(goal_predicates)
                 print(f"    Goal name: {goal_name}")
-                print(f"    Normalized: {[str(p) for p in normalized_goal]}")
-                print(f"    Variable mapping: {obj_to_var_mapping.obj_to_var}")
+                print(f"    Goal predicates: {[str(p) for p in goal_predicates]}")
 
-                # OPTIMIZATION: Two-tier cache lookup
+                # Check cache
                 state_graph = None
-                cache_hit = False
-
-                # Tier 1: If single predicate, check predicate cache first
-                if len(normalized_goal) == 1:
-                    single_pred = normalized_goal[0]
-                    single_pred_key = (single_pred.to_agentspeak(), len(objects))
-
-                    if single_pred_key in predicate_cache:
-                        # Cache HIT for single predicate!
-                        state_graph, canonical_var_mapping = predicate_cache[single_pred_key]
-                        predicate_cache_hits += 1
-                        cache_hit = True
-                        print(f"    ✓ PREDICATE Cache HIT! Reusing single-predicate exploration")
-                        print(f"    State graph: {state_graph}")
-
-                # Tier 2: Check full goal cache (for multi-predicate or if predicate cache missed)
-                if not cache_hit:
-                    if variable_goal_key in full_goal_cache:
-                        state_graph, canonical_var_mapping = full_goal_cache[variable_goal_key]
-                        full_goal_cache_hits += 1
-                        cache_hit = True
-                        print(f"    ✓ FULL-GOAL Cache HIT! Reusing exploration")
-                        print(f"    State graph: {state_graph}")
-
-                # Cache MISS: Need to explore
-                if not cache_hit:
-                    if len(normalized_goal) == 1:
-                        predicate_cache_misses += 1
-                        print(f"    Cache MISS (predicate) - running exploration...")
-                    else:
-                        full_goal_cache_misses += 1
-                        print(f"    Cache MISS (full goal) - running exploration...")
+                if goal_key in goal_cache:
+                    state_graph = goal_cache[goal_key]
+                    cache_hits += 1
+                    print(f"    ✓ Cache HIT! Reusing exploration")
+                    print(f"    State graph: {state_graph}")
+                else:
+                    # Cache MISS: Need to explore
+                    cache_misses += 1
+                    print(f"    Cache MISS - running object-level exploration...")
 
                     try:
-                        # Get variable list for this problem size
-                        variables = normalizer.get_variable_list(len(objects))
+                        # OBJECT-LEVEL PLANNING: Use concrete objects
+                        planner = ForwardStatePlanner(self.domain, objects, use_variables=False)
 
-                        # Create planner with variables instead of objects
-                        planner = ForwardStatePlanner(self.domain, variables, use_variables=True)
-
-                        # Explore using normalized (variable) goal
-                        state_graph = planner.explore_from_goal(normalized_goal)
+                        # Explore using grounded goal
+                        state_graph = planner.explore_from_goal(goal_predicates)
                         print(f"    State graph: {state_graph}")
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
                             any_truncated = True
 
-                        # Update caches based on goal type
-                        if len(normalized_goal) == 1:
-                            # Single predicate: cache in predicate cache
-                            single_pred = normalized_goal[0]
-                            single_pred_key = (single_pred.to_agentspeak(), len(objects))
-                            predicate_cache[single_pred_key] = (state_graph, obj_to_var_mapping)
-                            print(f"    → Cached in predicate cache: {single_pred_key[0]}")
-                        else:
-                            # Multi-predicate: cache in full goal cache
-                            full_goal_cache[variable_goal_key] = (state_graph, obj_to_var_mapping)
-                            print(f"    → Cached in full-goal cache")
-                            # NOTE: Proactive caching removed for performance optimization
-                            # (Previously cached individual predicates from multi-predicate goals)
+                        # Cache the result
+                        goal_cache[goal_key] = state_graph
+                        print(f"    → Cached exploration result")
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
@@ -237,31 +189,30 @@ class BackwardPlannerGenerator:
                         traceback.print_exc()
                         continue
 
-                # OPTIMIZATION 3: Generate ONLY goal-specific code
-                # Shared components (initial beliefs + action plans) will be
-                # generated once at the end
+                # Pattern-based deduplication and code generation
                 try:
-                    # OPTIMIZATION 4: Check if this parameterized pattern was already generated
-                    # Multiple grounded goals (e.g., on(a,b), on(c,d)) normalize to same pattern (on(?v0,?v1))
-                    # We should only generate the plan suite once, not duplicate for each grounded instance
-                    param_pattern = self._get_pattern_from_normalized_goal(normalized_goal)
+                    # Detect structural pattern from grounded goal
+                    # Example: on(a,b) and on(c,d) both have pattern "on(?,?)"
+                    param_pattern = self._get_pattern_from_goal(goal_predicates)
 
                     # Always add state graph (needed for shared section)
                     all_state_graphs.append(state_graph)
 
                     if param_pattern in generated_patterns:
-                        # This parameterized pattern already generated, skip duplicate plan generation
+                        # This pattern already generated, skip duplicate plan generation
                         print(f"    ✓ Pattern '{param_pattern}' already generated, skipping duplicate plans")
                         continue
 
-                    # Generate goal-specific section only if pattern not already generated
-                    # Pass variable mapping to instantiate variables during code gen
+                    # Generate goal-specific section with object→variable parameterization
+                    # Create mapping for parameterization
+                    obj_to_var_mapping = self._create_parameterization_mapping(goal_predicates)
+
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
                         goal_name=goal_name,
                         domain=self.domain,
                         objects=objects,
-                        var_mapping=obj_to_var_mapping  # NEW: Pass variable mapping
+                        var_mapping=obj_to_var_mapping
                     )
 
                     goal_section = codegen.generate_goal_specific_section()
@@ -305,34 +256,16 @@ class BackwardPlannerGenerator:
         print(f"  Goal-specific sections: {len(all_goal_sections)}")
         print(f"  Redundancy eliminated: ~{(len(all_goal_sections) - 1) * 30:.0f}% of shared code")
 
-        # Two-tier cache statistics
-        print(f"\nTwo-tier cache statistics:")
-        print(f"  Tier 1 - Predicate cache (single predicates):")
-        print(f"    Hits: {predicate_cache_hits}")
-        print(f"    Misses: {predicate_cache_misses}")
-        total_predicate = predicate_cache_hits + predicate_cache_misses
-        if total_predicate > 0:
-            print(f"    Hit rate: {predicate_cache_hits / total_predicate * 100:.1f}%")
-
-        print(f"  Tier 2 - Full-goal cache (multi-predicate goals):")
-        print(f"    Hits: {full_goal_cache_hits}")
-        print(f"    Misses: {full_goal_cache_misses}")
-        total_full = full_goal_cache_hits + full_goal_cache_misses
-        if total_full > 0:
-            print(f"    Hit rate: {full_goal_cache_hits / total_full * 100:.1f}%")
-
-        total_hits = predicate_cache_hits + full_goal_cache_hits
-        total_misses = predicate_cache_misses + full_goal_cache_misses
-        total_queries = total_hits + total_misses
-
-        print(f"  Overall:")
-        print(f"    Total cache queries: {total_queries}")
-        print(f"    Total hits: {total_hits}")
-        print(f"    Total misses: {total_misses}")
+        # Object-level cache statistics
+        print(f"\nObject-level planning cache statistics:")
+        total_queries = cache_hits + cache_misses
+        print(f"    Total goal explorations: {total_queries}")
+        print(f"    Cache hits: {cache_hits}")
+        print(f"    Cache misses: {cache_misses}")
         if total_queries > 0:
-            print(f"    Overall hit rate: {total_hits / total_queries * 100:.1f}%")
-        if total_hits > 0:
-            print(f"    💡 Predicate-level caching saved {total_hits} state space explorations!")
+            print(f"    Hit rate: {cache_hits / total_queries * 100:.1f}%")
+        if cache_hits > 0:
+            print(f"    💡 Caching saved {cache_hits} state space explorations!")
         print("="*80)
 
         return final_code, any_truncated
@@ -511,31 +444,54 @@ class BackwardPlannerGenerator:
         sorted_preds = sorted([p.to_agentspeak() for p in predicates])
         return "|".join(sorted_preds)
 
-    def _get_pattern_from_normalized_goal(self, normalized_goal: List[PredicateAtom]) -> str:
+    def _get_pattern_from_goal(self, goal: List[PredicateAtom]) -> str:
         """
-        Get parameterized pattern from normalized goal for deduplication
+        Get structural pattern from grounded goal for deduplication
 
         This is used to detect duplicate plan generation. For example:
-        - on(a,b) normalizes to on(?v0,?v1) → pattern "on_V0_V1"
-        - on(c,d) normalizes to on(?v0,?v1) → pattern "on_V0_V1" (SAME!)
+        - on(a,b) → pattern "on(?,?)"
+        - on(c,d) → pattern "on(?,?)" (SAME!)
 
         We only want to generate the plan suite once for each unique pattern.
 
         Args:
-            normalized_goal: List of normalized predicates (with ?v variables)
+            goal: List of grounded predicates (with concrete objects)
 
         Returns:
             Pattern string for deduplication
         """
-        if len(normalized_goal) == 1:
-            # Single predicate: convert to AgentSpeak with V variables
-            return normalized_goal[0].to_agentspeak(convert_vars=True)
-        else:
-            # Multiple predicates: combine with sorted order
-            pred_strs = [p.to_agentspeak(convert_vars=True)
-                        for p in sorted(normalized_goal, key=lambda x: (x.name, x.args))]
-            # Convert to a clean pattern string
-            return "_and_".join(pred_strs).replace("(", "_").replace(")", "").replace(", ", "_")
+        pattern_parts = []
+        for pred in sorted(goal, key=lambda x: (x.name, len(x.args))):
+            # Create pattern with ? for each argument
+            args_pattern = ','.join(['?' for _ in pred.args])
+            negation = 'not ' if pred.negated else ''
+            pattern_parts.append(f"{negation}{pred.name}({args_pattern})")
+        return '&'.join(pattern_parts)
+
+    def _create_parameterization_mapping(self, goal: List[PredicateAtom]):
+        """
+        Create object→variable mapping for parameterizing AgentSpeak code
+
+        Args:
+            goal: List of grounded predicates (e.g., [on(a, b), clear(c)])
+
+        Returns:
+            VariableMapping with obj_to_var and var_to_obj dictionaries
+        """
+        from stage3_code_generation.variable_normalizer import VariableMapping
+
+        # Extract all unique objects from goal predicates
+        objects_in_goal = []
+        for pred in goal:
+            for arg in pred.args:
+                if arg not in objects_in_goal:
+                    objects_in_goal.append(arg)
+
+        # Create mapping: objects → V0, V1, V2, ...
+        obj_to_var = {obj: f"?v{i}" for i, obj in enumerate(objects_in_goal)}
+        var_to_obj = {var: obj for obj, var in obj_to_var.items()}
+
+        return VariableMapping(obj_to_var=obj_to_var, var_to_obj=var_to_obj)
 
     def _generate_main_header(self, ltl_dict: Dict[str, Any], dfa_info: DFAInfo) -> str:
         """Generate main file header"""
