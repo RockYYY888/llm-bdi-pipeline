@@ -127,6 +127,10 @@ class BackwardPlannerGenerator:
         # Track if any state graph was truncated due to max_states limit
         any_truncated = False
 
+        # OPTIMIZATION 4: Track generated parameterized patterns to avoid duplicates
+        # Example: on(a,b) and on(c,d) both normalize to on(?v0,?v1) - only generate once
+        generated_patterns = set()
+
         # OPTIMIZATION 3: Collect state graphs and generate goal-specific sections
         # to avoid duplicating shared components (initial beliefs + action plans)
         all_state_graphs = []  # For generating shared section once
@@ -225,14 +229,41 @@ class BackwardPlannerGenerator:
                             full_goal_cache[variable_goal_key] = (state_graph, obj_to_var_mapping)
                             print(f"    → Cached in full-goal cache")
 
-                            # BONUS: Also cache individual predicates if not already cached
+                            # OPTIMIZATION: Proactively explore and cache individual predicates
+                            # This enables future cache hits when single predicates appear in other disjuncts
+                            # Example: [on(?v0,?v1), clear(?v2)] explored → also cache on(?v0,?v1) and clear(?v2) separately
+                            print(f"    → Proactively caching individual predicates from multi-predicate goal...")
                             for pred in normalized_goal:
                                 pred_key = (pred.to_agentspeak(), len(objects))
                                 if pred_key not in predicate_cache:
-                                    # Note: We don't actually have the state graph for individual predicates
-                                    # This is a placeholder for future enhancement
-                                    # For now, we only cache when we explore single predicates directly
-                                    pass
+                                    try:
+                                        # Independently explore this single predicate
+                                        # This is SAFE: we're not extracting from multi-predicate state graph,
+                                        # but doing a fresh exploration with correct complete goal state
+                                        single_pred_planner = ForwardStatePlanner(self.domain, variables, use_variables=True)
+                                        single_pred_graph = single_pred_planner.explore_from_goal([pred])
+
+                                        # Cache the single predicate exploration
+                                        # Create minimal variable mapping for this single predicate
+                                        single_pred_obj_to_var = {obj: var for obj, var in obj_to_var_mapping.obj_to_var.items()
+                                                                 if var in pred.args}
+                                        single_pred_var_to_obj = {var: obj for var, obj in obj_to_var_mapping.var_to_obj.items()
+                                                                 if var in pred.args}
+                                        from stage3_code_generation.variable_normalizer import VariableMapping
+                                        single_pred_mapping = VariableMapping(single_pred_obj_to_var, single_pred_var_to_obj)
+
+                                        predicate_cache[pred_key] = (single_pred_graph, single_pred_mapping)
+                                        print(f"      ✓ Cached single predicate: {pred_key[0]} ({len(single_pred_graph.states)} states)")
+
+                                        # Check if truncated
+                                        if single_pred_graph.truncated:
+                                            any_truncated = True
+                                    except Exception as e:
+                                        print(f"      ⚠ Failed to cache single predicate {pred}: {e}")
+                                        # Continue with other predicates even if one fails
+                                        continue
+                                else:
+                                    print(f"      ✓ Single predicate already cached: {pred_key[0]}")
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
@@ -244,10 +275,20 @@ class BackwardPlannerGenerator:
                 # Shared components (initial beliefs + action plans) will be
                 # generated once at the end
                 try:
-                    # Add state graph to collection (for shared section generation)
+                    # OPTIMIZATION 4: Check if this parameterized pattern was already generated
+                    # Multiple grounded goals (e.g., on(a,b), on(c,d)) normalize to same pattern (on(?v0,?v1))
+                    # We should only generate the plan suite once, not duplicate for each grounded instance
+                    param_pattern = self._get_pattern_from_normalized_goal(normalized_goal)
+
+                    # Always add state graph (needed for shared section)
                     all_state_graphs.append(state_graph)
 
-                    # Generate goal-specific section only
+                    if param_pattern in generated_patterns:
+                        # This parameterized pattern already generated, skip duplicate plan generation
+                        print(f"    ✓ Pattern '{param_pattern}' already generated, skipping duplicate plans")
+                        continue
+
+                    # Generate goal-specific section only if pattern not already generated
                     # Pass variable mapping to instantiate variables during code gen
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
@@ -259,7 +300,8 @@ class BackwardPlannerGenerator:
 
                     goal_section = codegen.generate_goal_specific_section()
                     all_goal_sections.append(goal_section)
-                    print(f"    Generated {len(goal_section)} characters of goal-specific code")
+                    generated_patterns.add(param_pattern)  # Mark pattern as generated
+                    print(f"    Generated {len(goal_section)} characters of goal-specific code (pattern: {param_pattern})")
 
                 except Exception as e:
                     print(f"    Error during codegen: {e}")
@@ -502,6 +544,32 @@ class BackwardPlannerGenerator:
         # Sort predicates for consistency (order shouldn't matter)
         sorted_preds = sorted([p.to_agentspeak() for p in predicates])
         return "|".join(sorted_preds)
+
+    def _get_pattern_from_normalized_goal(self, normalized_goal: List[PredicateAtom]) -> str:
+        """
+        Get parameterized pattern from normalized goal for deduplication
+
+        This is used to detect duplicate plan generation. For example:
+        - on(a,b) normalizes to on(?v0,?v1) → pattern "on_V0_V1"
+        - on(c,d) normalizes to on(?v0,?v1) → pattern "on_V0_V1" (SAME!)
+
+        We only want to generate the plan suite once for each unique pattern.
+
+        Args:
+            normalized_goal: List of normalized predicates (with ?v variables)
+
+        Returns:
+            Pattern string for deduplication
+        """
+        if len(normalized_goal) == 1:
+            # Single predicate: convert to AgentSpeak with V variables
+            return normalized_goal[0].to_agentspeak(convert_vars=True)
+        else:
+            # Multiple predicates: combine with sorted order
+            pred_strs = [p.to_agentspeak(convert_vars=True)
+                        for p in sorted(normalized_goal, key=lambda x: (x.name, x.args))]
+            # Convert to a clean pattern string
+            return "_and_".join(pred_strs).replace("(", "_").replace(")", "").replace(", ", "_")
 
     def _generate_main_header(self, ltl_dict: Dict[str, Any], dfa_info: DFAInfo) -> str:
         """Generate main file header"""
