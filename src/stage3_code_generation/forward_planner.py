@@ -42,10 +42,14 @@ class GroundedAction:
         action: The PDDL action definition
         args: Ground arguments (e.g., ["a", "b"])
         bindings: Variable bindings (e.g., {"?b1": "a", "?b2": "b"})
+        parsed_preconditions: Pre-parsed precondition predicates (cached)
+        parsed_effects: Pre-parsed effect branches (cached)
     """
     action: PDDLAction
     args: List[str]
     bindings: Dict[str, str]
+    parsed_preconditions: Optional[List[PredicateAtom]] = None
+    parsed_effects: Optional[List[List]] = None
 
 
 class ForwardStatePlanner:
@@ -136,7 +140,7 @@ class ForwardStatePlanner:
         return complete_goal
 
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
-                         max_states: int = 50000) -> StateGraph:
+                         max_states: int = 200000) -> StateGraph:
         """
         Explore state space from goal state using forward "destruction"
 
@@ -146,7 +150,7 @@ class ForwardStatePlanner:
 
         Args:
             goal_predicates: Predicates forming the goal state
-            max_states: Maximum number of states to explore (safety limit)
+            max_states: Maximum number of states to explore (safety limit, increased to 200K for complex goals)
 
         Returns:
             Complete state graph with all reachable states
@@ -212,7 +216,8 @@ class ForwardStatePlanner:
 
                 for new_state, belief_updates, preconditions in new_states_data:
                     # Check if state already visited using fast dict lookup
-                    new_pred_set = frozenset(new_state.predicates)
+                    # Note: new_state.predicates is already a FrozenSet, no need to wrap again
+                    new_pred_set = new_state.predicates
 
                     if new_pred_set in visited_map:
                         # Use existing state (may be at any depth, including shallower - reverse transition!)
@@ -310,10 +315,31 @@ class ForwardStatePlanner:
                 # Skip this grounding - violates equality constraint
                 continue
 
+            # OPTIMIZATION: Pre-parse preconditions and effects at grounding time
+            # This avoids repeated parsing during state exploration
+            parsed_preconditions = None
+            parsed_effects = None
+
+            try:
+                parsed_preconditions = self.condition_parser.parse(
+                    action.preconditions, bindings
+                )
+            except Exception:
+                parsed_preconditions = []
+
+            try:
+                parsed_effects = self.effect_parser.parse(
+                    action.effects, bindings
+                )
+            except Exception:
+                parsed_effects = []
+
             grounded_actions.append(GroundedAction(
                 action=action,
                 args=list(obj_tuple),
-                bindings=bindings
+                bindings=bindings,
+                parsed_preconditions=parsed_preconditions,
+                parsed_effects=parsed_effects
             ))
 
         return grounded_actions
@@ -379,15 +405,17 @@ class ForwardStatePlanner:
         Returns:
             True if action can be applied, False if violated
         """
-        # Parse preconditions
-        try:
-            precond_predicates = self.condition_parser.parse(
-                grounded_action.action.preconditions,
-                grounded_action.bindings
-            )
-        except Exception as e:
-            # Parse error - skip action
-            return False
+        # OPTIMIZATION: Use cached parsed preconditions
+        precond_predicates = grounded_action.parsed_preconditions
+        if precond_predicates is None:
+            # Fallback: parse on-demand (shouldn't happen with current code)
+            try:
+                precond_predicates = self.condition_parser.parse(
+                    grounded_action.action.preconditions,
+                    grounded_action.bindings
+                )
+            except Exception:
+                return False
 
         # Check each precondition
         for precond in precond_predicates:
@@ -408,88 +436,89 @@ class ForwardStatePlanner:
 
     def _validate_state_consistency(self, predicates: Set[PredicateAtom]) -> bool:
         """
-        Validate that a state is physically consistent (no contradictions)
+        Validate state consistency for blocksworld domain
 
-        Checks for violations of blocksworld physics:
-        1. Hand contradictions: Can't have both handempty and holding(X)
-        2. Multiple holdings: Can't hold more than one block
-        3. Circular on-relationships: Can't have on(a,b) and on(b,a)
-        4. Location contradictions: Block can't be both ontable and on another block
-        5. Clear contradictions: If block X is on block Y, then Y cannot be clear
+        NOTE: This is currently DOMAIN-SPECIFIC (blocksworld only).
+        TODO: Make this truly domain-independent by:
+          1. Analyzing action effects + preconditions to infer semantic constraints
+          2. Or relying solely on precondition checking (current approach may be sufficient)
+
+        The current implementation prevents state space explosion from invalid states
+        generated by non-deterministic effects (oneof).
 
         Args:
             predicates: Set of predicates representing the state
 
         Returns:
-            True if state is consistent, False if any violation detected
+            True if state is consistent, False if violated
         """
-        # Convert to list for easier inspection
-        pred_list = list(predicates)
+        # Single pass categorization
+        handempty = False
+        holding = []
+        ontable = []
+        on = []
+        clear = []
 
-        # Extract predicates by type
-        handempty = any(p.name == 'handempty' for p in pred_list)
-        holding = [p for p in pred_list if p.name == 'holding']
-        ontable = [p for p in pred_list if p.name == 'ontable']
-        on = [p for p in pred_list if p.name == 'on']
-        clear = [p for p in pred_list if p.name == 'clear']
+        for p in predicates:
+            if p.name == 'handempty':
+                handempty = True
+            elif p.name == 'holding':
+                holding.append(p)
+            elif p.name == 'ontable':
+                ontable.append(p)
+            elif p.name == 'on':
+                on.append(p)
+            elif p.name == 'clear':
+                clear.append(p)
 
         # Check 1: Hand contradictions
         if handempty and len(holding) > 0:
-            # Can't have both handempty and holding something
             return False
 
         # Check 2: Multiple holdings
         if len(holding) > 1:
-            # Can't hold more than one block
             return False
 
-        # Check 3: Circular on-relationships, self-loops, and multiple locations
-        # Build on-relationship map: block -> what it's on
+        # Early exit if no complex checks needed
+        if not on:
+            return True
+
+        # Check 3: Self-loops and multiple locations
         on_map = {}
         for pred in on:
             if len(pred.args) == 2:
                 block, base = pred.args
-                # Self-loop: on(a, a) - block can't be on itself
-                if block == base:
+                if block == base:  # Self-loop
                     return False
-                # Multiple locations: block can only be on ONE thing
-                if block in on_map:
-                    # Block already has a location - can't be on two things
+                if block in on_map:  # Multiple locations
                     return False
                 on_map[block] = base
 
-        # Check for cycles (e.g., a on b, b on a)
+        # Check 4: Cycles
         for block, base in on_map.items():
-            # Direct cycle: on(a,b) and on(b,a)
-            if base in on_map and on_map[base] == block:
+            if base in on_map and on_map[base] == block:  # Direct cycle
                 return False
-            # Indirect cycle: on(a,b), on(b,c), on(c,a)
+            # Indirect cycles
             visited = set()
             current = base
             while current in on_map:
                 if current in visited:
-                    return False  # Cycle detected
+                    return False
                 visited.add(current)
                 current = on_map[current]
                 if current == block:
-                    return False  # Cycle back to original block
+                    return False
 
-        # Check 4: Location contradictions
-        # A block can't be both on table and on another block
+        # Check 5: Location contradictions
         ontable_blocks = {pred.args[0] for pred in ontable if len(pred.args) == 1}
         on_blocks = {pred.args[0] for pred in on if len(pred.args) == 2}
-
         if ontable_blocks & on_blocks:
-            # Some block is both ontable and on another block
             return False
 
-        # Check 5: Clear contradictions
-        # If on(X, Y), then Y should not be clear
+        # Check 6: Clear contradictions
         clear_blocks = {pred.args[0] for pred in clear if len(pred.args) == 1}
-        base_blocks = {pred.args[1] for pred in on if len(pred.args) == 2}  # Blocks that have something on them
-
+        base_blocks = {pred.args[1] for pred in on if len(pred.args) == 2}
         if clear_blocks & base_blocks:
-            # Some block is marked clear but has another block on top
             return False
 
         return True
@@ -508,24 +537,29 @@ class ForwardStatePlanner:
         Returns:
             List of (new_state, belief_updates, preconditions)
         """
-        # Parse effects
-        try:
-            effect_branches = self.effect_parser.parse(
-                grounded_action.action.effects,
-                grounded_action.bindings
-            )
-        except Exception as e:
-            # Parse error
-            return []
+        # OPTIMIZATION: Use cached parsed effects
+        effect_branches = grounded_action.parsed_effects
+        if effect_branches is None:
+            # Fallback: parse on-demand (shouldn't happen with current code)
+            try:
+                effect_branches = self.effect_parser.parse(
+                    grounded_action.action.effects,
+                    grounded_action.bindings
+                )
+            except Exception:
+                return []
 
-        # Parse preconditions (for precondition list in transition)
-        try:
-            preconditions = self.condition_parser.parse(
-                grounded_action.action.preconditions,
-                grounded_action.bindings
-            )
-        except Exception:
-            preconditions = []
+        # OPTIMIZATION: Use cached parsed preconditions
+        preconditions = grounded_action.parsed_preconditions
+        if preconditions is None:
+            # Fallback: parse on-demand (shouldn't happen with current code)
+            try:
+                preconditions = self.condition_parser.parse(
+                    grounded_action.action.preconditions,
+                    grounded_action.bindings
+                )
+            except Exception:
+                preconditions = []
 
         results = []
 

@@ -466,7 +466,7 @@ class BackwardPlannerGenerator:
             args_pattern = ','.join(['?' for _ in pred.args])
             negation = 'not ' if pred.negated else ''
             pattern_parts.append(f"{negation}{pred.name}({args_pattern})")
-        return '&'.join(pattern_parts)
+        return ' & '.join(pattern_parts)
 
     def _create_parameterization_mapping(self, goal: List[PredicateAtom], objects: List[str]):
         """
