@@ -71,6 +71,7 @@ class BackwardPlannerGenerator:
         """
         self.domain = domain
         self.grounding_map = grounding_map
+        self.partition_map = None  # Will be set from DFA result
 
     def generate(self, ltl_dict: Dict[str, Any], dfa_result: Dict[str, Any]) -> Tuple[str, bool]:
         """
@@ -83,7 +84,8 @@ class BackwardPlannerGenerator:
                 - 'grounding_map': GroundingMap
             dfa_result: DFA result dict with:
                 - 'formula': Formula string
-                - 'dfa_dot': DOT format string
+                - 'dfa_dot': Simplified DFA DOT format string (with partition symbols)
+                - 'partition_map': Dict mapping partition symbols to PartitionInfo
                 - other metadata
 
         Returns:
@@ -93,6 +95,11 @@ class BackwardPlannerGenerator:
         """
         print("\n[Backward Planner Generator] Starting code generation")
         print("="*80)
+
+        # Extract partition map from DFA result
+        self.partition_map = dfa_result.get('partition_map', {})
+        if self.partition_map:
+            print(f"Partition map loaded: {len(self.partition_map)} partitions")
 
         # Extract objects
         objects = ltl_dict['objects']
@@ -400,16 +407,33 @@ class BackwardPlannerGenerator:
         """
         Parse transition label to extract goal predicates
 
+        Handles both:
+        1. Partition symbols (e.g., "p1", "α1") - resolved via partition_map
+        2. Boolean expressions (e.g., "on_a_b & clear_c") - parsed directly
+
         Uses BooleanExpressionParser to convert to DNF.
 
         Args:
-            label: Transition label (e.g., "on_a_b & clear_c")
+            label: Transition label (partition symbol or boolean expression)
 
         Returns:
             List of goal predicate lists (DNF form)
         """
-        parser = BooleanExpressionParser(self.grounding_map)
-        dnf = parser.parse(label)
+        # Check if label is a partition symbol
+        if self.partition_map and label in self.partition_map:
+            # Resolve partition symbol to its boolean expression
+            partition_info = self.partition_map[label]
+            actual_expression = partition_info.expression
+            print(f"  Resolved partition '{label}' → '{actual_expression}'")
+
+            # Parse the resolved expression
+            parser = BooleanExpressionParser(self.grounding_map)
+            dnf = parser.parse(actual_expression)
+        else:
+            # Direct boolean expression (or no partition map available)
+            parser = BooleanExpressionParser(self.grounding_map)
+            dnf = parser.parse(label)
+
         return dnf
 
     def _format_goal_name(self, predicates: List[PredicateAtom]) -> str:
