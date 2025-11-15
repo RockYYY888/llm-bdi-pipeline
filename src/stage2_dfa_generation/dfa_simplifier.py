@@ -8,7 +8,9 @@ Key Features:
 - Scalable: Uses Binary Decision Diagrams (BDD) for symbolic computation
 - Lossless: Preserves all semantic information from original labels
 - Minimal: Generates only the necessary partitions (not all 2^n minterms)
-- Fallback: Simple minterm enumeration for small cases or when BDD unavailable
+
+Requirements:
+- BDD library (pip install dd) - MANDATORY, no fallback
 
 Design: See docs/dfa_simplification_design.md
 """
@@ -478,309 +480,49 @@ class BDDSimplifier:
         )
 
 
-class SimpleMintermSimplifier:
-    """
-    Simple minterm-based simplifier (fallback for small domains)
-
-    Explicitly enumerates all 2^n minterms, suitable only for n < 15.
-    """
-
-    def __init__(self, max_predicates: int = 12):
-        """
-        Initialize simple simplifier
-
-        Args:
-            max_predicates: Maximum number of predicates (default: 12, max 2^12=4096 minterms)
-        """
-        self.max_predicates = max_predicates
-
-    def simplify(self, dfa_dot: str, grounding_map: GroundingMap) -> SimplifiedDFA:
-        """
-        Simplify DFA using explicit minterm enumeration
-
-        Args:
-            dfa_dot: DFA in DOT format
-            grounding_map: Grounding map for anti-grounding
-
-        Returns:
-            SimplifiedDFA object
-        """
-        print(f"[Simple Simplifier] Using explicit minterm enumeration")
-
-        # Parse transitions
-        transitions = self._parse_transitions(dfa_dot)
-
-        # Collect predicates
-        all_predicates = self._collect_predicates(transitions, grounding_map)
-
-        if len(all_predicates) == 0:
-            return self._create_trivial_result(dfa_dot)
-
-        if len(all_predicates) > self.max_predicates:
-            raise ValueError(
-                f"Too many predicates ({len(all_predicates)}) for simple simplifier. "
-                f"Max: {self.max_predicates}. Use BDD-based simplifier instead."
-            )
-
-        print(f"  Predicates ({len(all_predicates)}): {all_predicates}")
-        print(f"  Will generate up to {2**len(all_predicates)} minterms")
-
-        # Generate all possible minterms
-        all_minterms = self._generate_all_minterms(all_predicates)
-
-        print(f"  Generated {len(all_minterms)} total minterms")
-
-        # For each label, find which minterms satisfy it
-        label_to_minterms = {}
-        parser = BooleanExpressionParser(grounding_map)
-
-        for _, _, label in transitions:
-            if label not in label_to_minterms:
-                satisfying = self._find_satisfying_minterms(
-                    label, all_minterms, all_predicates, parser
-                )
-                label_to_minterms[label] = satisfying
-
-        # Collect only used minterms
-        used_minterms = set()
-        for minterms in label_to_minterms.values():
-            used_minterms.update(minterms)
-
-        print(f"  Used minterms: {len(used_minterms)} out of {len(all_minterms)}")
-
-        # Create partition infos
-        partition_infos = []
-        partition_map = {}
-        minterm_to_symbol = {}
-
-        for i, minterm in enumerate(sorted(used_minterms)):
-            # Generate meaningful symbol from minterm
-            expr = self._minterm_to_expression(minterm, all_predicates)
-            values = dict(zip(all_predicates, minterm))
-
-            # Check if this minterm represents exactly one predicate being true
-            true_predicates = [pred for pred, val in values.items() if val]
-
-            if len(true_predicates) == 1 and len([v for v in values.values() if not v]) == len(all_predicates) - 1:
-                # Single predicate is true, all others false -> use predicate name
-                symbol = true_predicates[0]
-            else:
-                # Complex expression -> use the expression itself as symbol
-                symbol = expr
-
-            info = PartitionInfo(
-                symbol=symbol,
-                expression=expr,
-                minterm=minterm,
-                predicate_values=values
-            )
-            partition_infos.append(info)
-            partition_map[symbol] = info
-            minterm_to_symbol[minterm] = symbol
-
-        # Build label to partition mapping
-        original_label_to_partitions = {}
-        for label, minterms in label_to_minterms.items():
-            symbols = [minterm_to_symbol[m] for m in minterms]
-            original_label_to_partitions[label] = symbols
-
-        # Rebuild DFA
-        simplified_dot = self._rebuild_dfa(dfa_dot, transitions, original_label_to_partitions)
-
-        # Stats
-        stats = {
-            'method': 'minterm',
-            'num_predicates': len(all_predicates),
-            'num_partitions': len(used_minterms),
-            'num_total_minterms': len(all_minterms),
-            'compression_ratio': len(all_minterms) / len(used_minterms) if len(used_minterms) > 0 else 1,
-        }
-
-        return SimplifiedDFA(
-            simplified_dot=simplified_dot,
-            partitions=partition_infos,
-            partition_map=partition_map,
-            original_label_to_partitions=original_label_to_partitions,
-            stats=stats
-        )
-
-    def _parse_transitions(self, dfa_dot: str) -> List[Tuple[str, str, str]]:
-        """Parse transitions from DOT format"""
-        transitions = []
-        for line in dfa_dot.split('\n'):
-            match = re.match(r'(\w+)\s*->\s*(\w+)\s*\[label="([^"]+)"\]', line.strip())
-            if match:
-                from_state, to_state, label = match.groups()
-                if from_state not in ['init', '__start']:
-                    transitions.append((from_state, to_state, label))
-        return transitions
-
-    def _collect_predicates(self, transitions: List[Tuple], grounding_map: GroundingMap) -> List[str]:
-        """Collect all atomic predicates"""
-        predicates = set()
-        for _, _, label in transitions:
-            tokens = re.findall(r'\w+', label)
-            for token in tokens:
-                if token.lower() not in ['true', 'false', 'and', 'or', 'not']:
-                    predicates.add(token)
-        return sorted(list(predicates))
-
-    def _generate_all_minterms(self, predicates: List[str]) -> List[Tuple[bool, ...]]:
-        """Generate all 2^n minterms"""
-        import itertools
-        n = len(predicates)
-        minterms = []
-        for values in itertools.product([False, True], repeat=n):
-            minterms.append(values)
-        return minterms
-
-    def _find_satisfying_minterms(self, label: str, all_minterms: List[Tuple],
-                                  predicates: List[str], parser: BooleanExpressionParser) -> List[Tuple]:
-        """Find which minterms satisfy the given label expression"""
-        satisfying = []
-
-        for minterm in all_minterms:
-            # Evaluate label under this minterm assignment
-            if self._evaluate_expression(label, minterm, predicates):
-                satisfying.append(minterm)
-
-        return satisfying
-
-    def _evaluate_expression(self, expr: str, minterm: Tuple[bool, ...],
-                            predicates: List[str]) -> bool:
-        """Evaluate boolean expression under minterm assignment"""
-        # Create assignment dict
-        assignment = dict(zip(predicates, minterm))
-
-        # Replace predicates with their values
-        expr_eval = expr
-
-        # Sort by length descending to avoid substring issues
-        sorted_preds = sorted(predicates, key=len, reverse=True)
-
-        for pred in sorted_preds:
-            value_str = 'True' if assignment[pred] else 'False'
-            # Use word boundaries to avoid partial replacement
-            expr_eval = re.sub(r'\b' + re.escape(pred) + r'\b', value_str, expr_eval)
-
-        # Normalize operators
-        expr_eval = expr_eval.replace('&', ' and ')
-        expr_eval = expr_eval.replace('|', ' or ')
-        expr_eval = expr_eval.replace('!', ' not ')
-        expr_eval = expr_eval.replace('~', ' not ')
-        expr_eval = expr_eval.replace('true', 'True')
-        expr_eval = expr_eval.replace('false', 'False')
-
-        # Evaluate
-        try:
-            return eval(expr_eval)
-        except:
-            print(f"Warning: Could not evaluate '{expr_eval}'")
-            return False
-
-    def _minterm_to_expression(self, minterm: Tuple[bool, ...], predicates: List[str]) -> str:
-        """Convert minterm to boolean expression string"""
-        parts = []
-        for pred, value in zip(predicates, minterm):
-            if value:
-                parts.append(pred)
-            else:
-                parts.append(f"~{pred}")
-        return " & ".join(parts)
-
-    def _rebuild_dfa(self, original_dot: str, transitions: List[Tuple],
-                     label_to_partitions: Dict[str, List[str]]) -> str:
-        """Rebuild DFA with partition symbols"""
-        lines = original_dot.split('\n')
-        new_lines = []
-
-        for line in lines:
-            match = re.match(r'(\s*)(\w+)\s*->\s*(\w+)\s*\[label="([^"]+)"\](.*)', line)
-
-            if match:
-                indent, from_state, to_state, label, rest = match.groups()
-
-                if from_state in ['init', '__start']:
-                    new_lines.append(line)
-                    continue
-
-                partition_symbols = label_to_partitions.get(label, [])
-
-                if not partition_symbols:
-                    new_lines.append(line)
-                else:
-                    for symbol in partition_symbols:
-                        new_line = f'{indent}{from_state} -> {to_state} [label="{symbol}"];'
-                        new_lines.append(new_line)
-            else:
-                new_lines.append(line)
-
-        return '\n'.join(new_lines)
-
-    def _create_trivial_result(self, dfa_dot: str) -> SimplifiedDFA:
-        """Create trivial result when no simplification needed"""
-        return SimplifiedDFA(
-            simplified_dot=dfa_dot,
-            partitions=[],
-            partition_map={},
-            original_label_to_partitions={},
-            stats={'method': 'none', 'num_predicates': 0, 'num_partitions': 0}
-        )
-
-
 class DFASimplifier:
     """
-    Main DFA simplifier with automatic method selection
+    BDD-based DFA simplifier (MANDATORY)
 
-    Automatically chooses between BDD-based or minterm-based simplification
-    based on availability and problem size.
+    Uses Binary Decision Diagrams for partition refinement.
+    BDD library is REQUIRED - no fallback methods.
     """
 
-    def __init__(self, prefer_bdd: bool = True, max_predicates_for_minterm: int = 12):
+    def __init__(self):
         """
         Initialize DFA simplifier
 
-        Args:
-            prefer_bdd: Prefer BDD method if available
-            max_predicates_for_minterm: Max predicates for minterm method
+        Raises:
+            ImportError: If BDD library is not available
         """
-        self.prefer_bdd = prefer_bdd
-        self.max_predicates_for_minterm = max_predicates_for_minterm
-
-        # Try to initialize BDD simplifier
+        # Initialize BDD simplifier (REQUIRED)
         self.bdd_simplifier = BDDSimplifier()
-        self.minterm_simplifier = SimpleMintermSimplifier(max_predicates_for_minterm)
 
-    def simplify(self, dfa_dot: str, grounding_map: GroundingMap,
-                 method: Optional[str] = None) -> SimplifiedDFA:
+        if not self.bdd_simplifier.is_available():
+            raise ImportError(
+                "BDD library is required for DFA simplification. "
+                "Install with: pip install dd"
+            )
+
+    def simplify(self, dfa_dot: str, grounding_map: GroundingMap) -> SimplifiedDFA:
         """
-        Simplify DFA using best available method
+        Simplify DFA using BDD-based partition refinement
 
         Args:
             dfa_dot: DFA in DOT format
             grounding_map: Grounding map for anti-grounding
-            method: Force specific method ('bdd', 'minterm', or None for auto)
 
         Returns:
             SimplifiedDFA object
+
+        Raises:
+            RuntimeError: If BDD simplifier is not available
         """
-        # Auto-select method
-        if method is None:
-            if self.prefer_bdd and self.bdd_simplifier.is_available():
-                method = 'bdd'
-            else:
-                method = 'minterm'
+        if not self.bdd_simplifier.is_available():
+            raise RuntimeError(
+                "BDD simplifier is not available. "
+                "Install with: pip install dd"
+            )
 
-        print(f"[DFA Simplifier] Using method: {method}")
-
-        if method == 'bdd':
-            if not self.bdd_simplifier.is_available():
-                print("  Warning: BDD not available, falling back to minterm")
-                method = 'minterm'
-            else:
-                return self.bdd_simplifier.simplify(dfa_dot, grounding_map)
-
-        if method == 'minterm':
-            return self.minterm_simplifier.simplify(dfa_dot, grounding_map)
-
-        raise ValueError(f"Unknown simplification method: {method}")
+        print(f"[DFA Simplifier] Using method: bdd")
+        return self.bdd_simplifier.simplify(dfa_dot, grounding_map)

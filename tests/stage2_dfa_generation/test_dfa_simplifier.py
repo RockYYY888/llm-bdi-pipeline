@@ -2,7 +2,7 @@
 """
 Test DFA Simplifier
 
-Tests both BDD-based and minterm-based simplification methods.
+Tests BDD-based simplification method only.
 """
 
 import sys
@@ -24,7 +24,6 @@ spec.loader.exec_module(dfa_simplifier_module)
 
 DFASimplifier = dfa_simplifier_module.DFASimplifier
 BDDSimplifier = dfa_simplifier_module.BDDSimplifier
-SimpleMintermSimplifier = dfa_simplifier_module.SimpleMintermSimplifier
 
 from stage1_interpretation.grounding_map import GroundingMap
 
@@ -56,17 +55,15 @@ digraph G {
     gmap.add_atom("on_a_b", "on", ["a", "b"])
     gmap.add_atom("clear_c", "clear", ["c"])
 
-    # Test minterm simplifier
-    print("\n--- Minterm Simplifier ---")
-    minterm_simplifier = SimpleMintermSimplifier()
-    result = minterm_simplifier.simplify(dfa_dot, gmap)
+    # Test BDD simplifier
+    print("\n--- BDD Simplifier ---")
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(dfa_dot, gmap)
 
     print(f"\nResults:")
     print(f"  Method: {result.stats['method']}")
     print(f"  Predicates: {result.stats['num_predicates']}")
     print(f"  Partitions: {result.stats['num_partitions']}")
-    print(f"  Total minterms: {result.stats.get('num_total_minterms', 'N/A')}")
-    print(f"  Compression: {result.stats['compression_ratio']:.2f}x")
 
     print(f"\nPartitions generated:")
     for partition in result.partitions:
@@ -75,9 +72,6 @@ digraph G {
     print(f"\nOriginal label mapping:")
     for label, partitions in result.original_label_to_partitions.items():
         print(f"  '{label}' → {partitions}")
-
-    print(f"\nSimplified DFA:")
-    print(result.simplified_dot)
 
     print("\n✓ Test 1 passed\n")
 
@@ -110,14 +104,13 @@ digraph G {
     gmap.add_atom("clear_c", "clear", ["c"])
     gmap.add_atom("holding_d", "holding", ["d"])
 
-    print("\n--- Minterm Simplifier ---")
-    minterm_simplifier = SimpleMintermSimplifier()
-    result = minterm_simplifier.simplify(dfa_dot, gmap)
+    print("\n--- BDD Simplifier ---")
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(dfa_dot, gmap)
 
     print(f"\nResults:")
     print(f"  Predicates: {result.stats['num_predicates']}")
-    print(f"  Partitions: {result.stats['num_partitions']} / {result.stats['num_total_minterms']}")
-    print(f"  Compression: {result.stats['compression_ratio']:.2f}x")
+    print(f"  Partitions: {result.stats['num_partitions']}")
 
     print(f"\nPartitions (first 10):")
     for partition in result.partitions[:10]:
@@ -129,7 +122,7 @@ digraph G {
 
 
 def test_bdd_simplifier():
-    """Test BDD-based simplifier if available"""
+    """Test BDD-based simplifier"""
     print("=" * 80)
     print("TEST 3: BDD-based Simplifier")
     print("=" * 80)
@@ -137,9 +130,7 @@ def test_bdd_simplifier():
     bdd_simplifier = BDDSimplifier()
 
     if not bdd_simplifier.is_available():
-        print("⚠ BDD library not available, skipping test")
-        print("  Install with: pip install dd")
-        return
+        raise RuntimeError("BDD library is required. Install with: pip install dd")
 
     print("✓ BDD library available")
 
@@ -165,7 +156,6 @@ digraph G {
     print(f"  Method: {result.stats['method']}")
     print(f"  Predicates: {result.stats['num_predicates']}")
     print(f"  Partitions: {result.stats['num_partitions']}")
-    print(f"  Compression: {result.stats['compression_ratio']:.2f}x")
 
     print(f"\nPartitions:")
     for partition in result.partitions:
@@ -200,7 +190,7 @@ digraph G {
 
     result = simplifier.simplify(dfa_dot, gmap)
 
-    print(f"\nAuto-selected method: {result.stats['method']}")
+    print(f"\nSelected method: {result.stats['method']}")
     print(f"Partitions: {result.stats['num_partitions']}")
 
     print("\n✓ Test 4 passed\n")
@@ -222,7 +212,7 @@ digraph G {
     gmap = GroundingMap()
     gmap.add_atom("on_a_b", "on", ["a", "b"])
 
-    simplifier = SimpleMintermSimplifier()
+    simplifier = DFASimplifier()
     result = simplifier.simplify(dfa_dot, gmap)
 
     print(f"Partitions: {result.stats['num_partitions']}")
@@ -250,14 +240,14 @@ digraph G {
     gmap.add_atom("on_a_b", "on", ["a", "b"])
     gmap.add_atom("clear_c", "clear", ["c"])
 
-    simplifier = SimpleMintermSimplifier()
+    simplifier = DFASimplifier()
     result = simplifier.simplify(dfa_dot, gmap)
 
-    # Verify: "on_a_b | clear_c" should map to 3 partitions
-    # (on_a_b & clear_c), (on_a_b & ~clear_c), (~on_a_b & clear_c)
+    # Verify: "on_a_b | clear_c" should map to partitions
+    # BDD optimization may generate fewer partitions than minterm enumeration
     label1_partitions = result.original_label_to_partitions.get("on_a_b | clear_c", [])
     print(f"'on_a_b | clear_c' maps to {len(label1_partitions)} partitions: {label1_partitions}")
-    assert len(label1_partitions) == 3, f"Expected 3 partitions, got {len(label1_partitions)}"
+    assert len(label1_partitions) >= 2, f"Expected at least 2 partitions, got {len(label1_partitions)}"
 
     # Verify: "on_a_b & clear_c" should map to 1 partition
     label2_partitions = result.original_label_to_partitions.get("on_a_b & clear_c", [])
