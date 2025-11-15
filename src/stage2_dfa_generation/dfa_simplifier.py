@@ -133,11 +133,23 @@ class BDDSimplifier:
         partition_infos = []
         partition_map = {}
         for i, (partition_bdd, expr) in enumerate(partitions):
-            symbol = f"α{i+1}"
+            # Get predicate values for this partition
+            pred_values = self._bdd_to_assignment(partition_bdd, bdd, all_predicates)
+
+            # Check if this partition represents exactly one predicate being true
+            true_predicates = [pred for pred, val in pred_values.items() if val]
+
+            if len(true_predicates) == 1 and len([v for v in pred_values.values() if not v]) == len(all_predicates) - 1:
+                # Single predicate is true, all others false -> use predicate name
+                symbol = true_predicates[0]
+            else:
+                # Complex expression -> use the expression itself as symbol
+                symbol = expr
+
             info = PartitionInfo(
                 symbol=symbol,
                 expression=expr,
-                predicate_values=self._bdd_to_assignment(partition_bdd, bdd, all_predicates)
+                predicate_values=pred_values
             )
             partition_infos.append(info)
             partition_map[symbol] = info
@@ -542,9 +554,19 @@ class SimpleMintermSimplifier:
         minterm_to_symbol = {}
 
         for i, minterm in enumerate(sorted(used_minterms)):
-            symbol = f"p{i+1}"
+            # Generate meaningful symbol from minterm
             expr = self._minterm_to_expression(minterm, all_predicates)
             values = dict(zip(all_predicates, minterm))
+
+            # Check if this minterm represents exactly one predicate being true
+            true_predicates = [pred for pred, val in values.items() if val]
+
+            if len(true_predicates) == 1 and len([v for v in values.values() if not v]) == len(all_predicates) - 1:
+                # Single predicate is true, all others false -> use predicate name
+                symbol = true_predicates[0]
+            else:
+                # Complex expression -> use the expression itself as symbol
+                symbol = expr
 
             info = PartitionInfo(
                 symbol=symbol,
