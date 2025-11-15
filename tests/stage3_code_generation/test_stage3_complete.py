@@ -58,13 +58,17 @@ def generate_dfa_from_formula(goal_formula: str):
         goal_formula: LTL formula string (e.g., "F(on(a, b))")
 
     Returns:
-        DFA result dict with formula, dfa_dot, num_states, num_transitions
+        DFA result dict with formula, dfa_dot, num_states, num_transitions,
+        partition_map (from simplification)
     """
     # Create LTL specification
     spec = LTLSpecification()
     spec.objects = []  # Objects not needed for DFA generation
 
-    # Parse the goal formula to create LTLFormula objects
+    # Create grounding map (required for DFA simplification)
+    gmap = GroundingMap()
+
+    # Parse the goal formula to create LTLFormula objects and build grounding map
     # Handle: F(predicate), F(pred1 & pred2), etc.
     match = re.match(r'F\((.+)\)', goal_formula)
     if not match:
@@ -79,9 +83,19 @@ def generate_dfa_from_formula(goal_formula: str):
         args_str = pred_match.group(2)
         args = [arg.strip() for arg in args_str.split(',')]
         predicate_dict = {pred_name: args}
+
+        # Add to grounding map
+        # Generate grounded atom name like "on_a_b"
+        grounded_name = f"{pred_name}_{'_'.join(args)}"
+        gmap.add_atom(grounded_name, pred_name, args)
     else:
         # No arguments, propositional symbol
         predicate_dict = {predicate_str: []}
+        # Add propositional symbol to grounding map
+        gmap.add_atom(predicate_str, predicate_str, [])
+
+    # Set grounding map in spec (required for DFA simplification)
+    spec.grounding_map = gmap
 
     # Create atomic formula
     atom = LTLFormula(
@@ -101,7 +115,7 @@ def generate_dfa_from_formula(goal_formula: str):
 
     spec.formulas = [f_formula]
 
-    # Build DFA using Stage 2
+    # Build DFA using Stage 2 (now includes mandatory simplification)
     builder = DFABuilder()
     dfa_result = builder.build(spec)
 
@@ -395,6 +409,11 @@ def test_2_1_globally_negation():
     spec.objects = ["a", "b"]
     spec.formulas = [g_formula]
 
+    # Create grounding map (required for DFA simplification)
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    spec.grounding_map = grounding_map
+
     # Build DFA
     builder = DFABuilder()
     dfa_result = builder.build(spec)
@@ -501,6 +520,12 @@ def test_2_2_conjunction_in_finally():
     spec = LTLSpecification()
     spec.objects = ["a", "b", "c"]
     spec.formulas = [f_formula]
+
+    # Create grounding map (required for DFA simplification)
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_c", "clear", ["c"])
+    spec.grounding_map = grounding_map
 
     # Build DFA
     builder = DFABuilder()
@@ -622,6 +647,12 @@ def test_2_3_release_operator():
     spec.objects = ["a", "b"]
     spec.formulas = [r_formula]
 
+    # Create grounding map (required for DFA simplification)
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("ontable_a", "ontable", ["a"])
+    grounding_map.add_atom("clear_b", "clear", ["b"])
+    spec.grounding_map = grounding_map
+
     # Build DFA
     builder = DFABuilder()
     dfa_result = builder.build(spec)
@@ -736,6 +767,12 @@ def test_2_4_negation_and_conjunction():
     spec = LTLSpecification()
     spec.objects = ["a", "b", "c"]
     spec.formulas = [f_formula]
+
+    # Create grounding map (required for DFA simplification)
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_c", "clear", ["c"])
+    spec.grounding_map = grounding_map
 
     # Build DFA
     builder = DFABuilder()
@@ -860,6 +897,13 @@ def test_3_disjunction_with_conjunction():
     spec.objects = ["a", "b", "c", "d", "e"]
     spec.formulas = [f_formula]
 
+    # Create grounding map (required for DFA simplification)
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_c", "clear", ["c"])
+    grounding_map.add_atom("on_d_e", "on", ["d", "e"])
+    spec.grounding_map = grounding_map
+
     # Build DFA
     builder = DFABuilder()
     dfa_result = builder.build(spec)
@@ -894,6 +938,7 @@ def test_3_disjunction_with_conjunction():
     elapsed = time.time() - start_time
 
     print(f"  ✓ Code generated: {len(asl_code)} characters in {elapsed:.2f}s")
+    print(asl_code)
     print(f"  Truncated: {truncated}")
 
     # Validate code quality
