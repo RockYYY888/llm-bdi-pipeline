@@ -124,19 +124,14 @@ def main():
     simplified_result = simplifier.simplify(original_dfa_dot, spec.grounding_map)
 
     print(f"Simplified DFA Statistics:")
-    print(f"  Method: {simplified_result.stats['method']}")
-    print(f"  Predicates: {simplified_result.stats['num_predicates']}")
-    print(f"  Partitions: {simplified_result.stats['num_partitions']}")
+    print(f"  Method: {simplified_result.stats.get('method', 'N/A')}")
+    print(f"  Predicates: {simplified_result.stats.get('num_predicates', 0)}")
+    print(f"  Original states: {simplified_result.stats.get('num_original_states', 0)}")
+    print(f"  New states: {simplified_result.stats.get('num_new_states', 0)}")
+    print(f"  Original transitions: {simplified_result.stats.get('num_original_transitions', 0)}")
+    print(f"  New transitions: {simplified_result.stats.get('num_new_transitions', 0)}")
     print()
 
-    print("Partition Map:")
-    print("-" * 80)
-    for symbol, info in simplified_result.partition_map.items():
-        print(f"\n{symbol}:")
-        print(f"  Expression: {info.expression}")
-        print(f"  Values: {info.predicate_values}")
-    print("-" * 80)
-    print()
 
     print("Simplified DFA (Complete DOT format):")
     print("-" * 80)
