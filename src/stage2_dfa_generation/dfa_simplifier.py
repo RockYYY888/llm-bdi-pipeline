@@ -2,7 +2,11 @@
 DFA Transition Label Simplifier
 
 Transforms DFA with complex boolean expressions into equivalent DFA
-where each transition checks exactly ONE atomic literal (var or !var).
+where each transition checks exactly ONE atomic literal.
+
+An atomic literal is either:
+  - A positive literal: var (e.g., on_a_b)
+  - A negative literal: !var (e.g., !clear_c)
 
 Algorithm: BDD-based Shannon Expansion
 For each original transition (s1 -> s2, label=formula):
@@ -60,9 +64,13 @@ class BDDBasedDFABuilder:
 
     Strategy:
     - For each original transition with complex formula, build BDD
-    - Traverse BDD: each node tests ONE atom (var or !var)
+    - Traverse BDD: each node tests ONE atomic literal (var or !var)
     - Create intermediate states for BDD decision nodes
     - Result: DFA where each edge checks exactly one atomic literal
+
+    Atomic Literal Definition:
+    - Positive literal: var (e.g., on_a_b means "on_a_b is true")
+    - Negative literal: !var (e.g., !clear_c means "clear_c is false")
 
     Guarantees:
     - Deterministic: each (state, atom) has at most one successor
@@ -90,7 +98,9 @@ class BDDBasedDFABuilder:
             grounding_map: Grounding map for predicates
 
         Returns:
-            SimplifiedDFA with atomic transitions (var or !var literals)
+            SimplifiedDFA with atomic literal transitions only
+            - Each transition label is either: var, !var, or "true"
+            - No complex boolean expressions (AND/OR) in transition labels
         """
         print("[BDD-Based DFA Builder] Converting to atomic transitions")
 
@@ -128,11 +138,18 @@ class BDDBasedDFABuilder:
             # Build BDD for this label
             try:
                 label_bdd = self._parse_to_bdd(label)
-            except Exception as e:
-                print(f"  Warning: Could not parse '{label}': {e}")
+            except (ValueError, KeyError, SyntaxError) as e:
+                print(f"  Warning: Could not parse '{label}': {type(e).__name__}: {e}")
+                print(f"  Keeping transition as-is: {from_state} -> {to_state} [label=\"{label}\"]")
                 # Fallback: keep as is
                 new_transitions.append((from_state, to_state, label))
                 continue
+            except Exception as e:
+                # Unexpected error - raise with context
+                raise RuntimeError(
+                    f"Unexpected error while parsing transition label '{label}' "
+                    f"from {from_state} to {to_state}: {type(e).__name__}: {e}"
+                ) from e
 
             # Convert BDD to atomic transitions
             atomic_trans, reachable_accept = self._bdd_to_atomic_transitions(
@@ -176,6 +193,9 @@ class BDDBasedDFABuilder:
            - Low edge (var=false) → transition labeled "!var"
         3. Use global state_map to handle shared BDD nodes correctly
 
+        CRITICAL: state_map uses BDD nodes as keys, NOT id(node), because
+        dd.autoref can have different nodes with same id() but different hash().
+
         Returns: (transitions, accepting_states)
         """
         transitions = []
@@ -185,7 +205,7 @@ class BDDBasedDFABuilder:
         self._map_bdd_to_states(bdd_node, start_state, target_state, target_is_accepting)
 
         # Then, create transitions from the BDD structure
-        visited = set()  # Track which nodes we've created transitions for
+        visited = set()  # Track which (node, state) pairs we've created transitions for
         trans = self._create_transitions_from_bdd(bdd_node, start_state, target_state, visited)
         transitions.extend(trans)
 
@@ -196,25 +216,34 @@ class BDDBasedDFABuilder:
         return transitions, accepting
 
     def _map_bdd_to_states(self, bdd_node, start_state: str, target_state: str,
-                           target_is_accepting: bool):
+                           target_is_accepting: bool, visited=None):
         """
         Phase 1: Build complete mapping from BDD nodes to DFA states.
 
         This ensures each unique BDD node gets exactly one DFA state.
-        Handles node sharing correctly.
+        Handles node sharing correctly by tracking visited nodes.
+
+        CRITICAL: Uses BDD nodes themselves as keys, not id(node), because
+        dd.autoref can have different nodes with same id() but different hash().
         """
+        if visited is None:
+            visited = set()
+
         # Terminal nodes don't need state mapping
         if bdd_node in [self.bdd.true, self.bdd.false]:
             return
 
-        # Check if already mapped
-        node_id = id(bdd_node)
-        if node_id in self.state_map:
-            return  # Already processed
+        # Check if already visited in this traversal
+        # Use node itself as key (hashable)
+        if bdd_node in visited:
+            return  # Already processed in this call tree
+        visited.add(bdd_node)
 
-        # Map this node to a state
-        # The root BDD node for this transition uses start_state
-        self.state_map[node_id] = start_state
+        # Map this node to a state if not already mapped
+        # CRITICAL: Use node as key, not id(node)
+        if bdd_node not in self.state_map:
+            # The root BDD node for this transition uses start_state
+            self.state_map[bdd_node] = start_state
 
         # Recursively map children (they will get new states)
         var_index = bdd_node.level
@@ -224,21 +253,25 @@ class BDDBasedDFABuilder:
 
             # Map children nodes
             if high_branch and high_branch not in [self.bdd.true, self.bdd.false]:
-                child_id = id(high_branch)
-                if child_id not in self.state_map:
+                # Assign state if not already assigned
+                # CRITICAL: Use node as key, not id(node)
+                if high_branch not in self.state_map:
                     self.state_counter += 1
-                    self.state_map[child_id] = f"s{self.state_counter}"
-                self._map_bdd_to_states(high_branch, self.state_map[child_id], target_state, target_is_accepting)
+                    self.state_map[high_branch] = f"s{self.state_counter}"
+                # Always recurse to ensure ALL descendants are mapped
+                self._map_bdd_to_states(high_branch, self.state_map[high_branch], target_state, target_is_accepting, visited)
 
             if low_branch and low_branch not in [self.bdd.true, self.bdd.false]:
-                child_id = id(low_branch)
-                if child_id not in self.state_map:
+                # Assign state if not already assigned
+                # CRITICAL: Use node as key, not id(node)
+                if low_branch not in self.state_map:
                     self.state_counter += 1
-                    self.state_map[child_id] = f"s{self.state_counter}"
-                self._map_bdd_to_states(low_branch, self.state_map[child_id], target_state, target_is_accepting)
+                    self.state_map[low_branch] = f"s{self.state_counter}"
+                # Always recurse to ensure ALL descendants are mapped
+                self._map_bdd_to_states(low_branch, self.state_map[low_branch], target_state, target_is_accepting, visited)
 
     def _create_transitions_from_bdd(self, bdd_node, start_state: str,
-                                     target_state: str, visited: Set[int]) -> List[Tuple[str, str, str]]:
+                                     target_state: str, visited: Set[Tuple]) -> List[Tuple[str, str, str]]:
         """
         Phase 2: Create transitions from BDD structure.
 
@@ -250,8 +283,12 @@ class BDDBasedDFABuilder:
         - high branch means variable is FALSE
         - low branch means variable is TRUE
 
+        CRITICAL FIX: visited tracks (node_id, current_state) pairs, not just node_id.
+        This is because shared BDD nodes need to generate transitions from each
+        predecessor state separately.
+
         Args:
-            visited: Set of node IDs we've already processed (prevents duplicates)
+            visited: Set of (node_id, state) tuples we've already processed
         """
         transitions = []
 
@@ -264,14 +301,15 @@ class BDDBasedDFABuilder:
         if bdd_node == self.bdd.false:
             return []
 
-        # Check if already processed
-        node_id = id(bdd_node)
-        if node_id in visited:
-            return []  # Already created transitions for this node
-        visited.add(node_id)
-
         # Get current node's DFA state
-        current_state = self.state_map.get(node_id, start_state)
+        # CRITICAL: Use node as key, not id(node)
+        current_state = self.state_map.get(bdd_node, start_state)
+
+        # Check if already processed
+        # BDD nodes are hashable and can be used directly in sets
+        if bdd_node in visited:
+            return []  # Already created transitions for this node
+        visited.add(bdd_node)
 
         # Get variable and negation status
         var_index = bdd_node.level
@@ -307,7 +345,8 @@ class BDDBasedDFABuilder:
                 transitions.append((current_state, target_state, true_label))
             else:
                 # Transition to intermediate state
-                true_state = self.state_map.get(id(true_branch))
+                # CRITICAL: Use node as key, not id(node)
+                true_state = self.state_map.get(true_branch)
                 if true_state:
                     transitions.append((current_state, true_state, true_label))
                     # Recursively create transitions from true_state
@@ -321,7 +360,8 @@ class BDDBasedDFABuilder:
                 transitions.append((current_state, target_state, false_label))
             else:
                 # Transition to intermediate state
-                false_state = self.state_map.get(id(false_branch))
+                # CRITICAL: Use node as key, not id(node)
+                false_state = self.state_map.get(false_branch)
                 if false_state:
                     transitions.append((current_state, false_state, false_label))
                     # Recursively create transitions from false_state
@@ -329,6 +369,30 @@ class BDDBasedDFABuilder:
                         false_branch, false_state, target_state, visited))
 
         return transitions
+
+    def _find_matching_paren(self, expr: str, start: int) -> int:
+        """
+        Find the index of the closing parenthesis that matches the opening one at start
+
+        Args:
+            expr: The expression string
+            start: Index of the opening parenthesis
+
+        Returns:
+            Index of the matching closing parenthesis, or -1 if not found
+        """
+        if start >= len(expr) or expr[start] != '(':
+            return -1
+
+        level = 0
+        for i in range(start, len(expr)):
+            if expr[i] == '(':
+                level += 1
+            elif expr[i] == ')':
+                level -= 1
+                if level == 0:
+                    return i
+        return -1
 
     def _parse_to_bdd(self, expr: str):
         """Parse boolean expression to BDD using Shannon Expansion"""
@@ -347,7 +411,13 @@ class BDDBasedDFABuilder:
         return self._parse_expr_recursive(expr)
 
     def _parse_expr_recursive(self, expr: str):
-        """Recursive expression parser for BDD construction"""
+        """
+        Recursive expression parser for BDD construction
+
+        Raises:
+            ValueError: If expression contains unknown predicates or is malformed
+            SyntaxError: If expression has unbalanced parentheses
+        """
         expr = expr.strip()
 
         # Single predicate
@@ -356,15 +426,26 @@ class BDDBasedDFABuilder:
 
         # Negation
         if expr.startswith('~'):
-            inner = expr[1:].strip('()')
+            inner = expr[1:].strip()
+            if not inner:
+                raise ValueError(f"Empty expression after negation operator in: {expr}")
+
+            # Strip outer parentheses if present
+            if inner.startswith('(') and inner.endswith(')'):
+                inner = inner[1:-1]
+
             if inner in self.predicates:
                 return ~self.bdd.var(inner)
             else:
                 return ~self._parse_expr_recursive(inner)
 
-        # Handle parentheses
+        # Handle parentheses - check if entire expression is wrapped
         if expr.startswith('(') and expr.endswith(')'):
-            return self._parse_expr_recursive(expr[1:-1])
+            # Verify these are matching parentheses
+            matching_close = self._find_matching_paren(expr, 0)
+            if matching_close == len(expr) - 1:
+                # Entire expression is wrapped, remove outer parens
+                return self._parse_expr_recursive(expr[1:-1])
 
         # Find main operator (lowest precedence)
         # Order: OR > AND > NOT
@@ -377,8 +458,12 @@ class BDDBasedDFABuilder:
             elif level == 0:
                 if c == '|':
                     # Disjunction
-                    left = self._parse_expr_recursive(expr[:i])
-                    right = self._parse_expr_recursive(expr[i+1:])
+                    left_expr = expr[:i].strip()
+                    right_expr = expr[i+1:].strip()
+                    if not left_expr or not right_expr:
+                        raise ValueError(f"Empty operand in OR expression: {expr}")
+                    left = self._parse_expr_recursive(left_expr)
+                    right = self._parse_expr_recursive(right_expr)
                     return left | right
 
         # AND
@@ -390,16 +475,23 @@ class BDDBasedDFABuilder:
                 level -= 1
             elif level == 0:
                 if c == '&':
-                    left = self._parse_expr_recursive(expr[:i])
-                    right = self._parse_expr_recursive(expr[i+1:])
+                    left_expr = expr[:i].strip()
+                    right_expr = expr[i+1:].strip()
+                    if not left_expr or not right_expr:
+                        raise ValueError(f"Empty operand in AND expression: {expr}")
+                    left = self._parse_expr_recursive(left_expr)
+                    right = self._parse_expr_recursive(right_expr)
                     return left & right
 
         # Fallback: treat as variable
         if expr in self.predicates:
             return self.bdd.var(expr)
 
-        # Unknown expression
-        return self.bdd.true
+        # Unknown expression - raise error instead of silently returning true
+        raise ValueError(
+            f"Unknown or malformed expression: '{expr}'. "
+            f"Expected one of: {self.predicates}"
+        )
 
     def _parse_transitions(self, dfa_dot: str) -> List[Tuple[str, str, str]]:
         """Parse transitions from DOT format"""

@@ -119,12 +119,20 @@ class DFAEvaluator:
             True if valuation is accepted, False otherwise
         """
         current_state = self.initial_state
+        visited_states = set()
+        max_steps = len(self.transitions) * 2  # Prevent infinite loops
 
-        # For DFAs with atomic labels, we process atoms one by one
-        # For each atom in the valuation, we try to take a transition
-        remaining_atoms = set(valuation)
+        steps = 0
+        while steps < max_steps:
+            steps += 1
 
-        while remaining_atoms or current_state != self.initial_state:
+            # Prevent infinite loops by tracking visited states
+            state_signature = (current_state, frozenset(valuation))
+            if state_signature in visited_states:
+                # We've been in this state with this valuation before - stop
+                break
+            visited_states.add(state_signature)
+
             # Find all transitions from current state that are enabled
             enabled_transitions = []
             for from_s, to_s, label in self.transitions:
@@ -132,23 +140,16 @@ class DFAEvaluator:
                     enabled_transitions.append((to_s, label))
 
             if not enabled_transitions:
-                # No enabled transition - check if we're in accepting state
+                # No enabled transition - stop here
                 break
 
             # Take the first enabled transition (deterministic)
             next_state, taken_label = enabled_transitions[0]
 
-            # Remove atoms from taken_label from remaining_atoms
-            if taken_label in self.all_atoms:
-                remaining_atoms.discard(taken_label)
-            elif taken_label == "true":
-                # Unconditional transition - consume all remaining atoms
-                remaining_atoms.clear()
-
             current_state = next_state
 
-            # If we took a "true" transition, we're done processing
-            if taken_label == "true":
+            # If we took a "true" transition to an accepting state, we're done
+            if taken_label == "true" and current_state in self.accepting_states:
                 break
 
         # Check if final state is accepting
@@ -296,6 +297,509 @@ digraph MONA_DFA {
         assert False, "Simplified DFA must be equivalent to original"
 
 
+def test_complex_formula_3_atoms():
+    """Test with 3 atoms and complex nested formula"""
+    print("=" * 80)
+    print("TEST: Complex Formula with 3 Atoms")
+    print("=" * 80)
+    print()
+
+    # Formula: (on_a_b & clear_c) | holding_d
+    # This requires testing 2^3 = 8 valuations
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="(on_a_b&clear_c)|holding_d"];
+    1 -> 1 [label="~((on_a_b&clear_c)|holding_d)"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("on_a_b", "on", ["a", "b"])
+    gmap.add_atom("clear_c", "clear", ["c"])
+    gmap.add_atom("holding_d", "holding", ["d"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    all_atoms = ["on_a_b", "clear_c", "holding_d"]
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: 3-atom complex formula is equivalent\n")
+    else:
+        print(f"✗ Test failed: Found {len(counterexamples)} counterexamples\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "3-atom formula equivalence failed"
+
+
+def test_deeply_nested_expression():
+    """Test with deeply nested boolean expressions"""
+    print("=" * 80)
+    print("TEST: Deeply Nested Expression")
+    print("=" * 80)
+    print()
+
+    # Formula: (a & (b | (c & d)))
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="a&(b|(c&d))"];
+    1 -> 1 [label="~(a&(b|(c&d)))"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("a", "on", ["a", "b"])
+    gmap.add_atom("b", "clear", ["c"])
+    gmap.add_atom("c", "holding", ["d"])
+    gmap.add_atom("d", "ontable", ["e"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    all_atoms = ["a", "b", "c", "d"]
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Deeply nested expression is equivalent\n")
+    else:
+        print(f"✗ Test failed: Found {len(counterexamples)} counterexamples\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "Deeply nested expression equivalence failed"
+
+
+def test_mixed_conjunction_disjunction():
+    """Test with mixed AND/OR operations"""
+    print("=" * 80)
+    print("TEST: Mixed Conjunction and Disjunction")
+    print("=" * 80)
+    print()
+
+    # Formula: (a & b) | (c & d) - DNF form
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="(a&b)|(c&d)"];
+    1 -> 1 [label="~((a&b)|(c&d))"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("a", "on", ["a", "b"])
+    gmap.add_atom("b", "clear", ["c"])
+    gmap.add_atom("c", "holding", ["d"])
+    gmap.add_atom("d", "ontable", ["e"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    all_atoms = ["a", "b", "c", "d"]
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Mixed AND/OR formula is equivalent\n")
+    else:
+        print(f"✗ Test failed: Found {len(counterexamples)} counterexamples\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "Mixed AND/OR equivalence failed"
+
+
+def test_edge_case_empty_dfa():
+    """Test edge case: DFA with no predicates"""
+    print("=" * 80)
+    print("TEST: Edge Case - Empty DFA (no predicates)")
+    print("=" * 80)
+    print()
+
+    # DFA that accepts everything (no predicates to check)
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 1;
+    init -> 1;
+    1 -> 1 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    # Should handle empty atom list gracefully
+    all_atoms = []
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Empty DFA handled correctly\n")
+    else:
+        print(f"✗ Test failed: Empty DFA equivalence failed\n")
+        assert False, "Empty DFA equivalence failed"
+
+
+def test_edge_case_single_state_reject():
+    """Test edge case: Single state DFA that rejects everything"""
+    print("=" * 80)
+    print("TEST: Edge Case - Single State Rejecting DFA")
+    print("=" * 80)
+    print()
+
+    # DFA with single non-accepting state
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 1 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("on_a_b", "on", ["a", "b"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    all_atoms = ["on_a_b"]
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Single-state rejecting DFA is equivalent\n")
+    else:
+        print(f"✗ Test failed: Single-state rejecting DFA failed\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "Single-state rejecting DFA equivalence failed"
+
+
+def test_edge_case_negation_only():
+    """Test edge case: Formula with only negations"""
+    print("=" * 80)
+    print("TEST: Edge Case - Negation Only Formula")
+    print("=" * 80)
+    print()
+
+    # Formula: ~a & ~b (both atoms must be false)
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="~a&~b"];
+    1 -> 1 [label="a|b"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("a", "on", ["a", "b"])
+    gmap.add_atom("b", "clear", ["c"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    all_atoms = ["a", "b"]
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Negation-only formula is equivalent\n")
+    else:
+        print(f"✗ Test failed: Negation-only formula failed\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "Negation-only formula equivalence failed"
+
+
+def test_regression_negated_bdd_nodes():
+    """
+    Regression test for negated BDD node handling
+
+    This tests the critical fix in dfa_simplifier.py:288-301 where
+    negated BDD nodes have inverted high/low semantics.
+
+    When a BDD node has negated=True:
+    - high branch means variable is FALSE
+    - low branch means variable is TRUE
+    """
+    print("=" * 80)
+    print("TEST: Regression - Negated BDD Node Semantics")
+    print("=" * 80)
+    print()
+
+    # Formula that will trigger negated BDD nodes: ~(a & b) = ~a | ~b
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="~(a&b)"];
+    1 -> 1 [label="a&b"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("a", "on", ["a", "b"])
+    gmap.add_atom("b", "clear", ["c"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(original_dfa, gmap)
+
+    all_atoms = ["a", "b"]
+
+    print("Original DFA:")
+    print(original_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Negated BDD nodes handled correctly\n")
+    else:
+        print(f"✗ Test failed: Negated BDD node semantics broken!\n")
+        print("This is a CRITICAL regression - the fix at dfa_simplifier.py:288-301 may be broken")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "CRITICAL: Negated BDD node semantics regression"
+
+
+def test_regression_double_negation():
+    """Regression test for double negation: ~~a should equal a"""
+    print("=" * 80)
+    print("TEST: Regression - Double Negation")
+    print("=" * 80)
+    print()
+
+    # Formula: ~~a (should be equivalent to just 'a')
+    original_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="a"];
+    1 -> 1 [label="~a"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    # Simplified version with double negation (should still be equivalent)
+    double_neg_dfa = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="~~a"];
+    1 -> 1 [label="~(~~a)"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("a", "on", ["a", "b"])
+
+    simplifier = DFASimplifier()
+    result = simplifier.simplify(double_neg_dfa, gmap)
+
+    all_atoms = ["a"]
+
+    print("Original DFA (single a):")
+    print(original_dfa)
+    print()
+    print("Double negation DFA (~~a):")
+    print(double_neg_dfa)
+    print()
+    print("Simplified DFA:")
+    print(result.simplified_dot)
+    print()
+
+    # Both should accept when a=True and reject when a=False
+    is_equiv, counterexamples = verify_equivalence(
+        original_dfa,
+        result.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: Double negation handled correctly\n")
+    else:
+        print(f"✗ Test failed: Double negation equivalence broken!\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    Original: {ce['original_result']}, Simplified: {ce['simplified_result']}")
+        assert False, "Double negation regression"
+
+
+def test_regression_de_morgan_laws():
+    """Regression test for De Morgan's laws: ~(a | b) = ~a & ~b"""
+    print("=" * 80)
+    print("TEST: Regression - De Morgan's Laws")
+    print("=" * 80)
+    print()
+
+    # Two equivalent formulas via De Morgan's law
+    dfa1 = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="~(a|b)"];
+    1 -> 1 [label="a|b"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    dfa2 = """
+digraph MONA_DFA {
+    rankdir = LR;
+    node [shape = doublecircle]; 2;
+    node [shape = circle]; 1;
+    init -> 1;
+    1 -> 2 [label="~a&~b"];
+    1 -> 1 [label="a|b"];
+    2 -> 2 [label="true"];
+}
+"""
+
+    gmap = GroundingMap()
+    gmap.add_atom("a", "on", ["a", "b"])
+    gmap.add_atom("b", "clear", ["c"])
+
+    simplifier = DFASimplifier()
+    result1 = simplifier.simplify(dfa1, gmap)
+    result2 = simplifier.simplify(dfa2, gmap)
+
+    all_atoms = ["a", "b"]
+
+    print("DFA1: ~(a|b)")
+    print(dfa1)
+    print()
+    print("DFA2: ~a&~b (De Morgan equivalent)")
+    print(dfa2)
+    print()
+
+    # Both simplified DFAs should be equivalent to each other
+    is_equiv, counterexamples = verify_equivalence(
+        result1.simplified_dot,
+        result2.simplified_dot,
+        all_atoms
+    )
+
+    if is_equiv:
+        print("✓ Test passed: De Morgan's laws preserved\n")
+    else:
+        print(f"✗ Test failed: De Morgan's laws broken!\n")
+        for ce in counterexamples[:3]:
+            print(f"  Counterexample: {ce['valuation']}")
+            print(f"    DFA1: {ce['original_result']}, DFA2: {ce['simplified_result']}")
+        assert False, "De Morgan's laws regression"
+
+
 def run_all_tests():
     """Run all equivalence verification tests"""
     print("\n")
@@ -307,6 +811,15 @@ def run_all_tests():
     tests = [
         test_equivalence_simple_case,
         test_equivalence_with_simplifier,
+        test_complex_formula_3_atoms,
+        test_deeply_nested_expression,
+        test_mixed_conjunction_disjunction,
+        test_edge_case_empty_dfa,
+        test_edge_case_single_state_reject,
+        test_edge_case_negation_only,
+        test_regression_negated_bdd_nodes,
+        test_regression_double_negation,
+        test_regression_de_morgan_laws,
     ]
 
     passed = 0
