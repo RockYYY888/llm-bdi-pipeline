@@ -158,14 +158,16 @@ class BackwardPlannerGenerator:
                 normalized_preds, var_mapping = self.normalizer.normalize_predicates(goal_predicates)
                 pattern_key = self.normalizer.serialize_goal(normalized_preds)
 
-                # Extract unique variables used in this goal
-                # CRITICAL: Only pass variables that are ACTUALLY USED in the goal
-                # This prevents state space explosion from unused variables
-                variables_in_goal = sorted(set(var_mapping.var_to_obj.keys()))
+                # CRITICAL: Must pass ALL domain objects as variables for exploration
+                # Why? Because we need to handle "blocking objects" not in the goal
+                # Example: goal=on(a,b) but on(c,b) exists → need to move c first
+                # Solution: Pass all objects, but use normalized pattern for caching
+                num_vars_needed = len(objects)
+                all_variables = self.normalizer.get_variable_list(num_vars_needed)
 
                 print(f"    Original goal: {[str(p) for p in goal_predicates]}")
                 print(f"    Normalized pattern: {[str(p) for p in normalized_preds]}")
-                print(f"    Variables in goal: {variables_in_goal} (out of {len(objects)} total objects)")
+                print(f"    Variables for exploration: {all_variables} (all domain objects)")
                 print(f"    Cache key: {pattern_key}")
 
                 # Create goal name from original grounded predicates
@@ -185,9 +187,9 @@ class BackwardPlannerGenerator:
                     print(f"    Cache MISS - running variable-level exploration...")
 
                     try:
-                        # VARIABLE-LEVEL PLANNING: Use ONLY the variables needed for this goal
-                        # This avoids exploring irrelevant variable combinations
-                        planner = ForwardStatePlanner(self.domain, variables_in_goal, use_variables=True)
+                        # VARIABLE-LEVEL PLANNING: Use ALL domain objects as variables
+                        # This is necessary to handle blocking objects not in the goal
+                        planner = ForwardStatePlanner(self.domain, all_variables, use_variables=True)
 
                         # Explore using normalized (variable-based) goal
                         state_graph = planner.explore_from_goal(normalized_preds)
@@ -225,7 +227,7 @@ class BackwardPlannerGenerator:
                         state_graph=state_graph,
                         goal_name=goal_name,
                         domain=self.domain,
-                        objects=variables_in_goal,  # Use only variables in this goal
+                        objects=all_variables,  # Use all variables (needed for blocking objects)
                         var_mapping=None  # No mapping needed - state_graph already uses variables
                     )
 
