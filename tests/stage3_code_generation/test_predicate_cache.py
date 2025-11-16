@@ -51,10 +51,10 @@ def test_cache_logic():
     predicate_cache = {}
     num_objects = 5
 
-    # First disjunct: on(?v0, ?v1)
+    # First condition: on(?v0, ?v1)
     pred = predicates1[0]
     cache_key = (pred.to_agentspeak(), num_objects)
-    print(f"\n  Disjunct 1: [{pred}]")
+    print(f"\n  Condition 1: [{pred}]")
     if cache_key in predicate_cache:
         print(f"    → Cache HIT!")
     else:
@@ -62,23 +62,23 @@ def test_cache_logic():
         predicate_cache[cache_key] = "StateGraph(525 states)"  # Simulated
         print(f"    → Cached: {cache_key}")
 
-    # Second disjunct: on(?v0, ?v1) again (should hit!)
-    print(f"\n  Disjunct 2: [{predicates2[0]}]")
+    # Second condition: on(?v0, ?v1) again (should hit!)
+    print(f"\n  Condition 2: [{predicates2[0]}]")
     cache_key = (predicates2[0].to_agentspeak(), num_objects)
     if cache_key in predicate_cache:
         print(f"    → Cache HIT! ✓ Reusing previous exploration")
     else:
         print(f"    → Cache MISS (unexpected!)")
 
-    # Third disjunct: multi-predicate (won't use predicate cache)
-    print(f"\n  Disjunct 3: {[str(p) for p in predicates3]}")
+    # Third condition: multi-predicate (won't use predicate cache)
+    print(f"\n  Condition 3: {[str(p) for p in predicates3]}")
     if len(predicates3) > 1:
         print(f"    → Multi-predicate goal, using full-goal cache")
 
-    # Fourth disjunct: clear(?v0) (different predicate)
+    # Fourth condition: clear(?v0) (different predicate)
     pred = predicates4[0]
     cache_key = (pred.to_agentspeak(), num_objects)
-    print(f"\n  Disjunct 4: [{pred}]")
+    print(f"\n  Condition 4: [{pred}]")
     if cache_key in predicate_cache:
         print(f"    → Cache HIT!")
     else:

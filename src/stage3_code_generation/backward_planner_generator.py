@@ -25,7 +25,6 @@ if _parent not in sys.path:
 
 from stage3_code_generation.state_space import PredicateAtom, StateGraph
 from stage3_code_generation.forward_planner import ForwardStatePlanner
-from stage3_code_generation.boolean_expression_parser import BooleanExpressionParser
 from stage3_code_generation.agentspeak_codegen import AgentSpeakCodeGenerator
 from stage3_code_generation.variable_normalizer import VariableNormalizer, VariableMapping
 from utils.pddl_parser import PDDLDomain
@@ -71,7 +70,6 @@ class BackwardPlannerGenerator:
         """
         self.domain = domain
         self.grounding_map = grounding_map
-        self.partition_map = None  # Will be set from DFA result
 
     def generate(self, ltl_dict: Dict[str, Any], dfa_result: Dict[str, Any]) -> Tuple[str, bool]:
         """
@@ -84,8 +82,7 @@ class BackwardPlannerGenerator:
                 - 'grounding_map': GroundingMap
             dfa_result: DFA result dict with:
                 - 'formula': Formula string
-                - 'dfa_dot': Simplified DFA DOT format string (with partition symbols)
-                - 'partition_map': Dict mapping partition symbols to PartitionInfo
+                - 'dfa_dot': Simplified DFA DOT format string (with atomic literals)
                 - other metadata
 
         Returns:
@@ -95,11 +92,6 @@ class BackwardPlannerGenerator:
         """
         print("\n[Backward Planner Generator] Starting code generation")
         print("="*80)
-
-        # Extract partition map from DFA result
-        self.partition_map = dfa_result.get('partition_map', {})
-        if self.partition_map:
-            print(f"Partition map loaded: {len(self.partition_map)} partitions")
 
         # Extract objects
         objects = ltl_dict['objects']
@@ -140,20 +132,20 @@ class BackwardPlannerGenerator:
 
             # Parse transition label to get goal predicates
             try:
-                goal_disjuncts = self._parse_transition_label(label)
+                goal_conditions = self._parse_transition_label(label)
             except Exception as e:
                 print(f"  Warning: Failed to parse label '{label}': {e}")
                 print(f"  Skipping this transition")
                 continue
 
-            print(f"  DNF: {len(goal_disjuncts)} disjunct(s)")
+            print(f"  Goal conditions: {len(goal_conditions)} condition(s)")
 
-            # Generate code for each disjunct
-            for j, goal_predicates in enumerate(goal_disjuncts):
-                print(f"  Disjunct {j+1}: {[str(p) for p in goal_predicates]}")
+            # Generate code for each goal condition
+            for j, goal_predicates in enumerate(goal_conditions):
+                print(f"  Condition {j+1}: {[str(p) for p in goal_predicates]}")
 
                 if not goal_predicates:
-                    print(f"    Skipping empty disjunct")
+                    print(f"    Skipping empty condition (true)")
                     continue
 
                 # Create goal name and serialization key
@@ -407,34 +399,43 @@ class BackwardPlannerGenerator:
         """
         Parse transition label to extract goal predicates
 
-        Handles both:
-        1. Partition symbols (e.g., "p1", "α1") - resolved via partition_map
-        2. Boolean expressions (e.g., "on_a_b & clear_c") - parsed directly
-
-        Uses BooleanExpressionParser to convert to DNF.
+        After BDD Shannon Expansion, labels are atomic literals:
+        - Positive: "on_a_b", "clear_c"
+        - Negative: "!on_a_b", "!clear_c"
+        - Special: "true"
 
         Args:
-            label: Transition label (partition symbol or boolean expression)
+            label: Transition label (atomic literal)
 
         Returns:
-            List of goal predicate lists (DNF form)
+            List containing single predicate list (always [[predicate]] or [[]])
         """
-        # Check if label is a partition symbol
-        if self.partition_map and label in self.partition_map:
-            # Resolve partition symbol to its boolean expression
-            partition_info = self.partition_map[label]
-            actual_expression = partition_info.expression
-            print(f"  Resolved partition '{label}' → '{actual_expression}'")
+        # Handle special case
+        if label == "true":
+            return [[]]  # Empty goal (always satisfied)
 
-            # Parse the resolved expression
-            parser = BooleanExpressionParser(self.grounding_map)
-            dnf = parser.parse(actual_expression)
+        # Handle negation
+        negated = False
+        if label.startswith("!") or label.startswith("~"):
+            negated = True
+            atom_name = label[1:]
         else:
-            # Direct boolean expression (or no partition map available)
-            parser = BooleanExpressionParser(self.grounding_map)
-            dnf = parser.parse(label)
+            atom_name = label
 
-        return dnf
+        # Anti-ground the atom using grounding map
+        if atom_name not in self.grounding_map.atoms:
+            print(f"  Warning: atom '{atom_name}' not in grounding map")
+            return [[]]
+
+        grounded_atom = self.grounding_map.atoms[atom_name]
+        predicate = PredicateAtom(
+            name=grounded_atom.predicate,
+            args=grounded_atom.args,
+            negated=negated
+        )
+
+        # Return as single-element list (atomic literals don't need DNF conversion)
+        return [[predicate]]
 
     def _format_goal_name(self, predicates: List[PredicateAtom]) -> str:
         """

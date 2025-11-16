@@ -42,7 +42,7 @@ def test_proactive_caching_logic():
     print("Scenario: Simulate proactive caching for multi-predicate goal")
     print("-" * 80)
 
-    # Step 1: Multi-predicate goal (simulating Disjunct 1)
+    # Step 1: Multi-predicate goal (simulating Condition 1)
     print("\n[Step 1] Explore multi-predicate goal: [on(a,b), clear(c)]")
 
     goal1 = [PredicateAtom("on", ["a", "b"]), PredicateAtom("clear", ["c"])]
@@ -87,7 +87,7 @@ def test_proactive_caching_logic():
 
     # Step 2: Encounter a single predicate that was proactively cached
     print("\n" + "=" * 80)
-    print("[Step 2] Encounter single predicate: on(c,a) (simulating Disjunct 2)")
+    print("[Step 2] Encounter single predicate: on(c,a) (simulating Condition 2)")
     print("(Using different objects from step 1, but same predicate pattern)")
 
     goal2 = [PredicateAtom("on", ["c", "a"])]  # Different objects, but should normalize to on(?v0,?v1)
