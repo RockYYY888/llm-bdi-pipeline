@@ -334,15 +334,27 @@ class LiftedPlanner:
 
         # Unify positive preconditions
         # Strategy: try to find consistent substitution for all preconditions
-        unified_subst = self._find_consistent_unification(
+        unified_subst, unsatisfied_preconditions = self._find_consistent_unification(
             positive_preconditions,
             state.predicates,
             state.constraints
         )
 
         if unified_subst is None:
-            # Cannot apply this action to this state
-            return results
+            # Some preconditions not satisfied
+            # Generate subgoal states (domain-independent backward chaining)
+            subgoal_states = []
+            for unsatisfied_precond in unsatisfied_preconditions:
+                subgoals = self._generate_subgoal_states_for_precondition(
+                    unsatisfied_precond,
+                    state,
+                    action_renamed
+                )
+                subgoal_states.extend(subgoals)
+
+            # Return subgoal states for recursive exploration
+            # Note: these are (state, empty_substitution) tuples
+            return [(sg, Substitution()) for sg in subgoal_states]
 
         # Check inequality constraints from action
         for var1, var2 in action_renamed.inequality_constraints:
@@ -471,7 +483,7 @@ class LiftedPlanner:
     def _find_consistent_unification(self,
                                      preconditions: List[PredicateAtom],
                                      state_preds: FrozenSet[PredicateAtom],
-                                     constraints: ConstraintSet) -> Optional[Substitution]:
+                                     constraints: ConstraintSet) -> Tuple[Optional[Substitution], List[PredicateAtom]]:
         """
         Find a substitution that unifies all preconditions with state predicates
         while respecting constraints
@@ -482,20 +494,23 @@ class LiftedPlanner:
             constraints: State constraints
 
         Returns:
-            Unified substitution, or None if no consistent unification exists
+            Tuple of (unified_substitution, unsatisfied_preconditions)
+            - If all satisfied: (Substitution, [])
+            - If some unsatisfied: (None, [list of unsatisfied preconditions])
         """
         # Strategy: for each precondition, find matching state predicate
         # Build up substitution incrementally
 
         # Handle empty preconditions
         if not preconditions:
-            return Substitution()
+            return Substitution(), []
 
         # Try to find a consistent matching
         # This is a constraint satisfaction problem
         # For now, use simple greedy approach: try each precondition in order
 
         current_subst = Substitution()
+        unsatisfied = []
 
         for precond in preconditions:
             # Find a state predicate that unifies with this precondition
@@ -514,12 +529,148 @@ class LiftedPlanner:
 
             if not found:
                 # Could not find matching predicate for this precondition
-                # In true lifted planning, this means we need to add subgoal
-                # For now, treat as "action not applicable"
-                # TODO: Generate subgoal state
-                return None
+                # Mark as unsatisfied for subgoal generation
+                unsatisfied.append(precond)
 
-        return current_subst
+        if unsatisfied:
+            # Return unsatisfied preconditions for subgoal generation
+            return None, unsatisfied
+        else:
+            # All preconditions satisfied
+            return current_subst, []
+
+    def _generate_subgoal_states_for_precondition(self,
+                                                   precondition: PredicateAtom,
+                                                   current_state: AbstractState,
+                                                   requesting_action: AbstractAction) -> List[AbstractState]:
+        """
+        Generate subgoal states to achieve an unsatisfied precondition
+
+        DOMAIN-INDEPENDENT: Works for any PDDL domain by analyzing action effects
+
+        Algorithm:
+        1. Find all actions whose effects can produce the precondition
+        2. For each such action, create a subgoal state with that action's preconditions
+        3. This implements backward chaining
+
+        Args:
+            precondition: The unsatisfied precondition to achieve
+            current_state: Current abstract state
+            requesting_action: The action that requires this precondition
+
+        Returns:
+            List of subgoal states
+        """
+        subgoal_states = []
+
+        # For each action in the domain
+        for candidate_action in self._abstract_actions:
+            # Check if this action can produce the precondition
+            can_produce = self._action_produces_predicate(candidate_action, precondition)
+
+            if can_produce:
+                # Create subgoal state: we need to achieve this action's preconditions
+                # Rename action variables to avoid collision
+                action_renamed, rename_subst = self._rename_action_variables(
+                    candidate_action,
+                    current_state.get_variables()
+                )
+
+                # Try to unify the effect with the precondition we want
+                achieving_subst = self._find_achieving_substitution(
+                    action_renamed,
+                    precondition
+                )
+
+                if achieving_subst is not None:
+                    # Create subgoal state with this action's preconditions
+                    subgoal_predicates = set()
+
+                    # Add the action's preconditions (after applying substitution)
+                    for action_precond in action_renamed.preconditions:
+                        if not action_precond.negated:
+                            subgoal_pred = achieving_subst.apply_to_predicate(action_precond)
+                            subgoal_predicates.add(subgoal_pred)
+
+                    # Also keep relevant predicates from current state
+                    # (those that don't conflict with achieving the goal)
+                    for state_pred in current_state.predicates:
+                        # Don't include predicates that would be deleted by the action
+                        will_be_deleted = False
+                        for effect_branch in action_renamed.effects:
+                            for effect_atom in effect_branch:
+                                if not effect_atom.is_add:
+                                    effect_pred = achieving_subst.apply_to_predicate(effect_atom.predicate)
+                                    if effect_pred == state_pred:
+                                        will_be_deleted = True
+                                        break
+                            if will_be_deleted:
+                                break
+
+                        if not will_be_deleted:
+                            subgoal_predicates.add(state_pred)
+
+                    # Create subgoal state
+                    subgoal_constraints = current_state.constraints
+                    subgoal_state = AbstractState(
+                        subgoal_predicates,
+                        subgoal_constraints,
+                        depth=current_state.depth + 1
+                    )
+
+                    subgoal_states.append(subgoal_state)
+
+        return subgoal_states
+
+    def _action_produces_predicate(self,
+                                   action: AbstractAction,
+                                   target_predicate: PredicateAtom) -> bool:
+        """
+        Check if an action can produce a target predicate
+
+        DOMAIN-INDEPENDENT: Only checks PDDL action effects
+
+        Args:
+            action: Abstract action to check
+            target_predicate: Target predicate to produce
+
+        Returns:
+            True if action has an add-effect that can unify with target
+        """
+        for effect_branch in action.effects:
+            for effect_atom in effect_branch:
+                if effect_atom.is_add:
+                    # Try to unify effect with target
+                    if Unifier.unify_predicates(effect_atom.predicate, target_predicate) is not None:
+                        return True
+        return False
+
+    def _find_achieving_substitution(self,
+                                     action: AbstractAction,
+                                     target_predicate: PredicateAtom) -> Optional[Substitution]:
+        """
+        Find substitution that makes action's effect achieve target predicate
+
+        DOMAIN-INDEPENDENT
+
+        Args:
+            action: Abstract action
+            target_predicate: Target predicate to achieve
+
+        Returns:
+            Substitution that unifies action's effect with target, or None
+        """
+        for effect_branch in action.effects:
+            for effect_atom in effect_branch:
+                if effect_atom.is_add:
+                    # Try to unify
+                    unified = Unifier.unify_predicates(
+                        effect_atom.predicate,
+                        target_predicate
+                    )
+                    if unified is not None:
+                        return unified
+        return None
 
     def _validate_state_consistency(self, predicates: Set[PredicateAtom]) -> bool:
         """
@@ -554,51 +705,29 @@ class LiftedPlanner:
         """
         Infer complete goal state from goal predicates
 
-        For lifted planning, we keep the goal minimal to avoid introducing
-        unnecessary variables. The exploration will discover necessary preconditions.
+        For lifted planning with recursive subgoal handling, keep goal MINIMAL.
+        Let backward chaining discover necessary preconditions through subgoal generation.
 
         Args:
             goal_predicates: Core goal predicates
 
         Returns:
-            Complete set of predicates for goal state (simplified for lifted planning)
+            Minimal goal state (just the goal predicates themselves)
         """
-        # For true lifted planning, we start with minimal goal
-        # and let the exploration discover necessary co-effects
-        complete_goal = set(goal_predicates)
-
-        # For each goal predicate, find actions that produce it
-        # and add their co-effects (other effects in same branch) with proper unification
-        for goal_pred in goal_predicates:
-            for abstract_action in self._abstract_actions:
-                # Check each effect branch
-                for effect_branch in abstract_action.effects:
-                    # Check if this branch adds something that unifies with goal predicate
-                    adds_goal = False
-                    unified_subst = None
-
-                    for effect_atom in effect_branch:
-                        if effect_atom.is_add:
-                            # Try to unify with goal predicate
-                            unified = Unifier.unify_predicates(
-                                effect_atom.predicate,
-                                goal_pred
-                            )
-                            if unified is not None:
-                                adds_goal = True
-                                unified_subst = unified
-                                break
-
-                    if adds_goal and unified_subst:
-                        # This action can produce the goal
-                        # Add all positive effects from this branch, applying the substitution
-                        for eff in effect_branch:
-                            if eff.is_add:
-                                # Apply unification substitution to effect predicate
-                                unified_eff = unified_subst.apply_to_predicate(eff.predicate)
-                                complete_goal.add(unified_eff)
-
-        return complete_goal
+        # CRITICAL: Keep goal minimal for recursive subgoal handling
+        # The backward chaining will automatically discover necessary preconditions
+        # and generate subgoal states as needed
+        #
+        # Previous approach of inferring co-effects caused problems:
+        # - Introduced too many predicates in goal state
+        # - Prevented proper subgoal generation
+        # - Made exploration terminate prematurely
+        #
+        # Example:
+        #   Goal: clear(b)
+        #   Old: {clear(b), handempty, holding(?x), ...} → too complex!
+        #   New: {clear(b)} → backward chaining will find preconditions
+        return set(goal_predicates)
 
     def _state_key(self, state: AbstractState) -> Tuple:
         """
