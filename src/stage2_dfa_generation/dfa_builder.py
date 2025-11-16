@@ -25,9 +25,9 @@ class DFABuilder:
     """
     DFA builder that converts LTLf formula to DFA and simplifies it
 
-    Converts the complete LTLf formula to a DFA, then applies partition refinement
-    to simplify transition labels to atomic symbols. This is a mandatory step that
-    ensures each transition has a single atomic predicate.
+    Converts the complete LTLf formula to a DFA, then applies BDD Shannon Expansion
+    to simplify transition labels to atomic literals (var or !var). This is a
+    mandatory step that ensures each transition has a single atomic predicate.
     """
 
     def __init__(self):
@@ -41,7 +41,7 @@ class DFABuilder:
 
         This method performs two steps:
         1. Generate DFA from LTLf formula using ltlf2dfa
-        2. Simplify DFA by applying partition refinement to transition labels
+        2. Simplify DFA by applying BDD Shannon Expansion to transition labels
 
         Args:
             ltl_spec: LTLSpecification object with formulas and grounding_map
@@ -49,11 +49,9 @@ class DFABuilder:
         Returns:
             Dict with:
                 - formula: Original LTLf formula string
-                - dfa_dot: Simplified DFA in DOT format (with atomic partition labels)
+                - dfa_dot: Simplified DFA in DOT format (with atomic literals)
                 - num_states: Number of states in DFA
                 - num_transitions: Number of transitions (may increase after simplification)
-                - partition_map: Dict mapping partition symbols to PartitionInfo objects
-                - original_label_to_partitions: Dict mapping original labels to partition symbols
                 - simplification_stats: Statistics about the simplification process
         """
         from stage1_interpretation.ltlf_formula import LogicalOperator
@@ -78,7 +76,7 @@ class DFABuilder:
         original_dfa_dot, metadata = self.converter.convert(ltl_spec)
 
         # Step 2: Simplify DFA (mandatory)
-        # This replaces complex boolean expressions with atomic partition symbols
+        # This replaces complex boolean expressions with atomic literals (var or !var)
         if not hasattr(ltl_spec, 'grounding_map') or ltl_spec.grounding_map is None:
             raise ValueError("LTLSpecification must have a grounding_map for DFA simplification")
 
@@ -93,9 +91,6 @@ class DFABuilder:
             "dfa_dot": simplified_result.simplified_dot,
             "num_states": num_states,
             "num_transitions": num_transitions,
-            # Add simplification data for downstream use
-            "partition_map": simplified_result.partition_map,
-            "original_label_to_partitions": simplified_result.original_label_to_partitions,
             "simplification_stats": simplified_result.stats
         }
 
@@ -171,14 +166,16 @@ def test_dfa_builder():
     print(f"  States: {result['num_states']}")
     print(f"  Transitions: {result['num_transitions']}")
     print(f"\nSimplification Stats:")
-    print(f"  Method: {result['simplification_stats']['method']}")
-    print(f"  Predicates: {result['simplification_stats']['num_predicates']}")
-    print(f"  Partitions: {result['simplification_stats']['num_partitions']}")
+    stats = result['simplification_stats']
+    print(f"  Method: {stats['method']}")
+    print(f"  Predicates: {stats['num_predicates']}")
 
-    if result.get('partition_map'):
-        print(f"\nPartition Map ({len(result['partition_map'])} partitions):")
-        for symbol, partition in result['partition_map'].items():
-            print(f"  {symbol}: {partition.expression}")
+    # Only show detailed stats if simplification was actually performed
+    if 'num_original_states' in stats:
+        print(f"  Original States: {stats['num_original_states']}")
+        print(f"  New States: {stats['num_new_states']}")
+        print(f"  Original Transitions: {stats['num_original_transitions']}")
+        print(f"  New Transitions: {stats['num_new_transitions']}")
 
     print(f"\nSimplified DFA DOT (first 500 chars):")
     print(result['dfa_dot'][:500] + "...")
