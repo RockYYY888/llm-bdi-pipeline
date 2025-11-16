@@ -70,6 +70,7 @@ class BackwardPlannerGenerator:
         """
         self.domain = domain
         self.grounding_map = grounding_map
+        self.normalizer = None  # Will be initialized with objects in generate()
 
     def generate(self, ltl_dict: Dict[str, Any], dfa_result: Dict[str, Any]) -> Tuple[str, bool]:
         """
@@ -97,19 +98,23 @@ class BackwardPlannerGenerator:
         objects = ltl_dict['objects']
         print(f"Objects: {objects}")
 
+        # Initialize VariableNormalizer with objects
+        self.normalizer = VariableNormalizer(self.domain, objects)
+        print(f"Initialized VariableNormalizer for {len(objects)} objects")
+
         # Parse DFA
         dfa_info = self._parse_dfa(dfa_result['dfa_dot'])
         print(f"DFA: {len(dfa_info.states)} states, {len(dfa_info.transitions)} transitions")
 
-        # OBJECT-LEVEL PLANNING: Use concrete objects instead of variables
-        # This avoids state space explosion from irrelevant variable combinations
-        print(f"Object-level planning enabled: using {len(objects)} concrete objects")
+        # VARIABLE-LEVEL PLANNING: Use variables for pattern-based exploration
+        # This enables perfect caching: on(a,b) and on(c,d) share the same exploration
+        # Note: We'll create variables on-demand based on each goal's requirements
+        print(f"Variable-level planning enabled: using pattern-based exploration")
 
         # OPTIMIZATION: Pattern-based caching for goals
-        # Cache using grounded goal predicates, deduplicate by structural pattern
-        # Example: on(a,b) and on(c,d) have same pattern "on_2args"
-        goal_cache = {}  # goal_key -> state_graph
-        pattern_to_goals = {}  # pattern -> list of (goal, state_graph)
+        # Cache using normalized variable patterns (e.g., on(?v0,?v1))
+        # All goals with same structure share ONE exploration
+        goal_cache = {}  # normalized_pattern -> (state_graph, var_mapping)
 
         # Statistics
         cache_hits = 0
@@ -148,39 +153,53 @@ class BackwardPlannerGenerator:
                     print(f"    Skipping empty condition (true)")
                     continue
 
-                # Create goal name and serialization key
-                goal_name = self._format_goal_name(goal_predicates)
-                goal_key = self._serialize_goal(goal_predicates)
-                print(f"    Goal name: {goal_name}")
-                print(f"    Goal predicates: {[str(p) for p in goal_predicates]}")
+                # Normalize goal predicates to get pattern and mapping
+                # Example: on(a,b) → on(?v0,?v1) with mapping {?v0: a, ?v1: b}
+                normalized_preds, var_mapping = self.normalizer.normalize_predicates(goal_predicates)
+                pattern_key = self.normalizer.serialize_goal(normalized_preds)
 
-                # Check cache
+                # Extract unique variables used in this goal
+                # CRITICAL: Only pass variables that are ACTUALLY USED in the goal
+                # This prevents state space explosion from unused variables
+                variables_in_goal = sorted(set(var_mapping.var_to_obj.keys()))
+
+                print(f"    Original goal: {[str(p) for p in goal_predicates]}")
+                print(f"    Normalized pattern: {[str(p) for p in normalized_preds]}")
+                print(f"    Variables in goal: {variables_in_goal} (out of {len(objects)} total objects)")
+                print(f"    Cache key: {pattern_key}")
+
+                # Create goal name from original grounded predicates
+                goal_name = self._format_goal_name(goal_predicates)
+
+                # Check pattern-based cache
                 state_graph = None
-                if goal_key in goal_cache:
-                    state_graph = goal_cache[goal_key]
+                if pattern_key in goal_cache:
+                    # Cache HIT: Reuse existing exploration
+                    state_graph, _ = goal_cache[pattern_key]
                     cache_hits += 1
-                    print(f"    ✓ Cache HIT! Reusing exploration")
+                    print(f"    ✓ Cache HIT! Reusing variable-level exploration")
                     print(f"    State graph: {state_graph}")
                 else:
-                    # Cache MISS: Need to explore
+                    # Cache MISS: Need to explore with variables
                     cache_misses += 1
-                    print(f"    Cache MISS - running object-level exploration...")
+                    print(f"    Cache MISS - running variable-level exploration...")
 
                     try:
-                        # OBJECT-LEVEL PLANNING: Use concrete objects
-                        planner = ForwardStatePlanner(self.domain, objects, use_variables=False)
+                        # VARIABLE-LEVEL PLANNING: Use ONLY the variables needed for this goal
+                        # This avoids exploring irrelevant variable combinations
+                        planner = ForwardStatePlanner(self.domain, variables_in_goal, use_variables=True)
 
-                        # Explore using grounded goal
-                        state_graph = planner.explore_from_goal(goal_predicates)
+                        # Explore using normalized (variable-based) goal
+                        state_graph = planner.explore_from_goal(normalized_preds)
                         print(f"    State graph: {state_graph}")
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
                             any_truncated = True
 
-                        # Cache the result
-                        goal_cache[goal_key] = state_graph
-                        print(f"    → Cached exploration result")
+                        # Cache the result with pattern key
+                        goal_cache[pattern_key] = (state_graph, var_mapping)
+                        print(f"    → Cached exploration result with pattern key")
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
@@ -188,36 +207,32 @@ class BackwardPlannerGenerator:
                         traceback.print_exc()
                         continue
 
-                # Pattern-based deduplication and code generation
+                # Pattern-based code generation deduplication
                 try:
-                    # Detect structural pattern from grounded goal
-                    # Example: on(a,b) and on(c,d) both have pattern "on(?,?)"
-                    param_pattern = self._get_pattern_from_goal(goal_predicates)
-
                     # Always add state graph (needed for shared section)
                     all_state_graphs.append(state_graph)
 
-                    if param_pattern in generated_patterns:
+                    # Check if this pattern was already generated
+                    if pattern_key in generated_patterns:
                         # This pattern already generated, skip duplicate plan generation
-                        print(f"    ✓ Pattern '{param_pattern}' already generated, skipping duplicate plans")
+                        print(f"    ✓ Pattern '{pattern_key}' already generated, skipping duplicate plans")
                         continue
 
-                    # Generate goal-specific section with object→variable parameterization
-                    # Create mapping for parameterization (only map domain objects, preserve constants/literals)
-                    obj_to_var_mapping = self._create_parameterization_mapping(goal_predicates, objects)
-
+                    # Generate goal-specific section
+                    # The state_graph is already in variable form (?v0, ?v1, ...)
+                    # AgentSpeakCodeGenerator will use variables directly
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
                         goal_name=goal_name,
                         domain=self.domain,
-                        objects=objects,
-                        var_mapping=obj_to_var_mapping
+                        objects=variables_in_goal,  # Use only variables in this goal
+                        var_mapping=None  # No mapping needed - state_graph already uses variables
                     )
 
                     goal_section = codegen.generate_goal_specific_section()
                     all_goal_sections.append(goal_section)
-                    generated_patterns.add(param_pattern)  # Mark pattern as generated
-                    print(f"    Generated {len(goal_section)} characters of goal-specific code (pattern: {param_pattern})")
+                    generated_patterns.add(pattern_key)  # Mark pattern as generated
+                    print(f"    Generated {len(goal_section)} characters of goal-specific code (pattern: {pattern_key})")
 
                 except Exception as e:
                     print(f"    Error during codegen: {e}")
@@ -238,9 +253,24 @@ class BackwardPlannerGenerator:
         header = self._generate_main_header(ltl_dict, dfa_info)
 
         # OPTIMIZATION 3: Generate shared components ONCE
+        # Use variables for shared section since state_graphs are variable-based
+        # Collect all unique variables used across all state graphs
+        all_variables = set()
+        for sg in all_state_graphs:
+            # Extract variables from state graph states (sg.states is a Set[WorldState])
+            for state in sg.states:
+                # state.predicates is a frozenset of PredicateAtom
+                for pred in state.predicates:
+                    for arg in pred.args:
+                        if arg.startswith('?'):
+                            all_variables.add(arg)
+
+        all_variables_sorted = sorted(all_variables)
+        print(f"  Collected {len(all_variables_sorted)} unique variables across all state graphs: {all_variables_sorted}")
+
         shared_section = AgentSpeakCodeGenerator.generate_shared_section(
             domain=self.domain,
-            objects=objects,
+            objects=all_variables_sorted,  # Use all variables found in state graphs
             all_state_graphs=all_state_graphs
         )
 
@@ -255,8 +285,8 @@ class BackwardPlannerGenerator:
         print(f"  Goal-specific sections: {len(all_goal_sections)}")
         print(f"  Redundancy eliminated: ~{(len(all_goal_sections) - 1) * 30:.0f}% of shared code")
 
-        # Object-level cache statistics
-        print(f"\nObject-level planning cache statistics:")
+        # Variable-level cache statistics
+        print(f"\nVariable-level planning cache statistics:")
         total_queries = cache_hits + cache_misses
         print(f"    Total goal explorations: {total_queries}")
         print(f"    Cache hits: {cache_hits}")
@@ -264,7 +294,8 @@ class BackwardPlannerGenerator:
         if total_queries > 0:
             print(f"    Hit rate: {cache_hits / total_queries * 100:.1f}%")
         if cache_hits > 0:
-            print(f"    💡 Caching saved {cache_hits} state space explorations!")
+            print(f"    💡 Pattern-based caching saved {cache_hits} state space explorations!")
+        print(f"    Unique patterns explored: {len(goal_cache)}")
         print("="*80)
 
         return final_code, any_truncated
@@ -454,108 +485,6 @@ class BackwardPlannerGenerator:
             # Multiple predicates: combine
             names = [p.to_agentspeak().replace(" ", "_").replace("(", "_").replace(")", "").replace(",", "") for p in predicates]
             return "_and_".join(names)
-
-    def _serialize_goal(self, predicates: List[PredicateAtom]) -> str:
-        """
-        Serialize goal predicates to a hashable cache key
-
-        Args:
-            predicates: List of predicates
-
-        Returns:
-            String key for caching
-        """
-        # Sort predicates for consistency (order shouldn't matter)
-        sorted_preds = sorted([p.to_agentspeak() for p in predicates])
-        return "|".join(sorted_preds)
-
-    def _get_pattern_from_goal(self, goal: List[PredicateAtom]) -> str:
-        """
-        Get structural pattern from grounded goal for deduplication
-
-        This is used to detect duplicate plan generation. For example:
-        - on(a,b) → pattern "on(?,?)"
-        - on(c,d) → pattern "on(?,?)" (SAME!)
-
-        We only want to generate the plan suite once for each unique pattern.
-
-        Args:
-            goal: List of grounded predicates (with concrete objects)
-
-        Returns:
-            Pattern string for deduplication
-        """
-        pattern_parts = []
-        for pred in sorted(goal, key=lambda x: (x.name, len(x.args))):
-            # Create pattern with ? for each argument
-            args_pattern = ','.join(['?' for _ in pred.args])
-            negation = 'not ' if pred.negated else ''
-            pattern_parts.append(f"{negation}{pred.name}({args_pattern})")
-        return ' & '.join(pattern_parts)
-
-    def _create_parameterization_mapping(self, goal: List[PredicateAtom], objects: List[str]):
-        """
-        Create object→variable mapping for parameterizing AgentSpeak code
-
-        Only objects from the domain are parameterized. Constants and literals are preserved.
-
-        Args:
-            goal: List of grounded predicates (e.g., [move(a, -1, 'Left')])
-            objects: List of domain objects (e.g., ['a', 'b', 'c'])
-
-        Returns:
-            VariableMapping with obj_to_var and var_to_obj dictionaries
-            Example: move(a, -1, 'Left') with objects=['a','b','c']
-                     → mapping={'a': '?v0'} → generates move(V0, -1, 'Left')
-        """
-        from stage3_code_generation.variable_normalizer import VariableMapping
-
-        # Extract unique objects from goal predicates (excluding constants/literals)
-        objects_in_goal = []
-        for pred in goal:
-            for arg in pred.args:
-                # Only map domain objects, preserve constants/literals
-                if self._should_parameterize_arg(arg, objects):
-                    if arg not in objects_in_goal:
-                        objects_in_goal.append(arg)
-
-        # Create mapping: objects → ?v0, ?v1, ?v2, ...
-        obj_to_var = {obj: f"?v{i}" for i, obj in enumerate(objects_in_goal)}
-        var_to_obj = {var: obj for obj, var in obj_to_var.items()}
-
-        return VariableMapping(obj_to_var=obj_to_var, var_to_obj=var_to_obj)
-
-    def _should_parameterize_arg(self, arg: str, objects: List[str]) -> bool:
-        """
-        Determine if an argument should be parameterized to a variable
-
-        Args:
-            arg: Argument string to check
-            objects: List of domain objects
-
-        Returns:
-            True if arg should be parameterized (is a domain object)
-            False if arg should be preserved (constant/literal)
-        """
-        # 1. Already a PDDL variable (?...) → don't parameterize (already abstract)
-        if arg.startswith('?'):
-            return False
-
-        # 2. Numeric literals → preserve as constants
-        try:
-            float(arg)
-            return False
-        except ValueError:
-            pass
-
-        # 3. String literals with quotes → preserve as literals
-        if (arg.startswith("'") and arg.endswith("'")) or \
-           (arg.startswith('"') and arg.endswith('"')):
-            return False
-
-        # 4. Check if it's a domain object
-        # Only parameterize if in objects list
-        return arg in objects
 
     def _generate_main_header(self, ltl_dict: Dict[str, Any], dfa_info: DFAInfo) -> str:
         """Generate main file header"""
