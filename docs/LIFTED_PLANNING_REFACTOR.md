@@ -228,20 +228,189 @@ def _apply_abstract_action(self, abstract_action, state):
 - `tests/test_lifted_vs_grounded.py` - 对比测试
 - `tests/test_lifted_simple.py` - 简单lifted测试
 
-## 下一步
+## 当前实现的局限性
 
-### 待完成
+虽然当前实现使用了unification而不是枚举，但**仍然缺少真正的抽象操作**。
+
+### 问题1：仍然枚举阻碍物
+
+**场景：** 要实现 on(a, b)，但 b 上面有多个blocks: c, d, e
+
+**当前行为：**
+```python
+# 当前lifted planner会生成多个transitions:
+State1 --[pick-up(?V0, b)]-> State2  # 移除c
+State1 --[pick-up(?V1, b)]-> State3  # 移除d
+State1 --[pick-up(?V2, b)]-> State4  # 移除e
+# 虽然用了变量，但仍然为每个阻碍物生成一个分支！
+```
+
+**期望的抽象行为：**
+```python
+# 应该是单个抽象操作：
+State1 --[clear-block(b)]-> State2
+# 内部表示: ∀?Z. on(?Z, b) → remove(?Z)
+# 不具体化?Z是c、d还是e
+```
+
+**根本问题：** 当前实现虽然不枚举objects，但仍然为每个可能的unification生成一个状态转换。
+
+### 问题2：缺少Existential Quantification
+
+**当前实现：**
+- 只有变量和约束: `on(?X, ?Y) where ?X != ?Y`
+- 无法表示: "存在某个?Z满足on(?Z, b)"而不具体化?Z
+
+**需要支持：**
+```python
+# Existential quantification
+AbstractState({
+    on(?X, ?Y),
+    exists(?Z): on(?Z, ?Y)  # ?Y上有某个block，但不关心具体是哪个
+})
+```
+
+### 问题3：缺少抽象宏操作（Macro Operators）
+
+**当前实现：** 只有PDDL定义的原子actions（pick-up, put-down等）
+
+**需要支持：**
+```python
+# 抽象宏操作
+MacroAction("clear-block", {
+    params: [?X],
+    expansion: "recursively remove all blocks on ?X",
+    abstract_effect: clear(?X),
+    # 不展开具体的pick-up序列
+})
+```
+
+### 问题4：参数类型支持不完整
+
+**当前支持：**
+- ✅ 变量参数: `?X, ?Y, ?Z`
+- ✅ 任意数量的参数
+
+**尚未完全测试/支持：**
+- ⚠️ 常量参数: `move(?X, table)` - table是常量
+- ⚠️ 数值参数: `cost(?X, 5)` - 5是整数
+- ⚠️ 字符串参数: `label(?X, "red")`
+- ⚠️ 负数参数: `temperature(?X, -10)`
+
+**需要增强：**
+```python
+# Unification应该正确处理：
+unify(?X, "table") = {?X/"table"}
+unify(5, 5) = {}  # 常量匹配
+unify(5, 6) = None  # 常量不匹配
+```
+
+### 问题5：不支持分层规划
+
+**当前实现：** 单层flat planning - 所有actions在同一抽象层
+
+**真正的lifted planning应该支持：**
+```python
+# 高层抽象plan
+AbstractPlan([
+    achieve(on(a, b)),      # 高层目标
+    clear-tower(?X),        # 抽象操作
+    build-stack([a, b, c])  # 复合操作
+])
+
+# 低层具体plan (实例化时生成)
+ConcretePlan([
+    pick-up(d, b),
+    put-down(d, table),
+    pick-up(a, table),
+    put-on(a, b)
+])
+```
+
+## 未完成的目标
+
+### Phase 1: 当前完成 ✅
 1. ~~实现unification~~ ✅
 2. ~~实现abstract state~~ ✅
-3. ~~实现lifted planner~~ ✅
+3. ~~实现basic lifted planner~~ ✅
 4. ~~测试验证~~ ✅
-5. **整合到backward_planner_generator** - 待完成
-6. **更新code generation** - 待完成
 
-### 已知问题
-1. `_infer_complete_goal`仍可能引入额外变量（如?b2, ?b3）- 需进一步优化
-2. Abstract state validation需要更domain-independent的实现
-3. 需要实现plan instantiation（abstract plan → concrete plan）
+### Phase 2: 抽象操作支持 ⚠️ 待完成
+
+#### 2.1 Existential Quantification
+- [ ] 扩展AbstractState支持existential variables
+- [ ] 实现 `exists(?Z): P(?Z)` 语法
+- [ ] 更新unification处理existential variables
+- [ ] 测试: "exists ?Z where on(?Z, b)" 不具体化?Z
+
+#### 2.2 Universal Actions
+- [ ] 支持 `∀?Z. Precond(?Z) → Effect(?Z)` 形式的actions
+- [ ] 单个abstract action应用到多个满足条件的objects
+- [ ] 不为每个object生成单独的transition
+
+#### 2.3 抽象宏操作
+- [ ] 定义MacroAction数据结构
+- [ ] 实现常用宏: clear-block(?X), build-stack([?X, ?Y, ?Z])
+- [ ] 宏操作的abstract effects
+- [ ] 延迟展开（只在instantiation时展开）
+
+#### 2.4 参数类型完整支持
+- [ ] 测试常量参数: `on(?X, table)`
+- [ ] 测试数值参数: `cost(?X, 5)`
+- [ ] 测试字符串参数: `color(?X, "red")`
+- [ ] 测试负数参数: `temp(?X, -10)`
+- [ ] 更新unification处理所有类型
+- [ ] 更新constraint system支持type constraints
+
+### Phase 3: 分层规划 📋 未开始
+
+#### 3.1 抽象层次定义
+- [ ] 定义多个抽象层次: L0 (primitive), L1 (macro), L2 (high-level)
+- [ ] 每层的actions和state representation
+- [ ] 层次间的refinement映射
+
+#### 3.2 Hierarchical Planning Algorithm
+- [ ] 高层规划: 使用abstract actions
+- [ ] Plan refinement: 逐层具体化
+- [ ] Backtracking: 高层失败时回退
+
+#### 3.3 Plan Instantiation
+- [ ] Abstract plan → Concrete plan mapping
+- [ ] 变量绑定传播（从高层到低层）
+- [ ] 处理多个可能的instantiations
+
+### Phase 4: 集成和优化 📋 未开始
+
+#### 4.1 集成到Pipeline
+- [ ] 更新backward_planner_generator使用LiftedPlanner
+- [ ] 兼容现有的StateGraph和transitions
+- [ ] 更新code generation处理abstract plans
+
+#### 4.2 Domain-Independent
+- [ ] 移除blocksworld-specific assumptions
+- [ ] 从PDDL domain自动推导constraints
+- [ ] 通用的state consistency validation
+
+#### 4.3 性能优化
+- [ ] Abstract state caching优化
+- [ ] Constraint propagation优化
+- [ ] Early pruning of inconsistent states
+
+## 实现优先级
+
+### 🔥 高优先级
+1. **Existential Quantification** - 避免枚举阻碍物
+2. **抽象宏操作** - clear-block等高频操作
+3. **完整参数类型支持** - 支持任意valid PDDL
+
+### 📝 中优先级
+4. **Universal Actions** - 单个action应用到多个objects
+5. **Plan Instantiation** - abstract → concrete
+6. **Domain-Independent validation**
+
+### 🔮 低优先级
+7. **分层规划** - 多层抽象（可能是future work）
+8. **高级优化** - constraint propagation等
 
 ## 性能优势
 
