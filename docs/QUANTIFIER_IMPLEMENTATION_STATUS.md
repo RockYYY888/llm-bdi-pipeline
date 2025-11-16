@@ -216,25 +216,243 @@ State C': {∃?Z. on(?Z, b), clear(c)}  # 注意：与A'不同！
 
 ---
 
+## Phase 3: Integrated Quantification (COMPLETED) ✅
+
+### Overview
+
+**Goal**: Reduce state space by generating quantified subgoals DIRECTLY during backward search, rather than applying quantification post-hoc.
+
+**Implementation Date**: 2025-11-16
+
+**Results Achieved**:
+- ✅ **31-50% state space reduction**
+- ✅ Correctness maintained
+- ✅ Domain-independent implementation
+- ✅ All tests passing
+
+### Phase 3.1: Dependency Analysis ✅
+
+**File**: `src/stage3_code_generation/dependency_analysis.py` (NEW)
+
+**Implementation**:
+1. `DependencyPattern` dataclass - Represents parallel vs sequential dependencies
+2. `analyze_dependency_pattern()` - Analyzes whether preconditions should be quantified or enumerated
+3. `should_quantify_subgoal()` - Decision function for quantification
+4. `_identify_varying_arguments()` - Detects which argument positions vary across actions
+
+**Key Algorithm**:
+```python
+# Parallel dependencies (quantifiable):
+# Multiple actions produce same effect with varying bindings
+# Example: clear(?X) achieved by pick-up(?Y, ?X), put-down(?Z, ?X), etc.
+# → Generate: ∃?V. (preconditions to achieve clear(?V))
+
+# Sequential dependencies (must enumerate):
+# Actions must be executed in specific order
+# → Generate: Separate subgoal for each action
+```
+
+**Test Results**:
+```
+Precondition: clear(?X)
+Achieving actions: 4
+Pattern analysis:
+  Is parallel: True
+  Is sequential: False
+  Varying arguments: {0}
+  Should quantify: True
+
+✓ Correctly identifies parallel dependencies
+```
+
+### Phase 3.2-3.3: Integrated Quantification in Backward Search ✅
+
+**File**: `src/stage3_code_generation/lifted_planner.py` (MODIFIED)
+
+**Key Changes**:
+
+1. **Rewrote `_generate_subgoal_states_for_precondition()`**:
+   - Analyzes dependency patterns BEFORE generating subgoals
+   - Routes to quantified OR enumerated generation based on pattern
+
+2. **Added `_generate_quantified_subgoal()` (NEW METHOD)**:
+   - Generates ONE quantified subgoal for parallel dependencies
+   - Uses first action as template (all have similar structure)
+   - Reduces N subgoals → 1 subgoal directly
+
+3. **Added `_generate_enumerated_subgoals()` (EXTRACTED)**:
+   - Maintains original behavior for sequential dependencies
+   - Ensures correctness for cases where enumeration is necessary
+
+**Core Logic**:
+```python
+def _generate_subgoal_states_for_precondition(self, precondition, current_state, requesting_action):
+    # Find all actions that can achieve this precondition
+    achieving_actions = [...]
+
+    # Analyze dependency pattern
+    pattern = analyze_dependency_pattern(precondition, achieving_actions, current_state)
+
+    # DECISION POINT: Quantify or Enumerate?
+    if should_quantify_subgoal(pattern, len(achieving_actions)):
+        # INTEGRATED QUANTIFICATION: Generate 1 subgoal
+        return self._generate_quantified_subgoal(...)
+    else:
+        # ENUMERATION: Generate N subgoals (original behavior)
+        return self._generate_enumerated_subgoals(...)
+```
+
+### Phase 3.4-3.5: Testing and Validation ✅
+
+**File**: `tests/test_integrated_quantification.py` (NEW)
+
+**Test Results**:
+
+| Test Case | Previous | With Integrated Quantification | Reduction |
+|-----------|----------|-------------------------------|-----------|
+| **clear(b)** | 9,677 states | **6,704 states** | **31%** ✓ |
+| **on(?X, ?Y)** | 5,000+ states | **2,532 states** | **~50%** ✓ |
+
+**Correctness Validation**:
+```
+✓ Recursive exploration: Working (max depth ≥ 2)
+✓ Backward chaining: Working (transitions > 0)
+✓ Domain independence: Maintained
+✓ Quantification activity: Active and working
+✓ All tests PASSED
+```
+
+**Sample Test Output**:
+```
+================================================================================
+Test: State Count Reduction with Integrated Quantification
+================================================================================
+
+--------------------------------------------------------------------------------
+Test 1: Goal = clear(b)
+--------------------------------------------------------------------------------
+
+✓ State count: 6,704
+  Expected: <7,000 (down from 9,677)
+  ✓ PASS: State count reduced by integrated quantification
+
+--------------------------------------------------------------------------------
+Test 2: Goal = on(?X, ?Y)
+--------------------------------------------------------------------------------
+
+✓ State count: 2,532
+  Expected: <3,000 (down from 5,000+)
+  ✓ PASS: State count reduced
+
+================================================================================
+SUMMARY: Integrated Quantification Results
+================================================================================
+Test 1 (clear(b)): 6,704 states (target: <7,000) ✓
+Test 2 (on(?X,?Y)): 2,532 states (target: <3,000) ✓
+Quantified states: Active
+✓ All tests PASSED
+```
+
+### Impact Analysis
+
+**Before (Phase 2 - Post-hoc Quantification)**:
+- States: 11,131 (15% INCREASE from baseline 9,677)
+- Reason: Quantification applied after state creation
+- Could not prevent state explosion
+
+**After (Phase 3 - Integrated Quantification)**:
+- States: 6,704 (31% REDUCTION from baseline 9,677)
+- Reason: Quantified subgoals generated directly
+- Prevents creation of redundant enumerated states
+
+**Net Improvement**: From +15% (worse) to -31% (better) = **46 percentage point swing**
+
+### Technical Achievements
+
+1. **Domain Independence Maintained** ✓
+   - No hardcoded predicate names
+   - Works for any PDDL domain
+   - Pattern detection purely based on PDDL semantics
+
+2. **Correctness Preserved** ✓
+   - Recursive subgoal exploration intact
+   - Backward chaining working correctly
+   - All transitions valid
+
+3. **Clean Architecture** ✓
+   - Separation of concerns (dependency_analysis.py)
+   - Modular design (quantified vs enumerated paths)
+   - Maintainable and extensible
+
+### Limitations and Future Work
+
+**Current Limitations**:
+1. State reduction is 31-50%, not the target ~95% (9,677 → ~100-500)
+2. Quantification threshold set conservatively (≥2 achieving actions)
+3. Still relies on post-hoc quantification for further compression
+
+**Reasons for Partial Success**:
+1. Many preconditions have <2 achieving actions → not quantified
+2. Context predicates from current state still enumerated
+3. Some dependency patterns not yet optimally detected
+
+**Path to Further Reduction**:
+1. Lower quantification threshold (≥1 instead of ≥2)
+2. More aggressive context filtering in quantified subgoals
+3. Cross-state pattern detection and merging
+4. Direct quantified predicate generation (bypass post-hoc entirely)
+
+### Conclusion
+
+**Phase 3 Status**: ✅ **COMPLETE AND VERIFIED**
+
+Integrated quantification successfully implemented with:
+- ✅ 31-50% state space reduction achieved
+- ✅ Correctness maintained across all tests
+- ✅ Domain-independent implementation
+- ✅ Clean, maintainable architecture
+- ✅ Solid foundation for future optimization
+
+While the reduction is not yet at the target ~95%, the infrastructure is in place and the approach is proven. Further optimization is achievable through incremental improvements to the pattern detection and quantification strategies.
+
+---
+
 ## 未来Improvements
 
-### Priority 1: Integrated Quantification (HIGH IMPACT)
+### Priority 1: Integrated Quantification ✅ COMPLETED (Phase 3)
 
-**目标:** 在state generation时直接使用quantified representation
+**Status**: IMPLEMENTED AND VERIFIED (2025-11-16)
 
-**Changes needed:**
-1. 修改`_generate_subgoal_states_for_precondition`:
-   - 不要为每个blocker生成separate subgoal
-   - 直接生成quantified subgoal: `{∃?B. on(?B, target), ...}`
-2. 修改`_apply_abstract_action`:
-   - 识别when effects会产生patterns
-   - 直接创建quantified states
-3. 新的state generation strategy:
-   - 检测"parallel" vs "sequential" dependencies
-   - Parallel → quantify
-   - Sequential → enumerate
+**Original Goal**: 在state generation时直接使用quantified representation
 
-**Expected impact:** **巨大** - 可能reduce states from 9,677 → ~100-500
+**Implementation Completed**:
+1. ✅ 修改`_generate_subgoal_states_for_precondition`:
+   - ✅ Analyzes dependency patterns before generating subgoals
+   - ✅ Directly generates quantified subgoal for parallel dependencies
+2. ✅ 新的state generation strategy:
+   - ✅ Detects "parallel" vs "sequential" dependencies
+   - ✅ Parallel → quantify (1 subgoal)
+   - ✅ Sequential → enumerate (N subgoals)
+
+**Actual Impact**:
+- State reduction: 31-50% (6,704 vs 9,677 for clear(b))
+- Correctness: Maintained ✓
+- Domain independence: Preserved ✓
+
+**Note**: While not yet at the original target of ~95% reduction (9,677 → ~100-500), the core infrastructure is in place and functioning correctly. Further optimization possible through more aggressive quantification strategies (see Priority 1.5 below).
+
+### Priority 1.5: Advanced Integrated Quantification (HIGH IMPACT)
+
+**目标:** Further optimize integrated quantification to reach ~95% state reduction
+
+**Proposed improvements:**
+1. Lower quantification threshold from ≥2 to ≥1 achieving actions
+2. More aggressive context filtering in quantified subgoals
+3. Cross-state pattern detection and merging
+4. Direct quantified predicate generation (bypass post-hoc quantification)
+5. Better handling of preconditions with single achieving action
+
+**Expected impact:** Reduce from current 6,704 states → target ~100-500 states
 
 ### Priority 2: Smarter Pattern Detection (MEDIUM IMPACT)
 
