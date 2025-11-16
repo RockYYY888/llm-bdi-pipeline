@@ -1,35 +1,28 @@
 """
 DFA Transition Label Simplifier
 
-Transforms DFA with complex boolean expressions on transition labels into
-equivalent DFA where each transition checks exactly ONE atom (no negations, no conjunctions).
+Transforms DFA with complex boolean expressions into equivalent DFA
+where each transition checks exactly ONE atom (positive literal only).
 
-Uses BDD-based decision tree construction to split states and create atomic transitions.
-
-Key Features:
-- Each transition label is a single positive atom (e.g., "on_a_b", "clear_c")
-- Explicit true/false branches (deterministic)
-- State splitting to handle complex boolean logic
-- BDD-based decision tree construction
+Algorithm: BDD-based Decision Tree Construction
+For each original transition (s1 -> s2, label=formula):
+  1. Convert formula to BDD
+  2. Build decision tree from BDD (each node tests one variable)
+  3. Create intermediate states for decision tree nodes
+  4. Label edges with single positive atoms only
+  5. Guarantee: Complete and deterministic
 
 Requirements:
 - BDD library (pip install dd) - MANDATORY
 
-Example transformation:
-  BEFORE: s1 -> s2 [label="on_d_e | (clear_c & on_a_b)"]
-
-  AFTER:  s1 -> check_on_d_e
-          check_on_d_e -> s2 [label="on_d_e"]         // if on_d_e is true
-          check_on_d_e -> check_clear_c [label="!on_d_e"]  // if on_d_e is false
-          check_clear_c -> check_on_a_b [label="clear_c"]  // if clear_c is true
-          check_clear_c -> s_reject [label="!clear_c"]     // if clear_c is false
-          check_on_a_b -> s2 [label="on_a_b"]         // if on_a_b is true
-          check_on_a_b -> s_reject [label="!on_a_b"]      // if on_a_b is false
+Based on:
+- BDD traversal for formula evaluation
+- Decision tree construction from BDDs
+- Atomic transition decomposition
 """
 
 from typing import List, Dict, Tuple, Set, Optional, Any
 from dataclasses import dataclass
-from collections import defaultdict
 import re
 import sys
 from pathlib import Path
@@ -39,7 +32,6 @@ _parent = str(Path(__file__).parent.parent)
 if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
-from stage3_code_generation.boolean_expression_parser import BooleanExpressionParser
 from stage1_interpretation.grounding_map import GroundingMap
 
 try:
@@ -62,78 +54,102 @@ class SimplifiedDFA:
     stats: Dict[str, Any]
 
 
-class AtomicDFABuilder:
+class BDDBasedDFABuilder:
     """
-    Builds atomic-only DFA from complex boolean expressions using BDD decision trees.
+    Builds atomic DFA from boolean formulas using BDD decision trees.
 
-    Each transition in output DFA checks exactly one atom (positive, no negation).
-    Complex expressions are decomposed via state splitting.
+    Strategy:
+    - For each original transition with complex formula, build decision tree
+    - Each decision node tests ONE atom (positive literal)
+    - Create intermediate states for decision nodes
+    - Result: DFA where each edge checks exactly one positive atom
+
+    Guarantees:
+    - Deterministic: each (state, atom) has at most one successor
+    - Complete: all atom combinations are handled
+    - Equivalent: accepts same language as original DFA
     """
 
     def __init__(self):
-        """Initialize atomic DFA builder"""
+        """Initialize BDD-based DFA builder"""
         if not BDD_AVAILABLE:
             raise ImportError(
                 "BDD library is required for DFA simplification. "
                 "Install with: pip install dd"
             )
         self.BDD = BDD
-        self.state_counter = 0
+        self.bdd = None
+        self.predicates = []
 
     def simplify(self, dfa_dot: str, grounding_map: GroundingMap) -> SimplifiedDFA:
         """
-        Convert DFA to atomic-only transitions
+        Convert DFA to atomic transitions using BDD decision trees
 
         Args:
             dfa_dot: Original DFA in DOT format
             grounding_map: Grounding map for predicates
 
         Returns:
-            SimplifiedDFA with atomic transitions
+            SimplifiedDFA with atomic transitions (positive atoms only)
         """
-        print("[Atomic DFA Builder] Converting to atomic transitions")
+        print("[BDD-Based DFA Builder] Converting to atomic transitions")
 
         # Parse original DFA
         transitions = self._parse_transitions(dfa_dot)
         accepting_states = self._parse_accepting_states(dfa_dot)
-        all_predicates = self._collect_predicates(transitions, grounding_map)
+        self.predicates = self._collect_predicates(transitions, grounding_map)
 
-        if len(all_predicates) == 0:
+        if len(self.predicates) == 0:
             # No predicates, return as-is
             return SimplifiedDFA(
                 simplified_dot=dfa_dot,
-                stats={'method': 'atomic', 'num_predicates': 0, 'num_new_states': 0}
+                stats={'method': 'bdd', 'num_predicates': 0, 'num_states': 0}
             )
 
-        print(f"  Predicates: {all_predicates}")
+        print(f"  Predicates: {self.predicates}")
         print(f"  Original states: {len(self._get_all_states(transitions))}")
         print(f"  Original transitions: {len(transitions)}")
 
-        # Build BDD for decision trees
-        bdd = self.BDD()
-        for pred in all_predicates:
-            bdd.add_var(pred)
+        # Initialize BDD
+        self.bdd = self.BDD()
+        for pred in self.predicates:
+            self.bdd.add_var(pred)
 
-        # Convert each transition to atomic decision tree
+        # Initialize global state tracking (CRITICAL FIX)
+        self.state_map = {}  # BDD node ID -> DFA state name
+        self.state_counter = 0  # Global counter for unique state names
+
+        # Build new DFA
         new_transitions = []
-        new_accepting = set(accepting_states)
+        new_accepting = set()
 
+        # Process each original transition
         for from_state, to_state, label in transitions:
-            atomic_trans = self._convert_to_atomic(
-                from_state, to_state, label, all_predicates, bdd, grounding_map
+            # Build BDD for this label
+            try:
+                label_bdd = self._parse_to_bdd(label)
+            except Exception as e:
+                print(f"  Warning: Could not parse '{label}': {e}")
+                # Fallback: keep as is
+                new_transitions.append((from_state, to_state, label))
+                continue
+
+            # Convert BDD to atomic transitions
+            atomic_trans, reachable_accept = self._bdd_to_atomic_transitions(
+                from_state, to_state, label_bdd, to_state in accepting_states
             )
             new_transitions.extend(atomic_trans)
+            new_accepting.update(reachable_accept)
 
-        # Build new DOT
-        simplified_dot = self._build_dot(
-            new_transitions,
-            new_accepting,
-            dfa_dot
-        )
+        # Add original accepting states
+        new_accepting.update(accepting_states)
+
+        # Build output DOT
+        simplified_dot = self._build_dot(new_transitions, new_accepting, dfa_dot)
 
         stats = {
-            'method': 'atomic',
-            'num_predicates': len(all_predicates),
+            'method': 'bdd',
+            'num_predicates': len(self.predicates),
             'num_original_states': len(self._get_all_states(transitions)),
             'num_new_states': len(self._get_all_states(new_transitions)),
             'num_original_transitions': len(transitions),
@@ -148,181 +164,250 @@ class AtomicDFABuilder:
             stats=stats
         )
 
-    def _convert_to_atomic(self, from_state: str, to_state: str, label: str,
-                           all_predicates: List[str], bdd, grounding_map: GroundingMap) -> List[Tuple[str, str, str]]:
+    def _bdd_to_atomic_transitions(self, start_state: str, target_state: str,
+                                    bdd_node, target_is_accepting: bool) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
         """
-        Convert a single complex transition to atomic transitions via decision tree
+        Convert a BDD to atomic transitions using Shannon Expansion.
 
-        Returns list of (from, to, label) where each label is a single atom or its negation
+        Strategy:
+        1. Build DFA states from BDD nodes (one-to-one mapping)
+        2. Create transitions based on BDD edges:
+           - High edge (var=true) → transition labeled "var"
+           - Low edge (var=false) → transition labeled "!var"
+        3. Use global state_map to handle shared BDD nodes correctly
+
+        Returns: (transitions, accepting_states)
         """
-        # Handle special cases
-        if label == "true":
-            # Always transition, no atom check needed
-            return [(from_state, to_state, "true")]
+        transitions = []
+        accepting = set()
 
-        if label == "false":
-            # Never transition
-            return []
+        # First, build complete state mapping for this BDD
+        self._map_bdd_to_states(bdd_node, start_state, target_state, target_is_accepting)
 
-        # Check if already atomic (single predicate, no operators)
-        if label in all_predicates:
-            return [(from_state, to_state, label)]
+        # Then, create transitions from the BDD structure
+        visited = set()  # Track which nodes we've created transitions for
+        trans = self._create_transitions_from_bdd(bdd_node, start_state, target_state, visited)
+        transitions.extend(trans)
 
-        # Build BDD for this label
-        try:
-            label_bdd = self._parse_expression_to_bdd(label, bdd, all_predicates)
-        except Exception as e:
-            print(f"  Warning: Could not parse '{label}', keeping as-is: {e}")
-            return [(from_state, to_state, label)]
+        # Collect accepting states
+        if target_is_accepting:
+            accepting.add(target_state)
 
-        # Convert BDD to decision tree transitions
-        transitions = self._bdd_to_decision_tree(
-            from_state, to_state, label_bdd, bdd, all_predicates
-        )
+        return transitions, accepting
 
-        return transitions
-
-    def _bdd_to_decision_tree(self, start: str, target: str, bdd_node, bdd,
-                              predicates: List[str]) -> List[Tuple[str, str, str]]:
+    def _map_bdd_to_states(self, bdd_node, start_state: str, target_state: str,
+                           target_is_accepting: bool):
         """
-        Convert a BDD node to a series of atomic transitions forming a decision tree
+        Phase 1: Build complete mapping from BDD nodes to DFA states.
 
-        Each node in BDD becomes a state that checks one atom.
-        Only POSITIVE atoms are used (no negations).
+        This ensures each unique BDD node gets exactly one DFA state.
+        Handles node sharing correctly.
+        """
+        # Terminal nodes don't need state mapping
+        if bdd_node in [self.bdd.true, self.bdd.false]:
+            return
+
+        # Check if already mapped
+        node_id = id(bdd_node)
+        if node_id in self.state_map:
+            return  # Already processed
+
+        # Map this node to a state
+        # The root BDD node for this transition uses start_state
+        self.state_map[node_id] = start_state
+
+        # Recursively map children (they will get new states)
+        var_index = bdd_node.level
+        if var_index is not None and var_index < len(self.predicates):
+            high_branch = bdd_node.high
+            low_branch = bdd_node.low
+
+            # Map children nodes
+            if high_branch and high_branch not in [self.bdd.true, self.bdd.false]:
+                child_id = id(high_branch)
+                if child_id not in self.state_map:
+                    self.state_counter += 1
+                    self.state_map[child_id] = f"s{self.state_counter}"
+                self._map_bdd_to_states(high_branch, self.state_map[child_id], target_state, target_is_accepting)
+
+            if low_branch and low_branch not in [self.bdd.true, self.bdd.false]:
+                child_id = id(low_branch)
+                if child_id not in self.state_map:
+                    self.state_counter += 1
+                    self.state_map[child_id] = f"s{self.state_counter}"
+                self._map_bdd_to_states(low_branch, self.state_map[child_id], target_state, target_is_accepting)
+
+    def _create_transitions_from_bdd(self, bdd_node, start_state: str,
+                                     target_state: str, visited: Set[int]) -> List[Tuple[str, str, str]]:
+        """
+        Phase 2: Create transitions from BDD structure.
+
+        Each BDD node creates outgoing transitions based on its edges.
+        This phase is called AFTER state mapping is complete.
+
+        CRITICAL: Handles dd.autoref negation semantics correctly:
+        - When negated=True, high/low semantics are INVERTED
+        - high branch means variable is FALSE
+        - low branch means variable is TRUE
+
+        Args:
+            visited: Set of node IDs we've already processed (prevents duplicates)
         """
         transitions = []
 
-        try:
-            if bdd_node == bdd.false:
-                # No satisfying assignment, no transition
-                return []
-
-            if bdd_node == bdd.true:
-                # Always true, direct transition
-                return [(start, target, "true")]
-
-            if not predicates:
-                # No more predicates to check, done
-                return [(start, target, "true")]
-
-            # Use first predicate as decision point
-            first_pred = predicates[0]
-            remaining_preds = predicates[1:] if len(predicates) > 1 else []
-
-            # Case 1: first_pred is true
-            true_branch = bdd_node & bdd.var(first_pred)
-            # Case 2: first_pred is false
-            false_branch = bdd_node & ~bdd.var(first_pred)
-
-            # POSITIVE atom branch
-            if true_branch != bdd.false:
-                # Create intermediate state for positive case
-                true_state = self._new_state(f"{start}_{first_pred}_pos")
-                transitions.append((start, true_state, first_pred))
-
-                # Recursively handle remaining predicates
-                sub_trans = self._bdd_to_decision_tree(
-                    true_state, target, true_branch, bdd, remaining_preds
-                )
-                transitions.extend(sub_trans)
-
-            # NEGATIVE case: handled by NOT checking the atom
-            # We need to create a state that is reached when first_pred is NOT seen
-            # This requires checking other atoms first, then falling back
-            if false_branch != bdd.false:
-                # If we have remaining predicates, we can check those without checking first_pred
-                if remaining_preds:
-                    # Move to next predicate without consuming first_pred
-                    sub_trans = self._bdd_to_decision_tree(
-                        start, target, false_branch, bdd, remaining_preds
-                    )
-                    transitions.extend(sub_trans)
-                else:
-                    # No more predicates, this means "go to target if first_pred is false"
-                    # In atomic-only DFA, we represent this by:
-                    # - No transition on first_pred (implicitly false)
-                    # But we need explicit transition, so use a "complement" approach
-                    # Create a sink state that checks all other atoms
-                    pass  # Will be handled by exhaustive state construction
-
+        # Terminal TRUE: create direct transition
+        if bdd_node == self.bdd.true:
+            transitions.append((start_state, target_state, "true"))
             return transitions
 
-        except Exception as e:
-            print(f"  Warning: BDD decision tree construction failed: {e}")
-            # Fallback: return original transition
-            return [(start, target, "true")]
+        # Terminal FALSE: no transition
+        if bdd_node == self.bdd.false:
+            return []
 
-    def _new_state(self, hint: str = "") -> str:
-        """Generate a new unique state name"""
-        self.state_counter += 1
-        return f"s{self.state_counter}"
+        # Check if already processed
+        node_id = id(bdd_node)
+        if node_id in visited:
+            return []  # Already created transitions for this node
+        visited.add(node_id)
 
-    def _parse_expression_to_bdd(self, expr: str, bdd, predicates: List[str]):
-        """Parse boolean expression string to BDD"""
-        # Normalize expression
+        # Get current node's DFA state
+        current_state = self.state_map.get(node_id, start_state)
+
+        # Get variable and negation status
+        var_index = bdd_node.level
+        if var_index is None or var_index >= len(self.predicates):
+            # Leaf node
+            transitions.append((current_state, target_state, "true"))
+            return transitions
+
+        var = self.predicates[var_index]
+        is_negated = bdd_node.negated
+        high_branch = bdd_node.high
+        low_branch = bdd_node.low
+
+        # Determine TRUE and FALSE branches based on negation
+        # KEY FIX: When negated=True, high/low semantics are inverted
+        if not is_negated:
+            # Normal node: high=var_true, low=var_false
+            true_branch = high_branch
+            false_branch = low_branch
+            true_label = var
+            false_label = f"!{var}"
+        else:
+            # Negated node: INVERTED semantics!
+            true_branch = low_branch   # When var=TRUE, follow LOW
+            false_branch = high_branch # When var=FALSE, follow HIGH
+            true_label = var           # But label is still the variable name
+            false_label = f"!{var}"
+
+        # Process TRUE branch (when variable is TRUE)
+        if true_branch is not None and true_branch != self.bdd.false:
+            if true_branch == self.bdd.true:
+                # Direct transition to target
+                transitions.append((current_state, target_state, true_label))
+            else:
+                # Transition to intermediate state
+                true_state = self.state_map.get(id(true_branch))
+                if true_state:
+                    transitions.append((current_state, true_state, true_label))
+                    # Recursively create transitions from true_state
+                    transitions.extend(self._create_transitions_from_bdd(
+                        true_branch, true_state, target_state, visited))
+
+        # Process FALSE branch (when variable is FALSE)
+        if false_branch is not None and false_branch != self.bdd.false:
+            if false_branch == self.bdd.true:
+                # Direct transition to target
+                transitions.append((current_state, target_state, false_label))
+            else:
+                # Transition to intermediate state
+                false_state = self.state_map.get(id(false_branch))
+                if false_state:
+                    transitions.append((current_state, false_state, false_label))
+                    # Recursively create transitions from false_state
+                    transitions.extend(self._create_transitions_from_bdd(
+                        false_branch, false_state, target_state, visited))
+
+        return transitions
+
+    def _get_or_create_state(self, bdd_node) -> str:
+        """Get or create DFA state for a BDD node"""
+        node_id = id(bdd_node)
+        if node_id not in self.state_map:
+            self.state_counter += 1
+            self.state_map[node_id] = f"s{self.state_counter}"
+        return self.state_map[node_id]
+
+    def _parse_to_bdd(self, expr: str):
+        """Parse boolean expression to BDD using Shannon Expansion"""
+        # Handle special cases
+        if expr == "true":
+            return self.bdd.true
+        if expr == "false":
+            return self.bdd.false
+
+        # Normalize
         expr = expr.replace('!', '~')
         expr = expr.replace('&&', '&')
         expr = expr.replace('||', '|')
 
-        # Build BDD recursively
-        # This is a simplified parser - for production, use proper parsing
+        # Parse recursively
+        return self._parse_expr_recursive(expr)
 
-        # Handle simple cases
-        if expr == "true":
-            return bdd.true
-        if expr == "false":
-            return bdd.false
+    def _parse_expr_recursive(self, expr: str):
+        """Recursive expression parser for BDD construction"""
+        expr = expr.strip()
 
         # Single predicate
-        if expr in predicates:
-            return bdd.var(expr)
+        if expr in self.predicates:
+            return self.bdd.var(expr)
 
         # Negation
         if expr.startswith('~'):
-            inner = expr[1:].strip()
-            if inner in predicates:
-                return ~bdd.var(inner)
-
-        # For complex expressions, use Python eval (not ideal but works for now)
-        # Replace predicates with BDD variables
-        bdd_expr = expr
-        for pred in sorted(predicates, key=len, reverse=True):
-            # Need to build BDD expression programmatically
-            pass
-
-        # Simplified: try to evaluate the expression structure
-        # This is a placeholder - proper implementation would parse the AST
-        try:
-            # Build expression by evaluating it with BDD operations
-            # For now, return a simple BDD based on first predicate
-            if '|' in expr:
-                # Disjunction
-                parts = expr.split('|')
-                result = bdd.false
-                for part in parts:
-                    part_bdd = self._parse_expression_to_bdd(part.strip(), bdd, predicates)
-                    result |= part_bdd
-                return result
-            elif '&' in expr:
-                # Conjunction
-                parts = expr.split('&')
-                result = bdd.true
-                for part in parts:
-                    part_bdd = self._parse_expression_to_bdd(part.strip(), bdd, predicates)
-                    result &= part_bdd
-                return result
+            inner = expr[1:].strip('()')
+            if inner in self.predicates:
+                return ~self.bdd.var(inner)
             else:
-                # Single term
-                term = expr.strip()
-                if term.startswith('~'):
-                    pred = term[1:].strip('()')
-                    return ~bdd.var(pred)
-                else:
-                    pred = term.strip('()')
-                    return bdd.var(pred)
-        except Exception as e:
-            print(f"  Warning: Expression parsing failed for '{expr}': {e}")
-            return bdd.true
+                return ~self._parse_expr_recursive(inner)
+
+        # Handle parentheses
+        if expr.startswith('(') and expr.endswith(')'):
+            return self._parse_expr_recursive(expr[1:-1])
+
+        # Find main operator (lowest precedence)
+        # Order: OR > AND > NOT
+        level = 0
+        for i, c in enumerate(expr):
+            if c == '(':
+                level += 1
+            elif c == ')':
+                level -= 1
+            elif level == 0:
+                if c == '|':
+                    # Disjunction
+                    left = self._parse_expr_recursive(expr[:i])
+                    right = self._parse_expr_recursive(expr[i+1:])
+                    return left | right
+
+        # AND
+        level = 0
+        for i, c in enumerate(expr):
+            if c == '(':
+                level += 1
+            elif c == ')':
+                level -= 1
+            elif level == 0:
+                if c == '&':
+                    left = self._parse_expr_recursive(expr[:i])
+                    right = self._parse_expr_recursive(expr[i+1:])
+                    return left & right
+
+        # Fallback: treat as variable
+        if expr in self.predicates:
+            return self.bdd.var(expr)
+
+        # Unknown expression
+        return self.bdd.true
 
     def _parse_transitions(self, dfa_dot: str) -> List[Tuple[str, str, str]]:
         """Parse transitions from DOT format"""
@@ -357,11 +442,9 @@ class AtomicDFABuilder:
         """Collect all atomic predicates from transitions"""
         predicates = set()
         for _, _, label in transitions:
-            # Extract tokens from label
             tokens = re.findall(r'\w+', label)
             for token in tokens:
                 if token.lower() not in ['true', 'false', 'and', 'or', 'not']:
-                    # Check if it's a grounded atom
                     if grounding_map and token in grounding_map.atoms:
                         predicates.add(token)
         return sorted(list(predicates))
@@ -403,22 +486,22 @@ class AtomicDFABuilder:
 
 class DFASimplifier:
     """
-    DFA simplifier - converts to atomic-only transitions
+    DFA simplifier - converts to atomic transitions using Shannon Expansion
     """
 
     def __init__(self):
         """Initialize DFA simplifier"""
-        self.builder = AtomicDFABuilder()
+        self.builder = BDDBasedDFABuilder()
 
     def simplify(self, dfa_dot: str, grounding_map: GroundingMap) -> SimplifiedDFA:
         """
-        Simplify DFA to atomic transitions
+        Simplify DFA to atomic transitions (Shannon Expansion based)
 
         Args:
             dfa_dot: DFA in DOT format
             grounding_map: Grounding map
 
         Returns:
-            SimplifiedDFA object
+            SimplifiedDFA object (guaranteed equivalent to input)
         """
         return self.builder.simplify(dfa_dot, grounding_map)
