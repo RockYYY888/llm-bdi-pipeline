@@ -2,23 +2,23 @@
 DFA Transition Label Simplifier
 
 Transforms DFA with complex boolean expressions into equivalent DFA
-where each transition checks exactly ONE atom (positive literal only).
+where each transition checks exactly ONE atomic literal (var or !var).
 
-Algorithm: BDD-based Decision Tree Construction
+Algorithm: BDD-based Shannon Expansion
 For each original transition (s1 -> s2, label=formula):
   1. Convert formula to BDD
-  2. Build decision tree from BDD (each node tests one variable)
-  3. Create intermediate states for decision tree nodes
-  4. Label edges with single positive atoms only
-  5. Guarantee: Complete and deterministic
+  2. Traverse BDD using Shannon Expansion (each node tests one variable)
+  3. Create intermediate states for BDD decision nodes
+  4. Label edges with single atomic literals (var or !var)
+  5. Guarantee: Complete, deterministic, and equivalent to original
 
 Requirements:
 - BDD library (pip install dd) - MANDATORY
 
 Based on:
-- BDD traversal for formula evaluation
-- Decision tree construction from BDDs
-- Atomic transition decomposition
+- Shannon Expansion: f = (x ∧ f|x=1) ∨ (¬x ∧ f|x=0)
+- BDD canonical representation of boolean functions
+- Atomic transition decomposition via decision tree
 """
 
 from typing import List, Dict, Tuple, Set, Optional, Any
@@ -56,18 +56,18 @@ class SimplifiedDFA:
 
 class BDDBasedDFABuilder:
     """
-    Builds atomic DFA from boolean formulas using BDD decision trees.
+    Builds atomic DFA from boolean formulas using BDD Shannon Expansion.
 
     Strategy:
-    - For each original transition with complex formula, build decision tree
-    - Each decision node tests ONE atom (positive literal)
-    - Create intermediate states for decision nodes
-    - Result: DFA where each edge checks exactly one positive atom
+    - For each original transition with complex formula, build BDD
+    - Traverse BDD: each node tests ONE atom (var or !var)
+    - Create intermediate states for BDD decision nodes
+    - Result: DFA where each edge checks exactly one atomic literal
 
     Guarantees:
     - Deterministic: each (state, atom) has at most one successor
-    - Complete: all atom combinations are handled
-    - Equivalent: accepts same language as original DFA
+    - Complete: all atom value combinations are handled
+    - Equivalent: accepts same language as original DFA (via Shannon Expansion)
     """
 
     def __init__(self):
@@ -83,14 +83,14 @@ class BDDBasedDFABuilder:
 
     def simplify(self, dfa_dot: str, grounding_map: GroundingMap) -> SimplifiedDFA:
         """
-        Convert DFA to atomic transitions using BDD decision trees
+        Convert DFA to atomic transitions using BDD Shannon Expansion
 
         Args:
             dfa_dot: Original DFA in DOT format
             grounding_map: Grounding map for predicates
 
         Returns:
-            SimplifiedDFA with atomic transitions (positive atoms only)
+            SimplifiedDFA with atomic transitions (var or !var literals)
         """
         print("[BDD-Based DFA Builder] Converting to atomic transitions")
 
@@ -330,14 +330,6 @@ class BDDBasedDFABuilder:
 
         return transitions
 
-    def _get_or_create_state(self, bdd_node) -> str:
-        """Get or create DFA state for a BDD node"""
-        node_id = id(bdd_node)
-        if node_id not in self.state_map:
-            self.state_counter += 1
-            self.state_map[node_id] = f"s{self.state_counter}"
-        return self.state_map[node_id]
-
     def _parse_to_bdd(self, expr: str):
         """Parse boolean expression to BDD using Shannon Expansion"""
         # Handle special cases
@@ -493,15 +485,44 @@ class DFASimplifier:
         """Initialize DFA simplifier"""
         self.builder = BDDBasedDFABuilder()
 
-    def simplify(self, dfa_dot: str, grounding_map: GroundingMap) -> SimplifiedDFA:
+    def simplify(self, dfa_dot: str, grounding_map: GroundingMap,
+                 verify: bool = False) -> SimplifiedDFA:
         """
         Simplify DFA to atomic transitions (Shannon Expansion based)
 
         Args:
             dfa_dot: DFA in DOT format
             grounding_map: Grounding map
+            verify: If True, verify equivalence after simplification (requires test module)
 
         Returns:
             SimplifiedDFA object (guaranteed equivalent to input)
+
+        Raises:
+            ValueError: If verify=True and equivalence check fails
+            ImportError: If verify=True but verification module not available
         """
-        return self.builder.simplify(dfa_dot, grounding_map)
+        result = self.builder.simplify(dfa_dot, grounding_map)
+
+        if verify:
+            # Import verification module from tests
+            try:
+                from tests.stage2_dfa_generation.test_dfa_equivalence_verification import verify_equivalence
+            except ImportError:
+                raise ImportError(
+                    "Equivalence verification requires test module. "
+                    "Cannot import from tests/stage2_dfa_generation/test_dfa_equivalence_verification.py"
+                )
+
+            # Run verification
+            all_atoms = self.builder.predicates
+            if all_atoms:
+                is_equiv, counterexamples = verify_equivalence(dfa_dot, result.simplified_dot, all_atoms)
+                if not is_equiv:
+                    raise ValueError(
+                        f"Equivalence verification failed! Found {len(counterexamples)} counterexample(s): "
+                        f"{counterexamples[:3]}"  # Show first 3 counterexamples
+                    )
+                print(f"✅ Equivalence verified: tested all {2**len(all_atoms)} valuations")
+
+        return result
