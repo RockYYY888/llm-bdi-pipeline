@@ -228,9 +228,52 @@ def _apply_abstract_action(self, abstract_action, state):
 - `tests/test_lifted_vs_grounded.py` - 对比测试
 - `tests/test_lifted_simple.py` - 简单lifted测试
 
+## 正确的方向：一阶谓词逻辑（First-Order Logic）
+
+### 核心洞察
+
+真正的lifted planning不需要domain-specific macros，而是基于**一阶谓词逻辑（FOL）**的quantifiers：
+
+**Universal (∀)**: "对所有"
+```
+∀?Z. on(?Z, b) → "对所有在b上的blocks"
+```
+
+**Existential (∃)**: "存在某个"
+```
+∃?Z. on(?Z, b) → "存在某个block在b上"（不关心具体是哪个）
+```
+
+### 为什么这是正确的
+
+1. **Domain-Independent**: 适用于任何PDDL domain，不需要为每个domain定义macros
+2. **数学基础**: 基于成熟的一阶谓词逻辑，不是ad-hoc hacks
+3. **自动化**: 可以自动检测何时使用quantifiers，不需要人工定义
+4. **完备性**: 一阶逻辑足以表达任何PDDL问题
+
+### Domain-Independent示例
+
+**Blocksworld:**
+```python
+# 不是: MacroAction("clear-block", ...)  ❌ Domain-specific
+# 而是: ∃?Z. on(?Z, b)  ✅ Domain-independent
+```
+
+**Logistics:**
+```python
+# 不是: MacroAction("deliver-all-packages", ...)  ❌ Domain-specific
+# 而是: ∀?P. at(?P, depot) → deliver(?P)  ✅ Domain-independent
+```
+
+**任意Domain:**
+```python
+# 只需要一阶逻辑的quantifiers
+# 不需要domain knowledge！
+```
+
 ## 当前实现的局限性
 
-虽然当前实现使用了unification而不是枚举，但**仍然缺少真正的抽象操作**。
+虽然当前实现使用了unification而不是枚举，但**仍然缺少quantifiers**。
 
 ### 问题1：仍然枚举阻碍物
 
@@ -245,86 +288,61 @@ State1 --[pick-up(?V2, b)]-> State4  # 移除e
 # 虽然用了变量，但仍然为每个阻碍物生成一个分支！
 ```
 
-**期望的抽象行为：**
+**期望的抽象行为（使用FOL）：**
 ```python
-# 应该是单个抽象操作：
-State1 --[clear-block(b)]-> State2
-# 内部表示: ∀?Z. on(?Z, b) → remove(?Z)
+# 应该是单个抽象transition：
+State1 --[∃?Z. pick-up(?Z, b)]-> State2
+# 内部表示: "存在某个在b上的block被移除"
 # 不具体化?Z是c、d还是e
+# Domain-independent - 不需要知道domain是blocksworld
 ```
 
 **根本问题：** 当前实现虽然不枚举objects，但仍然为每个可能的unification生成一个状态转换。
 
-### 问题2：缺少Existential Quantification
+### 问题2：缺少Quantified Predicates
 
 **当前实现：**
 - 只有变量和约束: `on(?X, ?Y) where ?X != ?Y`
 - 无法表示: "存在某个?Z满足on(?Z, b)"而不具体化?Z
+- State仍然是具体predicates的集合
 
-**需要支持：**
+**需要支持（一阶谓词逻辑）：**
 ```python
-# Existential quantification
-AbstractState({
-    on(?X, ?Y),
-    exists(?Z): on(?Z, ?Y)  # ?Y上有某个block，但不关心具体是哪个
-})
+# 使用FOL quantifiers
+class AbstractState:
+    concrete: {on(?X, ?Y)}  # 我们关心的具体parts
+    quantified: {
+        ∃?Z. on(?Z, ?Y),  # ?Y上有某些blocks（不枚举）
+        ∀?W. clear(?W) → ontable(?W)  # 所有clear的都在table上
+    }
+    constraints: {?X != ?Y}
+
+# Domain-independent - 任何domain都可以用quantifiers表达
 ```
 
-### 问题3：缺少抽象宏操作（Macro Operators）
-
-**当前实现：** 只有PDDL定义的原子actions（pick-up, put-down等）
-
-**需要支持：**
-```python
-# 抽象宏操作
-MacroAction("clear-block", {
-    params: [?X],
-    expansion: "recursively remove all blocks on ?X",
-    abstract_effect: clear(?X),
-    # 不展开具体的pick-up序列
-})
-```
-
-### 问题4：参数类型支持不完整
+### 问题3：参数类型支持
 
 **当前支持：**
 - ✅ 变量参数: `?X, ?Y, ?Z`
 - ✅ 任意数量的参数
 
-**尚未完全测试/支持：**
+**尚未完全测试：**
 - ⚠️ 常量参数: `move(?X, table)` - table是常量
-- ⚠️ 数值参数: `cost(?X, 5)` - 5是整数
-- ⚠️ 字符串参数: `label(?X, "red")`
-- ⚠️ 负数参数: `temperature(?X, -10)`
+- ⚠️ 类型化参数: `?x - block` (PDDL typing)
+- ⚠️ 混合参数: `on(?X, table)` - 变量+常量
 
-**需要增强：**
+**需要确保与PDDL/AgentSpeak兼容：**
 ```python
+# PDDL参数类型：
+- 变量: ?x, ?y
+- 常量: table, block1
+- 类型化: ?x - block, ?y - location
+
 # Unification应该正确处理：
-unify(?X, "table") = {?X/"table"}
-unify(5, 5) = {}  # 常量匹配
-unify(5, 6) = None  # 常量不匹配
-```
-
-### 问题5：不支持分层规划
-
-**当前实现：** 单层flat planning - 所有actions在同一抽象层
-
-**真正的lifted planning应该支持：**
-```python
-# 高层抽象plan
-AbstractPlan([
-    achieve(on(a, b)),      # 高层目标
-    clear-tower(?X),        # 抽象操作
-    build-stack([a, b, c])  # 复合操作
-])
-
-# 低层具体plan (实例化时生成)
-ConcretePlan([
-    pick-up(d, b),
-    put-down(d, table),
-    pick-up(a, table),
-    put-on(a, b)
-])
+unify(?X, table) = {?X/table}  # 变量与常量
+unify(table, table) = {}  # 常量匹配
+unify(table, block1) = None  # 不同常量
+unify(?X - block, table - location) = None  # 类型不匹配
 ```
 
 ## 未完成的目标
@@ -335,49 +353,104 @@ ConcretePlan([
 3. ~~实现basic lifted planner~~ ✅
 4. ~~测试验证~~ ✅
 
-### Phase 2: 抽象操作支持 ⚠️ 待完成
+### Phase 2: 一阶谓词逻辑支持 ⚠️ 核心重构
 
-#### 2.1 Existential Quantification
-- [ ] 扩展AbstractState支持existential variables
-- [ ] 实现 `exists(?Z): P(?Z)` 语法
-- [ ] 更新unification处理existential variables
-- [ ] 测试: "exists ?Z where on(?Z, b)" 不具体化?Z
+**关键洞察：** 不需要domain-specific macros！使用一阶谓词逻辑的quantifiers实现domain-independent抽象。
 
-#### 2.2 Universal Actions
-- [ ] 支持 `∀?Z. Precond(?Z) → Effect(?Z)` 形式的actions
-- [ ] 单个abstract action应用到多个满足条件的objects
-- [ ] 不为每个object生成单独的transition
+#### 2.1 Quantified Predicates（基础）
+- [ ] 定义`Quantifier` enum: EXISTS (∃), FORALL (∀)
+- [ ] 实现`QuantifiedPredicate`类
+  ```python
+  QuantifiedPredicate(
+      quantifier=EXISTS,
+      variables=["?Z"],
+      formula=on(?Z, b),
+      constraints={?Z != b}
+  )
+  # 表示: ∃?Z. on(?Z, b) where ?Z != b
+  ```
+- [ ] 更新`AbstractState`支持quantified predicates
+  - `concrete: Set[PredicateAtom]` - 具体predicates
+  - `quantified: Set[QuantifiedPredicate]` - 量化predicates
+- [ ] 测试基础quantifier表示
 
-#### 2.3 抽象宏操作
-- [ ] 定义MacroAction数据结构
-- [ ] 实现常用宏: clear-block(?X), build-stack([?X, ?Y, ?Z])
-- [ ] 宏操作的abstract effects
-- [ ] 延迟展开（只在instantiation时展开）
+#### 2.2 Quantifier Detection（自动检测）
+- [ ] 实现`detect_quantification_opportunity()`
+  - 检测多个predicates可以合并为quantified form
+  - Domain-independent规则：
+    - 多个predicates只在某些变量上不同
+    - 可以抽象为 ∃?X. P(?X)
+- [ ] 实现`create_quantified_from_matches()`
+  - 从多个unification matches创建quantified predicate
+  - 例如：{on(c,b), on(d,b), on(e,b)} → ∃?Z. on(?Z, b)
+- [ ] 测试自动quantifier detection
 
-#### 2.4 参数类型完整支持
-- [ ] 测试常量参数: `on(?X, table)`
-- [ ] 测试数值参数: `cost(?X, 5)`
-- [ ] 测试字符串参数: `color(?X, "red")`
-- [ ] 测试负数参数: `temp(?X, -10)`
-- [ ] 更新unification处理所有类型
-- [ ] 更新constraint system支持type constraints
+#### 2.3 Non-Enumerating Exploration（核心）
+- [ ] 修改`_apply_abstract_action()`不枚举
+  - 当前：为每个unification生成一个transition ❌
+  - 目标：生成一个带quantifier的transition ✅
+- [ ] 实现`apply_with_quantifier()`
+  - 保持quantified形式，不具体化
+  - 传播quantifiers through action effects
+- [ ] 实现set-based constraints
+  - `?Z ∈ blocks_on(b)` 而不是枚举{c, d, e}
+- [ ] 测试：验证不为每个blocker生成transition
+  - 场景：b上有10个blocks
+  - 期望：1个abstract transition（不是10个）
 
-### Phase 3: 分层规划 📋 未开始
+#### 2.4 Quantifier Propagation
+- [ ] 实现quantifier propagation through effects
+  ```python
+  State: ∃?Z. on(?Z, b)
+  Action: pick-up(?X, ?Y) → -on(?X,?Y), +holding(?X)
+  Result: ∃?Z. holding(?Z) where ?Z was on b
+  ```
+- [ ] 处理nested quantifiers
+- [ ] Quantifier simplification rules
 
-#### 3.1 抽象层次定义
-- [ ] 定义多个抽象层次: L0 (primitive), L1 (macro), L2 (high-level)
-- [ ] 每层的actions和state representation
-- [ ] 层次间的refinement映射
+#### 2.5 参数类型完整支持（与PDDL/AgentSpeak一致）
+- [ ] 支持PDDL参数类型：
+  - 变量: `?x`, `?y`
+  - 常量: `table`, `block1`
+  - 类型化: `?x - block`, `?y - location`
+- [ ] 更新unification处理所有PDDL参数类型：
+  ```python
+  unify(?X, table)  # 变量与常量
+  unify(table, table)  # 常量与常量
+  unify(?X - block, ?Y - block)  # 类型化变量
+  ```
+- [ ] 确保与AgentSpeak语法兼容
+- [ ] 测试混合参数：`on(?X, table)`
 
-#### 3.2 Hierarchical Planning Algorithm
-- [ ] 高层规划: 使用abstract actions
-- [ ] Plan refinement: 逐层具体化
-- [ ] Backtracking: 高层失败时回退
+### Phase 3: Plan Instantiation 📋 待开始
 
-#### 3.3 Plan Instantiation
-- [ ] Abstract plan → Concrete plan mapping
-- [ ] 变量绑定传播（从高层到低层）
-- [ ] 处理多个可能的instantiations
+**关键：** Planning阶段保持quantified，只在最后instantiation时具体化。
+
+#### 3.1 Quantifier Elimination
+- [ ] 实现`eliminate_quantifiers()`
+  - 将quantified plan转换为concrete plan
+  - 这一步才枚举具体objects
+- [ ] 处理existential quantifiers (∃)
+  ```python
+  Abstract: ∃?Z. pick-up(?Z, b)
+  Concrete: [pick-up(c, b), pick-up(d, b), pick-up(e, b)]
+  # 为每个满足条件的object生成action
+  ```
+- [ ] 处理universal quantifiers (∀)
+  ```python
+  Abstract: ∀?Z. on(?Z, b) → clear(?Z)
+  Concrete: [ensure clear(c), ensure clear(d), ensure clear(e)]
+  ```
+
+#### 3.2 Variable Binding Propagation
+- [ ] 从abstract plan到concrete plan的变量绑定
+- [ ] 处理dependencies between quantified variables
+- [ ] 保持substitution consistency
+
+#### 3.3 Multiple Instantiations
+- [ ] 处理一个abstract plan可能有多个concrete instantiations
+- [ ] 选择策略：最短、最优等
+- [ ] 处理instantiation conflicts
 
 ### Phase 4: 集成和优化 📋 未开始
 
@@ -398,19 +471,53 @@ ConcretePlan([
 
 ## 实现优先级
 
-### 🔥 高优先级
-1. **Existential Quantification** - 避免枚举阻碍物
-2. **抽象宏操作** - clear-block等高频操作
-3. **完整参数类型支持** - 支持任意valid PDDL
+### 🔥 最高优先级：一阶谓词逻辑（FOL）基础
 
-### 📝 中优先级
-4. **Universal Actions** - 单个action应用到多个objects
-5. **Plan Instantiation** - abstract → concrete
-6. **Domain-Independent validation**
+**关键：** Domain-independent方法，基于数理逻辑而非domain hacks
 
-### 🔮 低优先级
-7. **分层规划** - 多层抽象（可能是future work）
-8. **高级优化** - constraint propagation等
+1. **Quantified Predicates** (Phase 2.1)
+   - 定义∃和∀
+   - 更新AbstractState支持quantified predicates
+   - 这是所有后续工作的基础
+
+2. **Non-Enumerating Exploration** (Phase 2.3)
+   - 修改`_apply_abstract_action()`不枚举
+   - 当多个predicates可unify时，生成一个quantified transition
+   - **核心目标：** State space O(1) for clearing operations
+
+3. **PDDL/AgentSpeak参数兼容性** (Phase 2.5)
+   - 支持常量、变量、类型化参数
+   - 与标准语法100%兼容
+
+### 📝 高优先级：Quantifier处理
+
+4. **Quantifier Detection** (Phase 2.2)
+   - 自动检测何时可以用quantifier替代枚举
+   - Domain-independent规则
+
+5. **Quantifier Propagation** (Phase 2.4)
+   - 保持quantified形式through action effects
+   - 不提前具体化
+
+### 🔮 中优先级：集成
+
+6. **Plan Instantiation** (Phase 3)
+   - Abstract (with quantifiers) → Concrete plan
+   - 只在最后一步才消除quantifiers
+
+7. **集成到Pipeline** (Phase 4.1)
+   - 更新backward_planner_generator
+   - 更新code generation
+
+8. **Domain-Independent Validation** (Phase 4.2)
+   - 移除所有domain-specific assumptions
+   - 从PDDL自动推导constraints
+
+### ❌ 已废弃的方向
+
+- ~~Macro operations~~ - Domain-specific，不通用
+- ~~Hierarchical planning~~ - 可能是future work，不是当前重点
+- ~~Domain-specific optimizations~~ - 违反domain-independent原则
 
 ## 性能优势
 
