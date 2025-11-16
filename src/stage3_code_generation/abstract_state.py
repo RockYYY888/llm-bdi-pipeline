@@ -199,30 +199,43 @@ class ConstraintSet:
 @dataclass(frozen=True)
 class AbstractState:
     """
-    Abstract state for lifted planning
+    Abstract state for lifted planning with quantified predicates
 
     Contains:
-    - predicates: Set of abstract predicates with variables
+    - predicates: Set of concrete abstract predicates with variables (e.g., on(?X, ?Y))
+    - quantified_predicates: Set of quantified predicates (e.g., ∃?Z. on(?Z, b))
     - constraints: Constraints on variables
     - depth: Depth in state graph (for search)
 
-    Example:
-        predicates = {on(?X, ?Y), clear(?Z)}
-        constraints = {?X != ?Y, ?Y != ?Z}
+    Example (with quantifiers):
+        predicates = {clear(b), handempty}
+        quantified_predicates = {∃?Z. on(?Z, b)}  # "There exists some block on b"
+        constraints = {}
+
+    This dual representation allows:
+    - Specific facts: clear(b), handempty
+    - Abstract patterns: ∃?Z. on(?Z, b) (represents multiple concrete on(?X, b) predicates)
     """
     predicates: FrozenSet[PredicateAtom]
     constraints: ConstraintSet
     depth: int = 0
+    quantified_predicates: FrozenSet = None  # FrozenSet[QuantifiedPredicate], late import to avoid circular
 
-    def __init__(self, predicates: Set[PredicateAtom], constraints: ConstraintSet = None, depth: int = 0):
+    def __init__(self, predicates: Set[PredicateAtom], constraints: ConstraintSet = None,
+                 depth: int = 0, quantified_predicates = None):
         if isinstance(predicates, set):
             predicates = frozenset(predicates)
         if constraints is None:
             constraints = ConstraintSet()
+        if quantified_predicates is None:
+            quantified_predicates = frozenset()
+        elif isinstance(quantified_predicates, set):
+            quantified_predicates = frozenset(quantified_predicates)
 
         object.__setattr__(self, 'predicates', predicates)
         object.__setattr__(self, 'constraints', constraints)
         object.__setattr__(self, 'depth', depth)
+        object.__setattr__(self, 'quantified_predicates', quantified_predicates)
 
     def apply_substitution(self, subst: Substitution) -> Optional['AbstractState']:
         """
@@ -286,20 +299,35 @@ class AbstractState:
         return ConstraintSet(constraints)
 
     def __str__(self):
-        pred_str = ", ".join(str(p) for p in sorted(self.predicates, key=str))
+        parts = []
+
+        # Concrete predicates
+        if self.predicates:
+            pred_str = ", ".join(str(p) for p in sorted(self.predicates, key=str))
+            parts.append(pred_str)
+
+        # Quantified predicates
+        if self.quantified_predicates:
+            qpred_str = ", ".join(str(qp) for qp in sorted(self.quantified_predicates, key=str))
+            parts.append(qpred_str)
+
+        result = "{" + ", ".join(parts) + "}"
+
         if self.constraints:
-            return f"{{{pred_str}}} where {self.constraints}"
-        else:
-            return f"{{{pred_str}}}"
+            result += f" where {self.constraints}"
+
+        return result
 
     def __hash__(self):
-        # Hash based on predicates and constraints
-        return hash((self.predicates, self.constraints))
+        # Hash based on predicates, quantified predicates, and constraints
+        return hash((self.predicates, self.quantified_predicates, self.constraints))
 
     def __eq__(self, other):
         if not isinstance(other, AbstractState):
             return False
-        return self.predicates == other.predicates and self.constraints == other.constraints
+        return (self.predicates == other.predicates and
+                self.quantified_predicates == other.quantified_predicates and
+                self.constraints == other.constraints)
 
 
 def test_abstract_state():

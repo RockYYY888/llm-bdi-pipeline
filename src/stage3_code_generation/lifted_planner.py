@@ -32,6 +32,9 @@ if _parent not in sys.path:
 from stage3_code_generation.state_space import PredicateAtom
 from stage3_code_generation.abstract_state import AbstractState, Constraint, ConstraintSet
 from stage3_code_generation.unification import Unifier, Substitution
+from stage3_code_generation.quantified_predicate import (
+    Quantifier, QuantifiedPredicate, detect_quantifiable_pattern
+)
 from utils.pddl_parser import PDDLDomain, PDDLAction
 from stage3_code_generation.pddl_condition_parser import PDDLConditionParser, PDDLEffectParser
 
@@ -340,10 +343,12 @@ class LiftedPlanner:
 
         # Unify positive preconditions
         # Strategy: try to find consistent substitution for all preconditions
+        # NOW SUPPORTS QUANTIFIED PREDICATES for matching
         unified_subst, unsatisfied_preconditions = self._find_consistent_unification(
             positive_preconditions,
             state.predicates,
-            state.constraints
+            state.constraints,
+            quantified_preds=state.quantified_predicates
         )
 
         if unified_subst is None:
@@ -406,7 +411,13 @@ class LiftedPlanner:
             if not self._validate_state_consistency(new_predicates):
                 continue
 
+            # Create new state
             new_state = AbstractState(new_predicates, new_constraints)
+
+            # CRITICAL: Apply quantification to reduce state space
+            # This is where we convert {on(?V1, b), on(?V2, b), ...} → {∃?Z. on(?Z, b)}
+            new_state = self._detect_and_quantify_state(new_state, min_instances=2)
+
             results.append((new_state, unified_subst))
 
         return results
@@ -489,15 +500,21 @@ class LiftedPlanner:
     def _find_consistent_unification(self,
                                      preconditions: List[PredicateAtom],
                                      state_preds: FrozenSet[PredicateAtom],
-                                     constraints: ConstraintSet) -> Tuple[Optional[Substitution], List[PredicateAtom]]:
+                                     constraints: ConstraintSet,
+                                     quantified_preds: FrozenSet = None) -> Tuple[Optional[Substitution], List[PredicateAtom]]:
         """
         Find a substitution that unifies all preconditions with state predicates
         while respecting constraints
+
+        NOW SUPPORTS QUANTIFIED PREDICATES:
+        - If a precondition can't match concrete predicates, try quantified predicates
+        - Quantified predicates can be instantiated to match action preconditions
 
         Args:
             preconditions: Action preconditions to match
             state_preds: State predicates
             constraints: State constraints
+            quantified_preds: Quantified predicates in state (optional)
 
         Returns:
             Tuple of (unified_substitution, unsatisfied_preconditions)
@@ -522,6 +539,7 @@ class LiftedPlanner:
             # Find a state predicate that unifies with this precondition
             found = False
 
+            # Try concrete predicates first
             for state_pred in state_preds:
                 # Try to unify
                 unified = Unifier.unify_predicates(precond, state_pred, current_subst)
@@ -530,6 +548,16 @@ class LiftedPlanner:
                     # Check if unification respects constraints
                     if constraints.is_consistent(unified):
                         current_subst = unified
+                        found = True
+                        break
+
+            # If not found in concrete predicates, try quantified predicates
+            if not found and quantified_preds:
+                for qpred in quantified_preds:
+                    # Check if quantified predicate can match this precondition
+                    if qpred.matches_concrete_predicate(precond, current_subst.bindings):
+                        # Instantiate quantified predicate for this match
+                        # This effectively "uses" the quantified predicate
                         found = True
                         break
 
@@ -636,6 +664,11 @@ class LiftedPlanner:
                         subgoal_constraints,
                         depth=current_state.depth + 1
                     )
+
+                    # CRITICAL: Apply quantification to subgoal states
+                    # This dramatically reduces state explosion from backward chaining
+                    # Example: {on(?V1, b), on(?V2, b), ...} → {∃?Z. on(?Z, b)}
+                    subgoal_state = self._detect_and_quantify_state(subgoal_state, min_instances=2)
 
                     subgoal_states.append(subgoal_state)
 
@@ -750,6 +783,69 @@ class LiftedPlanner:
         #   New: {clear(b)} → backward chaining will find preconditions
         return set(goal_predicates)
 
+    def _detect_and_quantify_state(self, state: AbstractState,
+                                   min_instances: int = 2) -> AbstractState:
+        """
+        Detect quantifiable patterns in state predicates and convert to quantified form
+
+        This is the KEY method for reducing state space via quantification.
+
+        Algorithm:
+        1. Group predicates by structure (same predicate name, some varying arguments)
+        2. For groups with >= min_instances, check if quantification is beneficial
+        3. Convert concrete predicates to quantified predicates
+        4. Return new state with both concrete and quantified predicates
+
+        Example:
+            Input state: {on(?V1, b), on(?V2, b), on(?V3, b), clear(b), handempty}
+            Output state: {∃?Z. on(?Z, b), clear(b), handempty}
+
+        This reduces state explosion dramatically: instead of 3 separate on() predicates,
+        we have 1 quantified predicate representing "at least 3 blocks on b".
+
+        Args:
+            state: Abstract state with concrete predicates
+            min_instances: Minimum instances to trigger quantification
+
+        Returns:
+            New state with quantified predicates
+        """
+        if not state.predicates:
+            return state
+
+        # Detect quantifiable patterns
+        quantified_preds = detect_quantifiable_pattern(
+            set(state.predicates),
+            min_instances=min_instances
+        )
+
+        if not quantified_preds:
+            # No quantification opportunities
+            return state
+
+        # Remove concrete predicates that are now covered by quantified predicates
+        remaining_concrete = set(state.predicates)
+
+        for qpred in quantified_preds:
+            # Find all concrete predicates matched by this quantified predicate
+            matched = set()
+            for concrete_pred in remaining_concrete:
+                if qpred.matches_concrete_predicate(concrete_pred):
+                    matched.add(concrete_pred)
+
+            # Remove matched predicates (they're now represented by quantified predicate)
+            remaining_concrete -= matched
+
+        # Create new state with quantified predicates
+        new_state = AbstractState(
+            predicates=remaining_concrete,
+            constraints=state.constraints,
+            depth=state.depth,
+            quantified_predicates=set(quantified_preds) | set(state.quantified_predicates or [])
+        )
+
+        return new_state
+
     def _state_key(self, state: AbstractState) -> Tuple:
         """
         Generate hashable key for abstract state
@@ -762,8 +858,9 @@ class LiftedPlanner:
         """
         # Sort predicates and constraints for consistent hashing
         pred_tuple = tuple(sorted(state.predicates, key=str))
+        qpred_tuple = tuple(sorted(state.quantified_predicates or [], key=str))
         constraint_tuple = tuple(sorted(state.constraints.constraints, key=str))
-        return (pred_tuple, constraint_tuple)
+        return (pred_tuple, qpred_tuple, constraint_tuple)
 
     def _print_comparison(self, abstract_state_count: int):
         """
