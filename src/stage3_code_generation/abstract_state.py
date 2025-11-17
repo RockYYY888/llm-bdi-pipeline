@@ -267,22 +267,27 @@ class AbstractState:
         """
         Extract implicit constraints from predicates
 
-        For example:
-        - on(?X, ?Y) implies ?X != ?Y (block can't be on itself)
-        - Same variable in different positions may imply equality
+        DOMAIN-INDEPENDENT: For any binary predicate P(?X, ?Y) where ?X and ?Y
+        are different variables, we infer ?X != ?Y (reflexivity constraint).
+
+        This is a reasonable general assumption: binary relations typically
+        relate different objects (e.g., on(?X, ?Y), at(?X, ?Y), connected(?X, ?Y)).
 
         Returns:
             ConstraintSet with implicit constraints
         """
         constraints = set(self.constraints.constraints)
 
-        # Domain-specific constraints for blocksworld
-        # TODO: Make this domain-independent by analyzing action definitions
+        # CRITICAL FIX #3: Domain-independent constraint extraction
+        # Apply to ALL binary predicates, not just "on"
         for pred in self.predicates:
-            if pred.name == "on" and len(pred.args) == 2:
-                # on(?X, ?Y) implies ?X != ?Y
-                if pred.args[0].startswith('?') and pred.args[1].startswith('?'):
-                    constraints.add(Constraint(pred.args[0], pred.args[1], Constraint.INEQUALITY))
+            # For any binary predicate P(?X, ?Y)
+            # If both arguments are different variables, infer ?X != ?Y
+            if len(pred.args) == 2:
+                arg0, arg1 = pred.args
+                # Both are variables and they're different variable names
+                if (arg0.startswith('?') and arg1.startswith('?') and arg0 != arg1):
+                    constraints.add(Constraint(arg0, arg1, Constraint.INEQUALITY))
 
         return ConstraintSet(constraints)
 

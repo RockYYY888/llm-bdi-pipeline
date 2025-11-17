@@ -90,14 +90,20 @@ class LiftedPlanner:
         # Variable generator for introducing new variables
         self._var_counter = 0
 
+        # CRITICAL FIX #2: Extract mutex predicates for state validation
+        self._mutex_predicates = self._extract_mutex_predicates()
+
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
-                         max_states: int = 10000) -> Dict:
+                         max_states: int = 10000,
+                         max_depth: Optional[int] = None) -> Dict:
         """
         Explore abstract state space from goal
 
         Args:
             goal_predicates: Abstract goal predicates (with variables)
             max_states: Maximum abstract states to explore
+            max_depth: Maximum depth to explore (None = unlimited)
+                      Recommended: 3-5 (depth 3+ often contains 90%+ of states)
 
         Returns:
             Dictionary with:
@@ -105,10 +111,16 @@ class LiftedPlanner:
                 - 'transitions': List of (from_state, to_state, action, subst)
                 - 'goal_state': Initial goal state
         """
+        # HIGH PRIORITY FIX #6: Reset variable counter per exploration
+        # Prevents indefinite growth of variable names across multiple explorations
+        self._var_counter = 0
+
         print(f"[Lifted Planner] Starting ABSTRACT state space exploration")
         print(f"[Lifted Planner] Goal: {[str(p) for p in goal_predicates]}")
         print(f"[Lifted Planner] Abstract actions: {len(self._abstract_actions)}")
         print(f"[Lifted Planner] Max abstract states: {max_states:,}")
+        if max_depth is not None:
+            print(f"[Lifted Planner] Max depth: {max_depth}")
 
         # Infer complete goal state
         complete_goal_preds = self._infer_complete_goal(goal_predicates)
@@ -132,6 +144,10 @@ class LiftedPlanner:
         while queue and states_explored < max_states:
             current_state = queue.popleft()
             states_explored += 1
+
+            # MEDIUM FIX #9: Skip states beyond max depth
+            if max_depth is not None and current_state.depth >= max_depth:
+                continue
 
             if states_explored % 100 == 0:
                 print(f"  Explored {states_explored} abstract states, "
@@ -593,15 +609,50 @@ class LiftedPlanner:
             if achieving_subst is not None:
                 subgoal_predicates = set()
 
-                # Add the action's preconditions (after applying substitution)
+                # Add the action's positive preconditions (after applying substitution)
                 for action_precond in action_renamed.preconditions:
                     if not action_precond.negated:
                         subgoal_pred = achieving_subst.apply_to_predicate(action_precond)
                         subgoal_predicates.add(subgoal_pred)
 
-                # Keep relevant predicates from current state for context
+                # HIGH PRIORITY FIX #5: Collect negative preconditions
+                # Subgoal state must NOT contain predicates matching negative preconditions
+                negative_preconditions = []
+                for action_precond in action_renamed.preconditions:
+                    if action_precond.negated:
+                        # Get positive form and apply substitution
+                        pos_form = action_precond.get_positive()
+                        neg_pred = achieving_subst.apply_to_predicate(pos_form)
+                        negative_preconditions.append(neg_pred)
+
+                # CRITICAL FIX #1: Only keep ESSENTIAL context from current state
+                # Strategy: Only copy predicates that are:
+                # 1. Not deleted by this action
+                # 2. Not already covered by action preconditions (avoid duplication)
+                # 3. Global predicates (0-arity) that provide essential context
+                # 4. HIGH FIX #5: Don't violate negative preconditions
+
+                # Collect predicate names already in subgoal (from action preconditions)
+                subgoal_pred_names = {p.name for p in subgoal_predicates}
+
                 for state_pred in current_state.predicates:
-                    # Don't include predicates that would be deleted by the action
+                    # Skip if this predicate type is already in subgoal
+                    # (action preconditions already added it)
+                    if state_pred.name in subgoal_pred_names and len(state_pred.args) > 0:
+                        continue
+
+                    # HIGH FIX #5: Check if this predicate violates negative preconditions
+                    violates_negative = False
+                    for neg_pred in negative_preconditions:
+                        # Check if state_pred matches the negative precondition
+                        if Unifier.unify_predicates(state_pred, neg_pred) is not None:
+                            violates_negative = True
+                            break
+
+                    if violates_negative:
+                        continue
+
+                    # Check if will be deleted by the action
                     will_be_deleted = False
                     for effect_branch in action_renamed.effects:
                         for effect_atom in effect_branch:
@@ -613,7 +664,12 @@ class LiftedPlanner:
                         if will_be_deleted:
                             break
 
-                    if not will_be_deleted:
+                    if will_be_deleted:
+                        continue
+
+                    # Only keep if it's a global 0-arity predicate (like handempty)
+                    # Other predicates should be discovered through backward chaining
+                    if len(state_pred.args) == 0:
                         subgoal_predicates.add(state_pred)
 
                 # Create subgoal state with same constraints
@@ -678,34 +734,99 @@ class LiftedPlanner:
                         return unified
         return None
 
+    def _extract_mutex_predicates(self) -> Set[Tuple[str, str]]:
+        """
+        Extract mutex predicates from PDDL domain (CRITICAL FIX #2)
+
+        Mutex predicates are predicates that cannot coexist in a valid state.
+        We infer these from action effects:
+        - If an action adds P and deletes Q, then P and Q are mutex
+
+        Returns:
+            Set of (pred_name1, pred_name2) tuples representing mutex pairs
+        """
+        mutex_pairs = set()
+
+        for action in self._abstract_actions:
+            for effect_branch in action.effects:
+                adds = set()
+                deletes = set()
+
+                for effect_atom in effect_branch:
+                    if effect_atom.is_add:
+                        adds.add(effect_atom.predicate.name)
+                    else:
+                        deletes.add(effect_atom.predicate.name)
+
+                # If action adds P and deletes Q simultaneously, they're likely mutex
+                for add_pred in adds:
+                    for del_pred in deletes:
+                        if add_pred != del_pred:
+                            mutex_pairs.add((min(add_pred, del_pred), max(add_pred, del_pred)))
+
+        return mutex_pairs
+
     def _validate_state_consistency(self, predicates: Set[PredicateAtom]) -> bool:
         """
-        Validate abstract state consistency
+        Validate abstract state consistency (CRITICAL FIX #2)
 
-        DOMAIN-INDEPENDENT: Relies on PDDL semantics and unification
-        to ensure consistency, not on domain-specific predicate names.
+        DOMAIN-INDEPENDENT: Uses mutex predicates extracted from PDDL domain
 
-        In true domain-independent planning, consistency is ensured by:
-        1. Unification correctly matching predicates
-        2. Constraint satisfaction (inequality/equality constraints)
-        3. Action preconditions/effects defining valid transitions
+        Checks:
+        1. No mutex predicates coexist (e.g., handempty and holding)
+        2. No duplicate predicates with conflicting arguments
+        3. Basic logical consistency
 
         Args:
             predicates: Set of predicates
 
         Returns:
-            True if consistent (always True - consistency enforced elsewhere)
+            True if consistent, False otherwise
         """
-        # REMOVED: Domain-specific checks for handempty/holding
-        # Those were blocksworld-specific and violated domain-independence
-        #
-        # Consistency is now ensured by:
-        # - Unification algorithm (prevents invalid variable bindings)
-        # - Constraint propagation (maintains inequality/equality constraints)
-        # - PDDL action semantics (preconditions/effects define valid states)
-        #
-        # If we need domain-specific consistency checks, they should be
-        # derived from action mutex or PDDL invariants, not hardcoded
+        # Check 1: Mutex predicates (extracted from domain)
+        pred_names = {p.name for p in predicates}
+        for pred1, pred2 in self._mutex_predicates:
+            if pred1 in pred_names and pred2 in pred_names:
+                # Both mutex predicates present - invalid state
+                return False
+
+        # Check 2: No duplicate predicates with same name but different args
+        # (e.g., holding(a) and holding(b) - can't hold two objects)
+        pred_by_name = {}
+        for pred in predicates:
+            if pred.name not in pred_by_name:
+                pred_by_name[pred.name] = []
+            pred_by_name[pred.name].append(pred)
+
+        for pred_name, pred_list in pred_by_name.items():
+            # For predicates with arguments, check for conflicts
+            if len(pred_list) > 1:
+                # Check if they have same arity - if so, might be mutex
+                arities = {len(p.args) for p in pred_list}
+                if len(arities) == 1 and list(arities)[0] > 0:
+                    # Multiple instances of same predicate type with arguments
+                    # This is usually OK for predicates like on(?X, ?Y)
+                    # But NOT OK for predicates like holding(?X) - single-valued
+                    # We'll use a heuristic: 1-argument predicates are usually single-valued
+                    if list(arities)[0] == 1:
+                        # Single-argument predicate with multiple instances
+                        # Check if arguments are different concrete values (not variables)
+                        concrete_args = []
+                        for p in pred_list:
+                            if not p.args[0].startswith('?'):
+                                concrete_args.append(p.args[0])
+                        # If we have multiple concrete different values, it's likely invalid
+                        if len(set(concrete_args)) > 1:
+                            return False
+
+        # Check 3: Self-loop check for binary relations
+        for pred in predicates:
+            if len(pred.args) == 2:
+                arg0, arg1 = pred.args
+                # If both args are concrete (not variables) and equal, it's likely invalid
+                if not arg0.startswith('?') and not arg1.startswith('?') and arg0 == arg1:
+                    # Self-loop like on(a, a) - usually invalid
+                    return False
 
         return True
 
@@ -737,9 +858,69 @@ class LiftedPlanner:
         #   New: {clear(b)} → backward chaining will find preconditions
         return set(goal_predicates)
 
+    def _canonicalize_state(self, state: AbstractState) -> AbstractState:
+        """
+        Canonicalize state by renaming variables to standard form (HIGH FIX #7)
+
+        Two states with same structure but different variable names will
+        have the same canonical form.
+
+        CRITICAL: Variables must be renamed based on FIRST APPEARANCE order
+        in predicates (sorted lexicographically), not alphabetically by name.
+
+        Example:
+            State A: {on(?V0, ?V1), clear(?V0)} → {on(?C0, ?C1), clear(?C0)}
+            State B: {on(?V2, ?V3), clear(?V2)} → {on(?C0, ?C1), clear(?C0)}
+            Both have same canonical form → detected as isomorphic
+
+        Args:
+            state: Abstract state
+
+        Returns:
+            Canonicalized state with renamed variables
+        """
+        # Sort predicates for deterministic traversal
+        sorted_preds = sorted(state.predicates, key=str)
+
+        # Traverse predicates in order and assign canonical names based on first appearance
+        rename_map = {}
+        var_counter = 0
+
+        for pred in sorted_preds:
+            for arg in pred.args:
+                if arg.startswith('?') and arg not in rename_map:
+                    rename_map[arg] = f"?C{var_counter}"
+                    var_counter += 1
+
+        # Apply renaming to predicates
+        canonical_preds = set()
+        for pred in state.predicates:
+            new_args = tuple(rename_map.get(arg, arg) for arg in pred.args)
+            canonical_preds.add(PredicateAtom(pred.name, new_args, pred.negated))
+
+        # Apply renaming to constraints (also sort them for consistency)
+        canonical_constraints = set()
+        for constraint in sorted(state.constraints.constraints, key=str):
+            var1 = constraint.var1
+            var2 = constraint.var2
+
+            # Assign canonical names if not already assigned
+            if var1.startswith('?') and var1 not in rename_map:
+                rename_map[var1] = f"?C{var_counter}"
+                var_counter += 1
+            if var2.startswith('?') and var2 not in rename_map:
+                rename_map[var2] = f"?C{var_counter}"
+                var_counter += 1
+
+            new_var1 = rename_map.get(var1, var1)
+            new_var2 = rename_map.get(var2, var2)
+            canonical_constraints.add(Constraint(new_var1, new_var2, constraint.constraint_type))
+
+        return AbstractState(canonical_preds, ConstraintSet(canonical_constraints), state.depth)
+
     def _state_key(self, state: AbstractState) -> Tuple:
         """
-        Generate hashable key for abstract state
+        Generate hashable key for abstract state (HIGH FIX #7: with isomorphism detection)
 
         Args:
             state: Abstract state
@@ -747,9 +928,12 @@ class LiftedPlanner:
         Returns:
             Hashable tuple representing state
         """
+        # HIGH FIX #7: Canonicalize state to detect isomorphic states
+        canonical_state = self._canonicalize_state(state)
+
         # Sort predicates and constraints for consistent hashing
-        pred_tuple = tuple(sorted(state.predicates, key=str))
-        constraint_tuple = tuple(sorted(state.constraints.constraints, key=str))
+        pred_tuple = tuple(sorted(canonical_state.predicates, key=str))
+        constraint_tuple = tuple(sorted(canonical_state.constraints.constraints, key=str))
         return (pred_tuple, constraint_tuple)
 
     def _print_comparison(self, abstract_state_count: int):
