@@ -185,12 +185,60 @@ class LiftedPlanner:
         # Compare with grounded state space estimate
         self._print_comparison(len(visited))
 
-        return {
-            'states': set(visited.values()),
-            'transitions': transitions,
-            'goal_state': goal_state,
-            'truncated': states_explored >= max_states
-        }
+        # Convert to StateGraph format for compatibility with AgentSpeakCodeGenerator
+        from stage3_code_generation.state_space import WorldState, StateGraph, StateTransition
+
+        # Convert AbstractStates to WorldStates
+        abstract_to_world = {}
+        for abstract_state in visited.values():
+            world_state = WorldState(abstract_state.predicates, depth=abstract_state.depth)
+            abstract_to_world[abstract_state] = world_state
+
+        # Create StateGraph
+        goal_world_state = abstract_to_world[goal_state]
+        state_graph = StateGraph(goal_world_state)
+        state_graph.truncated = states_explored >= max_states
+
+        # Add transitions
+        for from_state, to_state, action, action_subst in transitions:
+            from_world = abstract_to_world[from_state]
+            to_world = abstract_to_world[to_state]
+
+            # Extract action arguments from substitution
+            # action_subst maps parameter variables to values
+            action_args = tuple(action_subst.apply(var) for var in action.parameters)
+
+            # Parse effects to extract belief updates
+            try:
+                # Create bindings dict for effect parsing
+                bindings = {param: action_subst.apply(param) for param in action.parameters}
+                effect_branches = self.effect_parser.parse(action.effects, bindings)
+                belief_updates = []
+                if effect_branches:
+                    for effect_atom in effect_branches[0]:  # Use first branch
+                        belief_updates.append(effect_atom.to_agentspeak())
+            except:
+                belief_updates = []
+
+            # Parse preconditions
+            try:
+                bindings = {param: action_subst.apply(param) for param in action.parameters}
+                preconditions = self.condition_parser.parse(action.preconditions, bindings)
+            except:
+                preconditions = []
+
+            # Create transition
+            transition = StateTransition(
+                from_state=from_world,
+                to_state=to_world,
+                action=action,
+                action_args=action_args,
+                belief_updates=tuple(belief_updates),
+                preconditions=tuple(preconditions)
+            )
+            state_graph.add_transition(transition)
+
+        return state_graph
 
     def _parse_abstract_actions(self) -> List[AbstractAction]:
         """

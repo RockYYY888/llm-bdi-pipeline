@@ -42,12 +42,12 @@ def test_inequality_constraints():
     print("\n2. Testing exploration with goal on(?X, ?Y)")
     print("   This should NOT generate states like on(?X, ?X) (self-loop)")
 
-    result = planner.explore_from_goal(goal_preds, max_states=1000)
+    state_graph = planner.explore_from_goal(goal_preds, max_states=1000)
 
     print(f"\n3. Checking generated states for constraint violations:")
     violations = []
 
-    for state in result['states']:
+    for state in state_graph.states:
         for pred in state.predicates:
             # Check for on(?X, ?X) where same variable appears twice
             if pred.name == "on" and len(pred.args) == 2:
@@ -65,7 +65,7 @@ def test_inequality_constraints():
             print(f"      {pred} in state {state}")
         return False
     else:
-        print(f"   ✅ NO VIOLATIONS FOUND in {len(result['states'])} states")
+        print(f"   ✅ NO VIOLATIONS FOUND in {len(state_graph.states)} states")
         print(f"   All states respect inequality constraints from PDDL")
         return True
 
