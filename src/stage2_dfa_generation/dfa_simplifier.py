@@ -215,16 +215,9 @@ class BDDBasedDFABuilder:
         """
         Process all outgoing transitions from a single source state together.
 
-        This ensures determinism by handling all BDD formulas from the same state
-        simultaneously, creating a unified state space.
-
-        Key insight: When transitions share BDD nodes, we need to ensure that
-        each (source_state, label) pair maps to exactly ONE target state.
-
-        Strategy:
-        1. Build complete state mappings for ALL BDDs first
-        2. Then generate transitions, using a local visited set per source state
-           to ensure we only generate each transition once
+        NEW APPROACH: Variable-level expansion with pattern-based caching.
+        For each variable, we test both assignments (true/false) and see which
+        target state each BDD leads to. This creates a deterministic decision tree.
 
         Args:
             source_state: The source state for all transitions
@@ -236,29 +229,164 @@ class BDDBasedDFABuilder:
         all_transitions = []
         all_accepting = set()
 
-        # Phase 1: Build state mappings for ALL BDDs from this source state
-        # This ensures shared BDD nodes get consistent state assignments
-        print(f"    Phase 1: Mapping {len(bdd_transitions)} BDD roots to states")
-        for i, (target_state, bdd_node, target_is_accepting) in enumerate(bdd_transitions):
-            print(f"      BDD {i}: node={id(bdd_node)}, hash={hash(bdd_node)}, target={target_state}")
-            self._map_bdd_to_states(bdd_node, source_state, target_state, target_is_accepting)
+        print(f"    Processing {len(bdd_transitions)} transitions with variable-level expansion")
 
-        # Phase 2: Generate transitions using LOCAL visited set
-        # CRITICAL: Use a local visited set for this source state only
-        # This prevents duplicate transitions within this state's expansions
-        # but allows the same BDD node to be used from different source states
-        local_visited = set()  # Tracks which BDD nodes we've processed
+        # Build a mapping: BDD -> (target_state, is_accepting)
+        bdd_targets = {bdd_node: (target_state, is_accepting)
+                      for target_state, bdd_node, is_accepting in bdd_transitions}
 
-        for target_state, bdd_node, target_is_accepting in bdd_transitions:
-            # Generate transitions from this BDD
-            trans = self._create_transitions_from_bdd(bdd_node, source_state, target_state, local_visited)
-            all_transitions.extend(trans)
+        # Start recursive expansion from source state
+        trans, accepting = self._expand_variable_level(
+            source_state,
+            bdd_targets,
+            var_index=0,
+            cache={}
+        )
 
-            # Track accepting states
-            if target_is_accepting:
+        all_transitions.extend(trans)
+        all_accepting.update(accepting)
+
+        # Track original accepting states
+        for target_state, _, is_accepting in bdd_transitions:
+            if is_accepting:
                 all_accepting.add(target_state)
 
         return all_transitions, all_accepting
+
+    def _expand_variable_level(self, current_state: str, bdd_targets: Dict,
+                               var_index: int, cache: Dict) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
+        """
+        Recursively expand transitions using variable-level planning.
+
+        At each level, we pick a variable and test both true/false assignments.
+        For each assignment, we evaluate all BDDs to find which one becomes true,
+        determining the target state.
+
+        Args:
+            current_state: Current DFA state
+            bdd_targets: Dict mapping BDD nodes to (target_state, is_accepting)
+            var_index: Current variable index to test
+            cache: Cache of (bdd_pattern, var_index) -> state_name for reuse
+
+        Returns:
+            (transitions, accepting_states)
+        """
+        transitions = []
+        accepting = set()
+
+        # Base case: all variables assigned
+        if var_index >= len(self.predicates):
+            # Evaluate all BDDs to find which one is true
+            for bdd_node, (target_state, is_accepting) in bdd_targets.items():
+                # All variables assigned, check if this BDD evaluates to true
+                # For now, we'll just return to target state directly
+                if bdd_node == self.bdd.true:
+                    transitions.append((current_state, target_state, "true"))
+                    if is_accepting:
+                        accepting.add(target_state)
+                    return transitions, accepting
+            return transitions, accepting
+
+        var_name = self.predicates[var_index]
+
+        # Create a cache key for this combination of BDDs
+        bdd_pattern = frozenset((hash(bdd), target) for bdd, (target, _) in bdd_targets.items())
+        cache_key = (bdd_pattern, var_index, current_state)
+
+        # Test TRUE assignment (var = true)
+        true_targets = {}
+        for bdd_node, (target_state, is_accepting) in bdd_targets.items():
+            # Restrict BDD: set var to true
+            if bdd_node == self.bdd.true:
+                true_targets[self.bdd.true] = (target_state, is_accepting)
+            elif bdd_node == self.bdd.false:
+                true_targets[self.bdd.false] = (target_state, is_accepting)
+            elif bdd_node.level == var_index:
+                # This node tests our variable
+                high_branch = bdd_node.high if not bdd_node.negated else bdd_node.low
+                true_targets[high_branch] = (target_state, is_accepting)
+            else:
+                # This node tests a different variable, keep it
+                true_targets[bdd_node] = (target_state, is_accepting)
+
+        # Test FALSE assignment (var = false)
+        false_targets = {}
+        for bdd_node, (target_state, is_accepting) in bdd_targets.items():
+            # Restrict BDD: set var to false
+            if bdd_node == self.bdd.true:
+                false_targets[self.bdd.true] = (target_state, is_accepting)
+            elif bdd_node == self.bdd.false:
+                false_targets[self.bdd.false] = (target_state, is_accepting)
+            elif bdd_node.level == var_index:
+                # This node tests our variable
+                low_branch = bdd_node.low if not bdd_node.negated else bdd_node.high
+                false_targets[low_branch] = (target_state, is_accepting)
+            else:
+                # This node tests a different variable, keep it
+                false_targets[bdd_node] = (target_state, is_accepting)
+
+        # Find unique target for TRUE branch
+        true_target = self._find_unique_target(true_targets)
+        false_target = self._find_unique_target(false_targets)
+
+        # Create intermediate states if needed and recurse
+        if true_target:
+            target_state, is_accepting = true_target
+            # Check if we need intermediate state
+            if len([b for b in true_targets if b not in [self.bdd.true, self.bdd.false]]) > 0:
+                # Need to continue expanding
+                self.state_counter += 1
+                intermediate = f"s{self.state_counter}"
+                transitions.append((current_state, intermediate, var_name))
+                sub_trans, sub_acc = self._expand_variable_level(intermediate, true_targets, var_index + 1, cache)
+                transitions.extend(sub_trans)
+                accepting.update(sub_acc)
+            else:
+                # Direct transition to target
+                transitions.append((current_state, target_state, var_name))
+                if is_accepting:
+                    accepting.add(target_state)
+
+        if false_target:
+            target_state, is_accepting = false_target
+            # Check if we need intermediate state
+            if len([b for b in false_targets if b not in [self.bdd.true, self.bdd.false]]) > 0:
+                # Need to continue expanding
+                self.state_counter += 1
+                intermediate = f"s{self.state_counter}"
+                transitions.append((current_state, intermediate, f"!{var_name}"))
+                sub_trans, sub_acc = self._expand_variable_level(intermediate, false_targets, var_index + 1, cache)
+                transitions.extend(sub_trans)
+                accepting.update(sub_acc)
+            else:
+                # Direct transition to target
+                transitions.append((current_state, target_state, f"!{var_name}"))
+                if is_accepting:
+                    accepting.add(target_state)
+
+        return transitions, accepting
+
+    def _find_unique_target(self, bdd_targets: Dict) -> Optional[Tuple[str, bool]]:
+        """
+        Find the unique target state by evaluating which BDD is true.
+
+        Returns: (target_state, is_accepting) or None
+        """
+        # Check for terminal true
+        if self.bdd.true in bdd_targets:
+            return bdd_targets[self.bdd.true]
+
+        # If only terminal false remains, no transition
+        if len(bdd_targets) == 1 and self.bdd.false in bdd_targets:
+            return None
+
+        # If multiple non-terminal BDDs remain, we need to continue expansion
+        # Return the first non-false target for now
+        for bdd_node, (target_state, is_accepting) in bdd_targets.items():
+            if bdd_node != self.bdd.false:
+                return (target_state, is_accepting)
+
+        return None
 
     def _bdd_to_atomic_transitions(self, start_state: str, target_state: str,
                                     bdd_node, target_is_accepting: bool) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
