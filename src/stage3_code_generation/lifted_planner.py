@@ -94,16 +94,13 @@ class LiftedPlanner:
         self._mutex_predicates = self._extract_mutex_predicates()
 
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
-                         max_states: int = 10000,
-                         max_depth: Optional[int] = None) -> Dict:
+                         max_states: int = 10000) -> Dict:
         """
         Explore abstract state space from goal
 
         Args:
             goal_predicates: Abstract goal predicates (with variables)
             max_states: Maximum abstract states to explore
-            max_depth: Maximum depth to explore (None = unlimited)
-                      Recommended: 3-5 (depth 3+ often contains 90%+ of states)
 
         Returns:
             Dictionary with:
@@ -119,8 +116,6 @@ class LiftedPlanner:
         print(f"[Lifted Planner] Goal: {[str(p) for p in goal_predicates]}")
         print(f"[Lifted Planner] Abstract actions: {len(self._abstract_actions)}")
         print(f"[Lifted Planner] Max abstract states: {max_states:,}")
-        if max_depth is not None:
-            print(f"[Lifted Planner] Max depth: {max_depth}")
 
         # Infer complete goal state
         complete_goal_preds = self._infer_complete_goal(goal_predicates)
@@ -144,10 +139,6 @@ class LiftedPlanner:
         while queue and states_explored < max_states:
             current_state = queue.popleft()
             states_explored += 1
-
-            # MEDIUM FIX #9: Skip states beyond max depth
-            if max_depth is not None and current_state.depth >= max_depth:
-                continue
 
             if states_explored % 100 == 0:
                 print(f"  Explored {states_explored} abstract states, "
@@ -777,10 +768,10 @@ class LiftedPlanner:
 
         DOMAIN-INDEPENDENT: Uses mutex predicates extracted from PDDL domain
 
-        Checks:
-        1. No mutex predicates coexist (e.g., handempty and holding)
-        2. No duplicate predicates with conflicting arguments
-        3. Basic logical consistency
+        This check is guaranteed by PDDL semantics: if two predicates are mutex
+        (one is added and the other is deleted by the same action), they cannot
+        coexist in a valid state. This is because the action's preconditions must
+        be satisfied before the action can be executed.
 
         Args:
             predicates: Set of predicates
@@ -788,50 +779,14 @@ class LiftedPlanner:
         Returns:
             True if consistent, False otherwise
         """
-        # Check 1: Mutex predicates (extracted from domain)
+        # Check: Mutex predicates cannot coexist
+        # This is the ONLY domain-independent check that is guaranteed by PDDL
         pred_names = {p.name for p in predicates}
         for pred1, pred2 in self._mutex_predicates:
             if pred1 in pred_names and pred2 in pred_names:
                 # Both mutex predicates present - invalid state
+                # This violates PDDL action semantics
                 return False
-
-        # Check 2: No duplicate predicates with same name but different args
-        # (e.g., holding(a) and holding(b) - can't hold two objects)
-        pred_by_name = {}
-        for pred in predicates:
-            if pred.name not in pred_by_name:
-                pred_by_name[pred.name] = []
-            pred_by_name[pred.name].append(pred)
-
-        for pred_name, pred_list in pred_by_name.items():
-            # For predicates with arguments, check for conflicts
-            if len(pred_list) > 1:
-                # Check if they have same arity - if so, might be mutex
-                arities = {len(p.args) for p in pred_list}
-                if len(arities) == 1 and list(arities)[0] > 0:
-                    # Multiple instances of same predicate type with arguments
-                    # This is usually OK for predicates like on(?X, ?Y)
-                    # But NOT OK for predicates like holding(?X) - single-valued
-                    # We'll use a heuristic: 1-argument predicates are usually single-valued
-                    if list(arities)[0] == 1:
-                        # Single-argument predicate with multiple instances
-                        # Check if arguments are different concrete values (not variables)
-                        concrete_args = []
-                        for p in pred_list:
-                            if not p.args[0].startswith('?'):
-                                concrete_args.append(p.args[0])
-                        # If we have multiple concrete different values, it's likely invalid
-                        if len(set(concrete_args)) > 1:
-                            return False
-
-        # Check 3: Self-loop check for binary relations
-        for pred in predicates:
-            if len(pred.args) == 2:
-                arg0, arg1 = pred.args
-                # If both args are concrete (not variables) and equal, it's likely invalid
-                if not arg0.startswith('?') and not arg1.startswith('?') and arg0 == arg1:
-                    # Self-loop like on(a, a) - usually invalid
-                    return False
 
         return True
 
