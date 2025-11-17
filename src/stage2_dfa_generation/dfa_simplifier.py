@@ -129,34 +129,43 @@ class BDDBasedDFABuilder:
         self.state_map = {}  # BDD node ID -> DFA state name
         self.state_counter = 0  # Global counter for unique state names
 
-        # Build new DFA
+        # Build new DFA using textbook Shannon Expansion with parallel restriction
         new_transitions = []
         new_accepting = set()
 
-        # Process each original transition
-        for from_state, to_state, label in transitions:
-            # Build BDD for this label
-            try:
-                label_bdd = self._parse_to_bdd(label)
-            except (ValueError, KeyError, SyntaxError) as e:
-                print(f"  Warning: Could not parse '{label}': {type(e).__name__}: {e}")
-                print(f"  Keeping transition as-is: {from_state} -> {to_state} [label=\"{label}\"]")
-                # Fallback: keep as is
-                new_transitions.append((from_state, to_state, label))
-                continue
-            except Exception as e:
-                # Unexpected error - raise with context
-                raise RuntimeError(
-                    f"Unexpected error while parsing transition label '{label}' "
-                    f"from {from_state} to {to_state}: {type(e).__name__}: {e}"
-                ) from e
+        # Group transitions by source state (CRITICAL for determinism)
+        from collections import defaultdict
+        transitions_by_source = defaultdict(list)
 
-            # Convert BDD to atomic transitions
-            atomic_trans, reachable_accept = self._bdd_to_atomic_transitions(
-                from_state, to_state, label_bdd, to_state in accepting_states
-            )
-            new_transitions.extend(atomic_trans)
-            new_accepting.update(reachable_accept)
+        for from_state, to_state, label in transitions:
+            transitions_by_source[from_state].append((to_state, label))
+
+        # Process each source state's transitions together
+        print("\n[Textbook Shannon Expansion] Processing states with parallel restriction")
+        for source_state, outgoing_transitions in transitions_by_source.items():
+            print(f"\n  State {source_state}: {len(outgoing_transitions)} outgoing transitions")
+
+            # Parse all BDDs for this source state
+            bdd_transitions = []  # List of (target_state, bdd, is_accepting)
+
+            for target_state, label in outgoing_transitions:
+                try:
+                    label_bdd = self._parse_to_bdd(label)
+                    is_accepting = target_state in accepting_states
+                    bdd_transitions.append((target_state, label_bdd, is_accepting))
+                except Exception as e:
+                    print(f"    Warning: Could not parse '{label}': {e}")
+                    # Fallback: keep unparseable transitions as-is
+                    new_transitions.append((source_state, target_state, label))
+                    continue
+
+            # Apply textbook parallel expansion
+            if bdd_transitions:
+                atomic_trans, reachable_accept = self._expand_with_parallel_restriction(
+                    source_state, bdd_transitions, var_index=0
+                )
+                new_transitions.extend(atomic_trans)
+                new_accepting.update(reachable_accept)
 
         # Add original accepting states
         new_accepting.update(accepting_states)
@@ -180,6 +189,152 @@ class BDDBasedDFABuilder:
             simplified_dot=simplified_dot,
             stats=stats
         )
+
+    def _expand_with_parallel_restriction(self, current_state: str,
+                                          bdd_transitions: List[Tuple[str, any, bool]],
+                                          var_index: int) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
+        """
+        TEXTBOOK SOLUTION: Shannon Expansion with parallel BDD restriction.
+
+        Process all formulas together by restricting them in parallel.
+        This is the standard approach from symbolic model checking literature.
+
+        Algorithm (from Bryant 1986, MONA implementation):
+        1. Pick next variable v
+        2. Restrict ALL BDDs with v=true using bdd.let({v: True})
+        3. Restrict ALL BDDs with v=false using bdd.let({v: False})
+        4. Find which target each branch leads to
+        5. Create transitions and recurse
+
+        Args:
+            current_state: Current DFA state
+            bdd_transitions: List of (target_state, bdd_formula, is_accepting)
+            var_index: Current variable index
+
+        Returns:
+            (transitions, accepting_states)
+        """
+        transitions = []
+        accepting = set()
+
+        # Base case: all variables have been assigned
+        if var_index >= len(self.predicates):
+            # Find which BDD is TRUE (exactly one should be for deterministic DFA)
+            for target_state, bdd, is_accepting in bdd_transitions:
+                if bdd == self.bdd.true:
+                    # Direct transition to target
+                    transitions.append((current_state, target_state, "true"))
+                    if is_accepting:
+                        accepting.add(target_state)
+                    return transitions, accepting
+
+            # No formula is true - shouldn't happen for total DFA
+            return transitions, accepting
+
+        # Get current variable
+        var = self.predicates[var_index]
+
+        # === TEXTBOOK STEP: Restrict all BDDs in parallel ===
+
+        # Restrict with var=TRUE (Shannon cofactor: f|var=1)
+        high_transitions = [
+            (target, self.bdd.let({var: True}, bdd), is_acc)
+            for target, bdd, is_acc in bdd_transitions
+        ]
+
+        # Restrict with var=FALSE (Shannon cofactor: f|var=0)
+        low_transitions = [
+            (target, self.bdd.let({var: False}, bdd), is_acc)
+            for target, bdd, is_acc in bdd_transitions
+        ]
+
+        # Find unique target for each branch
+        high_target_info = self._find_unique_target(high_transitions)
+        low_target_info = self._find_unique_target(low_transitions)
+
+        # Process HIGH branch (var=true)
+        if high_target_info:
+            target, is_accepting_target, needs_more = high_target_info
+
+            if needs_more:
+                # Need intermediate state for more variable tests
+                self.state_counter += 1
+                intermediate = f"s{self.state_counter}"
+                transitions.append((current_state, intermediate, var))
+
+                # Recursively expand
+                sub_trans, sub_acc = self._expand_with_parallel_restriction(
+                    intermediate, high_transitions, var_index + 1
+                )
+                transitions.extend(sub_trans)
+                accepting.update(sub_acc)
+            else:
+                # Direct transition to target
+                transitions.append((current_state, target, var))
+                if is_accepting_target:
+                    accepting.add(target)
+
+        # Process LOW branch (var=false)
+        if low_target_info:
+            target, is_accepting_target, needs_more = low_target_info
+
+            if needs_more:
+                # Need intermediate state for more variable tests
+                self.state_counter += 1
+                intermediate = f"s{self.state_counter}"
+                transitions.append((current_state, intermediate, f"!{var}"))
+
+                # Recursively expand
+                sub_trans, sub_acc = self._expand_with_parallel_restriction(
+                    intermediate, low_transitions, var_index + 1
+                )
+                transitions.extend(sub_trans)
+                accepting.update(sub_acc)
+            else:
+                # Direct transition to target
+                transitions.append((current_state, target, f"!{var}"))
+                if is_accepting_target:
+                    accepting.add(target)
+
+        return transitions, accepting
+
+    def _find_unique_target(self, transitions: List[Tuple[str, any, bool]]) -> Optional[Tuple[str, bool, bool]]:
+        """
+        Find the unique target state for a set of restricted formulas.
+
+        CRITICAL: For deterministic DFA, formulas must be mutually exclusive.
+        After restricting with some variables, we need to check:
+        1. If exactly ONE formula is TRUE and ALL others are FALSE -> terminal
+        2. If all formulas are FALSE -> no transition
+        3. If multiple formulas are non-terminal -> need more expansion
+
+        Returns:
+            (target_state, is_accepting, needs_more_expansion) or None
+            - needs_more_expansion is True if formulas aren't terminal yet
+        """
+        # Count formula states
+        true_count = sum(1 for _, bdd, _ in transitions if bdd == self.bdd.true)
+        false_count = sum(1 for _, bdd, _ in transitions if bdd == self.bdd.false)
+
+        # Case 1: Exactly one formula is TRUE and all others are FALSE
+        # This is the ONLY case where we can terminate
+        if true_count == 1 and false_count == len(transitions) - 1:
+            for target, bdd, is_accepting in transitions:
+                if bdd == self.bdd.true:
+                    return (target, is_accepting, False)
+
+        # Case 2: All formulas are FALSE -> no transition for this branch
+        if false_count == len(transitions):
+            return None
+
+        # Case 3: Need more expansion (multiple non-FALSE formulas exist)
+        # This includes: multiple TRUE, mix of TRUE and non-terminal, all non-terminal
+        # Pick first non-FALSE formula to continue expansion
+        for target, bdd, is_accepting in transitions:
+            if bdd != self.bdd.false:
+                return (target, is_accepting, True)
+
+        return None
 
     def _bdd_to_atomic_transitions(self, start_state: str, target_state: str,
                                     bdd_node, target_is_accepting: bool) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
@@ -414,30 +569,18 @@ class BDDBasedDFABuilder:
         """
         Recursive expression parser for BDD construction
 
+        CRITICAL FIX: Operator precedence must be: OR (lowest) > AND > NOT (highest)
+        This means we search for operators in this order:
+        1. First look for | (OR) at level 0
+        2. Then look for & (AND) at level 0
+        3. Only then handle ~ (NOT) prefix
+        4. Finally handle single predicates
+
         Raises:
             ValueError: If expression contains unknown predicates or is malformed
             SyntaxError: If expression has unbalanced parentheses
         """
         expr = expr.strip()
-
-        # Single predicate
-        if expr in self.predicates:
-            return self.bdd.var(expr)
-
-        # Negation
-        if expr.startswith('~'):
-            inner = expr[1:].strip()
-            if not inner:
-                raise ValueError(f"Empty expression after negation operator in: {expr}")
-
-            # Strip outer parentheses if present
-            if inner.startswith('(') and inner.endswith(')'):
-                inner = inner[1:-1]
-
-            if inner in self.predicates:
-                return ~self.bdd.var(inner)
-            else:
-                return ~self._parse_expr_recursive(inner)
 
         # Handle parentheses - check if entire expression is wrapped
         if expr.startswith('(') and expr.endswith(')'):
@@ -447,8 +590,8 @@ class BDDBasedDFABuilder:
                 # Entire expression is wrapped, remove outer parens
                 return self._parse_expr_recursive(expr[1:-1])
 
-        # Find main operator (lowest precedence)
-        # Order: OR > AND > NOT
+        # Find main operator (lowest precedence first)
+        # Step 1: Look for OR (|) at level 0
         level = 0
         for i, c in enumerate(expr):
             if c == '(':
@@ -466,7 +609,7 @@ class BDDBasedDFABuilder:
                     right = self._parse_expr_recursive(right_expr)
                     return left | right
 
-        # AND
+        # Step 2: Look for AND (&) at level 0
         level = 0
         for i, c in enumerate(expr):
             if c == '(':
@@ -483,7 +626,22 @@ class BDDBasedDFABuilder:
                     right = self._parse_expr_recursive(right_expr)
                     return left & right
 
-        # Fallback: treat as variable
+        # Step 3: Handle negation (only if no AND/OR found)
+        if expr.startswith('~'):
+            inner = expr[1:].strip()
+            if not inner:
+                raise ValueError(f"Empty expression after negation operator in: {expr}")
+
+            # Strip outer parentheses if present
+            if inner.startswith('(') and inner.endswith(')'):
+                inner = inner[1:-1]
+
+            if inner in self.predicates:
+                return ~self.bdd.var(inner)
+            else:
+                return ~self._parse_expr_recursive(inner)
+
+        # Step 4: Single predicate
         if expr in self.predicates:
             return self.bdd.var(expr)
 
