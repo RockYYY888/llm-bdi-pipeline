@@ -136,31 +136,48 @@ class BDDBasedDFABuilder:
         new_transitions = []
         new_accepting = set()
 
-        # Process each original transition
-        # CRITICAL: state_map, state_counter, and global_visited are shared across all iterations
+        # Group transitions by source state
+        # CRITICAL: Process all outgoing transitions from the same state together
+        # to ensure determinism
+        from collections import defaultdict
+        transitions_by_source = defaultdict(list)
         for from_state, to_state, label in transitions:
-            # Build BDD for this label
-            try:
-                label_bdd = self._parse_to_bdd(label)
-            except (ValueError, KeyError, SyntaxError) as e:
-                print(f"  Warning: Could not parse '{label}': {type(e).__name__}: {e}")
-                print(f"  Keeping transition as-is: {from_state} -> {to_state} [label=\"{label}\"]")
-                # Fallback: keep as is
-                new_transitions.append((from_state, to_state, label))
-                continue
-            except Exception as e:
-                # Unexpected error - raise with context
-                raise RuntimeError(
-                    f"Unexpected error while parsing transition label '{label}' "
-                    f"from {from_state} to {to_state}: {type(e).__name__}: {e}"
-                ) from e
+            transitions_by_source[from_state].append((to_state, label))
 
-            # Convert BDD to atomic transitions
-            atomic_trans, reachable_accept = self._bdd_to_atomic_transitions(
-                from_state, to_state, label_bdd, to_state in accepting_states
-            )
-            new_transitions.extend(atomic_trans)
-            new_accepting.update(reachable_accept)
+        # Process each source state's transitions together
+        for source_state, outgoing in transitions_by_source.items():
+            print(f"\n  Processing state {source_state} with {len(outgoing)} outgoing transitions")
+
+            # Parse all labels to BDDs
+            bdd_transitions = []  # List of (target_state, bdd_node, is_accepting)
+            unparseable = []  # List of (target_state, label) that couldn't be parsed
+
+            for target_state, label in outgoing:
+                try:
+                    label_bdd = self._parse_to_bdd(label)
+                    bdd_transitions.append((target_state, label_bdd, target_state in accepting_states))
+                except (ValueError, KeyError, SyntaxError) as e:
+                    print(f"    Warning: Could not parse '{label}': {type(e).__name__}: {e}")
+                    print(f"    Keeping transition as-is: {source_state} -> {target_state} [label=\"{label}\"]")
+                    unparseable.append((target_state, label))
+                    continue
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Unexpected error while parsing transition label '{label}' "
+                        f"from {source_state} to {target_state}: {type(e).__name__}: {e}"
+                    ) from e
+
+            # Add unparseable transitions as-is
+            for target_state, label in unparseable:
+                new_transitions.append((source_state, target_state, label))
+
+            # Process all BDD transitions from this source state together
+            if bdd_transitions:
+                atomic_trans, reachable_accept = self._process_state_transitions(
+                    source_state, bdd_transitions
+                )
+                new_transitions.extend(atomic_trans)
+                new_accepting.update(reachable_accept)
 
         # Add original accepting states
         new_accepting.update(accepting_states)
@@ -194,10 +211,64 @@ class BDDBasedDFABuilder:
             stats=stats
         )
 
+    def _process_state_transitions(self, source_state: str,
+                                    bdd_transitions: List[Tuple[str, any, bool]]) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
+        """
+        Process all outgoing transitions from a single source state together.
+
+        This ensures determinism by handling all BDD formulas from the same state
+        simultaneously, creating a unified state space.
+
+        Key insight: When transitions share BDD nodes, we need to ensure that
+        each (source_state, label) pair maps to exactly ONE target state.
+
+        Strategy:
+        1. Build complete state mappings for ALL BDDs first
+        2. Then generate transitions, using a local visited set per source state
+           to ensure we only generate each transition once
+
+        Args:
+            source_state: The source state for all transitions
+            bdd_transitions: List of (target_state, bdd_node, is_accepting) tuples
+
+        Returns:
+            (transitions, accepting_states)
+        """
+        all_transitions = []
+        all_accepting = set()
+
+        # Phase 1: Build state mappings for ALL BDDs from this source state
+        # This ensures shared BDD nodes get consistent state assignments
+        print(f"    Phase 1: Mapping {len(bdd_transitions)} BDD roots to states")
+        for i, (target_state, bdd_node, target_is_accepting) in enumerate(bdd_transitions):
+            print(f"      BDD {i}: node={id(bdd_node)}, hash={hash(bdd_node)}, target={target_state}")
+            self._map_bdd_to_states(bdd_node, source_state, target_state, target_is_accepting)
+
+        # Phase 2: Generate transitions using LOCAL tracking sets
+        # CRITICAL: Use a local visited set for this source state only
+        # This prevents duplicate transitions within this state's expansions
+        # but allows the same BDD node to be used from different source states
+        local_visited = set()  # Tracks which BDD nodes we've processed
+        dfa_states_done = set()  # Tracks which DFA states have generated outgoing transitions
+
+        for target_state, bdd_node, target_is_accepting in bdd_transitions:
+            # Generate transitions from this BDD
+            trans = self._create_transitions_from_bdd(bdd_node, source_state, target_state,
+                                                     local_visited, dfa_states_done)
+            all_transitions.extend(trans)
+
+            # Track accepting states
+            if target_is_accepting:
+                all_accepting.add(target_state)
+
+        return all_transitions, all_accepting
+
     def _bdd_to_atomic_transitions(self, start_state: str, target_state: str,
                                     bdd_node, target_is_accepting: bool) -> Tuple[List[Tuple[str, str, str]], Set[str]]:
         """
         Convert a BDD to atomic transitions using Shannon Expansion.
+
+        DEPRECATED: Use _process_state_transitions instead for correct determinism.
 
         Strategy:
         1. Build DFA states from BDD nodes (one-to-one mapping)
@@ -288,7 +359,7 @@ class BDDBasedDFABuilder:
                 self._map_bdd_to_states(low_branch, self.state_map[low_branch], target_state, target_is_accepting, visited)
 
     def _create_transitions_from_bdd(self, bdd_node, start_state: str,
-                                     target_state: str, visited: Set[Tuple]) -> List[Tuple[str, str, str]]:
+                                     target_state: str, visited: Set, dfa_states_done: Set) -> List[Tuple[str, str, str]]:
         """
         Phase 2: Create transitions from BDD structure.
 
@@ -300,12 +371,14 @@ class BDDBasedDFABuilder:
         - high branch means variable is FALSE
         - low branch means variable is TRUE
 
-        CRITICAL FIX: visited tracks (node_id, current_state) pairs, not just node_id.
-        This is because shared BDD nodes need to generate transitions from each
-        predecessor state separately.
+        CRITICAL FIX: dfa_states_done tracks which DFA states have already
+        generated their outgoing transitions. This prevents multiple BDD roots
+        (from different formulas) that map to the same DFA state from creating
+        duplicate/conflicting transitions.
 
         Args:
-            visited: Set of (node_id, state) tuples we've already processed
+            visited: Set of BDD nodes we've already processed
+            dfa_states_done: Set of DFA states that have already generated outgoing transitions
         """
         transitions = []
 
@@ -322,10 +395,36 @@ class BDDBasedDFABuilder:
         # CRITICAL: Use node as key, not id(node)
         current_state = self.state_map.get(bdd_node, start_state)
 
-        # Check if already processed
-        # BDD nodes are hashable and can be used directly in sets
+        # Check if this DFA state has already generated transitions
+        # This is KEY to preventing nondeterminism when multiple BDD roots
+        # map to the same DFA state
+        if current_state in dfa_states_done:
+            # This DFA state already has its transitions - skip this BDD path
+            # But we still need to recurse to child nodes that might map to
+            # different DFA states
+            if bdd_node in visited:
+                return []
+            visited.add(bdd_node)
+
+            # Continue recursion to children without generating transitions from current_state
+            var_index = bdd_node.level
+            if var_index is not None and var_index < len(self.predicates):
+                high_branch = bdd_node.high
+                low_branch = bdd_node.low
+
+                if high_branch and high_branch not in [self.bdd.true, self.bdd.false]:
+                    transitions.extend(self._create_transitions_from_bdd(high_branch, start_state, target_state, visited, dfa_states_done))
+                if low_branch and low_branch not in [self.bdd.true, self.bdd.false]:
+                    transitions.extend(self._create_transitions_from_bdd(low_branch, start_state, target_state, visited, dfa_states_done))
+
+            return transitions
+
+        # Mark this DFA state as having generated transitions
+        dfa_states_done.add(current_state)
+
+        # Check if already processed this BDD node
         if bdd_node in visited:
-            return []  # Already created transitions for this node
+            return []
         visited.add(bdd_node)
 
         # Get variable and negation status
@@ -368,7 +467,7 @@ class BDDBasedDFABuilder:
                     transitions.append((current_state, true_state, true_label))
                     # Recursively create transitions from true_state
                     transitions.extend(self._create_transitions_from_bdd(
-                        true_branch, true_state, target_state, visited))
+                        true_branch, true_state, target_state, visited, dfa_states_done))
 
         # Process FALSE branch (when variable is FALSE)
         if false_branch is not None and false_branch != self.bdd.false:
@@ -383,7 +482,7 @@ class BDDBasedDFABuilder:
                     transitions.append((current_state, false_state, false_label))
                     # Recursively create transitions from false_state
                     transitions.extend(self._create_transitions_from_bdd(
-                        false_branch, false_state, target_state, visited))
+                        false_branch, false_state, target_state, visited, dfa_states_done))
 
         return transitions
 
