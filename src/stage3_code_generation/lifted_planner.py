@@ -672,6 +672,11 @@ class LiftedPlanner:
                     if len(state_pred.args) == 0:
                         subgoal_predicates.add(state_pred)
 
+                # CRITICAL FIX #2 (BUG FIX): Validate subgoal state consistency
+                # Skip generating invalid subgoal states with mutex conflicts
+                if not self._validate_state_consistency(subgoal_predicates):
+                    continue  # Skip this invalid subgoal state
+
                 # Create subgoal state with same constraints
                 subgoal_constraints = current_state.constraints
                 subgoal_state = AbstractState(
