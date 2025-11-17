@@ -125,15 +125,19 @@ class BDDBasedDFABuilder:
         for pred in self.predicates:
             self.bdd.add_var(pred)
 
-        # Initialize global state tracking (CRITICAL FIX)
-        self.state_map = {}  # BDD node ID -> DFA state name
-        self.state_counter = 0  # Global counter for unique state names
+        # Initialize global state tracking for ALL transitions
+        # CRITICAL: These must persist across all transition processing
+        # to ensure unique state names and avoid duplicates
+        self.state_map = {}  # BDD node -> DFA state name
+        self.state_counter = 0  # Global counter for unique state names across ALL transitions
+        self.global_visited = set()  # Track which BDD nodes we've generated transitions for
 
         # Build new DFA
         new_transitions = []
         new_accepting = set()
 
         # Process each original transition
+        # CRITICAL: state_map, state_counter, and global_visited are shared across all iterations
         for from_state, to_state, label in transitions:
             # Build BDD for this label
             try:
@@ -160,6 +164,15 @@ class BDDBasedDFABuilder:
 
         # Add original accepting states
         new_accepting.update(accepting_states)
+
+        # Debug: Check for duplicates
+        from collections import Counter
+        trans_counts = Counter(new_transitions)
+        duplicates = [(t, c) for t, c in trans_counts.items() if c > 1]
+        if duplicates:
+            print(f"  WARNING: Found {len(duplicates)} duplicate transitions:")
+            for trans, count in duplicates:
+                print(f"    {trans[0]} -> {trans[1]} [{trans[2]}] appears {count} times")
 
         # Build output DOT
         simplified_dot = self._build_dot(new_transitions, new_accepting, dfa_dot)
@@ -205,8 +218,9 @@ class BDDBasedDFABuilder:
         self._map_bdd_to_states(bdd_node, start_state, target_state, target_is_accepting)
 
         # Then, create transitions from the BDD structure
-        visited = set()  # Track which (node, state) pairs we've created transitions for
-        trans = self._create_transitions_from_bdd(bdd_node, start_state, target_state, visited)
+        # CRITICAL: Use global_visited to avoid generating duplicate transitions
+        # when different original transitions share BDD nodes
+        trans = self._create_transitions_from_bdd(bdd_node, start_state, target_state, self.global_visited)
         transitions.extend(trans)
 
         # Collect accepting states
@@ -241,8 +255,11 @@ class BDDBasedDFABuilder:
 
         # Map this node to a state if not already mapped
         # CRITICAL: Use node as key, not id(node)
+        # IMPORTANT: If this node is already mapped, we reuse its state
+        # This handles BDD node sharing across different transitions
         if bdd_node not in self.state_map:
-            # The root BDD node for this transition uses start_state
+            # For the root of this BDD (first time we see it in this call),
+            # use the provided start_state
             self.state_map[bdd_node] = start_state
 
         # Recursively map children (they will get new states)
