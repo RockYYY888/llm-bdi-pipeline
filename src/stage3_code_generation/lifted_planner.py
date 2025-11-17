@@ -32,12 +32,6 @@ if _parent not in sys.path:
 from stage3_code_generation.state_space import PredicateAtom
 from stage3_code_generation.abstract_state import AbstractState, Constraint, ConstraintSet
 from stage3_code_generation.unification import Unifier, Substitution
-from stage3_code_generation.quantified_predicate import (
-    Quantifier, QuantifiedPredicate, detect_quantifiable_pattern
-)
-from stage3_code_generation.dependency_analysis import (
-    analyze_dependency_pattern, should_quantify_subgoal
-)
 from utils.pddl_parser import PDDLDomain, PDDLAction
 from stage3_code_generation.pddl_condition_parser import PDDLConditionParser, PDDLEffectParser
 
@@ -350,8 +344,7 @@ class LiftedPlanner:
         unified_subst, unsatisfied_preconditions = self._find_consistent_unification(
             positive_preconditions,
             state.predicates,
-            state.constraints,
-            quantified_preds=state.quantified_predicates
+            state.constraints
         )
 
         if unified_subst is None:
@@ -416,10 +409,6 @@ class LiftedPlanner:
 
             # Create new state
             new_state = AbstractState(new_predicates, new_constraints)
-
-            # CRITICAL: Apply quantification to reduce state space
-            # This is where we convert {on(?V1, b), on(?V2, b), ...} → {∃?Z. on(?Z, b)}
-            new_state = self._detect_and_quantify_state(new_state, min_instances=2)
 
             results.append((new_state, unified_subst))
 
@@ -503,21 +492,15 @@ class LiftedPlanner:
     def _find_consistent_unification(self,
                                      preconditions: List[PredicateAtom],
                                      state_preds: FrozenSet[PredicateAtom],
-                                     constraints: ConstraintSet,
-                                     quantified_preds: FrozenSet = None) -> Tuple[Optional[Substitution], List[PredicateAtom]]:
+                                     constraints: ConstraintSet) -> Tuple[Optional[Substitution], List[PredicateAtom]]:
         """
         Find a substitution that unifies all preconditions with state predicates
         while respecting constraints
-
-        NOW SUPPORTS QUANTIFIED PREDICATES:
-        - If a precondition can't match concrete predicates, try quantified predicates
-        - Quantified predicates can be instantiated to match action preconditions
 
         Args:
             preconditions: Action preconditions to match
             state_preds: State predicates
             constraints: State constraints
-            quantified_preds: Quantified predicates in state (optional)
 
         Returns:
             Tuple of (unified_substitution, unsatisfied_preconditions)
@@ -542,7 +525,6 @@ class LiftedPlanner:
             # Find a state predicate that unifies with this precondition
             found = False
 
-            # Try concrete predicates first
             for state_pred in state_preds:
                 # Try to unify
                 unified = Unifier.unify_predicates(precond, state_pred, current_subst)
@@ -551,16 +533,6 @@ class LiftedPlanner:
                     # Check if unification respects constraints
                     if constraints.is_consistent(unified):
                         current_subst = unified
-                        found = True
-                        break
-
-            # If not found in concrete predicates, try quantified predicates
-            if not found and quantified_preds:
-                for qpred in quantified_preds:
-                    # Check if quantified predicate can match this precondition
-                    if qpred.matches_concrete_predicate(precond, current_subst.bindings):
-                        # Instantiate quantified predicate for this match
-                        # This effectively "uses" the quantified predicate
                         found = True
                         break
 
@@ -583,21 +555,7 @@ class LiftedPlanner:
         """
         Generate subgoal states to achieve an unsatisfied precondition
 
-        INTEGRATED QUANTIFICATION (Priority 1):
-        - Analyzes dependency patterns (parallel vs sequential)
-        - For parallel dependencies: Generates ONE quantified subgoal directly
-        - For sequential dependencies: Enumerates subgoals as before
-
-        This is the KEY to reducing state space from 9,677 → ~100-500 states!
-
-        Example (parallel - quantified):
-            Precondition: clear(?X)
-            Old: Generate 4 subgoals (one per achieving action)
-            New: Generate 1 quantified subgoal with ∃?A. (action A achieves clear(?X))
-
-        Example (sequential - enumerated):
-            Precondition: tower(?X, ?Y, ?Z) - must build in sequence
-            Behavior: Enumerate (unchanged)
+        For each action that can achieve the precondition, generate a subgoal state.
 
         Args:
             precondition: The unsatisfied precondition to achieve
@@ -605,7 +563,7 @@ class LiftedPlanner:
             requesting_action: The action that requires this precondition
 
         Returns:
-            List of subgoal states (typically 1 for quantified, N for enumerated)
+            List of subgoal states (one per achieving action)
         """
         # Find all actions that can achieve this precondition
         achieving_actions = []
@@ -616,149 +574,7 @@ class LiftedPlanner:
         if not achieving_actions:
             return []
 
-        # Analyze dependency pattern
-        pattern = analyze_dependency_pattern(precondition, achieving_actions, current_state)
-
-        # Decide: quantify or enumerate?
-        if should_quantify_subgoal(pattern, len(achieving_actions)):
-            # QUANTIFIED PATH: Generate ONE quantified subgoal
-            return self._generate_quantified_subgoal(
-                precondition,
-                achieving_actions,
-                current_state,
-                pattern
-            )
-        else:
-            # ENUMERATION PATH: Generate subgoal for each action (old behavior)
-            return self._generate_enumerated_subgoals(
-                precondition,
-                achieving_actions,
-                current_state
-            )
-
-    def _generate_quantified_subgoal(self,
-                                     precondition: PredicateAtom,
-                                     achieving_actions: List,
-                                     current_state: AbstractState,
-                                     pattern) -> List[AbstractState]:
-        """
-        Generate ONE quantified subgoal with DIRECT quantified predicate generation
-
-        TRUE INTEGRATED QUANTIFICATION - No post-hoc processing!
-
-        This directly creates QuantifiedPredicate objects during subgoal generation,
-        rather than creating concrete predicates and converting them later.
-
-        Algorithm:
-            1. Collect preconditions from ALL achieving actions (not just first)
-            2. Analyze which precondition arguments vary across actions
-            3. DIRECTLY create QuantifiedPredicate for varying patterns
-            4. Create concrete PredicateAtom for fixed predicates
-            5. Return state with quantified_predicates populated directly
-
-        Example:
-            Precondition: clear(?X)
-            Actions: [pick-up(?Y, ?X), pick-tower(?Z, ?X, ?S)]
-
-            Both have: on(?, ?X), clear(?), handempty
-
-            OLD: Generate {on(?Y, ?X), clear(?Y), handempty} then call _detect_and_quantify_state
-            NEW: DIRECTLY generate:
-                quantified_predicates: {∃?Q0. on(?Q0, ?X), ∃?Q0. clear(?Q0)}
-                predicates: {handempty}
-
-        Args:
-            precondition: The precondition to achieve
-            achieving_actions: Actions that can achieve it
-            current_state: Current state
-            pattern: Dependency pattern analysis
-
-        Returns:
-            List with ONE quantified subgoal state
-        """
-        # Step 1: Collect preconditions from ALL achieving actions (not just template)
-        # IMPORTANT: Each action must use DIFFERENT variable names to detect variation
-        all_action_preconditions = []
-        all_achieving_substs = []
-        used_vars = set(current_state.get_variables())
-
-        for action in achieving_actions:
-            # Rename to avoid variable collisions with current state AND previous actions
-            action_renamed, rename_subst = self._rename_action_variables(
-                action,
-                used_vars
-            )
-
-            # Add this action's variables to used set for next action
-            for precond in action_renamed.preconditions:
-                for arg in precond.args:
-                    if arg.startswith('?'):
-                        used_vars.add(arg)
-
-            # Find substitution that achieves the precondition
-            achieving_subst = self._find_achieving_substitution(action_renamed, precondition)
-
-            if achieving_subst is None:
-                continue
-
-            # Collect preconditions with substitution applied
-            precond_set = []
-            for action_precond in action_renamed.preconditions:
-                if not action_precond.negated:
-                    precond_set.append(achieving_subst.apply_to_predicate(action_precond))
-
-            all_action_preconditions.append(precond_set)
-            all_achieving_substs.append((action_renamed, achieving_subst))
-
-        if not all_action_preconditions:
-            # Fallback to enumeration
-            return self._generate_enumerated_subgoals(precondition, achieving_actions, current_state)
-
-        # Step 2: Analyze precondition patterns and DIRECTLY generate quantified predicates
-        quantified_preds, concrete_preds = self._analyze_and_quantify_preconditions(
-            all_action_preconditions,
-            pattern
-        )
-
-        # Step 3: Filter essential context from current state (AGGRESSIVE filtering)
-        essential_context = self._filter_essential_context(
-            current_state,
-            all_achieving_substs[0][0],  # Use first action as reference
-            all_achieving_substs[0][1]
-        )
-        concrete_preds.update(essential_context)
-
-        # Step 4: Create state with DIRECT quantified_predicates population
-        subgoal_state = AbstractState(
-            predicates=concrete_preds,
-            quantified_predicates=quantified_preds,  # DIRECTLY populated with QuantifiedPredicate objects!
-            constraints=current_state.constraints,
-            depth=current_state.depth + 1
-        )
-
-        # NO CALL TO _detect_and_quantify_state()!
-        # We already generated quantified predicates directly.
-
-        return [subgoal_state]
-
-
-    def _generate_enumerated_subgoals(self,
-                                     precondition: PredicateAtom,
-                                     achieving_actions: List,
-                                     current_state: AbstractState) -> List[AbstractState]:
-        """
-        Generate enumerated subgoals (one per achieving action)
-
-        This is the OLD behavior, kept for sequential dependencies.
-
-        Args:
-            precondition: The precondition to achieve
-            achieving_actions: Actions that can achieve it
-            current_state: Current state
-
-        Returns:
-            List of subgoal states (one per action)
-        """
+        # Generate subgoal for each achieving action
         subgoal_states = []
 
         for candidate_action in achieving_actions:
@@ -800,16 +616,13 @@ class LiftedPlanner:
                     if not will_be_deleted:
                         subgoal_predicates.add(state_pred)
 
-                # Create subgoal state
+                # Create subgoal state with same constraints
                 subgoal_constraints = current_state.constraints
                 subgoal_state = AbstractState(
                     subgoal_predicates,
                     subgoal_constraints,
                     depth=current_state.depth + 1
                 )
-
-                # Apply post-hoc quantification
-                subgoal_state = self._detect_and_quantify_state(subgoal_state, min_instances=2)
 
                 subgoal_states.append(subgoal_state)
 
@@ -924,238 +737,6 @@ class LiftedPlanner:
         #   New: {clear(b)} → backward chaining will find preconditions
         return set(goal_predicates)
 
-    def _analyze_and_quantify_preconditions(self,
-                                           all_action_preconditions: List[List[PredicateAtom]],
-                                           pattern) -> Tuple[Set, Set]:
-        """
-        Analyze preconditions from multiple actions and generate quantified predicates DIRECTLY
-
-        This is the core of TRUE integrated quantification.
-
-        Algorithm:
-            1. Group preconditions by (name, arity)
-            2. For each group, analyze which argument positions vary across actions
-            3. If arguments vary AND all are variables → Create QuantifiedPredicate
-            4. If arguments constant across all actions → Create concrete PredicateAtom
-
-        Args:
-            all_action_preconditions: List of precondition sets, one per achieving action
-            pattern: Dependency pattern analysis
-
-        Returns:
-            Tuple of (quantified_predicates, concrete_predicates)
-
-        Example:
-            Action 1 preconditions: [on(?V1, ?X), clear(?V1), handempty]
-            Action 2 preconditions: [on(?V2, ?X), clear(?V2), handempty]
-
-            Analysis:
-                on(?, ?X): pos 0 varies (?V1 vs ?V2), pos 1 constant (?X)
-                    → ∃?Q0. on(?Q0, ?X)
-                clear(?): pos 0 varies (?V1 vs ?V2)
-                    → ∃?Q0. clear(?Q0)
-                handempty: no arguments, appears in all
-                    → handempty (concrete)
-
-            Returns:
-                quantified: {∃?Q0. on(?Q0, ?X), ∃?Q0. clear(?Q0)}
-                concrete: {handempty}
-        """
-        from stage3_code_generation.quantified_predicate import Quantifier, QuantifiedPredicate
-
-
-        if not all_action_preconditions:
-            return (set(), set())
-
-        # Group predicates by structure (name, arity)
-        precond_groups = {}  # (name, arity) -> [predicates from different actions]
-
-        for precond_set in all_action_preconditions:
-            for pred in precond_set:
-                key = (pred.name, len(pred.args))
-                if key not in precond_groups:
-                    precond_groups[key] = []
-                precond_groups[key].append(pred)
-
-        quantified_predicates = set()
-        concrete_predicates = set()
-
-        for (name, arity), pred_list in precond_groups.items():
-            if arity == 0:
-                # No arguments - must be concrete (e.g., handempty)
-                concrete_predicates.add(pred_list[0])
-                continue
-
-            # Analyze each argument position for variation
-            arg_patterns = []  # List of ('quantified', var_name) or ('constant', value)
-            has_variation = False
-
-            for arg_pos in range(arity):
-                values_at_pos = set(p.args[arg_pos] for p in pred_list)
-
-                if len(values_at_pos) == 1:
-                    # All actions have same value at this position → constant
-                    arg_patterns.append(('constant', list(values_at_pos)[0]))
-                else:
-                    # Values vary across actions
-                    # Check if all are variables (required for quantification)
-                    if all(v.startswith('?') for v in values_at_pos):
-                        arg_patterns.append(('quantified', f'?Q{arg_pos}'))
-                        has_variation = True
-                    else:
-                        # Mix of variables and constants - treat as constant using first
-                        arg_patterns.append(('constant', pred_list[0].args[arg_pos]))
-
-            # Decide: quantify or make concrete?
-            if has_variation and len(pred_list) >= 1:  # Threshold = 1 (quantify even single instance)
-                # Build quantified predicate
-                quantified_vars = []
-                formula_args = []
-
-                for arg_pos, (pattern_type, value) in enumerate(arg_patterns):
-                    if pattern_type == 'quantified':
-                        var_name = f'?Q{arg_pos}'
-                        quantified_vars.append(var_name)
-                        formula_args.append(var_name)
-                    else:
-                        formula_args.append(value)
-
-                # Create formula
-                formula = PredicateAtom(name, tuple(formula_args), negated=False)
-
-                # Create quantified predicate
-                qpred = QuantifiedPredicate(
-                    quantifier=Quantifier.EXISTS,
-                    variables=tuple(quantified_vars),
-                    formula=formula,
-                    constraints=ConstraintSet(set()),
-                    count_bound=None  # No bound - just "exists"
-                )
-
-                quantified_predicates.add(qpred)
-            else:
-                # No variation or below threshold - use concrete
-                concrete_predicates.add(pred_list[0])
-
-        return (quantified_predicates, concrete_predicates)
-
-    def _filter_essential_context(self,
-                                  current_state: AbstractState,
-                                  action_renamed,
-                                  achieving_subst) -> Set[PredicateAtom]:
-        """
-        Filter essential context predicates from current state
-
-        Only keep predicates that:
-        1. Are NOT deleted by the action
-        2. Are NOT already included in action preconditions
-        3. Are needed for completeness
-
-        This implements AGGRESSIVE filtering to maximize state reduction.
-
-        Args:
-            current_state: Current abstract state
-            action_renamed: Action with renamed variables
-            achieving_subst: Substitution that achieves the goal
-
-        Returns:
-            Set of essential context predicates
-        """
-        essential = set()
-
-        # Collect predicates that will be deleted by action effects
-        deleted_preds = set()
-        for effect_branch in action_renamed.effects:
-            for effect_atom in effect_branch:
-                if not effect_atom.is_add:
-                    effect_pred = achieving_subst.apply_to_predicate(effect_atom.predicate)
-                    deleted_preds.add(effect_pred)
-
-        # Collect action preconditions (already included, no need to duplicate)
-        action_precond_names = set()
-        for action_precond in action_renamed.preconditions:
-            if not action_precond.negated:
-                action_precond_names.add(action_precond.name)
-
-        # Filter current state predicates
-        for state_pred in current_state.predicates:
-            # Skip if deleted
-            if state_pred in deleted_preds:
-                continue
-
-            # AGGRESSIVE FILTER: Skip if same predicate name as action precondition
-            # Reasoning: Action preconditions already covered by quantified/concrete predicates
-            if state_pred.name in action_precond_names:
-                continue
-
-            # Keep only if it's a "global" predicate not related to action
-            essential.add(state_pred)
-
-        return essential
-
-    def _detect_and_quantify_state(self, state: AbstractState,
-                                   min_instances: int = 2) -> AbstractState:
-        """
-        Detect quantifiable patterns in state predicates and convert to quantified form
-
-        This is the KEY method for reducing state space via quantification.
-
-        Algorithm:
-        1. Group predicates by structure (same predicate name, some varying arguments)
-        2. For groups with >= min_instances, check if quantification is beneficial
-        3. Convert concrete predicates to quantified predicates
-        4. Return new state with both concrete and quantified predicates
-
-        Example:
-            Input state: {on(?V1, b), on(?V2, b), on(?V3, b), clear(b), handempty}
-            Output state: {∃?Z. on(?Z, b), clear(b), handempty}
-
-        This reduces state explosion dramatically: instead of 3 separate on() predicates,
-        we have 1 quantified predicate representing "at least 3 blocks on b".
-
-        Args:
-            state: Abstract state with concrete predicates
-            min_instances: Minimum instances to trigger quantification
-
-        Returns:
-            New state with quantified predicates
-        """
-        if not state.predicates:
-            return state
-
-        # Detect quantifiable patterns
-        quantified_preds = detect_quantifiable_pattern(
-            set(state.predicates),
-            min_instances=min_instances
-        )
-
-        if not quantified_preds:
-            # No quantification opportunities
-            return state
-
-        # Remove concrete predicates that are now covered by quantified predicates
-        remaining_concrete = set(state.predicates)
-
-        for qpred in quantified_preds:
-            # Find all concrete predicates matched by this quantified predicate
-            matched = set()
-            for concrete_pred in remaining_concrete:
-                if qpred.matches_concrete_predicate(concrete_pred):
-                    matched.add(concrete_pred)
-
-            # Remove matched predicates (they're now represented by quantified predicate)
-            remaining_concrete -= matched
-
-        # Create new state with quantified predicates
-        new_state = AbstractState(
-            predicates=remaining_concrete,
-            constraints=state.constraints,
-            depth=state.depth,
-            quantified_predicates=set(quantified_preds) | set(state.quantified_predicates or [])
-        )
-
-        return new_state
-
     def _state_key(self, state: AbstractState) -> Tuple:
         """
         Generate hashable key for abstract state
@@ -1168,9 +749,8 @@ class LiftedPlanner:
         """
         # Sort predicates and constraints for consistent hashing
         pred_tuple = tuple(sorted(state.predicates, key=str))
-        qpred_tuple = tuple(sorted(state.quantified_predicates or [], key=str))
         constraint_tuple = tuple(sorted(state.constraints.constraints, key=str))
-        return (pred_tuple, qpred_tuple, constraint_tuple)
+        return (pred_tuple, constraint_tuple)
 
     def _print_comparison(self, abstract_state_count: int):
         """
