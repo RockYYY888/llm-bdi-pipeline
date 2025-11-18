@@ -365,6 +365,11 @@ class LiftedPlanner:
         - Use unification to find if action can apply
         - Generate new abstract state with potentially new variables
 
+        CRITICAL FIX: Do NOT rename action variables!
+        - Directly unify action parameters with state variables
+        - This reuses existing variables instead of creating new ones
+        - This is the core of TRUE lifted planning
+
         Args:
             abstract_action: Abstract action to apply
             state: Current abstract state
@@ -374,19 +379,17 @@ class LiftedPlanner:
         """
         results = []
 
-        # CRITICAL: Rename action variables to avoid collision with state variables
-        action_renamed, rename_subst = self._rename_action_variables(
-            abstract_action,
-            state.get_variables()
-        )
+        # FIXED: Use action directly without renaming
+        # Unification will handle variable matching
+        action = abstract_action
 
         # Try to unify action preconditions with state predicates
         # We need to find a substitution σ such that:
         # ∀ precond ∈ action.preconditions: ∃ state_pred ∈ state.predicates: unify(precond, state_pred, σ)
 
         # For negative preconditions (not P), we check they don't exist in state
-        positive_preconditions = [p for p in action_renamed.preconditions if not p.negated]
-        negative_preconditions = [p for p in action_renamed.preconditions if p.negated]
+        positive_preconditions = [p for p in action.preconditions if not p.negated]
+        negative_preconditions = [p for p in action.preconditions if p.negated]
 
         # Check negative preconditions first (must NOT match anything in state)
         for neg_precond in negative_preconditions:
@@ -414,7 +417,7 @@ class LiftedPlanner:
                 subgoals = self._generate_subgoal_states_for_precondition(
                     unsatisfied_precond,
                     state,
-                    action_renamed
+                    action
                 )
                 subgoal_states.extend(subgoals)
 
@@ -423,7 +426,7 @@ class LiftedPlanner:
             return [(sg, Substitution()) for sg in subgoal_states]
 
         # Check inequality constraints from action
-        for var1, var2 in action_renamed.inequality_constraints:
+        for var1, var2 in action.inequality_constraints:
             val1 = unified_subst.apply(var1)
             val2 = unified_subst.apply(var2)
             if val1 == val2:
@@ -431,7 +434,7 @@ class LiftedPlanner:
                 return results
 
         # Apply effects to generate new state(s)
-        for effect_branch in action_renamed.effects:
+        for effect_branch in action.effects:
             new_predicates = set(state.predicates)
 
             for effect_atom in effect_branch:
@@ -447,7 +450,7 @@ class LiftedPlanner:
             new_constraints = state.constraints
 
             # Add inequality constraints from action
-            for var1, var2 in action_renamed.inequality_constraints:
+            for var1, var2 in action.inequality_constraints:
                 new_var1 = unified_subst.apply(var1)
                 new_var2 = unified_subst.apply(var2)
                 if new_var1.startswith('?') and new_var2.startswith('?'):
@@ -637,15 +640,13 @@ class LiftedPlanner:
         subgoal_states = []
 
         for candidate_action in achieving_actions:
-            # Rename action variables to avoid collision
-            action_renamed, rename_subst = self._rename_action_variables(
-                candidate_action,
-                current_state.get_variables()
-            )
+            # FIXED: Do NOT rename action variables
+            # Use candidate_action directly for true lifted planning
+            action = candidate_action
 
             # Try to unify the effect with the precondition we want
             achieving_subst = self._find_achieving_substitution(
-                action_renamed,
+                action,
                 precondition
             )
 
@@ -653,7 +654,7 @@ class LiftedPlanner:
                 subgoal_predicates = set()
 
                 # Add the action's positive preconditions (after applying substitution)
-                for action_precond in action_renamed.preconditions:
+                for action_precond in action.preconditions:
                     if not action_precond.negated:
                         subgoal_pred = achieving_subst.apply_to_predicate(action_precond)
                         subgoal_predicates.add(subgoal_pred)
@@ -661,7 +662,7 @@ class LiftedPlanner:
                 # HIGH PRIORITY FIX #5: Collect negative preconditions
                 # Subgoal state must NOT contain predicates matching negative preconditions
                 negative_preconditions = []
-                for action_precond in action_renamed.preconditions:
+                for action_precond in action.preconditions:
                     if action_precond.negated:
                         # Get positive form and apply substitution
                         pos_form = action_precond.get_positive()
@@ -697,7 +698,7 @@ class LiftedPlanner:
 
                     # Check if will be deleted by the action
                     will_be_deleted = False
-                    for effect_branch in action_renamed.effects:
+                    for effect_branch in action.effects:
                         for effect_atom in effect_branch:
                             if not effect_atom.is_add:
                                 effect_pred = achieving_subst.apply_to_predicate(effect_atom.predicate)
