@@ -38,7 +38,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator
-from src.stage3_code_generation.forward_planner import ForwardStatePlanner
+from src.stage3_code_generation.legacy.forward_planner import ForwardStatePlanner
 from src.stage3_code_generation.state_space import PredicateAtom
 from src.utils.pddl_parser import PDDLParser
 from src.stage1_interpretation.grounding_map import GroundingMap

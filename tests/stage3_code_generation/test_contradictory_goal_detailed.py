@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from stage3_code_generation.state_space import PredicateAtom, WorldState
-from stage3_code_generation.forward_planner import ForwardStatePlanner
+from stage3_code_generation.legacy.forward_planner import ForwardStatePlanner
 from utils.pddl_parser import PDDLParser
 
 

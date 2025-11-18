@@ -24,7 +24,7 @@ if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
 from stage3_code_generation.state_space import PredicateAtom, StateGraph
-from stage3_code_generation.forward_planner import ForwardStatePlanner
+from stage3_code_generation.lifted_planner import LiftedPlanner
 from stage3_code_generation.agentspeak_codegen import AgentSpeakCodeGenerator
 from stage3_code_generation.variable_normalizer import VariableNormalizer, VariableMapping
 from utils.pddl_parser import PDDLDomain
@@ -187,12 +187,11 @@ class BackwardPlannerGenerator:
                     print(f"    Cache MISS - running variable-level exploration...")
 
                     try:
-                        # VARIABLE-LEVEL PLANNING: Use ForwardStatePlanner with use_variables=True
-                        # This provides fixed variable sets without the explosion of LiftedPlanner
-                        planner = ForwardStatePlanner(
+                        # LIFTED PLANNING: Use LiftedPlanner for true abstract state exploration
+                        # This explores abstract state space independent of object count
+                        planner = LiftedPlanner(
                             self.domain,
-                            objects=all_variables,  # Pass variables as "objects"
-                            use_variables=True       # Enable variable-level mode
+                            var_counter_offset=0  # Start fresh for each goal
                         )
 
                         # Explore using normalized (variable-based) goal

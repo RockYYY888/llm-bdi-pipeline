@@ -294,11 +294,16 @@ Execution log saved to: logs/20251030_123456_llm_agentspeak/execution.json
 │   ├── stage3_code_generation/
 │   │   ├── __init__.py
 │   │   ├── backward_planner_generator.py   # Stage 3: Main entry point (non-LLM)
-│   │   ├── forward_planner.py              # Backward planning (forward destruction)
+│   │   ├── lifted_planner.py               # True lifted planning with unification
+│   │   ├── unification.py                  # Robinson's unification algorithm
+│   │   ├── abstract_state.py               # Abstract state representation
 │   │   ├── agentspeak_codegen.py           # AgentSpeak code generation
 │   │   ├── boolean_expression_parser.py    # Parse transition labels (DNF conversion)
 │   │   ├── state_space.py                  # State representation and graph
-│   │   └── pddl_condition_parser.py        # PDDL precondition/effect parsing
+│   │   ├── pddl_condition_parser.py        # PDDL precondition/effect parsing
+│   │   └── legacy/
+│   │       ├── forward_planner.py          # Legacy: Grounded planning (deprecated)
+│   │       └── README.md                   # Documentation of deprecated files
 │   ├── external/
 │   │   ├── mona-1.4/                    # MONA automata tool (for ltlf2dfa)
 │   │   └── pr2/                         # PR2 FOND planner

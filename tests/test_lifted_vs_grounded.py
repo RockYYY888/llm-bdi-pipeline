@@ -14,7 +14,7 @@ _parent = str(Path(__file__).parent.parent / "src")
 if str(_parent) not in sys.path:
     sys.path.insert(0, str(_parent))
 
-from stage3_code_generation.forward_planner import ForwardStatePlanner
+from stage3_code_generation.legacy.forward_planner import ForwardStatePlanner
 from stage3_code_generation.lifted_planner import LiftedPlanner
 from stage3_code_generation.state_space import PredicateAtom
 from utils.pddl_parser import PDDLParser

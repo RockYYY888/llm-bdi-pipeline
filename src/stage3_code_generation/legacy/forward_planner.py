@@ -18,8 +18,8 @@ from dataclasses import dataclass
 import sys
 from pathlib import Path
 
-# Add parent directory to path
-_parent = str(Path(__file__).parent.parent)
+# Add parent directories to path (now in legacy/ subdirectory)
+_parent = str(Path(__file__).parent.parent.parent)
 if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
