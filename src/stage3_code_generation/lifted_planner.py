@@ -112,9 +112,9 @@ class LiftedPlanner:
                 - 'transitions': List of (from_state, to_state, action, subst)
                 - 'goal_state': Initial goal state
         """
-        # HIGH PRIORITY FIX #6: Reset variable counter per exploration
-        # Prevents indefinite growth of variable names across multiple explorations
-        self._var_counter = 0
+        # NOTE: Do NOT reset _var_counter here!
+        # It should be set once in __init__ with var_counter_offset
+        # to prevent conflicts between multiple LiftedPlanner instances
 
         print(f"[Lifted Planner] Starting ABSTRACT state space exploration")
         print(f"[Lifted Planner] Goal: {[str(p) for p in goal_predicates]}")

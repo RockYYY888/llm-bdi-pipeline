@@ -199,10 +199,12 @@ class BackwardPlannerGenerator:
                         state_graph = planner.explore_from_goal(normalized_preds)
                         print(f"    State graph: {state_graph}")
 
-                        # Update global counter based on how many variables this planner used
-                        # Each exploration can use up to max_states * avg_vars_per_state variables
-                        # Conservative estimate: reserve 10000 variable IDs per exploration
-                        global_var_counter += 10000
+                        # Update global counter to actual counter value used by this planner
+                        # This ensures next planner starts from where this one left off
+                        vars_used = planner._var_counter - global_var_counter
+                        global_var_counter = planner._var_counter
+                        if vars_used > 0:
+                            print(f"    Variables used: {vars_used} variables (?V{global_var_counter - vars_used} to ?V{global_var_counter - 1})")
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
