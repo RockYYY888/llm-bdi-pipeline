@@ -24,7 +24,7 @@ if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
 from stage3_code_generation.state_space import PredicateAtom, StateGraph
-from stage3_code_generation.lifted_planner import LiftedPlanner
+from stage3_code_generation.forward_planner import ForwardStatePlanner
 from stage3_code_generation.agentspeak_codegen import AgentSpeakCodeGenerator
 from stage3_code_generation.variable_normalizer import VariableNormalizer, VariableMapping
 from utils.pddl_parser import PDDLDomain
@@ -132,10 +132,6 @@ class BackwardPlannerGenerator:
         all_state_graphs = []  # For generating shared section once
         all_goal_sections = []  # Goal-specific sections only
 
-        # CRITICAL FIX: Global variable counter to prevent conflicts between
-        # multiple LiftedPlanner instances. Each instance gets unique variable IDs.
-        global_var_counter = 0
-
         for i, (from_state, to_state, label) in enumerate(dfa_info.transitions):
             print(f"\n[Transition {i+1}/{len(dfa_info.transitions)}] {from_state} --[{label}]-> {to_state}")
 
@@ -191,20 +187,17 @@ class BackwardPlannerGenerator:
                     print(f"    Cache MISS - running variable-level exploration...")
 
                     try:
-                        # LIFTED PLANNING: Use true lifted planner with unification
-                        # Pass global_var_counter as offset to prevent variable name conflicts
-                        planner = LiftedPlanner(self.domain, var_counter_offset=global_var_counter)
+                        # VARIABLE-LEVEL PLANNING: Use ForwardStatePlanner with use_variables=True
+                        # This provides fixed variable sets without the explosion of LiftedPlanner
+                        planner = ForwardStatePlanner(
+                            self.domain,
+                            objects=all_variables,  # Pass variables as "objects"
+                            use_variables=True       # Enable variable-level mode
+                        )
 
                         # Explore using normalized (variable-based) goal
                         state_graph = planner.explore_from_goal(normalized_preds)
                         print(f"    State graph: {state_graph}")
-
-                        # Update global counter to actual counter value used by this planner
-                        # This ensures next planner starts from where this one left off
-                        vars_used = planner._var_counter - global_var_counter
-                        global_var_counter = planner._var_counter
-                        if vars_used > 0:
-                            print(f"    Variables used: {vars_used} variables (?V{global_var_counter - vars_used} to ?V{global_var_counter - 1})")
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
