@@ -39,8 +39,10 @@ class PipelineRecord:
     stage2_status: str = "pending"
     stage2_dfa_result: Optional[Dict[str, Any]] = None  # DFA dict (formula, dfa_dot, num_states, num_transitions)
     stage2_formula: Optional[str] = None
-    stage2_num_states: int = 0
-    stage2_num_transitions: int = 0
+    stage2_num_states: int = 0  # Simplified DFA states
+    stage2_num_transitions: int = 0  # Simplified DFA transitions
+    stage2_original_num_states: int = 0  # Original DFA states (before simplification)
+    stage2_original_num_transitions: int = 0  # Original DFA transitions (before simplification)
     stage2_error: Optional[str] = None
 
     # Stage 3: DFAs -> AgentSpeak Code Generation
@@ -187,6 +189,23 @@ class PipelineLogger:
             self.current_record.stage2_formula = dfa_result.get('formula', 'N/A')
             self.current_record.stage2_num_states = dfa_result.get('num_states', 0)
             self.current_record.stage2_num_transitions = dfa_result.get('num_transitions', 0)
+            # NEW: Log original DFA statistics
+            self.current_record.stage2_original_num_states = dfa_result.get('original_num_states', 0)
+            self.current_record.stage2_original_num_transitions = dfa_result.get('original_num_transitions', 0)
+
+            # Save both original and simplified DFA DOT files
+            if self.current_log_dir:
+                # Save original DFA (before simplification)
+                if 'original_dfa_dot' in dfa_result:
+                    original_dfa_path = self.current_log_dir / "dfa_original.dot"
+                    with open(original_dfa_path, 'w') as f:
+                        f.write(dfa_result['original_dfa_dot'])
+
+                # Save simplified DFA (after simplification)
+                if 'dfa_dot' in dfa_result:
+                    simplified_dfa_path = self.current_log_dir / "dfa_simplified.dot"
+                    with open(simplified_dfa_path, 'w') as f:
+                        f.write(dfa_result['dfa_dot'])
         elif error:
             self.current_record.stage2_status = "failed"
             self.current_record.stage2_error = str(error)
@@ -415,15 +434,35 @@ class PipelineLogger:
                 f.write("DFA GENERATION RESULT\n")
                 f.write("~"*40 + "\n")
 
-                f.write(f"Formula: {record.get('stage2_formula', 'N/A')}\n")
-                f.write(f"States: {record.get('stage2_num_states', 0)}\n")
-                f.write(f"Transitions: {record.get('stage2_num_transitions', 0)}\n")
+                f.write(f"Formula: {record.get('stage2_formula', 'N/A')}\n\n")
 
-                # Optionally show a snippet of the DFA DOT format
+                # Show both original and simplified DFA statistics
+                f.write("Original DFA (before simplification):\n")
+                f.write(f"  States: {record.get('stage2_original_num_states', 0)}\n")
+                f.write(f"  Transitions: {record.get('stage2_original_num_transitions', 0)}\n")
+                f.write(f"  File: dfa_original.dot\n\n")
+
+                f.write("Simplified DFA (after simplification):\n")
+                f.write(f"  States: {record.get('stage2_num_states', 0)}\n")
+                f.write(f"  Transitions: {record.get('stage2_num_transitions', 0)}\n")
+                f.write(f"  File: dfa_simplified.dot\n\n")
+
+                # Show simplification statistics if available
                 dfa_result = record['stage2_dfa_result']
+                if 'simplification_stats' in dfa_result:
+                    stats = dfa_result['simplification_stats']
+                    f.write("Simplification Statistics:\n")
+                    f.write(f"  Method: {stats.get('method', 'N/A')}\n")
+                    f.write(f"  Predicates: {stats.get('num_predicates', 0)}\n")
+                    if 'num_original_states' in stats:
+                        f.write(f"  Original States → New States: {stats['num_original_states']} → {stats['num_new_states']}\n")
+                        f.write(f"  Original Transitions → New Transitions: {stats['num_original_transitions']} → {stats['num_new_transitions']}\n")
+                    f.write("\n")
+
+                # Optionally show a snippet of the simplified DFA DOT format
                 dfa_dot = dfa_result.get('dfa_dot', '')
                 if dfa_dot:
-                    f.write(f"\nDFA DOT Format (first 300 chars):\n")
+                    f.write(f"Simplified DFA DOT Format (first 300 chars):\n")
                     f.write(dfa_dot[:300] + "...\n")
 
                 f.write("\n")

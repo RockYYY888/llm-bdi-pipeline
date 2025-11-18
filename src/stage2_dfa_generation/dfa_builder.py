@@ -49,9 +49,12 @@ class DFABuilder:
         Returns:
             Dict with:
                 - formula: Original LTLf formula string
+                - original_dfa_dot: Original DFA in DOT format (before simplification)
                 - dfa_dot: Simplified DFA in DOT format (with atomic literals)
-                - num_states: Number of states in DFA
-                - num_transitions: Number of transitions (may increase after simplification)
+                - num_states: Number of states in simplified DFA
+                - num_transitions: Number of transitions in simplified DFA (may increase after simplification)
+                - original_num_states: Number of states in original DFA
+                - original_num_transitions: Number of transitions in original DFA
                 - simplification_stats: Statistics about the simplification process
         """
         from stage1_interpretation.ltlf_formula import LogicalOperator
@@ -75,6 +78,10 @@ class DFABuilder:
         # Step 1: Generate DFA using the convert method (takes ltl_spec object)
         original_dfa_dot, metadata = self.converter.convert(ltl_spec)
 
+        # Parse original DFA to get statistics (BEFORE simplification)
+        original_num_states = self._count_states(original_dfa_dot)
+        original_num_transitions = self._count_transitions(original_dfa_dot)
+
         # Step 2: Simplify DFA (mandatory)
         # This replaces complex boolean expressions with atomic literals (var or !var)
         if not hasattr(ltl_spec, 'grounding_map') or ltl_spec.grounding_map is None:
@@ -82,15 +89,18 @@ class DFABuilder:
 
         simplified_result = self.simplifier.simplify(original_dfa_dot, ltl_spec.grounding_map)
 
-        # Parse simplified DFA to get statistics
+        # Parse simplified DFA to get statistics (AFTER simplification)
         num_states = self._count_states(simplified_result.simplified_dot)
         num_transitions = self._count_transitions(simplified_result.simplified_dot)
 
         result = {
             "formula": formula_str,
-            "dfa_dot": simplified_result.simplified_dot,
-            "num_states": num_states,
-            "num_transitions": num_transitions,
+            "original_dfa_dot": original_dfa_dot,  # NEW: Original DFA before simplification
+            "dfa_dot": simplified_result.simplified_dot,  # Simplified DFA
+            "num_states": num_states,  # Simplified DFA states
+            "num_transitions": num_transitions,  # Simplified DFA transitions
+            "original_num_states": original_num_states,  # NEW: Original DFA states
+            "original_num_transitions": original_num_transitions,  # NEW: Original DFA transitions
             "simplification_stats": simplified_result.stats
         }
 
@@ -163,8 +173,12 @@ def test_dfa_builder():
 
     print(f"\n✓ DFA Generated and Simplified")
     print(f"  Formula: {result['formula']}")
-    print(f"  States: {result['num_states']}")
-    print(f"  Transitions: {result['num_transitions']}")
+    print(f"\n  Original DFA (before simplification):")
+    print(f"    States: {result['original_num_states']}")
+    print(f"    Transitions: {result['original_num_transitions']}")
+    print(f"\n  Simplified DFA (after simplification):")
+    print(f"    States: {result['num_states']}")
+    print(f"    Transitions: {result['num_transitions']}")
     print(f"\nSimplification Stats:")
     stats = result['simplification_stats']
     print(f"  Method: {stats['method']}")
@@ -177,8 +191,10 @@ def test_dfa_builder():
         print(f"  Original Transitions: {stats['num_original_transitions']}")
         print(f"  New Transitions: {stats['num_new_transitions']}")
 
-    print(f"\nSimplified DFA DOT (first 500 chars):")
-    print(result['dfa_dot'][:500] + "...")
+    print(f"\nOriginal DFA DOT (first 300 chars):")
+    print(result['original_dfa_dot'][:300] + "...")
+    print(f"\nSimplified DFA DOT (first 300 chars):")
+    print(result['dfa_dot'][:300] + "...")
 
     print("\n" + "="*80)
 

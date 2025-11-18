@@ -183,14 +183,24 @@ class LTL_BDI_Pipeline:
 
             print(f"✓ DFA Generation Complete")
             print(f"  Formula: {dfa_result['formula']}")
-            print(f"  States: {dfa_result['num_states']}")
-            print(f"  Transitions: {dfa_result['num_transitions']}")
+            print(f"\n  Original DFA (before simplification):")
+            print(f"    States: {dfa_result['original_num_states']}")
+            print(f"    Transitions: {dfa_result['original_num_transitions']}")
+            print(f"    Saved to: {self.output_dir / 'dfa_original.dot'}")
+            print(f"\n  Simplified DFA (after simplification):")
+            print(f"    States: {dfa_result['num_states']}")
+            print(f"    Transitions: {dfa_result['num_transitions']}")
+            print(f"    Saved to: {self.output_dir / 'dfa_simplified.dot'}")
 
-            # Save DFA result to output
+            # Save complete DFA result to JSON
             output_file = self.output_dir / "dfa.json"
             import json
-            output_file.write_text(json.dumps(dfa_result, indent=2))
-            print(f"  Saved to: {output_file}")
+            # Remove the actual DOT strings from JSON to keep it readable
+            # (DOT files are saved separately)
+            json_data = {k: v for k, v in dfa_result.items()
+                        if k not in ['dfa_dot', 'original_dfa_dot']}
+            output_file.write_text(json.dumps(json_data, indent=2))
+            print(f"\n  Metadata saved to: {output_file}")
 
             return dfa_result
 
