@@ -191,9 +191,9 @@ def test_dfa_builder():
         print(f"  Original Transitions: {stats['num_original_transitions']}")
         print(f"  New Transitions: {stats['num_new_transitions']}")
 
-    print(f"\nOriginal DFA DOT (complete):")
+    print(f"\nOriginal DFA:")
     print(result['original_dfa_dot'])
-    print(f"\nSimplified DFA DOT (complete):")
+    print(f"\nSimplified DFA:")
     print(result['dfa_dot'])
 
     print("\n" + "="*80)

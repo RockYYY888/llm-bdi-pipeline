@@ -459,16 +459,16 @@ class PipelineLogger:
                         f.write(f"  Original Transitions → New Transitions: {stats['num_original_transitions']} → {stats['num_new_transitions']}\n")
                     f.write("\n")
 
-                # Show complete original DFA DOT format
+                # Show original DFA DOT format
                 original_dfa_dot = dfa_result.get('original_dfa_dot', '')
                 if original_dfa_dot:
-                    f.write(f"Original DFA DOT Format (complete):\n")
+                    f.write(f"Original DFA:\n")
                     f.write(original_dfa_dot + "\n\n")
 
-                # Show complete simplified DFA DOT format
+                # Show simplified DFA DOT format
                 dfa_dot = dfa_result.get('dfa_dot', '')
                 if dfa_dot:
-                    f.write(f"Simplified DFA DOT Format (complete):\n")
+                    f.write(f"Simplified DFA:\n")
                     f.write(dfa_dot + "\n")
 
                 f.write("\n")
