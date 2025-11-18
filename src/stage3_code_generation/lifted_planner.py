@@ -98,7 +98,7 @@ class LiftedPlanner:
         self._mutex_predicates = self._extract_mutex_predicates()
 
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
-                         max_states: int = 10000) -> Dict:
+                         max_states: int = 200000) -> Dict:
         """
         Explore abstract state space from goal
 
@@ -144,7 +144,7 @@ class LiftedPlanner:
             current_state = queue.popleft()
             states_explored += 1
 
-            if states_explored % 100 == 0:
+            if states_explored % 10000 == 0:
                 print(f"  Explored {states_explored} abstract states, "
                       f"{len(visited)} unique states, "
                       f"{transitions_added} transitions, "
