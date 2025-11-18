@@ -132,6 +132,10 @@ class BackwardPlannerGenerator:
         all_state_graphs = []  # For generating shared section once
         all_goal_sections = []  # Goal-specific sections only
 
+        # CRITICAL FIX: Global variable counter to prevent conflicts between
+        # multiple LiftedPlanner instances. Each instance gets unique variable IDs.
+        global_var_counter = 0
+
         for i, (from_state, to_state, label) in enumerate(dfa_info.transitions):
             print(f"\n[Transition {i+1}/{len(dfa_info.transitions)}] {from_state} --[{label}]-> {to_state}")
 
@@ -188,12 +192,17 @@ class BackwardPlannerGenerator:
 
                     try:
                         # LIFTED PLANNING: Use true lifted planner with unification
-                        # No need to pass objects - lifted planner works with abstract variables
-                        planner = LiftedPlanner(self.domain)
+                        # Pass global_var_counter as offset to prevent variable name conflicts
+                        planner = LiftedPlanner(self.domain, var_counter_offset=global_var_counter)
 
                         # Explore using normalized (variable-based) goal
                         state_graph = planner.explore_from_goal(normalized_preds)
                         print(f"    State graph: {state_graph}")
+
+                        # Update global counter based on how many variables this planner used
+                        # Each exploration can use up to max_states * avg_vars_per_state variables
+                        # Conservative estimate: reserve 10000 variable IDs per exploration
+                        global_var_counter += 10000
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
@@ -282,10 +291,9 @@ class BackwardPlannerGenerator:
 
         print(f"\n[Backward Planner Generator] Code generation complete")
         print(f"Total code length: {len(final_code)} characters")
-        print(f"Code structure optimization:")
-        print(f"  Shared section generated: 1 time (initial beliefs + action plans)")
+        print(f"Code structure:")
+        print(f"  Shared section: 1 (initial beliefs + action plans)")
         print(f"  Goal-specific sections: {len(all_goal_sections)}")
-        print(f"  Redundancy eliminated: ~{(len(all_goal_sections) - 1) * 30:.0f}% of shared code")
 
         # Variable-level cache statistics
         print(f"\nVariable-level planning cache statistics:")

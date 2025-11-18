@@ -73,12 +73,15 @@ class LiftedPlanner:
     State space is MUCH smaller because we don't enumerate all object combinations.
     """
 
-    def __init__(self, domain: PDDLDomain):
+    def __init__(self, domain: PDDLDomain, var_counter_offset: int = 0):
         """
         Initialize lifted planner
 
         Args:
             domain: PDDL domain definition
+            var_counter_offset: Starting value for variable counter (default: 0)
+                               Use this to prevent variable name conflicts when
+                               creating multiple LiftedPlanner instances
         """
         self.domain = domain
         self.condition_parser = PDDLConditionParser()
@@ -88,7 +91,8 @@ class LiftedPlanner:
         self._abstract_actions = self._parse_abstract_actions()
 
         # Variable generator for introducing new variables
-        self._var_counter = 0
+        # Start from offset to avoid conflicts between multiple planner instances
+        self._var_counter = var_counter_offset
 
         # CRITICAL FIX #2: Extract mutex predicates for state validation
         self._mutex_predicates = self._extract_mutex_predicates()
