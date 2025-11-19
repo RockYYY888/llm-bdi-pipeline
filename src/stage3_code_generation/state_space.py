@@ -64,9 +64,15 @@ class PredicateAtom:
                        Example: {"a": "?v0", "b": "?v1"} will convert on(a,b) → on(V0, V1)
 
         Returns:
-            String like "on(a, b)" or "not clear(c)" or "on(V0, V1)" if parameterized
+            String like "on(a, b)" or "~clear(c)" or "on(V0, V1)" if parameterized
+
+        Note:
+            Uses strong negation (~) instead of weak negation (not) because:
+            - ~ontable(c): "c is definitely not on the table" (achievable state)
+            - not ontable(c): "lack knowledge about ontable(c)" (not an achievable goal)
+            Strong negation corresponds to PDDL effects like (not (ontable c))
         """
-        prefix = "not " if self.negated else ""
+        prefix = "~" if self.negated else ""
         if self.args:
             if obj_to_var:
                 # Object-level parameterization: a → ?v0 → V0
