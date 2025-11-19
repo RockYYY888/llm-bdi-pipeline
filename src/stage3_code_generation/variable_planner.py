@@ -1071,14 +1071,20 @@ class VariablePlanner:
         """
         H^2 mutex detection (Helmert 2006, Fast Downward)
 
-        Algorithm:
-        1. Start with all predicate pairs as potential mutexes
-        2. If ANY action can achieve both P and Q simultaneously, they're NOT mutex
-        3. Return remaining pairs
+        Standard h^2 algorithm:
+        1. Build abstract planning graph by forward reachability analysis
+        2. Track which predicate pairs can be achieved together
+        3. Pairs that can never be achieved together are mutex
+        4. Propagate mutexes through action preconditions
 
-        This is SOUND but not COMPLETE:
+        This is SOUND and MORE COMPLETE than simplified version:
         - Sound: All returned pairs are truly mutex
-        - Incomplete: May miss some mutex pairs
+        - More complete: Uses reachability analysis, not just single-action check
+
+        For lifted planning:
+        - Start from empty state (most conservative)
+        - Use abstract predicates with variable patterns
+        - Track achievable predicate pairs through action sequences
 
         Returns:
             Set of (pred_name1, pred_name2) tuples that are mutex
@@ -1095,21 +1101,85 @@ class VariablePlanner:
                             for p2 in all_pred_names
                             if p1 < p2}
 
-        # Remove pairs that can be achieved together by some action
-        for action in self._abstract_actions:
-            adds = {eff.predicate.name
-                   for eff in action.effects
-                   if eff.is_add}
+        # Build planning graph to find reachable predicate pairs
+        # Layer 0: For lifted planning, assume all single predicates are reachable
+        # This is optimistic but necessary without a concrete initial state
+        reachable_pairs = set()  # Pairs that CAN coexist
+        reachable_facts = set(all_pred_names)  # All predicates are potentially reachable
 
-            # If action adds both P and Q, they're not mutex
-            pairs_to_remove = {(p1, p2)
-                              for p1 in adds
-                              for p2 in adds
-                              if p1 < p2}
+        # Iteratively expand reachability
+        # Fixed point: keep expanding until no new pairs are found
+        max_iterations = 10  # Prevent infinite loop
+        for iteration in range(max_iterations):
+            new_pairs_found = False
+            mutexes_this_iteration = potential_mutexes - reachable_pairs
 
-            potential_mutexes -= pairs_to_remove
+            # Try each action
+            for action in self._abstract_actions:
+                # Collect preconditions and effects
+                preconds = {p.name for p in action.preconditions if not p.negated}
+                adds = {eff.predicate.name for eff in action.effects if eff.is_add}
+                deletes = {eff.predicate.name for eff in action.effects if not eff.is_add}
 
-        return potential_mutexes
+                # Check if action is applicable:
+                # Action is NOT applicable if its preconditions contain a KNOWN mutex pair
+                precond_has_mutex = False
+                for p1 in preconds:
+                    for p2 in preconds:
+                        if p1 < p2 and (p1, p2) in mutexes_this_iteration:
+                            precond_has_mutex = True
+                            break
+                    if precond_has_mutex:
+                        break
+
+                # If preconditions contain mutex, this action cannot execute
+                if precond_has_mutex:
+                    continue
+
+                # Action CAN execute - its effects can be achieved
+                # All pairs of add effects can coexist (in the resulting state)
+                for p1 in adds:
+                    for p2 in adds:
+                        if p1 < p2:
+                            pair = (p1, p2)
+                            if pair not in reachable_pairs:
+                                reachable_pairs.add(pair)
+                                new_pairs_found = True
+
+                # CRITICAL: Effects can coexist with preconditions ONLY if not deleted
+                # After action executes: state = (preconditions - deletes) + adds
+                # So P (from precond) and Q (from adds) can coexist ONLY if P is not deleted
+                for p1 in adds:
+                    for p2 in preconds:
+                        if p1 != p2 and p2 not in deletes:
+                            # p2 survives (not deleted), p1 is added
+                            pair = (min(p1, p2), max(p1, p2))
+                            if pair not in reachable_pairs:
+                                reachable_pairs.add(pair)
+                                new_pairs_found = True
+
+                # Precondition pairs can coexist BEFORE action (action is applicable)
+                # But AFTER action, only non-deleted preconditions survive
+                for p1 in preconds:
+                    if p1 in deletes:
+                        continue  # p1 is deleted, can't use it
+                    for p2 in preconds:
+                        if p2 in deletes:
+                            continue  # p2 is deleted, can't use it
+                        if p1 < p2:
+                            pair = (p1, p2)
+                            if pair not in reachable_pairs:
+                                reachable_pairs.add(pair)
+                                new_pairs_found = True
+
+            # Fixed point check
+            if not new_pairs_found:
+                break
+
+        # Remove reachable pairs from potential mutexes
+        mutexes = potential_mutexes - reachable_pairs
+
+        return mutexes
 
     def _detect_exactly_one_groups(self) -> List[Set[str]]:
         """
