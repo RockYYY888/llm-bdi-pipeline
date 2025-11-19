@@ -12,7 +12,7 @@ _parent = str(Path(__file__).parent.parent / "src")
 if str(_parent) not in sys.path:
     sys.path.insert(0, str(_parent))
 
-from stage3_code_generation.lifted_planner import LiftedPlanner
+from stage3_code_generation.variable_planner import VariablePlanner
 from stage3_code_generation.state_space import PredicateAtom
 from utils.pddl_parser import PDDLParser
 
@@ -106,7 +106,7 @@ def test_mutex_validation():
     # Test with holding(?X) goal
     goal_preds = [PredicateAtom("holding", ["?X"])]
 
-    planner = LiftedPlanner(domain)
+    planner = VariablePlanner(domain)
     print(f"Goal: {[str(p) for p in goal_preds]}")
     print(f"Extracted mutex predicates: {planner._mutex_predicates}")
     print("\nStarting exploration...\n")

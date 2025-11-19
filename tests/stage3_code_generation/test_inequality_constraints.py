@@ -12,7 +12,7 @@ _parent = str(Path(__file__).parent.parent / "src")
 if _parent not in sys.path:
     sys.path.insert(0, str(_parent))
 
-from stage3_code_generation.lifted_planner import LiftedPlanner
+from stage3_code_generation.variable_planner import VariablePlanner
 from stage3_code_generation.state_space import PredicateAtom
 from utils.pddl_parser import PDDLParser
 
@@ -27,7 +27,7 @@ def test_inequality_constraints():
     domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
     domain = PDDLParser.parse_domain(str(domain_file))
 
-    planner = LiftedPlanner(domain)
+    planner = VariablePlanner(domain)
 
     # Check that actions have inequality constraints extracted
     print("\n1. Checking extracted inequality constraints from PDDL:")

@@ -1,20 +1,20 @@
 """
-True Lifted Planning using Unification
+Variable-Level Planning using Unification
 
-This implements REAL lifted planning that:
-1. Explores ABSTRACT state space (not grounded)
-2. Uses UNIFICATION to apply actions (not enumeration)
-3. Maintains variable CONSTRAINTS
+This implements planning with VARIABLES instead of concrete OBJECTS:
+1. Explores state space using VARIABLES (?X, ?Y) not objects (a, b, c)
+2. Uses UNIFICATION to apply actions (not object enumeration)
+3. Maintains variable INEQUALITY CONSTRAINTS (?X != ?Y)
 4. State space size independent of number of objects
 
-Key differences from pseudo-lifted (grounded with variables):
-- DOES NOT enumerate all variable combinations
-- DOES introduce variables on-demand through unification
-- State count: O(abstract patterns) not O(grounded combinations)
+Key differences from object-level (grounded) planning:
+- DOES NOT enumerate all object combinations
+- Plans work for ANY objects that satisfy variable constraints
+- State count: O(variable patterns) not O(object combinations)
 
 Example:
-    10 objects, object-level: 10,000+ states
-    10 objects, lifted: ~50 abstract states
+    10 objects, object-level planning: 10,000+ states
+    10 objects, variable-level planning: ~50 variable states
 """
 
 import re
@@ -57,25 +57,28 @@ class AbstractAction:
     inequality_constraints: Set[Tuple[str, str]]  # From preconditions: (not (= ?x ?y))
 
 
-class LiftedPlanner:
+class VariablePlanner:
     """
-    True lifted planner using unification
+    Variable-level planner using unification
+
+    Plans with VARIABLES (?X, ?Y) instead of concrete OBJECTS (a, b, c).
 
     Key insight: Don't ground actions to all object combinations!
-    Instead, use unification to find which abstract action can apply to abstract state.
+    Instead, use unification to find which variable-level action can apply to variable state.
 
     Algorithm:
-    1. Start with abstract goal state (e.g., {on(?X, ?Y)})
-    2. For each abstract action, try to UNIFY preconditions with current state
-    3. If unification succeeds, apply abstract effects to generate new abstract state
-    4. Repeat until no new abstract states discovered
+    1. Start with variable goal state (e.g., {on(?X, ?Y)})
+    2. For each action schema, try to UNIFY preconditions with current variable state
+    3. If unification succeeds, apply effects to generate new variable state
+    4. Repeat until no new variable states discovered
 
     State space is MUCH smaller because we don't enumerate all object combinations.
+    Plans work for ANY objects that satisfy the variable constraints.
     """
 
     def __init__(self, domain: PDDLDomain, var_counter_offset: int = 0):
         """
-        Initialize lifted planner
+        Initialize variable-level planner
 
         Args:
             domain: PDDL domain definition
