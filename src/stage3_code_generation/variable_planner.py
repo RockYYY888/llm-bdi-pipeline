@@ -1000,18 +1000,10 @@ class VariablePlanner:
 
     def _print_comparison(self, abstract_state_count: int):
         """
-        Print comparison with grounded approach
+        Print variable-level planning statistics
 
         Args:
             abstract_state_count: Number of abstract states explored
         """
-        print(f"\n[Lifted Planning Benefits]")
-        print(f"  Abstract states explored: {abstract_state_count:,}")
-        print(f"  This is INDEPENDENT of number of domain objects!")
-        print(f"  ")
-        print(f"  Comparison with grounded planning:")
-        print(f"    3 objects: ~hundreds of grounded states")
-        print(f"    10 objects: ~thousands-tens of thousands of grounded states")
-        print(f"    Lifted: {abstract_state_count:,} abstract states (same for any number of objects)")
-        print(f"  ")
-        print(f"  This is TRUE lifted planning - exploring abstract state space!")
+        print(f"\n[Variable-Level Planning]")
+        print(f"  States explored: {abstract_state_count}")

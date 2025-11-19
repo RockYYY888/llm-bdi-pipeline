@@ -179,8 +179,7 @@ class BackwardPlannerGenerator:
                     # Cache HIT: Reuse existing exploration
                     state_graph, _ = goal_cache[pattern_key]
                     cache_hits += 1
-                    print(f"    ✓ Cache HIT! Reusing variable-level exploration")
-                    print(f"    State graph: {state_graph}")
+                    print(f"    ✓ Cache HIT")
                 else:
                     # Cache MISS: Need to explore with variables
                     cache_misses += 1
@@ -196,7 +195,6 @@ class BackwardPlannerGenerator:
 
                         # Explore using normalized (variable-based) goal
                         state_graph = planner.explore_from_goal(normalized_preds)
-                        print(f"    State graph: {state_graph}")
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
@@ -204,7 +202,6 @@ class BackwardPlannerGenerator:
 
                         # Cache the result with pattern key
                         goal_cache[pattern_key] = (state_graph, var_mapping)
-                        print(f"    → Cached exploration result with pattern key")
 
                     except Exception as e:
                         print(f"    Error during exploration: {e}")
@@ -237,7 +234,6 @@ class BackwardPlannerGenerator:
                     goal_section = codegen.generate_goal_specific_section()
                     all_goal_sections.append(goal_section)
                     generated_patterns.add(pattern_key)  # Mark pattern as generated
-                    print(f"    Generated {len(goal_section)} characters of goal-specific code (pattern: {pattern_key})")
 
                 except Exception as e:
                     print(f"    Error during codegen: {e}")
