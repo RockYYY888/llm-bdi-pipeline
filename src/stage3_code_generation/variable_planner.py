@@ -570,46 +570,84 @@ class VariablePlanner:
             - If all satisfied: (Substitution, [])
             - If some unsatisfied: (None, [list of unsatisfied preconditions])
         """
-        # Strategy: for each precondition, find matching state predicate
-        # Build up substitution incrementally
-
         # Handle empty preconditions
         if not preconditions:
             return Substitution(), []
 
-        # Try to find a consistent matching
-        # This is a constraint satisfaction problem
-        # For now, use simple greedy approach: try each precondition in order
+        # Use backtracking search to find valid unification
+        # This ensures we explore all possible assignments and don't miss
+        # valid solutions due to greedy choice ordering
+        result = self._backtrack_unify(
+            state_preds=list(state_preds),
+            preconditions=preconditions,
+            constraints=constraints,
+            precond_idx=0,
+            current_subst=Substitution(),
+            used_state_preds=set()
+        )
 
-        current_subst = Substitution()
-        unsatisfied = []
-
-        for precond in preconditions:
-            # Find a state predicate that unifies with this precondition
-            found = False
-
-            for state_pred in state_preds:
-                # Try to unify
-                unified = Unifier.unify_predicates(precond, state_pred, current_subst)
-
-                if unified is not None:
-                    # Check if unification respects constraints
-                    if constraints.is_consistent(unified):
-                        current_subst = unified
-                        found = True
-                        break
-
-            if not found:
-                # Could not find matching predicate for this precondition
-                # Mark as unsatisfied for subgoal generation
-                unsatisfied.append(precond)
-
-        if unsatisfied:
-            # Return unsatisfied preconditions for subgoal generation
-            return None, unsatisfied
+        if result is not None:
+            return result, []
         else:
-            # All preconditions satisfied
-            return current_subst, []
+            # No complete unification found - return all preconditions as unsatisfied
+            return None, preconditions
+
+    def _backtrack_unify(self,
+                        state_preds: List[PredicateAtom],
+                        preconditions: List[PredicateAtom],
+                        constraints: ConstraintSet,
+                        precond_idx: int,
+                        current_subst: Substitution,
+                        used_state_preds: set) -> Optional[Substitution]:
+        """
+        Backtracking search for consistent unification.
+
+        Explores all possible assignments of state predicates to preconditions,
+        ensuring we find a valid unification if one exists.
+
+        Args:
+            state_preds: Available state predicates
+            preconditions: Preconditions to satisfy
+            constraints: Constraint set that must be respected
+            precond_idx: Current precondition index
+            current_subst: Current substitution
+            used_state_preds: Set of already-matched state predicate indices
+
+        Returns:
+            Valid substitution if found, None otherwise
+        """
+        # Base case: all preconditions satisfied
+        if precond_idx >= len(preconditions):
+            return current_subst
+
+        precond = preconditions[precond_idx]
+
+        # Try each state predicate
+        for state_idx, state_pred in enumerate(state_preds):
+            # Skip if already used (each state predicate can only match once)
+            if state_idx in used_state_preds:
+                continue
+
+            # Try to unify
+            unified = Unifier.unify_predicates(precond, state_pred, current_subst)
+
+            if unified is not None and constraints.is_consistent(unified):
+                # Valid unification - recurse with next precondition
+                new_used = used_state_preds | {state_idx}
+                result = self._backtrack_unify(
+                    state_preds=state_preds,
+                    preconditions=preconditions,
+                    constraints=constraints,
+                    precond_idx=precond_idx + 1,
+                    current_subst=unified,
+                    used_state_preds=new_used
+                )
+
+                if result is not None:
+                    return result
+
+        # No valid assignment found for this precondition
+        return None
 
     def _generate_subgoal_states_for_precondition(self,
                                                    precondition: PredicateAtom,
@@ -709,10 +747,26 @@ class VariablePlanner:
                     if will_be_deleted:
                         continue
 
-                    # Only keep if it's a global 0-arity predicate (like handempty)
-                    # Other predicates should be discovered through backward chaining
+                    # CRITICAL FIX #2: Preserve relevant context predicates
+                    # Keep predicates that share variables with the subgoal predicates
+                    # This ensures we maintain essential structural constraints
+
+                    # Always keep 0-arity predicates (global state)
                     if len(state_pred.args) == 0:
                         subgoal_predicates.add(state_pred)
+                    else:
+                        # Keep if it shares variables with any subgoal predicate
+                        shares_variables = False
+                        state_pred_vars = {arg for arg in state_pred.args if arg.startswith('?')}
+
+                        for sg_pred in subgoal_predicates:
+                            sg_vars = {arg for arg in sg_pred.args if arg.startswith('?')}
+                            if state_pred_vars & sg_vars:  # Non-empty intersection
+                                shares_variables = True
+                                break
+
+                        if shares_variables:
+                            subgoal_predicates.add(state_pred)
 
                 # CRITICAL FIX #2 (BUG FIX): Validate subgoal state consistency
                 # Skip generating invalid subgoal states with mutex conflicts
