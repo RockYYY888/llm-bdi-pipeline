@@ -85,6 +85,12 @@ digraph MONA_DFA {
         print(f"Truncated: {truncated}")
         print(f"Code length: {len(code)} characters")
 
+        print("\n" + "="*80)
+        print("GENERATED AGENTSPEAK CODE:")
+        print("="*80)
+        print(code)
+        print("="*80)
+
         # Check cache statistics in output
         # Should see: Cache hits: 2, Cache misses: 1
         # (First on_a_b is miss, then on_c_d and on_e_f are hits)

@@ -101,9 +101,13 @@ class VariablePlanner:
         self._mutex_predicates = self._extract_mutex_predicates()
 
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
-                         max_states: int = 200000) -> Dict:
+                         max_states: int = 200000,
+                         max_depth: int = 5) -> Dict:
         """
         Explore abstract state space from goal using BACKWARD PLANNING (Regression)
+
+        CRITICAL: To prevent infinite state space explosion, we only allow variables
+        that appear in the goal predicates. This is essential for lifted planning.
 
         This implements TRUE backward planning:
         1. Start from goal state
@@ -130,6 +134,16 @@ class VariablePlanner:
         print(f"[Backward Planner] Goal: {[str(p) for p in goal_predicates]}")
         print(f"[Backward Planner] Abstract actions: {len(self._abstract_actions)}")
         print(f"[Backward Planner] Max abstract states: {max_states:,}")
+        print(f"[Backward Planner] Max depth: {max_depth}")
+
+        # Extract allowed variables from goal (CRITICAL for preventing state space explosion)
+        # We only allow variables that appear in the goal predicates
+        allowed_vars = set()
+        for pred in goal_predicates:
+            for arg in pred.args:
+                if arg.startswith('?'):
+                    allowed_vars.add(arg)
+        print(f"[Backward Planner] Allowed variables: {sorted(allowed_vars)}")
 
         # Infer complete goal state
         complete_goal_preds = self._infer_complete_goal(goal_predicates)
@@ -154,11 +168,21 @@ class VariablePlanner:
             current_state = queue.popleft()
             states_explored += 1
 
+            # DEBUG: Print first 1000 explorations (disabled)
+            # if states_explored <= 1000:
+            #     print(f"\n[DEBUG {states_explored}] Exploring state (depth={current_state.depth}):")
+            #     print(f"  Predicates: {current_state.predicates}")
+            #     print(f"  Constraints: {current_state.constraints}")
+
             if states_explored % 10000 == 0:
                 print(f"  Explored {states_explored} abstract states, "
                       f"{len(visited)} unique states, "
                       f"{transitions_added} transitions, "
                       f"queue: {len(queue)}")
+
+            # Skip states that exceed max depth
+            if current_state.depth >= max_depth:
+                continue
 
             # Try each abstract action for REGRESSION
             for abstract_action in self._abstract_actions:
@@ -167,6 +191,21 @@ class VariablePlanner:
                 results = self._regress_abstract_action(abstract_action, current_state)
 
                 for new_state, action_subst in results:
+                    # CRITICAL: Check if new_state introduces variables not in goal
+                    # This prevents infinite state space explosion
+                    state_vars = set()
+                    for pred in new_state.predicates:
+                        for arg in pred.args:
+                            if arg.startswith('?'):
+                                state_vars.add(arg)
+
+                    # Reject states with new variables
+                    if not state_vars.issubset(allowed_vars):
+                        new_vars = state_vars - allowed_vars
+                        # if states_explored <= 1000:
+                        #     print(f"    ✗ REJECT state via {abstract_action.action.name}: introduces new vars {new_vars}")
+                        continue  # Skip this state
+
                     # Check if we've seen this abstract state
                     state_key = self._state_key(new_state)
 
@@ -181,6 +220,10 @@ class VariablePlanner:
                         )
                         visited[state_key] = final_state
                         queue.append(final_state)
+
+                        # DEBUG: Print new states found (first 1000 explorations - disabled)
+                        # if states_explored <= 1000:
+                        #     print(f"    → NEW state via {abstract_action.action.name}: {new_state.predicates}")
 
                     # Record transition: new_state --[action]--> current_state
                     # (backward direction: predecessor -> successor)
