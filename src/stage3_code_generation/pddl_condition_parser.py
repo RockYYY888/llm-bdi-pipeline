@@ -5,7 +5,6 @@ Parses PDDL preconditions and effects from their string representations.
 Handles:
 - Boolean connectives: and, or, not
 - Equality: = (ignored in grounding)
-- Non-deterministic effects: oneof
 - Grounding: Apply variable bindings to convert ?b1 -> a
 
 Example preconditions:
@@ -13,8 +12,8 @@ Example preconditions:
     → [handempty, clear(a)] (with bindings {?b1: a, ?b2: b})
 
 Example effects:
-    "oneof (and (holding ?b1) (not (handempty))) (and (ontable ?b1))"
-    → [[+holding(a), -handempty], [+ontable(a)]]
+    "and (holding ?b1) (not (handempty))"
+    → [+holding(a), -handempty]
 """
 
 import re
@@ -270,12 +269,11 @@ class PDDLEffectParser:
     Handles:
     - and: Conjunction of effects
     - not: Deletion effects
-    - oneof: Non-deterministic effects (multiple branches)
 
     Example:
-        effect_str = "oneof (and (holding ?b1) (not (handempty))) (and (ontable ?b1))"
+        effect_str = "and (holding ?b1) (not (handempty))"
         bindings = {'?b1': 'a'}
-        result = [[+holding(a), -handempty], [+ontable(a)]]
+        result = [[+holding(a), -handempty]]
     """
 
     def __init__(self):
@@ -290,9 +288,7 @@ class PDDLEffectParser:
             bindings: Variable bindings
 
         Returns:
-            List of branches (each branch is a list of EffectAtoms)
-            For deterministic effects: single branch
-            For oneof: multiple branches
+            List containing single branch (list of EffectAtoms)
         """
         if not effect_str or effect_str.strip() == "none":
             return [[]]  # Empty effect
@@ -310,11 +306,11 @@ class PDDLEffectParser:
         sexp, _ = self.sexp_parser.parse(tokens)
 
         # Extract effects
-        branches = self._extract_effects(sexp, bindings)
+        effects = self._extract_effects(sexp, bindings)
 
-        return branches
+        return [effects]  # Return single branch
 
-    def _extract_effects(self, sexp: Any, bindings: Dict[str, str]) -> List[List[EffectAtom]]:
+    def _extract_effects(self, sexp: Any, bindings: Dict[str, str]) -> List[EffectAtom]:
         """
         Recursively extract effects from s-expression tree
 
@@ -323,42 +319,33 @@ class PDDLEffectParser:
             bindings: Variable bindings
 
         Returns:
-            List of branches (each branch is a list of EffectAtoms)
+            List of EffectAtoms
         """
         if not isinstance(sexp, list) or len(sexp) == 0:
-            return [[]]
+            return []
 
         operator = sexp[0]
 
-        if operator == 'oneof':
-            # Non-deterministic: multiple branches
-            branches = []
-            for child in sexp[1:]:
-                child_branches = self._extract_effects(child, bindings)
-                # oneof children are alternatives, not combinations
-                branches.extend(child_branches)
-            return branches
-
-        elif operator == 'and':
-            # Conjunction: combine all effects into one branch
+        if operator == 'and':
+            # Conjunction: combine all effects
             effects = []
             for child in sexp[1:]:
                 child_effects = self._extract_single_effect(child, bindings, is_add=True)
                 if child_effects:
                     effects.extend(child_effects)
-            return [effects]
+            return effects
 
         elif operator == 'not':
             # Deletion effect
             if len(sexp) < 2:
-                return [[]]
+                return []
             effects = self._extract_single_effect(sexp[1], bindings, is_add=False)
-            return [effects]
+            return effects
 
         else:
             # Single predicate (add effect)
             effects = self._extract_single_effect(sexp, bindings, is_add=True)
-            return [effects]
+            return effects
 
     def _extract_single_effect(self, sexp: Any, bindings: Dict[str, str],
                                is_add: bool) -> List[EffectAtom]:
@@ -504,25 +491,14 @@ def test_effect_parser():
     for i, branch in enumerate(result1):
         print(f"  Branch {i}: {[str(e) for e in branch]}\n")
 
-    # Test 2: Non-deterministic (oneof)
-    effect2 = "oneof (and (holding ?b1) (clear ?b2) (not (handempty))) (and (clear ?b2) (ontable ?b1))"
-    bindings2 = {'?b1': 'a', '?b2': 'b'}
+    # Test 2: Single deletion effect
+    effect2 = "not (handempty)"
+    bindings2 = {}
     result2 = parser.parse(effect2, bindings2)
     print(f"Effect: {effect2}")
     print(f"Bindings: {bindings2}")
     print(f"Result: {result2}")
     for i, branch in enumerate(result2):
-        print(f"  Branch {i}: {[str(e) for e in branch]}")
-    print()
-
-    # Test 3: Oneof with empty branch
-    effect3 = "oneof (and) (and (holding ?b) (not (handempty)))"
-    bindings3 = {'?b': 'c'}
-    result3 = parser.parse(effect3, bindings3)
-    print(f"Effect: {effect3}")
-    print(f"Bindings: {bindings3}")
-    print(f"Result: {result3}")
-    for i, branch in enumerate(result3):
         print(f"  Branch {i}: {[str(e) for e in branch]}")
     print()
 

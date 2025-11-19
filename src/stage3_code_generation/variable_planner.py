@@ -53,7 +53,7 @@ class AbstractAction:
 
     # Cached parsed components
     preconditions: List[PredicateAtom]
-    effects: List[List]  # Effect branches (for oneof)
+    effects: List  # Effect atoms (deterministic)
     inequality_constraints: Set[Tuple[str, str]]  # From preconditions: (not (= ?x ?y))
 
 
@@ -284,10 +284,12 @@ class VariablePlanner:
 
             # Parse effects
             try:
-                effects = self.effect_parser.parse(
+                effect_branches = self.effect_parser.parse(
                     action.effects,
                     abstract_bindings
                 )
+                # Extract single branch (deterministic effects only)
+                effects = effect_branches[0] if effect_branches else []
             except Exception:
                 effects = []
 
@@ -436,46 +438,45 @@ class VariablePlanner:
                 # Constraint violated
                 return results
 
-        # Apply effects to generate new state(s)
-        for effect_branch in action.effects:
-            new_predicates = set(state.predicates)
+        # Apply effects to generate new state
+        new_predicates = set(state.predicates)
 
-            for effect_atom in effect_branch:
-                # Apply substitution to effect
-                effect_pred = unified_subst.apply_to_predicate(effect_atom.predicate)
+        for effect_atom in action.effects:
+            # Apply substitution to effect
+            effect_pred = unified_subst.apply_to_predicate(effect_atom.predicate)
 
-                if effect_atom.is_add:
-                    new_predicates.add(effect_pred)
-                else:
-                    new_predicates.discard(effect_pred)
+            if effect_atom.is_add:
+                new_predicates.add(effect_pred)
+            else:
+                new_predicates.discard(effect_pred)
 
-            # Merge constraints
-            new_constraints = state.constraints
+        # Merge constraints
+        new_constraints = state.constraints
 
-            # Add inequality constraints from action
-            for var1, var2 in action.inequality_constraints:
-                new_var1 = unified_subst.apply(var1)
-                new_var2 = unified_subst.apply(var2)
-                if new_var1.startswith('?') and new_var2.startswith('?'):
-                    new_constraint = Constraint(new_var1, new_var2, Constraint.INEQUALITY)
-                    new_constraints = new_constraints.add(new_constraint)
+        # Add inequality constraints from action
+        for var1, var2 in action.inequality_constraints:
+            new_var1 = unified_subst.apply(var1)
+            new_var2 = unified_subst.apply(var2)
+            if new_var1.startswith('?') and new_var2.startswith('?'):
+                new_constraint = Constraint(new_var1, new_var2, Constraint.INEQUALITY)
+                new_constraints = new_constraints.add(new_constraint)
 
-            # Extract implicit constraints from new predicates
-            implicit_constraints = self._extract_constraints_from_predicates(new_predicates)
-            new_constraints = new_constraints.merge(implicit_constraints)
+        # Extract implicit constraints from new predicates
+        implicit_constraints = self._extract_constraints_from_predicates(new_predicates)
+        new_constraints = new_constraints.merge(implicit_constraints)
 
-            if new_constraints is None or not new_constraints.is_consistent():
-                # Inconsistent constraints
-                continue
+        if new_constraints is None or not new_constraints.is_consistent():
+            # Inconsistent constraints
+            return results
 
-            # Validate state consistency (domain-specific)
-            if not self._validate_state_consistency(new_predicates):
-                continue
+        # Validate state consistency (domain-specific)
+        if not self._validate_state_consistency(new_predicates):
+            return results
 
-            # Create new state
-            new_state = AbstractState(new_predicates, new_constraints)
+        # Create new state
+        new_state = AbstractState(new_predicates, new_constraints)
 
-            results.append((new_state, unified_subst))
+        results.append((new_state, unified_subst))
 
         return results
 
@@ -511,14 +512,11 @@ class VariablePlanner:
         new_preconditions = [rename_subst.apply_to_predicate(p) for p in action.preconditions]
 
         new_effects = []
-        for effect_branch in action.effects:
-            new_branch = []
-            for effect_atom in effect_branch:
-                new_pred = rename_subst.apply_to_predicate(effect_atom.predicate)
-                # Create new effect atom with renamed predicate
-                from stage3_code_generation.pddl_condition_parser import EffectAtom
-                new_branch.append(EffectAtom(new_pred, effect_atom.is_add))
-            new_effects.append(new_branch)
+        for effect_atom in action.effects:
+            new_pred = rename_subst.apply_to_predicate(effect_atom.predicate)
+            # Create new effect atom with renamed predicate
+            from stage3_code_generation.pddl_condition_parser import EffectAtom
+            new_effects.append(EffectAtom(new_pred, effect_atom.is_add))
 
         # Rename inequality constraints
         new_inequality_constraints = set()
@@ -701,15 +699,12 @@ class VariablePlanner:
 
                     # Check if will be deleted by the action
                     will_be_deleted = False
-                    for effect_branch in action.effects:
-                        for effect_atom in effect_branch:
-                            if not effect_atom.is_add:
-                                effect_pred = achieving_subst.apply_to_predicate(effect_atom.predicate)
-                                if effect_pred == state_pred:
-                                    will_be_deleted = True
-                                    break
-                        if will_be_deleted:
-                            break
+                    for effect_atom in action.effects:
+                        if not effect_atom.is_add:
+                            effect_pred = achieving_subst.apply_to_predicate(effect_atom.predicate)
+                            if effect_pred == state_pred:
+                                will_be_deleted = True
+                                break
 
                     if will_be_deleted:
                         continue
@@ -751,12 +746,11 @@ class VariablePlanner:
         Returns:
             True if action has an add-effect that can unify with target
         """
-        for effect_branch in action.effects:
-            for effect_atom in effect_branch:
-                if effect_atom.is_add:
-                    # Try to unify effect with target
-                    if Unifier.unify_predicates(effect_atom.predicate, target_predicate) is not None:
-                        return True
+        for effect_atom in action.effects:
+            if effect_atom.is_add:
+                # Try to unify effect with target
+                if Unifier.unify_predicates(effect_atom.predicate, target_predicate) is not None:
+                    return True
         return False
 
     def _find_achieving_substitution(self,
@@ -774,16 +768,15 @@ class VariablePlanner:
         Returns:
             Substitution that unifies action's effect with target, or None
         """
-        for effect_branch in action.effects:
-            for effect_atom in effect_branch:
-                if effect_atom.is_add:
-                    # Try to unify
-                    unified = Unifier.unify_predicates(
-                        effect_atom.predicate,
-                        target_predicate
-                    )
-                    if unified is not None:
-                        return unified
+        for effect_atom in action.effects:
+            if effect_atom.is_add:
+                # Try to unify
+                unified = Unifier.unify_predicates(
+                    effect_atom.predicate,
+                    target_predicate
+                )
+                if unified is not None:
+                    return unified
         return None
 
     def _extract_mutex_predicates(self) -> Set[Tuple[str, str]]:
@@ -800,21 +793,20 @@ class VariablePlanner:
         mutex_pairs = set()
 
         for action in self._abstract_actions:
-            for effect_branch in action.effects:
-                adds = set()
-                deletes = set()
+            adds = set()
+            deletes = set()
 
-                for effect_atom in effect_branch:
-                    if effect_atom.is_add:
-                        adds.add(effect_atom.predicate.name)
-                    else:
-                        deletes.add(effect_atom.predicate.name)
+            for effect_atom in action.effects:
+                if effect_atom.is_add:
+                    adds.add(effect_atom.predicate.name)
+                else:
+                    deletes.add(effect_atom.predicate.name)
 
-                # If action adds P and deletes Q simultaneously, they're likely mutex
-                for add_pred in adds:
-                    for del_pred in deletes:
-                        if add_pred != del_pred:
-                            mutex_pairs.add((min(add_pred, del_pred), max(add_pred, del_pred)))
+            # If action adds P and deletes Q simultaneously, they're likely mutex
+            for add_pred in adds:
+                for del_pred in deletes:
+                    if add_pred != del_pred:
+                        mutex_pairs.add((min(add_pred, del_pred), max(add_pred, del_pred)))
 
         return mutex_pairs
 

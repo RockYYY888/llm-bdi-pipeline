@@ -183,7 +183,7 @@ class PDDLParser:
         Clean and format a PDDL formula string
 
         Removes extra whitespace and normalizes formatting while preserving
-        the logical structure. Handles oneof effects and nested formulas.
+        the logical structure.
         """
         if not formula_str:
             return "none"

@@ -447,9 +447,9 @@ class AgentSpeakCodeGenerator:
         # Parse effects with bindings
         try:
             effect_branches = self.effect_parser.parse(action.effects, bindings)
-            # Use first branch (non-determinism handled elsewhere)
+            # Extract single branch (deterministic effects only)
             belief_updates = []
-            if effect_branches:
+            if effect_branches and effect_branches[0]:
                 for effect_atom in effect_branches[0]:
                     belief_updates.append(effect_atom.to_agentspeak())
         except:
@@ -571,7 +571,7 @@ class AgentSpeakCodeGenerator:
         pos_pattern = r'\(([a-zA-Z][a-zA-Z0-9_-]*)\s+([^)]+)\)'
         for match in re.finditer(pos_pattern, effect_str):
             pred_name = match.group(1)
-            if pred_name in ['and', 'or', 'not', 'oneof']:
+            if pred_name in ['and', 'or', 'not']:
                 continue
             pred_args = match.group(2).strip()
             # Check if already captured as negative
