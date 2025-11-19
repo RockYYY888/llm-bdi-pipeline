@@ -103,7 +103,14 @@ class VariablePlanner:
     def explore_from_goal(self, goal_predicates: List[PredicateAtom],
                          max_states: int = 200000) -> Dict:
         """
-        Explore abstract state space from goal
+        Explore abstract state space from goal using BACKWARD PLANNING (Regression)
+
+        This implements TRUE backward planning:
+        1. Start from goal state
+        2. For each action that can ACHIEVE predicates in current state:
+           - Apply REGRESSION: compute predecessor state
+           - Regression formula: (state - add_effects) + del_effects + preconditions
+        3. Continue until no new states can be generated
 
         Args:
             goal_predicates: Abstract goal predicates (with variables)
@@ -119,10 +126,10 @@ class VariablePlanner:
         # It should be set once in __init__ with var_counter_offset
         # to prevent conflicts between multiple LiftedPlanner instances
 
-        print(f"[Lifted Planner] Starting ABSTRACT state space exploration")
-        print(f"[Lifted Planner] Goal: {[str(p) for p in goal_predicates]}")
-        print(f"[Lifted Planner] Abstract actions: {len(self._abstract_actions)}")
-        print(f"[Lifted Planner] Max abstract states: {max_states:,}")
+        print(f"[Backward Planner] Starting REGRESSION-based state space exploration")
+        print(f"[Backward Planner] Goal: {[str(p) for p in goal_predicates]}")
+        print(f"[Backward Planner] Abstract actions: {len(self._abstract_actions)}")
+        print(f"[Backward Planner] Max abstract states: {max_states:,}")
 
         # Infer complete goal state
         complete_goal_preds = self._infer_complete_goal(goal_predicates)
@@ -132,9 +139,9 @@ class VariablePlanner:
 
         # Create initial abstract state
         goal_state = AbstractState(complete_goal_preds, goal_constraints, depth=0)
-        print(f"[Lifted Planner] Complete goal state: {goal_state}")
+        print(f"[Backward Planner] Complete goal state: {goal_state}")
 
-        # BFS exploration
+        # BFS exploration using REGRESSION
         queue = deque([goal_state])
         visited: Dict[Tuple, AbstractState] = {}
         visited[self._state_key(goal_state)] = goal_state
@@ -153,10 +160,11 @@ class VariablePlanner:
                       f"{transitions_added} transitions, "
                       f"queue: {len(queue)}")
 
-            # Try each abstract action
+            # Try each abstract action for REGRESSION
             for abstract_action in self._abstract_actions:
-                # Try to apply action via unification
-                results = self._apply_abstract_action(abstract_action, current_state)
+                # Try to regress current_state through this action
+                # This finds predecessor states that can reach current_state via action
+                results = self._regress_abstract_action(abstract_action, current_state)
 
                 for new_state, action_subst in results:
                     # Check if we've seen this abstract state
@@ -174,16 +182,17 @@ class VariablePlanner:
                         visited[state_key] = final_state
                         queue.append(final_state)
 
-                    # Record transition
+                    # Record transition: new_state --[action]--> current_state
+                    # (backward direction: predecessor -> successor)
                     transitions.append((
-                        current_state,
-                        final_state,
+                        final_state,      # from_state (predecessor)
+                        current_state,    # to_state (successor/goal)
                         abstract_action.action,
                         action_subst
                     ))
                     transitions_added += 1
 
-        print(f"[Lifted Planner] Exploration complete:")
+        print(f"[Backward Planner] Exploration complete:")
         print(f"  Abstract states explored: {states_explored:,}")
         print(f"  Total unique abstract states: {len(visited):,}")
         print(f"  Transitions: {transitions_added:,}")
@@ -207,9 +216,8 @@ class VariablePlanner:
         state_graph.truncated = states_explored >= max_states
 
         # Add transitions
-        # IMPORTANT: Forward planning explores from goal outward
-        # But backward planning needs transitions pointing TO goal
-        # So we REVERSE the transition direction here
+        # Transitions are already in correct direction: predecessor --[action]--> goal
+        # (we recorded them correctly in the regression loop above)
         for from_state, to_state, action, action_subst in transitions:
             from_world = abstract_to_world[from_state]
             to_world = abstract_to_world[to_state]
@@ -217,7 +225,7 @@ class VariablePlanner:
             # Extract action arguments from substitution
             # action_subst maps parameter variables to values
             # IMPORTANT: Extract only variable name, strip PDDL type annotations
-            # e.g., "?b1 - block" → "?b1"
+            # e.g., "?b1 - block" -> "?b1"
             param_vars = []
             for param in action.parameters:
                 # Split by '-' and take only the variable name
@@ -247,11 +255,11 @@ class VariablePlanner:
             except:
                 preconditions = []
 
-            # REVERSE: Forward planning: goal→new_state
-            # We need: new_state→goal for backward planning
+            # Transitions are in correct backward planning direction:
+            # from_state (predecessor) --[action]--> to_state (goal/successor)
             transition = StateTransition(
-                from_state=to_world,      # REVERSED: was from_world
-                to_state=from_world,      # REVERSED: was to_world
+                from_state=from_world,
+                to_state=to_world,
                 action=action,
                 action_args=action_args,
                 belief_updates=tuple(belief_updates),
@@ -285,6 +293,7 @@ class VariablePlanner:
                         param_types[var_name] = type_name
 
             # Create abstract bindings (variables stay as variables)
+            # IMPORTANT: bindings map from variable name to variable name (identity)
             abstract_bindings = {var: var for var in param_vars}
 
             # Parse preconditions
@@ -304,7 +313,10 @@ class VariablePlanner:
                 )
                 # Extract single branch (deterministic effects only)
                 effects = effect_branches[0] if effect_branches else []
-            except Exception:
+            except Exception as e:
+                # NOTE: Effect parsing fails for non-deterministic (oneof) effects
+                # This is a known issue in PDDLEffectParser that needs separate fix
+                # For now, use empty effects list (will prevent regression for this action)
                 effects = []
 
             # Extract inequality constraints from preconditions
@@ -374,10 +386,125 @@ class VariablePlanner:
 
         return ConstraintSet(constraints)
 
+    def _regress_abstract_action(self, abstract_action: AbstractAction,
+                                 state: AbstractState) -> List[Tuple[AbstractState, Substitution]]:
+        """
+        Apply REGRESSION through abstract action to compute predecessor states
+
+        This implements TRUE backward planning (regression):
+        1. Check if action's EFFECTS can produce some predicates in current state
+        2. If yes, compute predecessor state using regression formula:
+           new_state = (state - add_effects) + del_effects + preconditions
+
+        Example:
+            state = {on(?v0, ?v1)}
+            action = puton(?b1, ?b2) with:
+                effects: +on(?b1, ?b2), -holding(?b1), -clear(?b2)
+                preconditions: holding(?b1), clear(?b2)
+            Unify: ?b1 -> ?v0, ?b2 -> ?v1
+            Regression:
+                Remove add_effects: {} (removed on(?v0, ?v1))
+                Add del_effects: {holding(?v0), clear(?v1)}
+                Add preconditions: {holding(?v0), clear(?v1)}
+            Result: {holding(?v0), clear(?v1)}
+
+        Args:
+            abstract_action: Abstract action to regress through
+            state: Current abstract state (goal or intermediate)
+
+        Returns:
+            List of (predecessor_state, substitution) tuples
+        """
+        results = []
+
+        # STEP 1: Check if action can ACHIEVE any predicates in current state
+        # Find which add-effects match predicates in state
+        # Try all possible unifications for each add-effect
+        for effect_atom in abstract_action.effects:
+            if not effect_atom.is_add:
+                continue  # Only consider add-effects for regression
+
+            # Try to unify effect with each predicate in state
+            for state_pred in state.predicates:
+                # Fresh unification for each attempt
+                unified_subst = Unifier.unify_predicates(effect_atom.predicate, state_pred)
+
+                if unified_subst is None:
+                    continue  # This effect doesn't match this state predicate
+
+                # Found a relevant effect - this action can achieve this predicate
+                # Now apply REGRESSION formula with this unification
+
+                # STEP 2: Apply REGRESSION formula
+                # new_state = (state - add_effects) + del_effects + preconditions
+
+                new_predicates = set(state.predicates)
+
+                # Remove add-effects (these are being achieved by the action)
+                # Apply substitution to all add-effects and remove them
+                for eff in abstract_action.effects:
+                    if eff.is_add:
+                        eff_pred = unified_subst.apply_to_predicate(eff.predicate)
+                        new_predicates.discard(eff_pred)
+
+                # Add delete-effects (need to hold before action)
+                for eff in abstract_action.effects:
+                    if not eff.is_add:  # Delete effect
+                        del_pred = unified_subst.apply_to_predicate(eff.predicate)
+                        new_predicates.add(del_pred)
+
+                # Add preconditions (must hold before action)
+                for precond in abstract_action.preconditions:
+                    if not precond.negated:  # Positive precondition
+                        precond_pred = unified_subst.apply_to_predicate(precond)
+                        new_predicates.add(precond_pred)
+
+                # STEP 3: Handle negative preconditions
+                # Negative preconditions: these predicates must NOT exist in predecessor
+                for precond in abstract_action.preconditions:
+                    if precond.negated:
+                        pos_form = precond.get_positive()
+                        neg_pred = unified_subst.apply_to_predicate(pos_form)
+                        # Ensure it's not in new_predicates
+                        new_predicates.discard(neg_pred)
+
+                # STEP 4: Merge constraints
+                new_constraints = state.constraints
+
+                # Add inequality constraints from action
+                for var1, var2 in abstract_action.inequality_constraints:
+                    new_var1 = unified_subst.apply(var1)
+                    new_var2 = unified_subst.apply(var2)
+                    if new_var1.startswith('?') and new_var2.startswith('?'):
+                        new_constraint = Constraint(new_var1, new_var2, Constraint.INEQUALITY)
+                        new_constraints = new_constraints.add(new_constraint)
+
+                # Extract implicit constraints from new predicates
+                implicit_constraints = self._extract_constraints_from_predicates(new_predicates)
+                new_constraints = new_constraints.merge(implicit_constraints)
+
+                if new_constraints is None or not new_constraints.is_consistent():
+                    # Inconsistent constraints
+                    continue  # Try next unification
+
+                # Validate state consistency
+                if not self._validate_state_consistency(new_predicates):
+                    continue  # Try next unification
+
+                # Create predecessor state
+                predecessor_state = AbstractState(new_predicates, new_constraints)
+
+                results.append((predecessor_state, unified_subst))
+
+        return results
+
     def _apply_abstract_action(self, abstract_action: AbstractAction,
                                state: AbstractState) -> List[Tuple[AbstractState, Substitution]]:
         """
-        Apply abstract action to abstract state using UNIFICATION
+        Apply abstract action to abstract state using UNIFICATION (FORWARD)
+
+        NOTE: This is FORWARD planning, kept for subgoal generation.
+        For backward planning, use _regress_abstract_action instead.
 
         This is the key difference from grounded planning:
         - Don't enumerate all object combinations

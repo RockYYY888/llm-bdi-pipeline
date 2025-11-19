@@ -707,21 +707,30 @@ class AgentSpeakCodeGenerator:
     def _generate_plan_for_state(self, state: WorldState,
                                   path: List[StateTransition]) -> Optional[str]:
         """
-        Generate AgentSpeak plan for a specific state
+        Generate AgentSpeak plan for a specific state using BACKWARD PLANNING logic
 
-        This now generates PARAMETERIZED plans with AgentSpeak variables.
-
-        Plan structure:
+        Plan structure for backward planning:
         +!goal_pattern(Vars) : context <-
-            !precond1;      // Precondition subgoals
-            !precond2;
-            !action_goal(args);  // Action goal invocation
-            !goal_pattern(Vars).     // Recursive check
+            !action_goal(args);      // Execute action
+            !goal_pattern(Vars).     // Recursive check (belief base has changed!)
 
-        Example:
+        Key insight: NO precondition subgoals in body!
+        Why? Because:
+        1. Preconditions are in the CONTEXT (pattern matching ensures they hold)
+        2. After action execution, belief base changes
+        3. Recursion will match a DIFFERENT plan (closer to goal)
+
+        Example (correct):
             +!on(X, Y) : holding(X) & clear(Y) <-
                 !put_on_block(X, Y);
                 !on(X, Y).
+            After put_on_block: on(X, Y) is true
+            Recursion matches: +!on(X, Y) : on(X, Y) <- .print("achieved!")
+
+        Example (WRONG - old approach):
+            +!on(X, Y) : holding(Z) <-
+                !handempty;  // BAD: subgoal that doesn't change state
+                !on(X, Y).   // BAD: infinite loop!
 
         Args:
             state: Current state (with variables)
@@ -744,15 +753,6 @@ class AgentSpeakCodeGenerator:
         # Format context (with AgentSpeak variables)
         context = state.to_agentspeak_context(unified_var_map=self.unified_var_map)
 
-        # Generate precondition subgoals (per Design Algorithm 4, Line 701-708)
-        subgoals = []
-        for precond in next_transition.preconditions:
-            # Convert precondition to AgentSpeak format with variables
-            if precond not in state.predicates:
-                # Need to establish this precondition
-                subgoal_name = precond.to_agentspeak(unified_var_map=self.unified_var_map)
-                subgoals.append(f"!{subgoal_name}")
-
         # Format action goal invocation
         # Action args may contain PDDL variables - convert using unified map
         action_args_as = []
@@ -770,12 +770,20 @@ class AgentSpeakCodeGenerator:
             action_args_as
         )
 
-        # Build plan body (per Design Algorithm 4, Line 716-719)
-        # Structure: !precond1; !precond2; action(args); !goal_pattern.
+        # Build plan body for backward planning
+        # Structure: action(args); !goal_pattern.
+        # NO precondition subgoals - they're already in the context!
         body_lines = []
-        body_lines.extend(subgoals)                    # Precondition subgoals first
-        body_lines.append(action_goal)                 # Then action goal
-        body_lines.append(f"!{param_goal_pattern}")    # Recursive goal check (parameterized)
+        body_lines.append(action_goal)                 # Execute action (changes belief base)
+
+        # Only add recursion if not directly achieving goal
+        # Check if action directly achieves goal (one-step plan)
+        if len(path) == 1 and next_transition.to_state == self.graph.goal_state:
+            # Direct achievement - no recursion needed
+            pass
+        else:
+            # Multi-step - recurse to check progress
+            body_lines.append(f"!{param_goal_pattern}")
 
         # Format body
         body = ";\n    ".join(body_lines)
