@@ -314,9 +314,13 @@ class VariablePlanner:
                 # Extract single branch (deterministic effects only)
                 effects = effect_branches[0] if effect_branches else []
             except Exception as e:
-                # NOTE: Effect parsing fails for non-deterministic (oneof) effects
-                # This is a known issue in PDDLEffectParser that needs separate fix
-                # For now, use empty effects list (will prevent regression for this action)
+                # Effect parsing failed - this will break regression!
+                print(f"[ERROR] Effect parsing failed for action {action.name}: {e}")
+                print(f"  Effects string: {action.effects}")
+                print(f"  Bindings: {abstract_bindings}")
+                import traceback
+                traceback.print_exc()
+                # Set empty to avoid crash, but regression won't work for this action
                 effects = []
 
             # Extract inequality constraints from preconditions
