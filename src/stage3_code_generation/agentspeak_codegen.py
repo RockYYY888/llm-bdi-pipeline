@@ -106,14 +106,21 @@ class AgentSpeakCodeGenerator:
         """
         Get parameterized goal pattern from goal state predicates
 
-        Converts objects or PDDL variables to AgentSpeak variables for goal definition.
+        CRITICAL FIX: For variable-level planning, goal pattern must use the SAME
+        variable names as the state graph, not a separate obj_to_var mapping.
 
-        Example (object-level):
+        Why? Because:
+        - State predicates use variables from lifted planning (e.g., ?b, ?b1, ?b2)
+        - Goal pattern must match these variable names
+        - Otherwise we get mismatches like +!on(V0,V1) : holding(B)
+          where V0/V1 and B come from different namespaces!
+
+        Example (variable-level):
+            Goal state: [on(?b1, ?b2)]  # From lifted planning
+            Returns: "on(B1, B2)"       # Matches state variables
+
+        Example (object-level with mapping):
             Goal state: [on(a, b)] with var_mapping {a: ?v0, b: ?v1}
-            Returns: "on(V0, V1)"
-
-        Example (variable-level - legacy):
-            Goal state: [on(?v0, ?v1)]
             Returns: "on(V0, V1)"
 
         Returns:
@@ -122,23 +129,16 @@ class AgentSpeakCodeGenerator:
         # Get goal predicates (may contain objects or variables)
         goal_preds = list(self.graph.goal_state.predicates)
 
-        # Determine obj_to_var mapping
-        obj_to_var = self.var_mapping.obj_to_var if self.var_mapping else None
-
+        # NEVER use obj_to_var for variable-level planning
+        # The goal state already contains the correct variables from lifted planning
+        # We just need to convert them to AgentSpeak format (?b1 → B1)
         if len(goal_preds) == 1:
             # Single predicate goal
-            if obj_to_var:
-                return goal_preds[0].to_agentspeak(obj_to_var=obj_to_var)
-            else:
-                return goal_preds[0].to_agentspeak(convert_vars=True)
+            return goal_preds[0].to_agentspeak(convert_vars=True)
         else:
             # Multiple predicates - create compound goal name
-            if obj_to_var:
-                pred_strs = [p.to_agentspeak(obj_to_var=obj_to_var)
-                           for p in sorted(goal_preds, key=lambda x: (x.name, x.args))]
-            else:
-                pred_strs = [p.to_agentspeak(convert_vars=True)
-                           for p in sorted(goal_preds, key=lambda x: (x.name, x.args))]
+            pred_strs = [p.to_agentspeak(convert_vars=True)
+                       for p in sorted(goal_preds, key=lambda x: (x.name, x.args))]
             return "_and_".join(pred_strs).replace("(", "_").replace(")", "").replace(", ", "_")
 
     def generate(self) -> str:
@@ -660,14 +660,10 @@ class AgentSpeakCodeGenerator:
         # Get parameterized goal pattern
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # Get obj_to_var mapping if available
-        obj_to_var = self.var_mapping.obj_to_var if self.var_mapping else None
-
+        # CRITICAL: For variable-level planning, always use convert_vars=True
+        # Never use obj_to_var mapping - state graph already has correct variable names
         # Format context (with AgentSpeak variables)
-        if obj_to_var:
-            context = state.to_agentspeak_context(obj_to_var=obj_to_var)
-        else:
-            context = state.to_agentspeak_context(convert_vars=True)
+        context = state.to_agentspeak_context(convert_vars=True)
 
         # Generate precondition subgoals (per Design Algorithm 4, Line 701-708)
         subgoals = []
@@ -675,22 +671,14 @@ class AgentSpeakCodeGenerator:
             # Convert precondition to AgentSpeak format with variables
             if precond not in state.predicates:
                 # Need to establish this precondition
-                if obj_to_var:
-                    subgoal_name = precond.to_agentspeak(obj_to_var=obj_to_var)
-                else:
-                    subgoal_name = precond.to_agentspeak(convert_vars=True)
+                subgoal_name = precond.to_agentspeak(convert_vars=True)
                 subgoals.append(f"!{subgoal_name}")
 
         # Format action goal invocation
-        # Action args may contain objects or variables - convert them to AgentSpeak format
+        # Action args may contain PDDL variables - convert them to AgentSpeak format
         action_args_as = []
         for arg in next_transition.action_args:
-            if obj_to_var and arg in obj_to_var:
-                # Object-level: map object to variable
-                pddl_var = obj_to_var[arg]
-                var_name = pddl_var[1:]  # Remove ?
-                action_args_as.append(var_name[0].upper() + var_name[1:] if var_name else var_name)
-            elif arg.startswith('?'):
+            if arg.startswith('?'):
                 # Variable-level: Convert PDDL variable to AgentSpeak
                 var_name = arg[1:]
                 action_args_as.append(var_name[0].upper() + var_name[1:] if var_name else var_name)
