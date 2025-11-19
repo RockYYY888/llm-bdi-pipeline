@@ -216,12 +216,21 @@ class VariablePlanner:
 
             # Extract action arguments from substitution
             # action_subst maps parameter variables to values
-            action_args = tuple(action_subst.apply(var) for var in action.parameters)
+            # IMPORTANT: Extract only variable name, strip PDDL type annotations
+            # e.g., "?b1 - block" → "?b1"
+            param_vars = []
+            for param in action.parameters:
+                # Split by '-' and take only the variable name
+                var_name = param.split('-')[0].strip() if '-' in param else param.strip()
+                param_vars.append(var_name)
+
+            action_args = tuple(action_subst.apply(var) for var in param_vars)
 
             # Parse effects to extract belief updates
             try:
                 # Create bindings dict for effect parsing
-                bindings = {param: action_subst.apply(param) for param in action.parameters}
+                # Use param_vars (without type annotations) for bindings
+                bindings = {var: action_subst.apply(var) for var in param_vars}
                 effect_branches = self.effect_parser.parse(action.effects, bindings)
                 belief_updates = []
                 if effect_branches:
@@ -232,7 +241,8 @@ class VariablePlanner:
 
             # Parse preconditions
             try:
-                bindings = {param: action_subst.apply(param) for param in action.parameters}
+                # Use param_vars (without type annotations) for bindings
+                bindings = {var: action_subst.apply(var) for var in param_vars}
                 preconditions = self.condition_parser.parse(action.preconditions, bindings)
             except:
                 preconditions = []
