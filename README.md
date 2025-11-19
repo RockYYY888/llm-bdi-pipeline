@@ -422,7 +422,7 @@ python tests/utils/test_symbol_normalizer.py
 
 ### Stage 3: DFA → AgentSpeak Code (Backward Planning)
 - **Input**: DFA with transition labels from Stage 2
-- **Process**: Backward planning (forward state-space destruction) with variable abstraction for deterministic code generation:
+- **Process**: Backward planning (regression) with variable abstraction for deterministic code generation:
   1. **Parse transition labels**: Extract goals from DFA transitions using boolean expression parser
      - Supports: `&` (AND), `|` (OR), `~` (NOT), `->` (IMPLIES), `<->` (IFF)
      - Converts to Disjunctive Normal Form (DNF)
@@ -431,16 +431,21 @@ python tests/utils/test_symbol_normalizer.py
      - Objects abstracted to schema variables (position-based normalization)
      - Constants preserved using semantic detection (object_list-based)
      - Schema-level caching: goals with same structure share exploration
-     - Example: on(a,b), on(c,d), on(b,a) → all normalize to on(?arg0, ?arg1)
-  3. **Backward planning** for each unique schema:
+     - Example: on(a,b), on(c,d), on(b,a) → all normalize to on(?v0, ?v1)
+  3. **Backward planning (regression)** for each unique schema:
      - Start from goal state
-     - Apply actions in reverse (preconditions → effects swapped)
-     - **State consistency validation**: Ensures only physically valid states are generated
+     - Apply actions in reverse via regression formula: `new_state = (state - add_effects) + del_effects + preconditions`
+     - **Invariant synthesis** (Helmert 2006, Fast Downward):
+       - H^2 mutex detection: Identifies mutually exclusive predicates (e.g., handempty ⊗ holding)
+       - Planning graph construction with fixed-point reachability analysis
+       - Delete effect handling: Only non-deleted predicates can coexist post-action
+       - Domain-independent: No hardcoded constraints
+     - **State validation**: Prunes invalid states using synthesized invariants
        - Validates equality constraints from PDDL
-       - Checks 7 critical physical constraints (hand, location, circular dependencies)
-       - 100% valid states guaranteed
-     - Complete BFS exploration of reachable state space
-     - Generate plans for all states that can reach the goal
+       - Sound and more complete than simple heuristics
+       - Prevents unreachable plans (e.g., `holding(?x) & holding(?y)` when `?x ≠ ?y`)
+     - Complete BFS exploration with variable restriction (only goal variables)
+     - Generate plans for all valid states that can reach the goal
   4. **Code generation**:
      - Create AgentSpeak plans for each (state, action, next_state) transition
      - Context-sensitive: plans check current beliefs before executing actions
