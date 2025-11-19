@@ -8,9 +8,9 @@ with conflicting predicates like {handempty, holding(?X)}.
 import sys
 from pathlib import Path
 
-_parent = str(Path(__file__).parent.parent / "src")
-if str(_parent) not in sys.path:
-    sys.path.insert(0, str(_parent))
+# Add src to path
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / "src"))
 
 from stage3_code_generation.variable_planner import VariablePlanner
 from stage3_code_generation.state_space import PredicateAtom
@@ -94,7 +94,8 @@ def test_mutex_validation():
     print("="*80)
 
     # Load domain
-    domain_file = Path(__file__).parent.parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    repo_root = Path(__file__).parent.parent.parent
+    domain_file = repo_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
 
     if not domain_file.exists():
         print(f"Domain file not found: {domain_file}")
