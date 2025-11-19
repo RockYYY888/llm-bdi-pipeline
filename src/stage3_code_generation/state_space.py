@@ -54,7 +54,8 @@ class PredicateAtom:
         object.__setattr__(self, 'args', tuple(args) if args else ())
         object.__setattr__(self, 'negated', negated)
 
-    def to_agentspeak(self, convert_vars: bool = False, obj_to_var: dict = None) -> str:
+    def to_agentspeak(self, convert_vars: bool = False, obj_to_var: dict = None,
+                     unified_var_map: dict = None) -> str:
         """
         Convert to AgentSpeak format
 
@@ -62,6 +63,9 @@ class PredicateAtom:
             convert_vars: If True, convert PDDL variables (?v0) to AgentSpeak variables (V0)
             obj_to_var: Optional mapping from objects to variables for parameterization
                        Example: {"a": "?v0", "b": "?v1"} will convert on(a,b) → on(V0, V1)
+            unified_var_map: Optional unified variable renaming map (CRITICAL FIX)
+                            Example: {"?b": "V0", "?b1": "V1", "?v0": "V2"}
+                            If provided, this takes precedence over convert_vars
 
         Returns:
             String like "on(a, b)" or "~clear(c)" or "on(V0, V1)" if parameterized
@@ -74,7 +78,12 @@ class PredicateAtom:
         """
         prefix = "~" if self.negated else ""
         if self.args:
-            if obj_to_var:
+            if unified_var_map:
+                # CRITICAL FIX: Use unified variable map for consistent renaming
+                # ?b → V0, ?b1 → V1, ?v0 → V2, etc.
+                args_str = ", ".join(unified_var_map.get(arg, arg) if arg.startswith('?') else arg
+                                   for arg in self.args)
+            elif obj_to_var:
                 # Object-level parameterization: a → ?v0 → V0
                 args_str = ", ".join(self._obj_to_agentspeak_var(arg, obj_to_var) for arg in self.args)
             elif convert_vars:
@@ -281,13 +290,15 @@ class WorldState:
         """Check if state has no predicates"""
         return len(self.predicates) == 0
 
-    def to_agentspeak_context(self, convert_vars: bool = False, obj_to_var: dict = None) -> str:
+    def to_agentspeak_context(self, convert_vars: bool = False, obj_to_var: dict = None,
+                            unified_var_map: dict = None) -> str:
         """
         Convert to AgentSpeak context condition
 
         Args:
             convert_vars: If True, convert PDDL variables to AgentSpeak variables
             obj_to_var: Optional mapping from objects to variables for parameterization
+            unified_var_map: Optional unified variable renaming map (CRITICAL FIX)
 
         Returns:
             String like "on(a, b) & clear(c) & handempty" or "true" if empty
@@ -298,7 +309,8 @@ class WorldState:
 
         # Sort for deterministic output
         sorted_preds = sorted(self.predicates, key=lambda p: (p.name, p.args))
-        return " & ".join(p.to_agentspeak(convert_vars=convert_vars, obj_to_var=obj_to_var) for p in sorted_preds)
+        return " & ".join(p.to_agentspeak(convert_vars=convert_vars, obj_to_var=obj_to_var,
+                                        unified_var_map=unified_var_map) for p in sorted_preds)
 
     def __str__(self) -> str:
         if self.is_empty():
@@ -429,6 +441,10 @@ class StateGraph:
         if transition.to_state not in self.state_to_incoming:
             self.state_to_incoming[transition.to_state] = []
         self.state_to_incoming[transition.to_state].append(transition)
+
+    def get_all_states(self) -> Set[WorldState]:
+        """Get all states in the graph"""
+        return self.states
 
     def get_outgoing_transitions(self, state: WorldState) -> List[StateTransition]:
         """Get all transitions leaving from a state"""

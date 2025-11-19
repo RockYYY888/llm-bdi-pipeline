@@ -223,11 +223,13 @@ class BackwardPlannerGenerator:
                     # Generate goal-specific section
                     # The state_graph is already in variable form (?v0, ?v1, ...)
                     # AgentSpeakCodeGenerator will use variables directly
+                    # CRITICAL FIX: Pass actual objects (b1, b2, b3) not variables (?v0, ?v1)
+                    # Variables are only for planning; initial beliefs need actual objects
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
                         goal_name=goal_name,
                         domain=self.domain,
-                        objects=all_variables,  # Use all variables (needed for blocking objects)
+                        objects=objects,  # Use actual objects for initial beliefs
                         var_mapping=None  # No mapping needed - state_graph already uses variables
                     )
 
@@ -269,9 +271,11 @@ class BackwardPlannerGenerator:
         all_variables_sorted = sorted(all_variables)
         print(f"  Collected {len(all_variables_sorted)} unique variables across all state graphs: {all_variables_sorted}")
 
+        # CRITICAL FIX: Use actual objects (b1, b2, b3) for initial beliefs
+        # Variables (?v0, ?v1) are only for planning - initial beliefs need concrete objects
         shared_section = AgentSpeakCodeGenerator.generate_shared_section(
             domain=self.domain,
-            objects=all_variables_sorted,  # Use all variables found in state graphs
+            objects=objects,  # Use actual objects, not planning variables
             all_state_graphs=all_state_graphs
         )
 

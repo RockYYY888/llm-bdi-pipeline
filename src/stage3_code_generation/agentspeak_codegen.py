@@ -67,6 +67,78 @@ class AgentSpeakCodeGenerator:
         self.effect_parser = PDDLEffectParser()
         self.goal_plan_count = 0  # Track number of goal plans generated
 
+        # CRITICAL FIX: Create unified variable renaming map
+        # Problem: State graph mixes variables from different sources:
+        #   - Goal: on(?v0, ?v1)
+        #   - Actions: pick_up(?b1, ?b2), pick_up_from_table(?b)
+        # Solution: Collect all variables and create consistent V0, V1, V2... mapping
+        self.unified_var_map = self._build_unified_variable_map()
+
+    def _build_unified_variable_map(self) -> Dict[str, str]:
+        """
+        Build unified variable renaming map from state graph
+
+        Collects ALL variables from:
+        - Goal state predicates
+        - All state predicates in the graph
+        - All transition action arguments
+
+        Creates consistent mapping: ?b → V0, ?b1 → V1, ?v0 → V2, ?v1 → V3, etc.
+
+        Returns:
+            Dictionary mapping PDDL variables to AgentSpeak variables
+            Example: {"?b": "V0", "?b1": "V1", "?b2": "V2", "?v0": "V3", "?v1": "V4"}
+        """
+        all_vars = set()
+
+        # Collect from goal state
+        for pred in self.graph.goal_state.predicates:
+            for arg in pred.args:
+                if arg.startswith('?'):
+                    all_vars.add(arg)
+
+        # Collect from all states in graph
+        for state in self.graph.get_all_states():
+            for pred in state.predicates:
+                for arg in pred.args:
+                    if arg.startswith('?'):
+                        all_vars.add(arg)
+
+        # Collect from transitions
+        for transition in self.graph.transitions:
+            # From action args
+            for arg in transition.action_args:
+                if arg.startswith('?'):
+                    all_vars.add(arg)
+            # From preconditions
+            for precond in transition.preconditions:
+                for arg in precond.args:
+                    if arg.startswith('?'):
+                        all_vars.add(arg)
+
+        # Sort variables for deterministic mapping
+        # Sort by: 1) variable base name, 2) numeric suffix
+        def var_sort_key(var: str) -> Tuple:
+            # Remove ? prefix
+            name = var[1:] if var.startswith('?') else var
+            # Split into base and number: "b1" → ("b", 1), "v0" → ("v", 0)
+            import re
+            match = re.match(r'([a-z]+)(\d*)', name)
+            if match:
+                base = match.group(1)
+                num = int(match.group(2)) if match.group(2) else 0
+                return (base, num)
+            return (name, 0)
+
+        sorted_vars = sorted(all_vars, key=var_sort_key)
+
+        # Create mapping: ?var → VN
+        var_map = {}
+        for i, var in enumerate(sorted_vars):
+            var_map[var] = f"V{i}"
+
+        return var_map
+
     def _instantiate_predicate(self, pred: 'PredicateAtom') -> 'PredicateAtom':
         """
         Instantiate a predicate by replacing variables with objects
@@ -129,15 +201,14 @@ class AgentSpeakCodeGenerator:
         # Get goal predicates (may contain objects or variables)
         goal_preds = list(self.graph.goal_state.predicates)
 
-        # NEVER use obj_to_var for variable-level planning
-        # The goal state already contains the correct variables from lifted planning
-        # We just need to convert them to AgentSpeak format (?b1 → B1)
+        # CRITICAL FIX: Use unified variable map for consistent naming
+        # This ensures goal parameters match state/action variables
         if len(goal_preds) == 1:
             # Single predicate goal
-            return goal_preds[0].to_agentspeak(convert_vars=True)
+            return goal_preds[0].to_agentspeak(unified_var_map=self.unified_var_map)
         else:
             # Multiple predicates - create compound goal name
-            pred_strs = [p.to_agentspeak(convert_vars=True)
+            pred_strs = [p.to_agentspeak(unified_var_map=self.unified_var_map)
                        for p in sorted(goal_preds, key=lambda x: (x.name, x.args))]
             return "_and_".join(pred_strs).replace("(", "_").replace(")", "").replace(", ", "_")
 
@@ -273,11 +344,19 @@ class AgentSpeakCodeGenerator:
 
         For blocksworld: all blocks on table, hand empty, all clear
         Design ref: Decision #14
+
+        CRITICAL FIX: Filter out PDDL variables from objects list
+        - In variable-level planning, objects may contain ?v0, ?v1, etc.
+        - Initial beliefs should only use actual objects (b1, b2, b3)
         """
         lines = ["/* Initial Beliefs */"]
 
+        # CRITICAL FIX: Only use non-variable objects for initial beliefs
+        # Filter out PDDL variables (?v0, ?v1, ?b, ?b1, etc.)
+        actual_objects = [obj for obj in self.objects if not obj.startswith('?')]
+
         # Blocksworld-specific initial beliefs
-        for obj in self.objects:
+        for obj in actual_objects:
             lines.append(f"ontable({obj}).")
             lines.append(f"clear({obj}).")
 
@@ -657,13 +736,13 @@ class AgentSpeakCodeGenerator:
         # Get next transition in path
         next_transition = path[0]
 
-        # Get parameterized goal pattern
+        # Get parameterized goal pattern (uses unified_var_map)
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # CRITICAL: For variable-level planning, always use convert_vars=True
-        # Never use obj_to_var mapping - state graph already has correct variable names
+        # CRITICAL FIX: Use unified variable map for ALL conversions
+        # This ensures consistent variable naming throughout the plan
         # Format context (with AgentSpeak variables)
-        context = state.to_agentspeak_context(convert_vars=True)
+        context = state.to_agentspeak_context(unified_var_map=self.unified_var_map)
 
         # Generate precondition subgoals (per Design Algorithm 4, Line 701-708)
         subgoals = []
@@ -671,17 +750,16 @@ class AgentSpeakCodeGenerator:
             # Convert precondition to AgentSpeak format with variables
             if precond not in state.predicates:
                 # Need to establish this precondition
-                subgoal_name = precond.to_agentspeak(convert_vars=True)
+                subgoal_name = precond.to_agentspeak(unified_var_map=self.unified_var_map)
                 subgoals.append(f"!{subgoal_name}")
 
         # Format action goal invocation
-        # Action args may contain PDDL variables - convert them to AgentSpeak format
+        # Action args may contain PDDL variables - convert using unified map
         action_args_as = []
         for arg in next_transition.action_args:
             if arg.startswith('?'):
-                # Variable-level: Convert PDDL variable to AgentSpeak
-                var_name = arg[1:]
-                action_args_as.append(var_name[0].upper() + var_name[1:] if var_name else var_name)
+                # Use unified variable map
+                action_args_as.append(self.unified_var_map.get(arg, arg))
             else:
                 # Constant/literal: keep as-is
                 action_args_as.append(arg)
@@ -761,8 +839,8 @@ class AgentSpeakCodeGenerator:
         # Get parameterized goal pattern (with AgentSpeak variables)
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # Get context condition (also with AgentSpeak variables)
-        context = self.graph.goal_state.to_agentspeak_context(convert_vars=True)
+        # Get context condition (use unified variable map)
+        context = self.graph.goal_state.to_agentspeak_context(unified_var_map=self.unified_var_map)
 
         return f"""+!{param_goal_pattern} : {context} <-
     .print("Goal {param_goal_pattern} already achieved!")."""
