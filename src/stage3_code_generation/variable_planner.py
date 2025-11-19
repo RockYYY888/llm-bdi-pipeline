@@ -546,7 +546,7 @@ class VariablePlanner:
 
                 # Validate state with synthesized invariants (h^2 + exactly-one)
                 # This uses Fast Downward's invariant synthesis - provably correct
-                if not self._validate_state_with_invariants(new_predicates):
+                if not self._validate_state_with_invariants(new_predicates, new_constraints):
                     # State violates synthesized invariants - skip it
                     continue
 
@@ -1204,38 +1204,70 @@ class VariablePlanner:
             adds = [eff.predicate.name for eff in action.effects if eff.is_add]
             deletes = [eff.predicate.name for eff in action.effects if not eff.is_add]
 
-            # If action: +P -Q (adds one, deletes another), they form a toggle pair
-            if len(adds) == 1 and len(deletes) == 1:
-                add_pred = adds[0]
-                del_pred = deletes[0]
-                if add_pred != del_pred:
-                    toggle_pairs.append(frozenset({add_pred, del_pred}))
+            # Find all (add, delete) pairs that form toggle patterns
+            # Relaxed condition: any add with any delete (not just 1-to-1)
+            for add_pred in adds:
+                for del_pred in deletes:
+                    if add_pred != del_pred:
+                        toggle_pairs.append(frozenset({add_pred, del_pred}))
 
-        # Merge toggle pairs that share predicates into exactly-one groups
-        # This handles cases like: {handempty, holding(?x)}, {handempty, holding(?y)}
-        # Should merge into one group if they represent the same logical constraint
+        # Count toggle pair frequencies to find strong toggle relationships
+        # A strong toggle means the pair appears multiple times (bidirectional)
+        from collections import Counter
+        pair_counts = Counter(toggle_pairs)
 
-        groups = []
-        seen = set()
+        # Filter for truly bidirectional toggles
+        # Need to verify both directions: +P-Q and +Q-P
+        bidirectional_pairs = []
+        checked = set()
 
-        for pair in toggle_pairs:
-            if pair not in seen:
-                # This pair forms an exactly-one group
-                groups.append(set(pair))
-                seen.add(pair)
+        for pair in pair_counts:
+            if pair in checked:
+                continue
 
-        return groups
+            pred_list = list(pair)
+            p1, p2 = pred_list[0], pred_list[1]
 
-    def _validate_state_with_invariants(self, predicates: Set[PredicateAtom]) -> bool:
+            # Check if we have both forward and backward toggle for this pair
+            # Forward: some action adds p1 and deletes p2
+            # Backward: some action adds p2 and deletes p1
+            has_forward = False
+            has_backward = False
+
+            for action in self._abstract_actions:
+                adds = {eff.predicate.name for eff in action.effects if eff.is_add}
+                deletes = {eff.predicate.name for eff in action.effects if not eff.is_add}
+
+                if p1 in adds and p2 in deletes:
+                    has_forward = True
+                if p2 in adds and p1 in deletes:
+                    has_backward = True
+
+            # Only keep truly bidirectional toggles
+            # This identifies genuine exactly-one constraints like {handempty, holding}
+            if has_forward and has_backward:
+                bidirectional_pairs.append(set(pair))
+                checked.add(pair)
+
+        # Return bidirectional pairs as exactly-one groups (no merging)
+        # Each pair represents an independent exactly-one constraint
+        # Do NOT merge pairs - this causes false positives
+        # Example: {handempty,holding} and {handempty,on} should stay separate
+        return bidirectional_pairs
+
+    def _validate_state_with_invariants(self, predicates: Set[PredicateAtom],
+                                       constraints: 'ConstraintSet' = None) -> bool:
         """
         Validate state against synthesized invariants.
 
         This is the CORRECT way to validate states:
         1. Check h^2 mutexes (predicate-name level)
-        2. Check exactly-one groups (with argument awareness)
+        2. Check exactly-one groups (with constraint awareness)
+        3. Check multiple instances of mutex predicates with inequality constraints
 
         Args:
             predicates: Set of predicates to validate
+            constraints: Variable constraints (inequalities and equalities)
 
         Returns:
             True if state satisfies all invariants, False otherwise
@@ -1247,18 +1279,56 @@ class VariablePlanner:
                 # Both mutex predicates present - invalid
                 return False
 
-        # Check 2: Exactly-One Groups
-        # For each group, exactly one predicate from that group should be present
-        for group in self._invariants['exactly_one_groups']:
-            # Count how many predicates from this group are in the state
-            count = sum(1 for p in predicates if p.name in group)
+        # Check 2: Exactly-One Groups - DISABLED
+        # REASON: Toggle-based detection produces too many false positives
+        # Example: {holding, clear}, {holding, on} are detected but not true exactly-one groups
+        # Instead, we rely on Check 3 (constraint-aware validation) for similar guarantees
+        #
+        # for group in self._invariants['exactly_one_groups']:
+        #     count = sum(1 for p in predicates if p.name in group)
+        #     if count != 1:
+        #         return False
 
-            # For exactly-one groups: must have exactly 1
-            # Note: This check is at predicate level, not considering arguments
-            # This is correct for simple cases like {handempty, holding}
-            # where holding can only have one instance anyway
-            if count != 1:
-                return False
+        # Check 3: Multiple instances with inequality constraints
+        # CRITICAL: For each predicate name, check if there are multiple instances
+        # with DIFFERENT variables (according to inequality constraints)
+        # Example: holding(?v0) & holding(?v1) where ?v0 != ?v1 is invalid
+        if constraints:
+            # Group predicates by name
+            preds_by_name = {}
+            for pred in predicates:
+                if pred.name not in preds_by_name:
+                    preds_by_name[pred.name] = []
+                preds_by_name[pred.name].append(pred)
+
+            # For predicates that appear in h^2 mutexes, check for multiple instances
+            mutex_pred_names = set()
+            for p1, p2 in self._invariants['h^2_mutexes']:
+                mutex_pred_names.add(p1)
+                mutex_pred_names.add(p2)
+
+            for pred_name in mutex_pred_names:
+                if pred_name not in preds_by_name:
+                    continue
+
+                instances = preds_by_name[pred_name]
+                if len(instances) <= 1:
+                    continue  # Single instance is OK
+
+                # Multiple instances found - check if they have inequality constraints
+                # If any two instances have variables that are constrained to be different, reject
+                for i, pred1 in enumerate(instances):
+                    for pred2 in instances[i+1:]:
+                        # Check if any pair of arguments has inequality constraint
+                        for arg1 in pred1.args:
+                            for arg2 in pred2.args:
+                                if arg1.startswith('?') and arg2.startswith('?'):
+                                    # Check if there's an inequality constraint between these vars
+                                    from stage3_code_generation.abstract_state import Constraint
+                                    test_constraint = Constraint(arg1, arg2, Constraint.INEQUALITY)
+                                    if test_constraint in constraints.constraints:
+                                        # Found inequality constraint - multiple instances invalid
+                                        return False
 
         return True
 
