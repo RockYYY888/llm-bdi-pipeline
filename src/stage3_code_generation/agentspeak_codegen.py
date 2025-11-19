@@ -188,7 +188,6 @@ class AgentSpeakCodeGenerator:
         # Add comment header for this goal
         sections.append(f"/* ========== Goal: {self.goal_name} ========== */")
         sections.append("")
-        sections.append(f"/* Goal Achievement Plans ({self.goal_plan_count} plans) */")
         sections.append(goal_plans)
         sections.append(success_plan)
         sections.append(failure_plan)
@@ -599,10 +598,7 @@ class AgentSpeakCodeGenerator:
         Plans use AgentSpeak variables (e.g., +!on(X, Y)) so they work
         for ANY objects of the correct type, not just specific instances.
         """
-        param_goal_pattern = self._get_parameterized_goal_pattern()
-        lines = [f"/* Goal Achievement Plans for: {param_goal_pattern} */"]
-        lines.append("/* Each plan handles a specific state and invokes action goals */")
-        lines.append("/* Plans are PARAMETERIZED - work for any objects of correct type */")
+        lines = []
 
         # Find shortest paths to goal for all states
         paths = self.graph.find_shortest_paths_to_goal()
@@ -627,10 +623,7 @@ class AgentSpeakCodeGenerator:
         # Store count for statistics
         self.goal_plan_count = plan_count
 
-        if plan_count == 0:
-            lines.append("/* No intermediate plans needed - goal directly achievable */")
-
-        return "\n\n".join(lines)
+        return "\n\n".join(lines) if lines else ""
 
     def _generate_plan_for_state(self, state: WorldState,
                                   path: List[StateTransition]) -> Optional[str]:
