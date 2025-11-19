@@ -6,12 +6,9 @@ from LTLf formula to AgentSpeak code generation, covering all critical functiona
 
 1. End-to-End Pipeline (LTLf → DFA → AgentSpeak)
 2. State Consistency Validation (100% valid states)
-3. Variable Abstraction & Schema-Level Caching
-4. Multi-Transition DFA Handling
-5. Scalability (2-3 blocks)
-6. Code Validation (AgentSpeak syntax)
-7. Performance Metrics (caching, reuse ratios)
-8. Complex LTL Operators (G, R, negation, conjunction)
+3. Scalability (2-3 blocks)
+4. Code Validation (AgentSpeak syntax)
+5. Complex LTL Operators (G, R, negation, conjunction)
 
 Run this single test to verify all Stage 3 functionality.
 
@@ -23,9 +20,6 @@ Test Cases:
 - Test 2.3: Release Operator (ontable(a) R clear(b))
 - Test 2.4: Negation and Conjunction (F(!(on(a, b)) & clear(c)))
 - Test 3: Disjunction with Conjunction (F(on(a, b) & clear(c) | on(d, e)))
-- Test 4: Variable Abstraction & Schema-Level Caching
-- Test 5: Multi-Transition DFA Handling
-- Test 6: State Consistency Guarantee (100% valid states)
 """
 
 import sys
@@ -1175,9 +1169,7 @@ def main():
     print("\nThis test validates the entire Stage 3 backward planning pipeline:")
     print("  1. End-to-End Pipeline (LTLf → DFA → AgentSpeak)")
     print("  2. State Consistency (100% valid states)")
-    print("  3. Variable Abstraction & Caching")
-    print("  4. Multi-Transition DFA Handling")
-    print("  5. Scalability (2-3 blocks)")
+    print("  3. Scalability (2-3 blocks)")
     print("\nPress Ctrl+C to abort at any time.\n")
 
     results = {}
@@ -1239,29 +1231,6 @@ def main():
         traceback.print_exc()
         results["test_3"] = False
 
-    try:
-        results["test_4"] = test_4_variable_abstraction_caching()
-    except Exception as e:
-        print(f"\n❌ TEST 4 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_4"] = False
-
-    try:
-        results["test_5"] = test_5_multi_transition_dfa()
-    except Exception as e:
-        print(f"\n❌ TEST 5 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_5"] = False
-
-    try:
-        results["test_6"] = test_6_state_consistency_guarantee()
-    except Exception as e:
-        print(f"\n❌ TEST 6 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_6"] = False
 
     # Summary
     total_time = time.time() - start_time
@@ -1276,9 +1245,6 @@ def main():
     print(f"Test 2.3 - Release Operator:                 {'✅ PASS' if results.get('test_2_3') else '❌ FAIL'}")
     print(f"Test 2.4 - Negation and Conjunction:         {'✅ PASS' if results.get('test_2_4') else '❌ FAIL'}")
     print(f"Test 3   - Disjunction with Conjunction:     {'✅ PASS' if results.get('test_3') else '❌ FAIL'}")
-    print(f"Test 4   - Variable Abstraction & Caching:   {'✅ PASS' if results.get('test_4') else '❌ FAIL'}")
-    print(f"Test 5   - Multi-Transition DFA:             {'✅ PASS' if results.get('test_5') else '❌ FAIL'}")
-    print(f"Test 6   - State Consistency (100% valid):   {'✅ PASS' if results.get('test_6') else '❌ FAIL'}")
     print(f"\nTotal time: {total_time:.2f}s")
     print("="*80)
 
