@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+repo_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(repo_root / "src"))
 
 from stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator
 from stage3_code_generation.state_space import PredicateAtom
@@ -20,7 +21,9 @@ def test_variable_level_planning():
     print("="*80)
 
     # Load domain
-    domain_file = Path(__file__).parent / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
+    # Get repository root (2 levels up from this test file)
+    repo_root = Path(__file__).parent.parent.parent
+    domain_file = repo_root / "src" / "legacy" / "fond" / "domains" / "blocksworld" / "domain.pddl"
     if not domain_file.exists():
         print(f"❌ Domain file not found: {domain_file}")
         return False

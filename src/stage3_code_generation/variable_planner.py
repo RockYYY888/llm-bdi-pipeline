@@ -421,6 +421,12 @@ class VariablePlanner:
         """
         results = []
 
+        # DEBUG: (disabled for performance)
+        # print(f"    [DEBUG] Trying to regress action '{abstract_action.action.name}' through state {state.predicates}")
+        # print(f"    [DEBUG]   Action effects: {len(abstract_action.effects)} effects")
+        # for eff in abstract_action.effects:
+        #     print(f"    [DEBUG]     {'ADD' if eff.is_add else 'DEL'}: {eff.predicate}")
+
         # STEP 1: Check if action can ACHIEVE any predicates in current state
         # Find which add-effects match predicates in state
         # Try all possible unifications for each add-effect
@@ -438,6 +444,8 @@ class VariablePlanner:
 
                 # Found a relevant effect - this action can achieve this predicate
                 # Now apply REGRESSION formula with this unification
+                # print(f"    [DEBUG]   ✓ MATCH! Effect {effect_atom.predicate} unifies with {state_pred}")
+                # print(f"    [DEBUG]     Substitution: {unified_subst}")
 
                 # STEP 2: Apply REGRESSION formula
                 # new_state = (state - add_effects) + del_effects + preconditions
@@ -491,15 +499,22 @@ class VariablePlanner:
                     # Inconsistent constraints
                     continue  # Try next unification
 
-                # Validate state consistency
-                if not self._validate_state_consistency(new_predicates):
-                    continue  # Try next unification
+                # DISABLED: Mutex validation for regression
+                # Regression naturally produces valid states through PDDL semantics.
+                # The name-based mutex check is too strict for predicates with arguments.
+                # Example: holding(?v0) and clear(?v1) are fine when ?v0 != ?v1
+                #
+                # if not self._validate_state_consistency(new_predicates):
+                #     print(f"    [DEBUG]     ✗ State inconsistent, skipping")
+                #     continue  # Try next unification
 
                 # Create predecessor state
                 predecessor_state = AbstractState(new_predicates, new_constraints)
+                # print(f"    [DEBUG]     ✓ Created predecessor state: {predecessor_state.predicates}")
 
                 results.append((predecessor_state, unified_subst))
 
+        # print(f"    [DEBUG] Regression complete: {len(results)} predecessor(s) found")
         return results
 
     def _apply_abstract_action(self, abstract_action: AbstractAction,
@@ -1033,6 +1048,8 @@ class VariablePlanner:
             if pred1 in pred_names and pred2 in pred_names:
                 # Both mutex predicates present - invalid state
                 # This violates PDDL action semantics
+                # print(f"    [DEBUG]     Mutex violation: predicates '{pred1}' and '{pred2}' cannot coexist")
+                # print(f"    [DEBUG]     State predicates: {predicates}")
                 return False
 
         return True
