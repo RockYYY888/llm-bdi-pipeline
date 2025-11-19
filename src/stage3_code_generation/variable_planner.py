@@ -207,6 +207,9 @@ class VariablePlanner:
         state_graph.truncated = states_explored >= max_states
 
         # Add transitions
+        # IMPORTANT: Forward planning explores from goal outward
+        # But backward planning needs transitions pointing TO goal
+        # So we REVERSE the transition direction here
         for from_state, to_state, action, action_subst in transitions:
             from_world = abstract_to_world[from_state]
             to_world = abstract_to_world[to_state]
@@ -234,10 +237,11 @@ class VariablePlanner:
             except:
                 preconditions = []
 
-            # Create transition
+            # REVERSE: Forward planning: goal→new_state
+            # We need: new_state→goal for backward planning
             transition = StateTransition(
-                from_state=from_world,
-                to_state=to_world,
+                from_state=to_world,      # REVERSED: was from_world
+                to_state=from_world,      # REVERSED: was to_world
                 action=action,
                 action_args=action_args,
                 belief_updates=tuple(belief_updates),
