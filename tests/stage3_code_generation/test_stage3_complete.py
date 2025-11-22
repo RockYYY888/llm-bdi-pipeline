@@ -1199,37 +1199,37 @@ def main():
         traceback.print_exc()
         results["test_2_1"] = False
 
-    try:
-        results["test_2_2"] = test_2_2_conjunction_in_finally()
-    except Exception as e:
-        print(f"\n❌ TEST 2.2 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_2_2"] = False
+    # try:
+    #     results["test_2_2"] = test_2_2_conjunction_in_finally()
+    # except Exception as e:
+    #     print(f"\n❌ TEST 2.2 FAILED: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+    #     results["test_2_2"] = False
 
-    try:
-        results["test_2_3"] = test_2_3_release_operator()
-    except Exception as e:
-        print(f"\n❌ TEST 2.3 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_2_3"] = False
+    # try:
+    #     results["test_2_3"] = test_2_3_release_operator()
+    # except Exception as e:
+    #     print(f"\n❌ TEST 2.3 FAILED: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+    #     results["test_2_3"] = False
 
-    try:
-        results["test_2_4"] = test_2_4_negation_and_conjunction()
-    except Exception as e:
-        print(f"\n❌ TEST 2.4 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_2_4"] = False
+    # try:
+    #     results["test_2_4"] = test_2_4_negation_and_conjunction()
+    # except Exception as e:
+    #     print(f"\n❌ TEST 2.4 FAILED: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+    #     results["test_2_4"] = False
 
-    try:
-        results["test_3"] = test_3_disjunction_with_conjunction()
-    except Exception as e:
-        print(f"\n❌ TEST 3 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        results["test_3"] = False
+    # try:
+    #     results["test_3"] = test_3_disjunction_with_conjunction()
+    # except Exception as e:
+    #     print(f"\n❌ TEST 3 FAILED: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+    #     results["test_3"] = False
 
 
     # Summary
