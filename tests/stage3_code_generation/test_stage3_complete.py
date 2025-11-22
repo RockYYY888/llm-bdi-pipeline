@@ -1182,14 +1182,27 @@ def main():
     print("\n\n" + "="*80)
     print("TEST SUITE SUMMARY")
     print("="*80)
-    print(f"Test 1   - Simple Goal (2 blocks):           {'✅ PASS' if results.get('test_1') else '❌ FAIL'}")
-    print(f"Test 2   - Scalability (3 blocks):           {'✅ PASS' if results.get('test_2') else '❌ FAIL'}")
-    print(f"Test 2.1 - Globally with Negation:           {'✅ PASS' if results.get('test_2_1') else '❌ FAIL'}")
-    print(f"Test 2.2 - Conjunction in Finally:           {'✅ PASS' if results.get('test_2_2') else '❌ FAIL'}")
-    print(f"Test 2.3 - Release Operator:                 {'✅ PASS' if results.get('test_2_3') else '❌ FAIL'}")
-    print(f"Test 2.4 - Negation and Conjunction:         {'✅ PASS' if results.get('test_2_4') else '❌ FAIL'}")
-    print(f"Test 3   - Disjunction with Conjunction:     {'✅ PASS' if results.get('test_3') else '❌ FAIL'}")
+
+    # Only show tests that were actually run
+    test_status = [
+        ("Test 1   - Simple Goal (2 blocks)", "test_1"),
+        ("Test 2   - Scalability (3 blocks)", "test_2"),
+        ("Test 2.1 - Globally with Negation", "test_2_1"),
+        ("Test 2.2 - Conjunction in Finally", "test_2_2"),
+        ("Test 2.3 - Release Operator", "test_2_3"),
+        ("Test 2.4 - Negation and Conjunction", "test_2_4"),
+        ("Test 3   - Disjunction with Conjunction", "test_3"),
+    ]
+
+    for test_name, test_key in test_status:
+        if test_key in results:
+            status = '✅ PASS' if results[test_key] else '❌ FAIL'
+            print(f"{test_name:45} {status}")
+        else:
+            print(f"{test_name:45} ⊘ SKIPPED")
+
     print(f"\nTotal time: {total_time:.2f}s")
+    print(f"Tests run: {len(results)}/{len(test_status)}")
     print("="*80)
 
     if all(results.values()):

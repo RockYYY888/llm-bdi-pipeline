@@ -203,8 +203,8 @@ class BackwardSearchPlanner:
             current_state = queue.popleft()
             states_explored += 1
 
-            if states_explored % 1000 == 0:
-                print(f"  Explored {states_explored} states, queue: {len(queue)}")
+            if states_explored % 10000 == 0:
+                print(f"  Explored {states_explored:,} states, queue: {len(queue):,}")
 
             # Skip if max depth reached
             if current_state.depth >= max_depth:
