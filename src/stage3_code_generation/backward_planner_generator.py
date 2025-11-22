@@ -24,7 +24,7 @@ if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
 from stage3_code_generation.state_space import PredicateAtom, StateGraph
-from stage3_code_generation.variable_planner import VariablePlanner
+from stage3_code_generation.backward_search_refactored import BackwardSearchPlanner
 from stage3_code_generation.agentspeak_codegen import AgentSpeakCodeGenerator
 from stage3_code_generation.variable_normalizer import VariableNormalizer, VariableMapping
 from utils.pddl_parser import PDDLDomain
@@ -186,15 +186,16 @@ class BackwardPlannerGenerator:
                     print(f"    Cache MISS - running variable-level exploration...")
 
                     try:
-                        # VARIABLE-LEVEL PLANNING: Use VariablePlanner for variable state exploration
-                        # This explores using variables (?X, ?Y) instead of objects (a, b, c)
-                        planner = VariablePlanner(
-                            self.domain,
-                            var_counter_offset=0  # Start fresh for each goal
-                        )
+                        # REFACTORED: Use BackwardSearchPlanner for proper backward search
+                        # This implements regression-based planning with proper variable handling
+                        planner = BackwardSearchPlanner(self.domain)
 
                         # Explore using normalized (variable-based) goal
-                        state_graph = planner.explore_from_goal(normalized_preds)
+                        state_graph = planner.search(
+                            goal_predicates=list(normalized_preds),
+                            max_states=200000,
+                            max_depth=5
+                        )
 
                         # Check if this graph was truncated
                         if state_graph.truncated:

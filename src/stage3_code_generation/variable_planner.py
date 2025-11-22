@@ -1,6 +1,9 @@
 """
 Variable-Level Planning using Unification
 
+DEPRECATED: This module is deprecated and should not be used in new code.
+Use backward_search_refactored.BackwardSearchPlanner instead.
+
 This implements planning with VARIABLES instead of concrete OBJECTS:
 1. Explores state space using VARIABLES (?X, ?Y) not objects (a, b, c)
 2. Uses UNIFICATION to apply actions (not object enumeration)
@@ -15,7 +18,26 @@ Key differences from object-level (grounded) planning:
 Example:
     10 objects, object-level planning: 10,000+ states
     10 objects, variable-level planning: ~50 variable states
+
+MIGRATION GUIDE:
+    Old code:
+        from stage3_code_generation.variable_planner import VariablePlanner
+        planner = VariablePlanner(domain)
+        state_graph = planner.explore_from_goal(goal_predicates)
+
+    New code:
+        from stage3_code_generation.backward_search_refactored import BackwardSearchPlanner
+        planner = BackwardSearchPlanner(domain)
+        state_graph = planner.search(goal_predicates, max_states=200000, max_depth=5)
 """
+
+import warnings
+
+warnings.warn(
+    "VariablePlanner is deprecated. Use backward_search_refactored.BackwardSearchPlanner instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import re
 import sys
