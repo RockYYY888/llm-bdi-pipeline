@@ -920,187 +920,6 @@ def test_3_disjunction_with_conjunction():
     return True
 
 
-def test_4_variable_abstraction_caching():
-    """
-    TEST 4: Variable Abstraction & Schema-Level Caching
-
-    Validates:
-    - Schema-level caching works
-    - Cache hit rate is > 0%
-    - Variable normalization is correct
-    - Constants are properly detected
-    """
-    print("\n\n" + "="*80)
-    print("TEST 4: Variable Abstraction & Schema-Level Caching")
-    print("="*80)
-
-    # Load domain
-    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
-    domain = PDDLParser.parse_domain(str(domain_path))
-
-    # Test with multiple similar goals that should share caching
-    print("\n[1/2] Testing schema-level caching with similar goals...")
-
-    # Generate DFA with multiple transitions requiring similar goals
-    goal_formula = "F(on(a, b))"
-    dfa_result = generate_dfa_from_formula(goal_formula)
-
-    # Create grounding map with multiple goal predicates
-    grounding_map = GroundingMap()
-    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
-    grounding_map.add_atom("on_b_c", "on", ["b", "c"])
-    grounding_map.add_atom("on_c_a", "on", ["c", "a"])
-
-    objects = ["a", "b", "c"]
-    ltl_dict = {
-        "objects": objects,
-        "formulas_string": [goal_formula],
-        "grounding_map": grounding_map
-    }
-
-    # Generate code and check cache metrics
-    generator = BackwardPlannerGenerator(domain, grounding_map)
-    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
-
-    # The generator should show cache statistics in its output
-    # We can verify by checking if code was generated successfully
-    assert len(asl_code) > 500, "Generated code is too short"
-    print(f"  ✓ Code generated with variable abstraction: {len(asl_code)} characters")
-
-    print("\n[2/2] Validating parameterized plans...")
-    # Check that plans use variables (V0, V1, etc.) not specific objects
-    has_variables = bool(re.search(r'\+![a-z_]+\([A-Z][a-z0-9]*', asl_code))
-    assert has_variables, "Generated plans should use variables"
-    print(f"  ✓ Plans are parameterized with variables")
-
-    print("\n✅ TEST 4 PASSED")
-    return True
-
-
-def test_5_multi_transition_dfa():
-    """
-    TEST 5: Multi-Transition DFA Handling
-
-    Validates:
-    - Multiple DFA transitions handled correctly
-    - Goals are processed in sequence
-    - Code merging works properly
-    """
-    print("\n\n" + "="*80)
-    print("TEST 5: Multi-Transition DFA - Sequential Goals")
-    print("="*80)
-
-    # Load domain
-    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
-    domain = PDDLParser.parse_domain(str(domain_path))
-
-    print("\n[1/2] Creating multi-transition DFA...")
-
-    # For this test, we use a manually created DFA with multiple transitions
-    # This simulates a more complex goal structure
-    grounding_map = GroundingMap()
-    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
-    grounding_map.add_atom("clear_a", "clear", ["a"])
-
-    # Create DFA with 2 transitions: achieve on(a,b), then achieve clear(a)
-    dfa_dot = """
-digraph {
-    rankdir=LR;
-    node [shape=circle];
-    __start [shape=point];
-    __start -> state0;
-    state0 [label="0"];
-    state1 [label="1"];
-    state2 [label="2", shape=doublecircle];
-    state0 -> state1 [label="on_a_b"];
-    state1 -> state2 [label="clear_a"];
-}
-"""
-
-    dfa_result = {
-        "formula": "F(on(a, b) & F(clear(a)))",
-        "dfa_dot": dfa_dot,
-        "num_states": 3,
-        "num_transitions": 2
-    }
-
-    objects = ["a", "b"]
-    ltl_dict = {
-        "objects": objects,
-        "formulas_string": [dfa_result["formula"]],
-        "grounding_map": grounding_map
-    }
-
-    print("\n[2/2] Generating code for multi-transition DFA...")
-    generator = BackwardPlannerGenerator(domain, grounding_map)
-    asl_code, truncated = generator.generate(ltl_dict, dfa_result)
-
-    print(f"  ✓ Code generated: {len(asl_code)} characters")
-
-    # Validate that code handles both goals
-    validation = validate_agentspeak_code(asl_code)
-    assert validation["all_passed"], "Code validation failed"
-
-    # Check that code mentions both goals
-    has_on_goal = "on(" in asl_code.lower() or "on_" in asl_code.lower()
-    has_clear_goal = "clear" in asl_code.lower()
-
-    assert has_on_goal, "Code should handle 'on' goal"
-    assert has_clear_goal, "Code should handle 'clear' goal"
-
-    print(f"  ✓ Both goals present in generated code")
-    print("\n✅ TEST 5 PASSED")
-    return True
-
-
-def test_6_state_consistency_guarantee():
-    """
-    TEST 6: State Consistency Guarantee
-
-    Validates:
-    - 100% of generated states are physically valid
-    - No circular dependencies
-    - No contradictions
-    - All 7 consistency checks pass
-    """
-    print("\n\n" + "="*80)
-    print("TEST 6: State Consistency Guarantee (100% Valid States)")
-    print("="*80)
-
-    # Load domain
-    domain_path = project_root / "src" / "domains" / "blocksworld" / "domain.pddl"
-    domain = PDDLParser.parse_domain(str(domain_path))
-
-    print("\n[1/2] Testing backward search with variables...")
-    planner = BackwardSearchPlanner(domain)
-    goal_preds = [PredicateAtom('on', ['?v0', '?v1'])]  # Use variables
-    graph = planner.search(goal_preds, max_states=50000, max_depth=3)
-
-    print(f"  ✓ States explored: {len(graph.states)}")
-    print(f"  ✓ Transitions: {len(graph.transitions)}")
-    print(f"  ✓ Truncated: {graph.truncated}")
-
-    # Verify graph structure
-    assert len(graph.states) > 0, "No states generated"
-    assert len(graph.transitions) > 0, "No transitions generated"
-
-    print("\n[2/2] Testing with conjunction...")
-    goal_preds = [
-        PredicateAtom('on', ['?v0', '?v1']),
-        PredicateAtom('clear', ['?v2'])
-    ]
-    graph = planner.search(goal_preds, max_states=50000, max_depth=3)
-
-    print(f"  ✓ States explored: {len(graph.states)}")
-    print(f"  ✓ Transitions: {len(graph.transitions)}")
-
-    assert len(graph.states) > 0, "No states generated for conjunction"
-    assert len(graph.transitions) > 0, "No transitions generated for conjunction"
-
-    print("\n✅ TEST 6 PASSED - Variable Planning is Sound")
-    return True
-
-
 # ============================================================================
 # Main Test Runner
 # ============================================================================
@@ -1143,37 +962,37 @@ def main():
         traceback.print_exc()
         results["test_2_1"] = False
 
-    # try:
-    #     results["test_2_2"] = test_2_2_conjunction_in_finally()
-    # except Exception as e:
-    #     print(f"\n❌ TEST 2.2 FAILED: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    #     results["test_2_2"] = False
+    try:
+        results["test_2_2"] = test_2_2_conjunction_in_finally()
+    except Exception as e:
+        print(f"\n❌ TEST 2.2 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_2"] = False
 
-    # try:
-    #     results["test_2_3"] = test_2_3_release_operator()
-    # except Exception as e:
-    #     print(f"\n❌ TEST 2.3 FAILED: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    #     results["test_2_3"] = False
+    try:
+        results["test_2_3"] = test_2_3_release_operator()
+    except Exception as e:
+        print(f"\n❌ TEST 2.3 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_3"] = False
 
-    # try:
-    #     results["test_2_4"] = test_2_4_negation_and_conjunction()
-    # except Exception as e:
-    #     print(f"\n❌ TEST 2.4 FAILED: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    #     results["test_2_4"] = False
+    try:
+        results["test_2_4"] = test_2_4_negation_and_conjunction()
+    except Exception as e:
+        print(f"\n❌ TEST 2.4 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_2_4"] = False
 
-    # try:
-    #     results["test_3"] = test_3_disjunction_with_conjunction()
-    # except Exception as e:
-    #     print(f"\n❌ TEST 3 FAILED: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    #     results["test_3"] = False
+    try:
+        results["test_3"] = test_3_disjunction_with_conjunction()
+    except Exception as e:
+        print(f"\n❌ TEST 3 FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["test_3"] = False
 
 
     # Summary

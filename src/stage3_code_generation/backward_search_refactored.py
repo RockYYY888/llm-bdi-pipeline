@@ -265,13 +265,20 @@ class BackwardSearchPlanner:
         Returns:
             BackwardState representing the goal
         """
-        # Extract variables and determine max_var_number
+        # Extract ALL variables (both ?v0-style and ?1-style) and determine max_var_number
         max_var = 0
         for pred in goal_predicates:
             for arg in pred.args:
-                if arg.startswith('?') and arg[1:].isdigit():
-                    var_num = int(arg[1:])
-                    max_var = max(max_var, var_num)
+                if arg.startswith('?'):
+                    # Extract number from variable name
+                    # ?v0 → 0, ?v1 → 1, ?1 → 1, ?2 → 2, etc.
+                    var_suffix = arg[1:]  # Remove '?'
+                    if var_suffix.startswith('v'):
+                        # ?v0, ?v1, ?v2 style
+                        var_suffix = var_suffix[1:]  # Remove 'v'
+                    if var_suffix.isdigit():
+                        var_num = int(var_suffix)
+                        max_var = max(max_var, var_num)
 
         return BackwardState(
             predicates=set(goal_predicates),
