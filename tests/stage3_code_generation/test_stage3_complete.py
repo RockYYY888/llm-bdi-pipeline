@@ -126,7 +126,7 @@ def validate_agentspeak_code(code: str) -> dict:
     results = {
         "has_beliefs": bool(re.search(r'(ontable|clear|handempty)\(', code)),
         "has_plans": "+!" in code and "<-" in code,
-        "has_actions": any(action in code for action in ["pick_up", "put_on_block", "put_down"]),
+        "has_actions": bool(re.search(r'(pick|put|stack|unstack)_\w+_physical\(', code)),  # Accept any PDDL action
         "has_belief_updates": bool(re.search(r'[+\-](ontable|clear|holding|handempty)', code)),
         "parameterized_plans": bool(re.search(r'\+![a-z_]+\([A-Z][A-Za-z0-9]*', code)),
         "substantial_code": len(code) > 500,

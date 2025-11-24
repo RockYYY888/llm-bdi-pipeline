@@ -680,8 +680,8 @@ class BackwardSearchPlanner:
         """
         Compute mutex relationships from PDDL domain using Tarski library
 
-        Uses Tarski to parse PDDL and automatically derive mutex rules by
-        analyzing action effects:
+        Uses Tarski to parse PDDL domain (no problem file needed) and automatically
+        derive mutex rules by analyzing action effects:
         - If adding P always deletes Q, then P and Q are mutex
         - Example: pick-up adds holding(x) and deletes handempty()
 
@@ -691,25 +691,20 @@ class BackwardSearchPlanner:
         try:
             from tarski.io import PDDLReader
             from tarski.fstrips.fstrips import AddEffect, DelEffect
-            from pathlib import Path
 
-            # Create minimal problem file if it doesn't exist
-            domain_path = Path('src/domains/blocksworld/domain.pddl')
-            problem_path = Path('src/domains/blocksworld/minimal_problem.pddl')
+            # Read domain file content
+            domain_path = 'src/domains/blocksworld/domain.pddl'
+            with open(domain_path, 'r') as f:
+                domain_str = f.read()
 
-            if not problem_path.exists():
-                # Create minimal problem for Tarski (requires both domain+problem)
-                problem_content = """(define (problem blocksworld-minimal)
-  (:domain blocksworld-4ops)
-  (:objects a b c - block)
-  (:init (on a b) (on b c) (ontable c) (clear a) (handempty))
-  (:goal (not (on a b)))
-)"""
-                problem_path.write_text(problem_content)
-
-            # Parse domain using Tarski
+            # Parse domain using Tarski (domain-only, no problem file needed)
             reader = PDDLReader(raise_on_error=True)
-            problem = reader.read_problem(str(domain_path), str(problem_path))
+            reader.parse_domain_string(domain_str)
+
+            # Actions are stored in reader.problem after parsing domain
+            problem = reader.problem
+            if not problem or not hasattr(problem, 'actions'):
+                raise RuntimeError("Failed to extract actions from domain")
 
             mutex_map = {}
 
