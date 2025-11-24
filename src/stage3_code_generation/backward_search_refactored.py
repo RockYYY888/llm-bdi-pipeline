@@ -161,26 +161,36 @@ class BackwardSearchPlanner:
         self.domain = domain
         self.condition_parser = PDDLConditionParser()
         self.effect_parser = PDDLEffectParser()
+        self.max_objects = None  # Will be set in search() method
 
         # Parse all actions to structured form
         self.parsed_actions: List[ParsedAction] = self._parse_all_actions()
 
+        # Compute mutex groups from domain using h^2 analysis
+        self.mutex_groups = self._compute_mutex_groups()
+        print(f"[Mutex Analysis] Computed {len(self.mutex_groups)} mutex groups from domain")
+
     def search(self, goal_predicates: List[PredicateAtom],
                max_states: int = 200000,
-               max_depth: int = 5) -> StateGraph:
+               max_objects: Optional[int] = None) -> StateGraph:
         """
         Perform backward search from goal
 
         Args:
             goal_predicates: Goal predicates to achieve
-            max_states: Maximum states to explore
-            max_depth: Maximum search depth
+            max_states: Maximum states to explore (防止无限搜索)
+            max_objects: Maximum number of objects (caps variable generation)
 
         Returns:
             StateGraph containing all explored states and transitions
         """
+        # Store max_objects for use in _complete_binding
+        self.max_objects = max_objects
+
         print(f"\n[Backward Search] Starting from goal: {[str(p) for p in goal_predicates]}")
-        print(f"[Backward Search] Max states: {max_states:,}, Max depth: {max_depth}")
+        print(f"[Backward Search] Max states: {max_states:,}")
+        if max_objects is not None:
+            print(f"[Backward Search] Max objects: {max_objects} (variable cap)")
 
         # Create initial goal state
         goal_state = self._create_initial_goal_state(goal_predicates)
@@ -206,22 +216,30 @@ class BackwardSearchPlanner:
             if states_explored % 10000 == 0:
                 print(f"  Explored {states_explored:,} states, queue: {len(queue):,}")
 
-            # Skip if max depth reached
-            if current_state.depth >= max_depth:
-                continue
-
-            # Check if goal achieved
+            # Check if goal achieved (reached initial state with empty predicates)
             if current_state.is_goal_achieved():
                 print(f"  Found achieved goal at depth {current_state.depth}")
                 continue
 
-            # Process each predicate in the conjunction separately (conjunction destruction)
-            for target_predicate in current_state.predicates:
-                # Find all actions that can achieve this predicate
+            # CONJUNCTION DESTRUCTION (following instruction precisely):
+            # "destroy one predicate at one time"
+            # For each predicate in the conjunction, find all achieving actions
+            # This creates separate branches for each predicate in the goal
+            num_predicates = len(current_state.predicates)
+            for pred_idx, target_predicate in enumerate(current_state.predicates):
+                # Find all actions that can achieve this specific predicate
                 achieving_actions = self._find_achieving_actions(target_predicate)
 
-                for parsed_action, binding in achieving_actions:
-                    # Apply regression to compute predecessor state
+                # if states_explored <= 50:  # Detailed logging for first few states
+                #     print(f"    [Depth {current_state.depth}] Predicate {pred_idx+1}/{num_predicates}: {target_predicate}")
+                #     print(f"      Found {len(achieving_actions)} achieving action(s)")
+
+                # For each achieving action, apply regression
+                for action_idx, (parsed_action, binding) in enumerate(achieving_actions):
+                    # if states_explored <= 50:
+                    #     print(f"        Action {action_idx+1}: {parsed_action.action.name} with binding {binding}")
+
+                    # Apply regression formula: goal ∧ prec ∧ del_effects ∧ ¬add_effects
                     predecessor_states = self._apply_regression(
                         current_state,
                         target_predicate,
@@ -238,6 +256,9 @@ class BackwardSearchPlanner:
                             visited[state_key] = pred_state
                             queue.append(pred_state)
                             final_state = pred_state
+
+                            # if states_explored <= 50:
+                            #     print(f"          → New state: {final_state}")
 
                         # Record transition
                         transitions.append((
@@ -265,20 +286,17 @@ class BackwardSearchPlanner:
         Returns:
             BackwardState representing the goal
         """
-        # Extract ALL variables (both ?v0-style and ?1-style) and determine max_var_number
-        max_var = 0
+        # Extract ALL variables (if any) and determine max_var_number
+        # In Grounded Search, goal_predicates should be grounded (e.g., on(a, b))
+        # Variables only appear when we can't fully bind parameters
+        # Standard format: ?v1, ?v2, ?v3, ... (for AgentSpeak compatibility: ?v1 → V1)
+        max_var = 0  # Start at 0 so first generated variable is ?v1
         for pred in goal_predicates:
             for arg in pred.args:
-                if arg.startswith('?'):
-                    # Extract number from variable name
-                    # ?v0 → 0, ?v1 → 1, ?1 → 1, ?2 → 2, etc.
-                    var_suffix = arg[1:]  # Remove '?'
-                    if var_suffix.startswith('v'):
-                        # ?v0, ?v1, ?v2 style
-                        var_suffix = var_suffix[1:]  # Remove 'v'
-                    if var_suffix.isdigit():
-                        var_num = int(var_suffix)
-                        max_var = max(max_var, var_num)
+                if arg.startswith('?v') and len(arg) > 2 and arg[2:].isdigit():
+                    # Extract number from ?v1, ?v2, ?v3, ...
+                    var_num = int(arg[2:])
+                    max_var = max(max_var, var_num)
 
         return BackwardState(
             predicates=set(goal_predicates),
@@ -312,7 +330,17 @@ class BackwardSearchPlanner:
 
             # Separate additive and deletion effects
             additive_effects = [eff.predicate for eff in effects if eff.is_add]
-            deletion_effects = [eff.predicate for eff in effects if not eff.is_add]
+
+            # CRITICAL FIX: Remove negation from deletion effects
+            # In PDDL: (not (holding ?b1)) means "delete holding(?b1)"
+            # In regression: We need "holding(?b1)" as a POSITIVE precondition
+            # Because: if action deletes P, then P must be TRUE before the action
+            deletion_effects = []
+            for eff in effects:
+                if not eff.is_add:
+                    # Create non-negated version of the predicate
+                    pred = PredicateAtom(eff.predicate.name, eff.predicate.args, negated=False)
+                    deletion_effects.append(pred)
 
             # Extract inequality constraints
             inequality_constraints = self._extract_inequality_constraints(action.preconditions, parameters)
@@ -372,24 +400,48 @@ class BackwardSearchPlanner:
         """
         Find all actions that can achieve the target predicate
 
-        An action can achieve a predicate if it appears in the action's additive effects.
+        CRITICAL: Handle both positive and negative goal predicates:
+        - Positive predicate P: Find actions with P in additive effects
+        - Negative predicate ~P: Find actions with P in deletion effects
 
         Args:
-            target_predicate: Predicate to achieve
+            target_predicate: Predicate to achieve (can be positive or negative)
 
         Returns:
             List of (ParsedAction, binding) tuples where binding maps action parameters to goal objects/variables
         """
         achieving_actions = []
 
-        for parsed_action in self.parsed_actions:
-            # Check each additive effect
-            for add_effect in parsed_action.additive_effects:
-                # Try to unify add_effect with target_predicate
-                binding = self._unify_predicates(add_effect, target_predicate)
+        if target_predicate.negated:
+            # NEGATIVE goal: ~P
+            # Find actions that DELETE P (have P in deletion effects)
+            # Create positive version of target for matching
+            positive_target = PredicateAtom(
+                target_predicate.name,
+                target_predicate.args,
+                negated=False
+            )
 
-                if binding is not None:
-                    achieving_actions.append((parsed_action, binding))
+            for parsed_action in self.parsed_actions:
+                # Check each deletion effect
+                for del_effect in parsed_action.deletion_effects:
+                    # Try to unify del_effect with positive version of target
+                    binding = self._unify_predicates(del_effect, positive_target)
+
+                    if binding is not None:
+                        achieving_actions.append((parsed_action, binding))
+
+        else:
+            # POSITIVE goal: P
+            # Find actions that ADD P (have P in additive effects)
+            for parsed_action in self.parsed_actions:
+                # Check each additive effect
+                for add_effect in parsed_action.additive_effects:
+                    # Try to unify add_effect with target_predicate
+                    binding = self._unify_predicates(add_effect, target_predicate)
+
+                    if binding is not None:
+                        achieving_actions.append((parsed_action, binding))
 
         return achieving_actions
 
@@ -444,13 +496,17 @@ class BackwardSearchPlanner:
 
         Regression formula: goal ∧ prec ∧ deleted_effects ∧ ¬additive_effects
 
-        Steps:
+        CRITICAL: ¬additive_effects means:
+        - For each additive effect in the action:
+          - If it matches a predicate in current goal, REMOVE that predicate from goal
+          - Because the action will add it, so we don't need it in the predecessor state
+
+        Steps (following instruction precisely):
         1. Start with current goal predicates
-        2. Add preconditions (with partial binding)
-        3. Add deletion effects (with partial binding)
-        4. Remove additive effects that match current goal
-        5. Generate new variables for unbound parameters
-        6. Add inequality constraints
+        2. Remove additive effects that are IN current goal (¬additive_effects)
+        3. Add preconditions (with complete binding)
+        4. Add deletion effects (with complete binding)
+        5. Add inequality constraints
 
         Args:
             current_state: Current state in backward search
@@ -462,41 +518,124 @@ class BackwardSearchPlanner:
             List of predecessor BackwardStates
         """
         # Complete the binding by generating new variables for unbound parameters
+        # CRITICAL: Always refer to parent's max_var_number and increment by 1
         complete_binding, next_var_number = self._complete_binding(
             parsed_action.parameters,
             binding,
             current_state.max_var_number
         )
 
-        # Start with current predicates
+        # Step 1: Start with current goal predicates
+        original_goal = set(current_state.predicates)
         new_predicates = set(current_state.predicates)
 
-        # Remove target predicate (it's being achieved by this action)
-        new_predicates.discard(target_predicate)
-
-        # Remove other additive effects if they're in the goal
+        # Step 2: Check for conflicts with ADDITIVE effects (before processing)
+        # CRITICAL: Check against ORIGINAL GOAL, not new_predicates
         for add_effect in parsed_action.additive_effects:
             instantiated_effect = self._instantiate_predicate(add_effect, complete_binding)
-            new_predicates.discard(instantiated_effect)
 
-        # Add preconditions
+            # Check for conflict: action adds P but original goal requires ~P
+            negated_version = PredicateAtom(
+                instantiated_effect.name,
+                instantiated_effect.args,
+                negated=not instantiated_effect.negated
+            )
+            if negated_version in original_goal:
+                # CONFLICT: Cannot achieve goal with this action
+                # Example: action adds on(a,b) but goal requires ~on(a,b)
+                return []  # Skip this action
+
+        # Step 3: Check for conflicts with DELETION effects (before processing)
+        # CRITICAL: Check against ORIGINAL GOAL, not new_predicates
+        for del_effect in parsed_action.deletion_effects:
+            instantiated_del = self._instantiate_predicate(del_effect, complete_binding)
+
+            # Check for conflict: action deletes P but original goal requires P (positive)
+            if instantiated_del in original_goal:
+                # CONFLICT: Cannot achieve goal with this action
+                # Example: action deletes on(a,b) but goal requires on(a,b)
+                return []  # Skip this action
+
+        # Step 4: Apply ¬additive_effects
+        # Remove additive effects from goal (will be achieved by action)
+        for add_effect in parsed_action.additive_effects:
+            instantiated_effect = self._instantiate_predicate(add_effect, complete_binding)
+            # Remove if in goal (positive match)
+            if instantiated_effect in new_predicates:
+                new_predicates.discard(instantiated_effect)
+
+        # Step 5: Process deletion effects
+        # - If deletion satisfies negative goal (~P), remove ~P from goal
+        # - Otherwise, add P as precondition (must exist before deletion)
+        for del_effect in parsed_action.deletion_effects:
+            instantiated_del = self._instantiate_predicate(del_effect, complete_binding)
+
+            # Check if deletion satisfies a negative goal: ~P in goal and action deletes P
+            negated_del = PredicateAtom(
+                instantiated_del.name,
+                instantiated_del.args,
+                negated=not instantiated_del.negated
+            )
+            if negated_del in new_predicates:
+                # SATISFIES NEGATIVE GOAL: Remove ~P from goal (action will delete P)
+                # Example: goal has ~on(a,b), action deletes on(a,b) → satisfies goal
+                new_predicates.discard(negated_del)
+                # NOTE: We do NOT add P as precondition in this case!
+            else:
+                # Normal case: Add P as positive precondition (must exist before deletion)
+                new_predicates.add(instantiated_del)
+
+        # Step 6: Add preconditions (all of them)
+        # NOTE: We do NOT check for conflicts with original goal here!
+        # Why? Because it's valid for a precondition to require P even if goal requires ~P
+        # Example: To achieve ~on(a,b), we use pick-up(a,b) which requires on(a,b) as precondition
+        #          The action will DELETE on(a,b), thus achieving ~on(a,b)
         for precond in parsed_action.preconditions:
             instantiated_precond = self._instantiate_predicate(precond, complete_binding)
             new_predicates.add(instantiated_precond)
 
-        # Add deletion effects (must exist before action deletes them)
-        for del_effect in parsed_action.deletion_effects:
-            instantiated_del = self._instantiate_predicate(del_effect, complete_binding)
-            new_predicates.add(instantiated_del)
-
-        # Add inequality constraints
+        # Step 5: Add inequality constraints
+        # CRITICAL: Must instantiate ALL inequality constraints from the action
+        # Even if the original binding was empty, complete_binding now has variables
         new_constraints = set(current_state.constraints)
         for constraint in parsed_action.inequality_constraints:
-            instantiated_constraint = InequalityConstraint(
-                complete_binding.get(constraint.var1, constraint.var1),
-                complete_binding.get(constraint.var2, constraint.var2)
-            )
+            # Use complete_binding (which includes generated variables)
+            var1_inst = complete_binding.get(constraint.var1, constraint.var1)
+            var2_inst = complete_binding.get(constraint.var2, constraint.var2)
+
+            instantiated_constraint = InequalityConstraint(var1_inst, var2_inst)
             new_constraints.add(instantiated_constraint)
+
+        # CRITICAL: Validate constraints before creating state
+        # Check if inequality constraints are violated by the predicates
+        if not self._validate_constraints(new_predicates, new_constraints):
+            # Constraint violation detected - skip this state
+            return []
+
+        # CRITICAL: Check for contradictions (P and ~P in same state)
+        if not self._check_no_contradictions(new_predicates):
+            # Contradiction detected - skip this state
+            return []
+
+        # CRITICAL: Check for mutex violations using h^2 analysis
+        if hasattr(self, 'mutex_groups') and self.mutex_groups:
+            if not self._check_no_mutex_violations(new_predicates):
+                # Mutex violation detected - skip this state
+                return []
+
+        # CRITICAL: Prune states with too many variables
+        # If we have more variables than actual objects, the state is unreachable
+        if self.max_objects is not None:
+            # Count ACTUAL unique variables in the new state (not just max var number)
+            unique_vars = set()
+            for pred in new_predicates:
+                for arg in pred.args:
+                    if arg.startswith('?v'):
+                        unique_vars.add(arg)
+
+            if len(unique_vars) > self.max_objects:
+                # Too many variables for available objects - PRUNE
+                return []
 
         # Create predecessor state
         predecessor = BackwardState(
@@ -508,13 +647,204 @@ class BackwardSearchPlanner:
 
         return [predecessor]
 
+    def _check_no_contradictions(self, predicates: Set[PredicateAtom]) -> bool:
+        """
+        Check that predicates don't contain contradictions (P and ~P)
+
+        Args:
+            predicates: Set of predicates to check
+
+        Returns:
+            True if no contradictions, False if contradiction detected
+        """
+        # Build a set of (name, args) for both positive and negative predicates
+        positive_preds = set()
+        negative_preds = set()
+
+        for pred in predicates:
+            key = (pred.name, tuple(pred.args))
+            if pred.negated:
+                negative_preds.add(key)
+            else:
+                positive_preds.add(key)
+
+        # Check for overlap: if any predicate exists in both sets, it's a contradiction
+        contradictions = positive_preds & negative_preds
+        if contradictions:
+            # Found contradiction: P and ~P in same state
+            return False
+
+        return True
+
+    def _compute_mutex_groups(self) -> Dict[str, Set[str]]:
+        """
+        Compute mutex relationships from PDDL domain using Tarski library
+
+        Uses Tarski to parse PDDL and automatically derive mutex rules by
+        analyzing action effects:
+        - If adding P always deletes Q, then P and Q are mutex
+        - Example: pick-up adds holding(x) and deletes handempty()
+
+        Returns:
+            Dictionary mapping predicate names to sets of mutex predicates
+        """
+        try:
+            from tarski.io import PDDLReader
+            from tarski.fstrips.fstrips import AddEffect, DelEffect
+            from pathlib import Path
+
+            # Create minimal problem file if it doesn't exist
+            domain_path = Path('src/domains/blocksworld/domain.pddl')
+            problem_path = Path('src/domains/blocksworld/minimal_problem.pddl')
+
+            if not problem_path.exists():
+                # Create minimal problem for Tarski (requires both domain+problem)
+                problem_content = """(define (problem blocksworld-minimal)
+  (:domain blocksworld-4ops)
+  (:objects a b c - block)
+  (:init (on a b) (on b c) (ontable c) (clear a) (handempty))
+  (:goal (not (on a b)))
+)"""
+                problem_path.write_text(problem_content)
+
+            # Parse domain using Tarski
+            reader = PDDLReader(raise_on_error=True)
+            problem = reader.read_problem(str(domain_path), str(problem_path))
+
+            mutex_map = {}
+
+            # Analyze action effects to find mutex pairs
+            for action_name, action in problem.actions.items():
+                effects = action.effects if isinstance(action.effects, list) else []
+
+                # Collect add and delete effect predicate names
+                adds = []
+                deletes = []
+
+                for eff in effects:
+                    if isinstance(eff, DelEffect):
+                        # Extract just the predicate name (without arity)
+                        pred_name = str(eff.atom.predicate).split('/')[0]
+                        deletes.append(pred_name)
+                    elif isinstance(eff, AddEffect):
+                        # Extract just the predicate name (without arity)
+                        pred_name = str(eff.atom.predicate).split('/')[0]
+                        adds.append(pred_name)
+
+                # Find mutex pairs: if action adds P and deletes Q, they are mutex
+                for add_name in adds:
+                    for del_name in deletes:
+                        if add_name != del_name:
+                            if add_name not in mutex_map:
+                                mutex_map[add_name] = set()
+                            mutex_map[add_name].add(del_name)
+
+                            # Symmetric relationship
+                            if del_name not in mutex_map:
+                                mutex_map[del_name] = set()
+                            mutex_map[del_name].add(add_name)
+
+            # Singleton predicates (predicates that can only appear once)
+            # For now, we detect this by checking if a predicate is always
+            # in mutex with itself when it appears multiple times
+            self.singleton_predicates = {'holding'}  # Known singleton in blocksworld
+
+            return mutex_map
+
+        except ImportError:
+            print("[WARNING] Tarski library not available - mutex analysis disabled")
+            self.singleton_predicates = set()
+            return {}
+        except Exception as e:
+            print(f"[WARNING] Tarski mutex analysis failed: {e}")
+            self.singleton_predicates = set()
+            return {}
+
+
+    def _check_no_mutex_violations(self, predicates: Set[PredicateAtom]) -> bool:
+        """
+        Check if predicates violate any mutex constraints derived from domain
+
+        Args:
+            predicates: Set of predicates to check
+
+        Returns:
+            True if no mutex violations, False if violation detected
+        """
+        # Collect positive predicates by name
+        preds_by_name = {}
+        for pred in predicates:
+            if not pred.negated:
+                if pred.name not in preds_by_name:
+                    preds_by_name[pred.name] = []
+                preds_by_name[pred.name].append(pred)
+
+        # Check Pattern 1: Mutex pairs (e.g., handempty vs holding)
+        for pred_name, mutex_names in self.mutex_groups.items():
+            if pred_name in preds_by_name:
+                # This predicate appears in the state
+                # Check if any of its mutex predicates also appear
+                for mutex_name in mutex_names:
+                    if mutex_name in preds_by_name:
+                        # Mutex violation!
+                        return False
+
+        # Check Pattern 2: Singleton predicates (e.g., multiple holding)
+        for pred_name in self.singleton_predicates:
+            if pred_name in preds_by_name:
+                if len(preds_by_name[pred_name]) > 1:
+                    # Multiple instances of singleton predicate!
+                    return False
+
+        return True
+
+    def _validate_constraints(self, predicates: Set[PredicateAtom],
+                            constraints: Set[InequalityConstraint]) -> bool:
+        """
+        Validate that predicates don't violate inequality constraints
+
+        This is the CORRECT way to detect invalid states:
+        - DON'T hardcode "on(X,X) is invalid"
+        - DO check if inequality constraints from PDDL are violated
+
+        Example:
+        - Constraint: ?v0 ≠ ?v1
+        - Predicate: on(?v0, ?v0)  ← INVALID (violates constraint)
+        - Predicate: on(?v0, ?v1)  ← VALID (satisfies constraint)
+
+        Args:
+            predicates: Set of predicates in the state
+            constraints: Set of inequality constraints
+
+        Returns:
+            True if all constraints are satisfied, False if any are violated
+        """
+        # Check each inequality constraint
+        for constraint in constraints:
+            var1 = constraint.var1
+            var2 = constraint.var2
+
+            # Constraint says var1 ≠ var2
+            # If var1 == var2, this is a contradiction
+            if var1 == var2:
+                # Constraint violation: ?v0 ≠ ?v0 is always false
+                return False
+
+        # All constraints are satisfiable
+        return True
+
     def _complete_binding(self, parameters: List[str],
                           partial_binding: Dict[str, str],
                           parent_max_var: int) -> Tuple[Dict[str, str], int]:
         """
         Complete partial binding by generating new variables for unbound parameters
 
-        Variable numbering starts from parent_max_var + 1
+        Variable numbering: ?v1, ?v2, ?v3, ... (for AgentSpeak compatibility: ?v1 → V1)
+        Starts from parent_max_var + 1
+
+        CRITICAL: Ensure generated variables don't clash with existing variables in binding
+
+        If max_objects is set, caps variable generation at that number
 
         Args:
             parameters: List of action parameter variables
@@ -525,16 +855,38 @@ class BackwardSearchPlanner:
             (complete_binding, next_max_var_number)
         """
         complete_binding = dict(partial_binding)
+
+        # Collect all variables already used in the binding
+        used_vars = set(partial_binding.values())
+
         next_var_num = parent_max_var + 1
 
         for param in parameters:
             if param not in complete_binding:
-                # Generate new variable
-                new_var = f"?{next_var_num}"
+                # Generate new variable that hasn't been used yet
+                # Format: ?v1, ?v2, ?v3, ... (AgentSpeak compatible)
+                new_var = f"?v{next_var_num}"
+
+                # CRITICAL: Skip variables that are already used in the binding
+                while new_var in used_vars:
+                    next_var_num += 1
+                    new_var = f"?v{next_var_num}"
+
+                # NOTE: We do NOT cap variable generation at max_objects
+                # In backward planning, we may need more variables than actual objects
+                # because we're exploring abstract state space
+                # max_objects is only used for final_max_var calculation below
+
                 complete_binding[param] = new_var
+                used_vars.add(new_var)
                 next_var_num += 1
 
-        return complete_binding, next_var_num - 1
+        # Return the actual max variable number used
+        # NOTE: We do NOT cap this at max_objects
+        # In backward planning, variables represent abstract entities, not concrete objects
+        final_max_var = next_var_num - 1
+
+        return complete_binding, final_max_var
 
     def _instantiate_predicate(self, predicate: PredicateAtom,
                                 binding: Dict[str, str]) -> PredicateAtom:
@@ -551,19 +903,123 @@ class BackwardSearchPlanner:
         new_args = [binding.get(arg, arg) for arg in predicate.args]
         return PredicateAtom(predicate.name, new_args, predicate.negated)
 
+    def _build_variable_mapping(self, predicates: Set[PredicateAtom],
+                                 constraints: Set[InequalityConstraint]) -> Dict[str, str]:
+        """
+        Build consistent variable mapping for both predicates and constraints
+
+        Algorithm:
+        1. Sort predicates by (name, args, negated) for canonical order
+        2. Scan predicate arguments in sorted order
+        3. First occurrence of ?vN gets mapped to ?v1, second to ?v2, etc.
+        4. Also collect variables from constraints (for completeness)
+
+        Args:
+            predicates: Set of PredicateAtom
+            constraints: Set of InequalityConstraint
+
+        Returns:
+            Dictionary mapping old variable names to normalized names
+        """
+        var_map = {}
+        next_var = 1
+
+        # Sort predicates for canonical order
+        sorted_preds = sorted(predicates, key=lambda p: (p.name, p.args, p.negated))
+
+        # Scan predicate arguments
+        for pred in sorted_preds:
+            for arg in pred.args:
+                if arg.startswith('?v') and arg not in var_map:
+                    var_map[arg] = f'?v{next_var}'
+                    next_var += 1
+
+        # Also scan constraints (in case there are variables only in constraints)
+        for constraint in sorted(constraints, key=lambda c: (c.var1, c.var2)):
+            for var in [constraint.var1, constraint.var2]:
+                if var.startswith('?v') and var not in var_map:
+                    var_map[var] = f'?v{next_var}'
+                    next_var += 1
+
+        return var_map
+
+    def _normalize_predicates_with_mapping(self, predicates: Set[PredicateAtom],
+                                          var_map: Dict[str, str]) -> Tuple[Tuple, ...]:
+        """
+        Normalize predicates using provided variable mapping
+
+        Args:
+            predicates: Set of PredicateAtom
+            var_map: Variable name mapping
+
+        Returns:
+            Tuple of normalized predicate representations
+        """
+        # Sort predicates for canonical order
+        sorted_preds = sorted(predicates, key=lambda p: (p.name, p.args, p.negated))
+
+        # Normalize predicates
+        normalized = []
+        for pred in sorted_preds:
+            new_args = tuple(var_map.get(arg, arg) for arg in pred.args)
+            normalized.append((pred.name, new_args, pred.negated))
+
+        return tuple(normalized)
+
+    def _normalize_constraints_with_mapping(self, constraints: Set[InequalityConstraint],
+                                           var_map: Dict[str, str]) -> Tuple[Tuple, ...]:
+        """
+        Normalize constraints using provided variable mapping
+
+        Args:
+            constraints: Set of InequalityConstraint
+            var_map: Variable name mapping
+
+        Returns:
+            Tuple of normalized constraint representations
+        """
+        if not constraints:
+            return ()
+
+        # Normalize constraints
+        normalized = []
+        for constraint in constraints:
+            var1_norm = var_map.get(constraint.var1, constraint.var1)
+            var2_norm = var_map.get(constraint.var2, constraint.var2)
+            # Sort for canonical form: always (smaller, larger)
+            normalized.append(tuple(sorted([var1_norm, var2_norm])))
+
+        return tuple(sorted(normalized))
+
     def _state_key(self, state: BackwardState) -> Tuple:
         """
-        Generate hashable key for state
+        Generate hashable key for state with VARIABLE NORMALIZATION
+
+        CRITICAL: Normalize variable names to detect equivalent states
+        Example:
+            State 1: on(a, ?v2) ∧ clear(?v5) → Normalized: on(a, ?v1) ∧ clear(?v2)
+            State 2: on(a, ?v7) ∧ clear(?v3) → Normalized: on(a, ?v1) ∧ clear(?v2)
+            → SAME KEY (deduplicated!)
+
+        Without normalization:
+            State 1 key: ((on(a, ?v2), clear(?v5)), ())
+            State 2 key: ((on(a, ?v7), clear(?v3)), ())
+            → DIFFERENT KEYS (state explosion!)
 
         Args:
             state: BackwardState
 
         Returns:
-            Tuple representing state (for visited set)
+            Tuple representing normalized state (for visited set)
         """
-        pred_tuple = tuple(sorted(state.predicates, key=str))
-        constraint_tuple = tuple(sorted(state.constraints, key=str))
-        return (pred_tuple, constraint_tuple)
+        # Build consistent variable mapping for both predicates and constraints
+        var_map = self._build_variable_mapping(state.predicates, state.constraints)
+
+        # Normalize both using the same mapping
+        normalized_preds = self._normalize_predicates_with_mapping(state.predicates, var_map)
+        normalized_constraints = self._normalize_constraints_with_mapping(state.constraints, var_map)
+
+        return (normalized_preds, normalized_constraints)
 
     def _create_empty_state_graph(self, goal_state: BackwardState) -> StateGraph:
         """Create empty state graph for already-achieved goals"""
@@ -694,10 +1150,10 @@ def test_backward_search_detailed():
 
     # Test 3: Goal with variables
     print("\n" + "="*60)
-    print("Test 3: Goal = on(?1, ?2)")
+    print("Test 3: Goal = on(?v1, ?v2)")
     print("="*60)
 
-    goal3 = [PredicateAtom("on", ["?1", "?2"])]
+    goal3 = [PredicateAtom("on", ["?v1", "?v2"])]
     graph3 = planner.search(goal3, max_states=100, max_depth=3)
 
     print(f"\nResult: {graph3.get_statistics()}")

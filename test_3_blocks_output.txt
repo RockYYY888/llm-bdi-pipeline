@@ -1,0 +1,572 @@
+================================================================================
+3 BLOCKS DETAILED STATE OUTPUT
+================================================================================
+
+Goal: ['~on(a, b)']
+Objects: a, b, c
+max_objects: 3
+max_states: 500
+
+Results:
+  States explored: 1437
+  Was truncated: True
+
+States by depth:
+  Depth 0: 1 states
+  Depth 1: 2 states
+  Depth 2: 14 states
+  Depth 3: 88 states
+  Depth 4: 429 states
+  Depth 5: 903 states
+
+================================================================================
+DETAILED STATE SAMPLES (10 samples per depth, first 5 depths)
+================================================================================
+
+
+================================================================================
+DEPTH 0 (showing 10/1 states)
+================================================================================
+
+--- State 1 (depth 0) ---
+Predicates (1):
+  ~on(a, b)
+Variables: 0 - []
+Grounded: ['a', 'b']
+
+
+================================================================================
+DEPTH 1 (showing 10/2 states)
+================================================================================
+
+--- State 1 (depth 1) ---
+Predicates (3):
+  clear(a)
+  handempty()
+  on(a, b)
+Variables: 0 - []
+Grounded: ['a', 'b']
+
+--- State 2 (depth 1) ---
+Predicates (3):
+  handempty()
+  on(?v1, a)
+  on(a, b)
+Variables: 1 - ['?v1']
+Grounded: ['a', 'b']
+
+
+================================================================================
+DEPTH 2 (showing 10/14 states)
+================================================================================
+
+--- State 1 (depth 2) ---
+Predicates (3):
+  holding(?v2)
+  on(?v1, a)
+  on(a, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 2 (depth 2) ---
+Predicates (2):
+  clear(b)
+  holding(a)
+Variables: 0 - []
+Grounded: ['a', 'b']
+
+--- State 3 (depth 2) ---
+Predicates (4):
+  clear(?v3)
+  holding(?v2)
+  on(?v1, a)
+  on(a, b)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 4 (depth 2) ---
+Predicates (4):
+  holding(?v3)
+  on(?v1, a)
+  on(?v2, ?v3)
+  on(a, b)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 5 (depth 2) ---
+Predicates (4):
+  clear(a)
+  clear(b)
+  holding(a)
+  on(?v1, a)
+Variables: 1 - ['?v1']
+Grounded: ['a', 'b']
+
+--- State 6 (depth 2) ---
+Predicates (4):
+  clear(a)
+  holding(?v1)
+  on(?v2, ?v1)
+  on(a, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 7 (depth 2) ---
+Predicates (4):
+  clear(b)
+  holding(a)
+  on(?v1, a)
+  on(?v2, a)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 8 (depth 2) ---
+Predicates (3):
+  clear(a)
+  holding(?v1)
+  on(a, b)
+Variables: 1 - ['?v1']
+Grounded: ['a', 'b']
+
+--- State 9 (depth 2) ---
+Predicates (4):
+  clear(a)
+  holding(?v2)
+  on(?v1, ?v2)
+  on(a, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 10 (depth 2) ---
+Predicates (2):
+  holding(a)
+  on(a, b)
+Variables: 0 - []
+Grounded: ['a', 'b']
+
+
+================================================================================
+DEPTH 3 (showing 10/88 states)
+================================================================================
+
+--- State 1 (depth 3) ---
+Predicates (3):
+  clear(?v1)
+  holding(a)
+  holding(b)
+Variables: 1 - ['?v1']
+Grounded: ['a', 'b']
+
+--- State 2 (depth 3) ---
+Predicates (6):
+  clear(a)
+  clear(b)
+  holding(?v2)
+  holding(a)
+  on(?v1, ?v2)
+  on(?v3, a)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 3 (depth 3) ---
+Predicates (5):
+  handempty()
+  holding(a)
+  on(?v2, ?v3)
+  on(?v3, ?v1)
+  on(a, b)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 4 (depth 3) ---
+Predicates (6):
+  clear(a)
+  clear(b)
+  holding(?v2)
+  holding(a)
+  on(?v1, a)
+  on(?v3, ?v2)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 5 (depth 3) ---
+Predicates (5):
+  clear(?v1)
+  clear(a)
+  holding(?v1)
+  holding(?v2)
+  on(a, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 6 (depth 3) ---
+Predicates (4):
+  clear(?v2)
+  holding(?v1)
+  holding(a)
+  on(a, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 7 (depth 3) ---
+Predicates (6):
+  clear(a)
+  clear(b)
+  handempty()
+  on(?v1, a)
+  on(?v2, a)
+  on(a, ?v3)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 8 (depth 3) ---
+Predicates (5):
+  clear(?v2)
+  clear(a)
+  holding(?v1)
+  holding(?v2)
+  on(a, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 9 (depth 3) ---
+Predicates (5):
+  clear(?v3)
+  clear(a)
+  holding(?v1)
+  holding(?v2)
+  on(a, b)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 10 (depth 3) ---
+Predicates (6):
+  clear(?v3)
+  handempty()
+  holding(?v1)
+  on(?v2, ?v1)
+  on(?v3, a)
+  on(a, b)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+
+================================================================================
+DEPTH 4 (showing 10/429 states)
+================================================================================
+
+--- State 1 (depth 4) ---
+Predicates (6):
+  clear(?v2)
+  clear(a)
+  handempty()
+  holding(?v1)
+  holding(a)
+  on(?v2, b)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 2 (depth 4) ---
+Predicates (6):
+  clear(?v2)
+  handempty()
+  holding(?v3)
+  on(?v1, a)
+  on(a, b)
+  ontable(?v2)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 3 (depth 4) ---
+Predicates (4):
+  clear(a)
+  holding(a)
+  on(?v1, a)
+  on(a, b)
+Variables: 1 - ['?v1']
+Grounded: ['a', 'b']
+
+--- State 4 (depth 4) ---
+Predicates (5):
+  clear(?v1)
+  clear(a)
+  clear(b)
+  holding(a)
+  on(?v2, a)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+--- State 5 (depth 4) ---
+Predicates (5):
+  clear(b)
+  holding(?v2)
+  holding(a)
+  on(?v1, ?v2)
+  on(?v3, ?v2)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 6 (depth 4) ---
+Predicates (3):
+  clear(b)
+  holding(a)
+  ontable(a)
+Variables: 0 - []
+Grounded: ['a', 'b']
+
+--- State 7 (depth 4) ---
+Predicates (8):
+  clear(?v1)
+  clear(a)
+  clear(b)
+  handempty()
+  holding(a)
+  on(?v2, ?v1)
+  on(?v3, a)
+  ontable(?v1)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 8 (depth 4) ---
+Predicates (7):
+  clear(?v3)
+  clear(b)
+  handempty()
+  holding(a)
+  on(?v1, a)
+  on(?v2, ?v3)
+  ontable(?v3)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 9 (depth 4) ---
+Predicates (5):
+  clear(?v2)
+  clear(a)
+  holding(?v1)
+  on(?v1, ?v3)
+  on(a, b)
+Variables: 3 - ['?v1', '?v2', '?v3']
+Grounded: ['a', 'b']
+
+--- State 10 (depth 4) ---
+Predicates (6):
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v1)
+  on(?v2, a)
+  ontable(a)
+Variables: 2 - ['?v1', '?v2']
+Grounded: ['a', 'b']
+
+
+================================================================================
+PATTERN ANALYSIS
+================================================================================
+
+Most common predicate names:
+  clear: 2574 occurrences
+  holding: 2265 occurrences
+  on: 2227 occurrences
+  handempty: 691 occurrences
+  ontable: 673 occurrences
+
+States by number of predicates:
+  1 predicates: 1 states
+  2 predicates: 3 states
+  3 predicates: 22 states
+  4 predicates: 115 states
+  5 predicates: 388 states
+  6 predicates: 489 states
+  7 predicates: 332 states
+  8 predicates: 84 states
+  9 predicates: 3 states
+
+Variable usage distribution:
+  0 variables: 13 states (0.9%)
+  1 variables: 74 states (5.1%)
+  2 variables: 334 states (23.2%)
+  3 variables: 1016 states (70.7%)
+
+================================================================================
+SAMPLE: States with 3 variables (max allowed)
+================================================================================
+
+Found 1016 states with exactly 3 variables
+
+Example 1 (depth 5):
+  clear(?v2)
+  handempty()
+  holding(a)
+  on(?v2, ?v1)
+  on(?v2, ?v3)
+  on(a, b)
+
+Example 2 (depth 5):
+  clear(?v3)
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v2)
+  on(?v1, a)
+  on(?v3, a)
+  ontable(a)
+
+Example 3 (depth 5):
+  clear(?v3)
+  clear(b)
+  handempty()
+  holding(?v2)
+  holding(a)
+  on(?v1, a)
+  on(?v3, a)
+
+Example 4 (depth 5):
+  clear(b)
+  handempty()
+  holding(a)
+  on(?v2, ?v3)
+  on(?v3, ?v1)
+  ontable(?v1)
+
+Example 5 (depth 4):
+  clear(?v2)
+  handempty()
+  holding(?v3)
+  on(?v1, a)
+  on(a, b)
+  ontable(?v2)
+
+Example 6 (depth 5):
+  clear(?v2)
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v1)
+  on(?v2, a)
+  on(a, ?v3)
+
+Example 7 (depth 4):
+  clear(b)
+  holding(?v2)
+  holding(a)
+  on(?v1, ?v2)
+  on(?v3, ?v2)
+
+Example 8 (depth 4):
+  clear(?v1)
+  clear(a)
+  clear(b)
+  handempty()
+  holding(a)
+  on(?v2, ?v1)
+  on(?v3, a)
+  ontable(?v1)
+
+Example 9 (depth 5):
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v2)
+  holding(a)
+  on(?v1, a)
+  on(b, ?v3)
+
+Example 10 (depth 4):
+  clear(?v3)
+  clear(b)
+  handempty()
+  holding(a)
+  on(?v1, a)
+  on(?v2, ?v3)
+  ontable(?v3)
+
+Example 11 (depth 5):
+  clear(?v1)
+  handempty()
+  holding(?v2)
+  on(?v1, ?v3)
+  on(?v2, a)
+  on(a, b)
+
+Example 12 (depth 5):
+  clear(?v3)
+  handempty()
+  holding(?v2)
+  on(?v1, ?v2)
+  on(?v3, a)
+  on(a, b)
+  ontable(a)
+
+Example 13 (depth 4):
+  clear(?v2)
+  clear(a)
+  holding(?v1)
+  on(?v1, ?v3)
+  on(a, b)
+
+Example 14 (depth 5):
+  clear(a)
+  holding(?v1)
+  holding(?v3)
+  holding(a)
+  on(?v2, a)
+  on(?v3, b)
+
+Example 15 (depth 4):
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v2)
+  on(?v1, a)
+  on(a, ?v3)
+
+Example 16 (depth 5):
+  clear(a)
+  holding(?v2)
+  holding(b)
+  on(?v1, a)
+  on(?v3, a)
+  ontable(a)
+
+Example 17 (depth 5):
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v2)
+  on(?v1, ?v2)
+  on(?v3, ?v2)
+  ontable(a)
+
+Example 18 (depth 5):
+  clear(?v1)
+  clear(?v2)
+  clear(a)
+  handempty()
+  on(a, ?v3)
+  on(a, b)
+  ontable(?v1)
+
+Example 19 (depth 5):
+  clear(?v2)
+  clear(a)
+  clear(b)
+  handempty()
+  holding(?v1)
+  holding(?v2)
+  on(?v3, a)
+  ontable(a)
+
+Example 20 (depth 4):
+  clear(?v2)
+  clear(a)
+  holding(?v1)
+  on(?v3, ?v1)
+  on(a, b)
+  ontable(?v2)
+
+
+================================================================================
+END OF DETAILED OUTPUT
+================================================================================

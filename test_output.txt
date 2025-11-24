@@ -1,0 +1,1177 @@
+
+
+╔==============================================================================╗
+║                                                                              ║
+║               BACKWARD SEARCH INSTRUCTION COMPLIANCE TEST SUITE              ║
+║                                                                              ║
+╚==============================================================================╝
+
+
+================================================================================
+TEST 1: Simple goal on(a, b)
+================================================================================
+
+Goal: ['on(a, b)']
+
+Expected first expansion:
+  Action: put-on-block(a, b)
+  Regression result: holding(a) ∧ clear(b)
+
+Actual exploration:
+
+[Backward Search] Starting from goal: ['on(a, b)']
+[Backward Search] Max states: 100
+[Backward Search] Initial goal state: State(depth=0, preds=[on(a, b)], constraints=[])
+    [Depth 0] Predicate 1/1: on(a, b)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': 'b'}
+          → New state: State(depth=1, preds=[clear(b), holding(a)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': 'b'}
+          → New state: State(depth=1, preds=[clear(b), holding(a), on(?1, a)], constraints=[])
+    [Depth 1] Predicate 1/2: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), handempty, on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), handempty, ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(b), handempty, on(?1, a), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 2/2: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), handempty, holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), holding(a), holding(b)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[holding(a), holding(b)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=2, preds=[handempty, holding(a), on(?1, ?2), on(?2, b)], constraints=[])
+    [Depth 1] Predicate 1/3: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), handempty, on(?1, a), on(a, ?2)], constraints=[a ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), handempty, on(?1, a), ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(b), handempty, on(?1, a), on(?2, a), on(a, ?3)], constraints=[])
+    [Depth 1] Predicate 2/3: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(?2), handempty, holding(a), on(?1, a), on(?2, b)], constraints=[?2 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(?2), holding(a), holding(b), on(?1, a)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[holding(a), holding(b), on(?1, a)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=2, preds=[handempty, holding(a), on(?1, a), on(?2, ?3), on(?3, b)], constraints=[])
+    [Depth 1] Predicate 3/3: on(?1, a)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?1), holding(a)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?1), holding(a), on(?2, ?1)], constraints=[])
+    [Depth 2] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), clear(b), holding(?2), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?2), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?4), clear(a), clear(b), holding(?3), on(?2, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?3), on(?2, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), handempty, on(?2, b), on(a, ?1)], constraints=[?2 ≠ b, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[clear(a), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=3, preds=[clear(a), handempty, on(?2, ?3), on(?3, b), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/4: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), clear(b), holding(a), on(?2, a)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 4/4: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?2), clear(b), handempty, on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?2), clear(b), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(b), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(b), handempty, on(?2, ?3), on(?3, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), clear(b), holding(?1), ontable(a)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?1), ontable(a)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), clear(b), holding(?2), on(?1, ?2), ontable(a)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?2), on(?1, ?2), ontable(a)], constraints=[])
+    [Depth 2] Predicate 2/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), handempty, on(?1, b), ontable(a)], constraints=[?1 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), holding(b), ontable(a)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[clear(a), holding(b), ontable(a)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=3, preds=[clear(a), handempty, on(?1, ?2), on(?2, b), ontable(a)], constraints=[])
+    [Depth 2] Predicate 3/4: ontable(a)
+      Found 2 achieving action(s)
+        Action 1: put-down with binding {'?b': 'a'}
+        Action 2: put-tower-down with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(a), on(?1, a)], constraints=[])
+    [Depth 2] Predicate 4/4: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), handempty, on(?1, a), ontable(a)], constraints=[?1 ≠ a])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), holding(a), ontable(a)], constraints=[])
+        Action 3: put-down with binding {'?b': 'a'}
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(b), handempty, on(?1, ?2), on(?2, a), ontable(a)], constraints=[])
+    [Depth 2] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?4), clear(b), holding(?3), on(?1, a), on(a, ?2)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[clear(b), holding(?3), on(?1, a), on(a, ?2)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?5), clear(b), holding(?4), on(?1, a), on(?3, ?4), on(a, ?2)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(b), holding(?4), on(?1, a), on(?3, ?4), on(a, ?2)], constraints=[])
+    [Depth 2] Predicate 2/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, on(?1, a), on(?3, b), on(a, ?2)], constraints=[?3 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), holding(b), on(?1, a), on(a, ?2)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[holding(b), on(?1, a), on(a, ?2)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=3, preds=[handempty, on(?1, a), on(?3, ?4), on(?4, b), on(a, ?2)], constraints=[])
+    [Depth 2] Predicate 3/4: on(a, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(b), holding(a), on(?1, a)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(b), holding(a), on(?1, a), on(?3, a)], constraints=[])
+    [Depth 2] Predicate 4/4: on(?1, a)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?1), on(a, ?2)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?1), on(?3, ?1), on(a, ?2)], constraints=[])
+    [Depth 2] Predicate 1/4: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), handempty, on(?1, b), on(a, ?2)], constraints=[?1 ≠ b, a ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, on(?1, b), on(?2, a), on(a, ?3)], constraints=[?1 ≠ b])
+    [Depth 2] Predicate 2/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), holding(?2), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[clear(?1), holding(?2), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?4), holding(?3), holding(a), on(?1, b), on(?2, ?3)], constraints=[?1 ≠ b])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(?1), holding(?3), holding(a), on(?1, b), on(?2, ?3)], constraints=[?1 ≠ b])
+    [Depth 2] Predicate 3/4: on(?1, b)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(b), holding(?1), holding(a)], constraints=[?1 ≠ b])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': 'b'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), holding(?1), holding(a), on(?2, ?1)], constraints=[?1 ≠ b])
+    [Depth 2] Predicate 4/4: clear(?1)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, holding(a), on(?1, b), on(?2, ?1)], constraints=[?1 ≠ b, ?2 ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 3: put-down with binding {'?b': '?1'}
+          → New state: State(depth=3, preds=[holding(?1), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 4: pick-tower with binding {'?b3': '?1'}
+          → New state: State(depth=3, preds=[handempty, holding(a), on(?1, b), on(?2, ?3), on(?3, ?1)], constraints=[?1 ≠ b])
+    [Depth 2] Predicate 1/3: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), handempty, holding(b), on(a, ?2)], constraints=[a ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), handempty, holding(b), ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, holding(b), on(?2, a), on(a, ?3)], constraints=[])
+    [Depth 2] Predicate 2/3: clear(?1)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, holding(a), holding(b), on(?2, ?1)], constraints=[?2 ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), holding(a), holding(b)], constraints=[])
+        Action 3: put-down with binding {'?b': '?1'}
+          → New state: State(depth=3, preds=[holding(?1), holding(a), holding(b)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?1'}
+          → New state: State(depth=3, preds=[handempty, holding(a), holding(b), on(?2, ?3), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 3/3: holding(b)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'b'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), handempty, holding(a), on(b, ?2)], constraints=[b ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), handempty, holding(a), ontable(b)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, holding(a), on(?2, b), on(b, ?3)], constraints=[])
+    [Depth 2] Predicate 1/2: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(a), handempty, holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(a), handempty, holding(b), ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[handempty, holding(b), on(?1, a), on(a, ?2)], constraints=[])
+    [Depth 2] Predicate 2/2: holding(b)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'b'}
+          → New state: State(depth=3, preds=[clear(b), handempty, holding(a), on(b, ?1)], constraints=[b ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[clear(b), handempty, holding(a), ontable(b)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[handempty, holding(a), on(?1, b), on(b, ?2)], constraints=[])
+    [Depth 2] Predicate 1/4: on(?1, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), holding(a), on(?2, b)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), holding(a), on(?2, b), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 2/4: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(a), handempty, on(?1, ?2), on(?2, b), on(a, ?3)], constraints=[a ≠ ?3])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[handempty, on(?1, ?2), on(?2, b), on(?3, a), on(a, ?4)], constraints=[])
+    [Depth 2] Predicate 3/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?4), holding(?3), holding(a), on(?1, ?2), on(?2, b)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[holding(?3), holding(a), on(?1, ?2), on(?2, b)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?5), holding(?4), holding(a), on(?1, ?2), on(?2, b), on(?3, ?4)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[holding(?4), holding(a), on(?1, ?2), on(?2, b), on(?3, ?4)], constraints=[])
+    [Depth 2] Predicate 4/4: on(?2, b)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?2', '?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(b), holding(?2), holding(a), on(?1, ?2)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?2', '?b3': 'b'}
+          → New state: State(depth=3, preds=[clear(b), holding(?2), holding(a), on(?1, ?2), on(?3, ?2)], constraints=[])
+[Backward Search] Exploration complete:
+  States explored: 100
+  Unique states: 1,193
+  Transitions: 1,354
+
+Results:
+  States explored: 1137
+  Transitions: 1354
+
+✓ Found expected state: State(clear(?2), clear(a), clear(b), holding(?1), holding(a))
+
+================================================================================
+
+================================================================================
+TEST 2: Conjunction goal holding(a) ∧ clear(b)
+================================================================================
+
+Goal: ['holding(a)', 'clear(b)']
+
+Expected expansions:
+  Branch 1 (achieving holding(a)):
+    Action: pick-up(a, ?1)
+    Regression: clear(b) ∧ handempty ∧ clear(a) ∧ on(a, ?1) ∧ (a ≠ ?1)
+  Branch 2 (achieving clear(b)):
+    Action: pick-up(?1, b)
+    Regression: holding(a) ∧ handempty ∧ clear(?1) ∧ on(?1, b) ∧ (?1 ≠ b)
+
+Actual exploration:
+
+[Backward Search] Starting from goal: ['holding(a)', 'clear(b)']
+[Backward Search] Max states: 100
+[Backward Search] Initial goal state: State(depth=0, preds=[clear(b), holding(a)], constraints=[])
+    [Depth 0] Predicate 1/2: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=1, preds=[clear(a), clear(b), handempty, on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=1, preds=[clear(a), clear(b), handempty, ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=1, preds=[clear(b), handempty, on(?1, a), on(a, ?2)], constraints=[])
+    [Depth 0] Predicate 2/2: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=1, preds=[clear(?1), handempty, holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=1, preds=[clear(?1), holding(a), holding(b)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=1, preds=[holding(a), holding(b)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=1, preds=[handempty, holding(a), on(?1, ?2), on(?2, b)], constraints=[])
+    [Depth 1] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?3), clear(a), clear(b), holding(?2), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?2), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?4), clear(a), clear(b), holding(?3), on(?2, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?3), on(?2, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 2/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(?2), clear(a), handempty, on(?2, b), on(a, ?1)], constraints=[?2 ≠ b, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(?2), clear(a), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[clear(a), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=2, preds=[clear(a), handempty, on(?2, ?3), on(?3, b), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 3/4: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(b), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), clear(b), holding(a), on(?2, a)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 4/4: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(?2), clear(b), handempty, on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(?2), clear(b), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'a'}
+          → New state: State(depth=2, preds=[clear(b), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=2, preds=[clear(b), handempty, on(?2, ?3), on(?3, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?2), clear(a), clear(b), holding(?1), ontable(a)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?1), ontable(a)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?3), clear(a), clear(b), holding(?2), on(?1, ?2), ontable(a)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?2), on(?1, ?2), ontable(a)], constraints=[])
+    [Depth 1] Predicate 2/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), handempty, on(?1, b), ontable(a)], constraints=[?1 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), holding(b), ontable(a)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[clear(a), holding(b), ontable(a)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=2, preds=[clear(a), handempty, on(?1, ?2), on(?2, b), ontable(a)], constraints=[])
+    [Depth 1] Predicate 3/4: ontable(a)
+      Found 2 achieving action(s)
+        Action 1: put-down with binding {'?b': 'a'}
+        Action 2: put-tower-down with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(a), on(?1, a)], constraints=[])
+    [Depth 1] Predicate 4/4: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), clear(b), handempty, on(?1, a), ontable(a)], constraints=[?1 ≠ a])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), clear(b), holding(a), ontable(a)], constraints=[])
+        Action 3: put-down with binding {'?b': 'a'}
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=2, preds=[clear(b), handempty, on(?1, ?2), on(?2, a), ontable(a)], constraints=[])
+    [Depth 1] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?4), clear(b), holding(?3), on(?1, a), on(a, ?2)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[clear(b), holding(?3), on(?1, a), on(a, ?2)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?5), clear(b), holding(?4), on(?1, a), on(?3, ?4), on(a, ?2)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[clear(b), holding(?4), on(?1, a), on(?3, ?4), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 2/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(?3), handempty, on(?1, a), on(?3, b), on(a, ?2)], constraints=[?3 ≠ b])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(?3), holding(b), on(?1, a), on(a, ?2)], constraints=[])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[holding(b), on(?1, a), on(a, ?2)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=2, preds=[handempty, on(?1, a), on(?3, ?4), on(?4, b), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 3/4: on(a, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?2'}
+          → New state: State(depth=2, preds=[clear(?2), clear(b), holding(a), on(?1, a)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?2'}
+          → New state: State(depth=2, preds=[clear(?2), clear(b), holding(a), on(?1, a), on(?3, a)], constraints=[])
+    [Depth 1] Predicate 4/4: on(?1, a)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?1), on(a, ?2)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': 'a'}
+          → New state: State(depth=2, preds=[clear(a), clear(b), holding(?1), on(?3, ?1), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 1/4: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), handempty, on(?1, b), on(a, ?2)], constraints=[?1 ≠ b, a ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), handempty, on(?1, b), on(?2, a), on(a, ?3)], constraints=[?1 ≠ b])
+    [Depth 1] Predicate 2/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?1), clear(?3), holding(?2), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[clear(?1), holding(?2), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?1), clear(?4), holding(?3), holding(a), on(?1, b), on(?2, ?3)], constraints=[?1 ≠ b])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[clear(?1), holding(?3), holding(a), on(?1, b), on(?2, ?3)], constraints=[?1 ≠ b])
+    [Depth 1] Predicate 3/4: on(?1, b)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(b), holding(?1), holding(a)], constraints=[?1 ≠ b])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), clear(b), holding(?1), holding(a), on(?2, ?1)], constraints=[?1 ≠ b])
+    [Depth 1] Predicate 4/4: clear(?1)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?1'}
+          → New state: State(depth=2, preds=[clear(?2), handempty, holding(a), on(?1, b), on(?2, ?1)], constraints=[?1 ≠ b, ?2 ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?1'}
+          → New state: State(depth=2, preds=[clear(?2), holding(?1), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 3: put-down with binding {'?b': '?1'}
+          → New state: State(depth=2, preds=[holding(?1), holding(a), on(?1, b)], constraints=[?1 ≠ b])
+        Action 4: pick-tower with binding {'?b3': '?1'}
+          → New state: State(depth=2, preds=[handempty, holding(a), on(?1, b), on(?2, ?3), on(?3, ?1)], constraints=[?1 ≠ b])
+    [Depth 1] Predicate 1/3: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), handempty, holding(b), on(a, ?2)], constraints=[a ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), handempty, holding(b), ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), handempty, holding(b), on(?2, a), on(a, ?3)], constraints=[])
+    [Depth 1] Predicate 2/3: clear(?1)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?1'}
+          → New state: State(depth=2, preds=[clear(?2), handempty, holding(a), holding(b), on(?2, ?1)], constraints=[?2 ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?1'}
+          → New state: State(depth=2, preds=[clear(?2), holding(?1), holding(a), holding(b)], constraints=[])
+        Action 3: put-down with binding {'?b': '?1'}
+          → New state: State(depth=2, preds=[holding(?1), holding(a), holding(b)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?1'}
+          → New state: State(depth=2, preds=[handempty, holding(a), holding(b), on(?2, ?3), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 3/3: holding(b)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), clear(b), handempty, holding(a), on(b, ?2)], constraints=[b ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), clear(b), handempty, holding(a), ontable(b)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(?1), handempty, holding(a), on(?2, b), on(b, ?3)], constraints=[])
+    [Depth 1] Predicate 1/2: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(a), handempty, holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=2, preds=[clear(a), handempty, holding(b), ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[handempty, holding(b), on(?1, a), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 2/2: holding(b)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'b'}
+          → New state: State(depth=2, preds=[clear(b), handempty, holding(a), on(b, ?1)], constraints=[b ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'b'}
+          → New state: State(depth=2, preds=[clear(b), handempty, holding(a), ontable(b)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'b'}
+          → New state: State(depth=2, preds=[handempty, holding(a), on(?1, b), on(b, ?2)], constraints=[])
+    [Depth 1] Predicate 1/4: on(?1, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': '?2'}
+          → New state: State(depth=2, preds=[clear(?2), holding(?1), holding(a), on(?2, b)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': '?2'}
+          → New state: State(depth=2, preds=[clear(?2), holding(?1), holding(a), on(?2, b), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 2/4: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(a), handempty, on(?1, ?2), on(?2, b), on(a, ?3)], constraints=[a ≠ ?3])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[handempty, on(?1, ?2), on(?2, b), on(?3, a), on(a, ?4)], constraints=[])
+    [Depth 1] Predicate 3/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?4), holding(?3), holding(a), on(?1, ?2), on(?2, b)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[holding(?3), holding(a), on(?1, ?2), on(?2, b)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?5), holding(?4), holding(a), on(?1, ?2), on(?2, b), on(?3, ?4)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[holding(?4), holding(a), on(?1, ?2), on(?2, b), on(?3, ?4)], constraints=[])
+    [Depth 1] Predicate 4/4: on(?2, b)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?2', '?b2': 'b'}
+          → New state: State(depth=2, preds=[clear(b), holding(?2), holding(a), on(?1, ?2)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?2', '?b3': 'b'}
+          → New state: State(depth=2, preds=[clear(b), holding(?2), holding(a), on(?1, ?2), on(?3, ?2)], constraints=[])
+    [Depth 2] Predicate 1/5: holding(?2)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), clear(a), clear(b), handempty, on(?2, ?4), on(a, ?1)], constraints=[?2 ≠ ?4, a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), clear(a), clear(b), handempty, on(a, ?1), ontable(?2)], constraints=[a ≠ ?1])
+        Action 3: pick-tower with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), clear(b), handempty, on(?2, ?5), on(?4, ?2), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/5: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), clear(?4), clear(a), handempty, holding(?2), on(?4, b), on(a, ?1)], constraints=[?4 ≠ b, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), clear(?4), clear(a), holding(?2), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), holding(?2), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), handempty, holding(?2), on(?4, ?5), on(?5, b), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/5: clear(?3)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?3'}
+          → New state: State(depth=3, preds=[clear(?4), clear(a), clear(b), handempty, holding(?2), on(?4, ?3), on(a, ?1)], constraints=[?4 ≠ ?3, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?3'}
+          → New state: State(depth=3, preds=[clear(?4), clear(a), clear(b), holding(?2), holding(?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': '?3'}
+          → New state: State(depth=3, preds=[clear(a), clear(b), holding(?2), holding(?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': '?3'}
+          → New state: State(depth=3, preds=[clear(a), clear(b), handempty, holding(?2), on(?4, ?5), on(?5, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 4/5: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(?4), clear(b), handempty, holding(?2), on(?4, a), on(a, ?1)], constraints=[?4 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(?4), clear(b), holding(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(b), holding(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(b), handempty, holding(?2), on(?4, ?5), on(?5, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 5/5: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), clear(b), holding(?2), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), clear(a), clear(b), holding(?2), holding(a), on(?4, a)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 1/4: holding(?2)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), clear(b), handempty, on(?2, ?3), on(a, ?1)], constraints=[?2 ≠ ?3, a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), clear(b), handempty, on(a, ?1), ontable(?2)], constraints=[a ≠ ?1])
+        Action 3: pick-tower with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(a), clear(b), handempty, on(?2, ?4), on(?3, ?2), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/4: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(b), handempty, holding(?2), on(?3, a), on(a, ?1)], constraints=[?3 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+        Action 3: put-down with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(b), holding(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(b), handempty, holding(?2), on(?3, ?4), on(?4, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/4: clear(b)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'b'}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), handempty, holding(?2), on(?3, b), on(a, ?1)], constraints=[?3 ≠ b, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'b'}
+        Action 3: put-down with binding {'?b': 'b'}
+          → New state: State(depth=3, preds=[clear(a), holding(?2), holding(b), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'b'}
+          → New state: State(depth=3, preds=[clear(a), handempty, holding(?2), on(?3, ?4), on(?4, b), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 4/4: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(b), holding(?2), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), clear(b), holding(?2), holding(a), on(?3, a)], constraints=[a ≠ ?1])
+[Backward Search] Exploration complete:
+  States explored: 100
+  Unique states: 1,284
+  Transitions: 1,457
+
+Results:
+  States explored: 1247
+  Transitions: 1457
+
+✓ Found state with variable ?1: State(clear(?2), clear(a), clear(b), holding(?1), holding(a))
+
+================================================================================
+
+================================================================================
+TEST 3: Variable numbering (?1, ?2, ?3 format)
+================================================================================
+
+Goal: ['on(?1, ?2)']
+
+Expected variable format: ?1, ?2, ?3, ... (NOT ?v0, ?v1, ?v2)
+
+Actual exploration:
+
+[Backward Search] Starting from goal: ['on(?1, ?2)']
+[Backward Search] Max states: 100
+[Backward Search] Max objects: 3 (variable cap)
+[Backward Search] Initial goal state: State(depth=0, preds=[on(?1, ?2)], constraints=[])
+    [Depth 0] Predicate 1/1: on(?1, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': '?2'}
+          → New state: State(depth=1, preds=[clear(?2), holding(?1)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': '?2'}
+          → New state: State(depth=1, preds=[clear(?2), holding(?1), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 1/2: holding(?1)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(?2), handempty, on(?1, ?3)], constraints=[?1 ≠ ?3])
+        Action 2: pick-up-from-table with binding {'?b': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(?2), handempty, ontable(?1)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': '?1'}
+          → New state: State(depth=2, preds=[clear(?2), handempty, on(?1, ?1), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 2/2: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=2, preds=[clear(?3), handempty, holding(?1), on(?3, ?2)], constraints=[?3 ≠ ?2])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=2, preds=[clear(?3), holding(?1), holding(?2)], constraints=[])
+        Action 3: put-down with binding {'?b': '?2'}
+          → New state: State(depth=2, preds=[holding(?1), holding(?2)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=2, preds=[handempty, on(?1, ?2), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 1/3: holding(?1)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(?2), handempty, on(?1, ?1), on(?3, ?1)], constraints=[?1 ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(?2), handempty, on(?3, ?1), ontable(?1)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': '?1'}
+          → New state: State(depth=2, preds=[handempty, on(?1, ?1), on(?1, ?2), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 2/3: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=2, preds=[clear(?1), handempty, on(?1, ?2), on(?3, ?1)], constraints=[?1 ≠ ?2])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=2, preds=[clear(?1), holding(?1), holding(?2), on(?3, ?1)], constraints=[])
+        Action 3: put-down with binding {'?b': '?2'}
+          → New state: State(depth=2, preds=[holding(?1), holding(?2), on(?3, ?1)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=2, preds=[handempty, holding(?1), on(?1, ?2), on(?2, ?2), on(?3, ?1)], constraints=[])
+    [Depth 1] Predicate 3/3: on(?3, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?3', '?b2': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(?2), holding(?1), holding(?3)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?3', '?b3': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(?2), holding(?1), holding(?3), on(?1, ?3)], constraints=[])
+    [Depth 2] Predicate 1/4: on(?1, ?3)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': '?3'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), holding(?1)], constraints=[?1 ≠ ?3])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': '?3'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), clear(?3), holding(?1), on(?1, ?1)], constraints=[?1 ≠ ?3])
+    [Depth 2] Predicate 2/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), on(?1, ?3)], constraints=[?1 ≠ ?3])
+        Action 2: put-down with binding {}
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), clear(?3), holding(?2), on(?1, ?2), on(?1, ?3)], constraints=[?1 ≠ ?3])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?2), on(?1, ?2), on(?1, ?3)], constraints=[?1 ≠ ?3])
+    [Depth 2] Predicate 3/4: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, on(?1, ?2), on(?1, ?3)], constraints=[?1 ≠ ?2, ?1 ≠ ?3])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?2), on(?1, ?3)], constraints=[?1 ≠ ?3])
+        Action 3: put-down with binding {'?b': '?2'}
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, on(?1, ?2), on(?1, ?3), on(?2, ?2)], constraints=[?1 ≠ ?3])
+    [Depth 2] Predicate 4/4: clear(?1)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), handempty, on(?1, ?1), on(?1, ?3)], constraints=[?1 ≠ ?1, ?1 ≠ ?3])
+        Action 2: put-on-block with binding {'?b1': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?1), on(?1, ?3)], constraints=[?1 ≠ ?3])
+        Action 3: put-down with binding {'?b': '?1'}
+        Action 4: pick-tower with binding {'?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, on(?1, ?2), on(?1, ?3), on(?2, ?1)], constraints=[?1 ≠ ?3])
+    [Depth 2] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?3), ontable(?1)], constraints=[])
+        Action 2: put-down with binding {}
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?1), on(?3, ?1), ontable(?1)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?1), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 2/4: ontable(?1)
+      Found 2 achieving action(s)
+        Action 1: put-down with binding {'?b': '?1'}
+        Action 2: put-tower-down with binding {'?b2': '?1'}
+    [Depth 2] Predicate 3/4: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), handempty, on(?3, ?2), ontable(?1)], constraints=[?3 ≠ ?2])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), holding(?2), ontable(?1)], constraints=[])
+        Action 3: put-down with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?2), ontable(?1)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, on(?1, ?2), on(?3, ?1), ontable(?1)], constraints=[])
+    [Depth 2] Predicate 4/4: clear(?1)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), handempty, on(?3, ?1), ontable(?1)], constraints=[?3 ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), holding(?1), ontable(?1)], constraints=[])
+        Action 3: put-down with binding {'?b': '?1'}
+        Action 4: pick-tower with binding {'?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, on(?1, ?1), on(?3, ?1), ontable(?1)], constraints=[])
+    [Depth 2] Predicate 1/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), on(?1, ?1), on(?3, ?1)], constraints=[])
+        Action 2: put-down with binding {}
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), holding(?2), on(?1, ?1), on(?1, ?2), on(?3, ?1)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(?2), holding(?2), on(?1, ?1), on(?1, ?2), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 2/4: on(?1, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': '?1'}
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?1), on(?1, ?1), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 3/4: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, on(?1, ?1), on(?1, ?2), on(?3, ?1)], constraints=[?1 ≠ ?2])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?2), on(?1, ?1), on(?3, ?1)], constraints=[])
+        Action 3: put-down with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[holding(?2), on(?1, ?1), on(?3, ?1)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=3, preds=[handempty, on(?1, ?1), on(?1, ?2), on(?2, ?2), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 4/4: on(?3, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?3', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?3), on(?1, ?1)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?3', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(?3), on(?1, ?1), on(?1, ?3)], constraints=[])
+    [Depth 2] Predicate 1/4: holding(?1)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), handempty, on(?1, ?1), on(?3, ?2)], constraints=[?1 ≠ ?1, ?3 ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': '?1'}
+        Action 3: pick-tower with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, on(?1, ?1), on(?1, ?2), on(?3, ?2)], constraints=[?3 ≠ ?2])
+    [Depth 2] Predicate 2/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), holding(?1), on(?3, ?2)], constraints=[?3 ≠ ?2])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[clear(?3), holding(?1), on(?3, ?2)], constraints=[?3 ≠ ?2])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?3), holding(?1), holding(?2), on(?1, ?2), on(?3, ?2)], constraints=[?3 ≠ ?2])
+        Action 4: put-tower-down with binding {}
+    [Depth 2] Predicate 3/4: clear(?3)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?3'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, on(?1, ?3), on(?3, ?2)], constraints=[?1 ≠ ?3, ?3 ≠ ?2])
+        Action 2: put-on-block with binding {'?b1': '?3'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?1), holding(?3), on(?3, ?2)], constraints=[?3 ≠ ?2])
+        Action 3: put-down with binding {'?b': '?3'}
+          → New state: State(depth=3, preds=[holding(?1), holding(?3), on(?3, ?2)], constraints=[?3 ≠ ?2])
+        Action 4: pick-tower with binding {'?b3': '?3'}
+          → New state: State(depth=3, preds=[handempty, holding(?1), on(?1, ?2), on(?2, ?3), on(?3, ?2)], constraints=[?3 ≠ ?2])
+    [Depth 2] Predicate 4/4: on(?3, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?3', '?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), holding(?1), holding(?3)], constraints=[?3 ≠ ?2])
+        Action 2: put-tower-on-block with binding {'?b2': '?3', '?b3': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), holding(?1), holding(?3), on(?1, ?3)], constraints=[?3 ≠ ?2])
+    [Depth 2] Predicate 1/3: holding(?2)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), handempty, holding(?1), on(?2, ?1)], constraints=[?2 ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), handempty, holding(?1), ontable(?2)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, holding(?1), on(?1, ?2), on(?2, ?2)], constraints=[])
+    [Depth 2] Predicate 2/3: holding(?1)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), handempty, holding(?2), on(?1, ?1)], constraints=[?1 ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), handempty, holding(?2), ontable(?1)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, holding(?2), on(?1, ?1), on(?1, ?2)], constraints=[])
+    [Depth 2] Predicate 3/3: clear(?3)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?3'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, holding(?2), on(?1, ?3)], constraints=[?1 ≠ ?3])
+        Action 2: put-on-block with binding {'?b1': '?3'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?1), holding(?2), holding(?3)], constraints=[])
+        Action 3: put-down with binding {'?b': '?3'}
+          → New state: State(depth=3, preds=[holding(?1), holding(?2), holding(?3)], constraints=[])
+        Action 4: pick-tower with binding {'?b3': '?3'}
+          → New state: State(depth=3, preds=[handempty, holding(?1), on(?1, ?2), on(?2, ?3)], constraints=[])
+    [Depth 2] Predicate 1/2: holding(?2)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, holding(?1), on(?2, ?3)], constraints=[?2 ≠ ?3])
+        Action 2: pick-up-from-table with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, holding(?1), ontable(?2)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[handempty, holding(?1), on(?2, ?1), on(?3, ?2)], constraints=[])
+    [Depth 2] Predicate 2/2: holding(?1)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?1'}
+        Action 2: pick-up-from-table with binding {'?b': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), handempty, holding(?2), ontable(?1)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': '?1'}
+          → New state: State(depth=3, preds=[handempty, holding(?2), on(?1, ?1), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 1/3: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[holding(?1), on(?1, ?2), on(?3, ?1)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?3), holding(?2), on(?1, ?2), on(?3, ?1)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[holding(?2), on(?1, ?2), on(?3, ?1)], constraints=[])
+    [Depth 2] Predicate 2/3: on(?1, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': '?2'}
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': '?2'}
+    [Depth 2] Predicate 3/3: on(?3, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?3', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?3), on(?1, ?2)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?3', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?3), on(?1, ?2), on(?1, ?3)], constraints=[])
+[Backward Search] Exploration complete:
+  States explored: 100
+  Unique states: 781
+  Transitions: 1,297
+
+Results:
+  States explored: 600
+
+All variables found: ['?1', '?2', '?3']
+
+✓ All variables use correct format (?1, ?2, ?3, ...)
+
+================================================================================
+
+================================================================================
+TEST 4: Inequality constraints (not (= ?b1 ?b2))
+================================================================================
+
+Action: pick-up
+Parameters: ['?b1', '?b2']
+Inequality constraints: {InequalityConstraint(var1='?b1', var2='?b2')}
+
+✓ Inequality constraints extracted correctly
+
+
+Goal: ['holding(a)']
+
+Expected: States should have inequality constraints
+
+[Backward Search] Starting from goal: ['holding(a)']
+[Backward Search] Max states: 50
+[Backward Search] Initial goal state: State(depth=0, preds=[holding(a)], constraints=[])
+    [Depth 0] Predicate 1/1: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=1, preds=[clear(a), handempty, on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=1, preds=[clear(a), handempty, ontable(a)], constraints=[])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=1, preds=[handempty, on(?1, a), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 1/3: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(?2), handempty, on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'a'}
+          → New state: State(depth=2, preds=[holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=2, preds=[handempty, on(?2, ?3), on(?3, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 2/3: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?3), clear(a), holding(?2), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), holding(?2), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?4), clear(a), holding(?3), on(?2, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), holding(?3), on(?2, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 3/3: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=2, preds=[clear(?1), clear(a), holding(a), on(?2, a)], constraints=[a ≠ ?1])
+    [Depth 1] Predicate 1/3: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), handempty, on(?1, a), ontable(a)], constraints=[?1 ≠ a])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=2, preds=[clear(?1), holding(a), ontable(a)], constraints=[])
+        Action 3: put-down with binding {'?b': 'a'}
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=2, preds=[handempty, on(?1, ?2), on(?2, a), ontable(a)], constraints=[])
+    [Depth 1] Predicate 2/3: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?2), clear(a), holding(?1), ontable(a)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), holding(?1), ontable(a)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?3), clear(a), holding(?2), on(?1, ?2), ontable(a)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[clear(a), holding(?2), on(?1, ?2), ontable(a)], constraints=[])
+    [Depth 1] Predicate 3/3: ontable(a)
+      Found 2 achieving action(s)
+        Action 1: put-down with binding {'?b': 'a'}
+        Action 2: put-tower-down with binding {'?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(a), holding(a), on(?1, a)], constraints=[])
+    [Depth 1] Predicate 1/3: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?4), holding(?3), on(?1, a), on(a, ?2)], constraints=[])
+        Action 2: put-down with binding {}
+          → New state: State(depth=2, preds=[holding(?3), on(?1, a), on(a, ?2)], constraints=[])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=2, preds=[clear(?5), holding(?4), on(?1, a), on(?3, ?4), on(a, ?2)], constraints=[])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=2, preds=[holding(?4), on(?1, a), on(?3, ?4), on(a, ?2)], constraints=[])
+    [Depth 1] Predicate 2/3: on(a, ?2)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?2'}
+          → New state: State(depth=2, preds=[clear(?2), holding(a), on(?1, a)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?2'}
+          → New state: State(depth=2, preds=[clear(?2), holding(a), on(?1, a), on(?3, a)], constraints=[])
+    [Depth 1] Predicate 3/3: on(?1, a)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?1', '?b2': 'a'}
+          → New state: State(depth=2, preds=[clear(a), holding(?1), on(a, ?2)], constraints=[])
+        Action 2: put-tower-on-block with binding {'?b2': '?1', '?b3': 'a'}
+          → New state: State(depth=2, preds=[clear(a), holding(?1), on(?3, ?1), on(a, ?2)], constraints=[])
+    [Depth 2] Predicate 1/4: on(?2, a)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?2', '?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(a), holding(?2), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': '?2', '?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), holding(?2), on(?3, ?2), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+    [Depth 2] Predicate 2/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), clear(?4), holding(?3), on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[clear(?2), holding(?3), on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?2), clear(?5), holding(?4), on(?2, a), on(?3, ?4), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[clear(?2), holding(?4), on(?2, a), on(?3, ?4), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+    [Depth 2] Predicate 3/4: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, on(?2, a), on(?3, ?2), on(a, ?1)], constraints=[?2 ≠ a, ?3 ≠ ?2, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), holding(?2), on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 3: put-down with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[holding(?2), on(?2, a), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=3, preds=[handempty, on(?2, a), on(?3, ?4), on(?4, ?2), on(a, ?1)], constraints=[?2 ≠ a, a ≠ ?1])
+    [Depth 2] Predicate 4/4: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(a), on(?2, a)], constraints=[?2 ≠ a, a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(a), on(?2, a), on(?3, a)], constraints=[?2 ≠ a, a ≠ ?1])
+    [Depth 2] Predicate 1/3: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), handempty, on(a, ?1), on(a, ?3)], constraints=[a ≠ ?1, a ≠ ?3])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), handempty, on(a, ?1), ontable(a)], constraints=[a ≠ ?1])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?2), handempty, on(?3, a), on(a, ?1), on(a, ?4)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/3: clear(?2)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, holding(a), on(?3, ?2), on(a, ?1)], constraints=[?3 ≠ ?2, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), holding(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[holding(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': '?2'}
+          → New state: State(depth=3, preds=[handempty, holding(a), on(?3, ?4), on(?4, ?2), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/3: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?2), holding(a), on(?3, a)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 1/2: holding(a)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(a), handempty, on(a, ?1), on(a, ?2)], constraints=[a ≠ ?1, a ≠ ?2])
+        Action 2: pick-up-from-table with binding {'?b': 'a'}
+          → New state: State(depth=3, preds=[clear(a), handempty, on(a, ?1), ontable(a)], constraints=[a ≠ ?1])
+        Action 3: pick-tower with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[handempty, on(?2, a), on(a, ?1), on(a, ?3)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/2: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), holding(a), on(?2, a)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 1/4: on(?3, a)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?3', '?b2': 'a'}
+        Action 2: put-tower-on-block with binding {'?b2': '?3', '?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(a), holding(?3), on(?2, ?3), on(?4, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/4: on(?2, ?3)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': '?2', '?b2': '?3'}
+          → New state: State(depth=3, preds=[clear(?3), holding(?2), on(?3, a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': '?2', '?b3': '?3'}
+          → New state: State(depth=3, preds=[clear(?3), holding(?2), on(?3, a), on(?4, ?2), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/4: handempty
+      Found 4 achieving action(s)
+        Action 1: put-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?5), holding(?4), on(?2, ?3), on(?3, a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 2: put-down with binding {}
+          → New state: State(depth=3, preds=[holding(?4), on(?2, ?3), on(?3, a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-tower-on-block with binding {}
+          → New state: State(depth=3, preds=[clear(?6), holding(?5), on(?2, ?3), on(?3, a), on(?4, ?5), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: put-tower-down with binding {}
+          → New state: State(depth=3, preds=[holding(?5), on(?2, ?3), on(?3, a), on(?4, ?5), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 4/4: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), holding(a), on(?2, ?3), on(?3, a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), holding(a), on(?2, ?3), on(?3, a), on(?4, a)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 1/4: holding(?2)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), clear(a), handempty, on(?2, ?4), on(a, ?1)], constraints=[?2 ≠ ?4, a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(?3), clear(a), handempty, on(a, ?1), ontable(?2)], constraints=[a ≠ ?1])
+        Action 3: pick-tower with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(?3), clear(a), handempty, on(?2, ?5), on(?4, ?2), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/4: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(?4), handempty, holding(?2), on(?4, a), on(a, ?1)], constraints=[?4 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), clear(?4), holding(?2), holding(a), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': 'a'}
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, holding(?2), on(?4, ?5), on(?5, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/4: clear(?3)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': '?3'}
+          → New state: State(depth=3, preds=[clear(?4), clear(a), handempty, holding(?2), on(?4, ?3), on(a, ?1)], constraints=[?4 ≠ ?3, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': '?3'}
+          → New state: State(depth=3, preds=[clear(?4), clear(a), holding(?2), holding(?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 3: put-down with binding {'?b': '?3'}
+          → New state: State(depth=3, preds=[clear(a), holding(?2), holding(?3), on(a, ?1)], constraints=[a ≠ ?1])
+        Action 4: pick-tower with binding {'?b3': '?3'}
+          → New state: State(depth=3, preds=[clear(a), handempty, holding(?2), on(?4, ?5), on(?5, ?3), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 4/4: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), holding(?2), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(?3), clear(a), holding(?2), holding(a), on(?4, a)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 1/3: holding(?2)
+      Found 3 achieving action(s)
+        Action 1: pick-up with binding {'?b1': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), handempty, on(?2, ?3), on(a, ?1)], constraints=[?2 ≠ ?3, a ≠ ?1])
+        Action 2: pick-up-from-table with binding {'?b': '?2'}
+          → New state: State(depth=3, preds=[clear(?2), clear(a), handempty, on(a, ?1), ontable(?2)], constraints=[a ≠ ?1])
+        Action 3: pick-tower with binding {'?b2': '?2'}
+          → New state: State(depth=3, preds=[clear(a), handempty, on(?2, ?4), on(?3, ?2), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 2/3: clear(a)
+      Found 4 achieving action(s)
+        Action 1: pick-up with binding {'?b2': 'a'}
+          → New state: State(depth=3, preds=[clear(?3), handempty, holding(?2), on(?3, a), on(a, ?1)], constraints=[?3 ≠ a, a ≠ ?1])
+        Action 2: put-on-block with binding {'?b1': 'a'}
+        Action 3: put-down with binding {'?b': 'a'}
+        Action 4: pick-tower with binding {'?b3': 'a'}
+          → New state: State(depth=3, preds=[handempty, holding(?2), on(?3, ?4), on(?4, a), on(a, ?1)], constraints=[a ≠ ?1])
+    [Depth 2] Predicate 3/3: on(a, ?1)
+      Found 2 achieving action(s)
+        Action 1: put-on-block with binding {'?b1': 'a', '?b2': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), holding(?2), holding(a)], constraints=[a ≠ ?1])
+        Action 2: put-tower-on-block with binding {'?b2': 'a', '?b3': '?1'}
+          → New state: State(depth=3, preds=[clear(?1), clear(a), holding(?2), holding(a), on(?3, a)], constraints=[a ≠ ?1])
+[Backward Search] Exploration complete:
+  States explored: 50
+  Unique states: 522
+  Transitions: 560
+
+✗ WARNING: No states with inequality constraints found
+
+================================================================================
+
+================================================================================
+TEST 5: Regression formula verification
+================================================================================
+
+Manual regression test:
+  Current goal: on(a, b)
+  Action: put-on-block(?b1, ?b2)
+    Preconditions: holding(?b1) ∧ clear(?b2)
+    Deletion effects: holding(?b1), clear(?b2)
+    Additive effects: on(?b1, ?b2), handempty, clear(?b1)
+  Binding: ?b1=a, ?b2=b
+
+Expected regression result:
+  1. Start with: {on(a, b)}
+  2. Remove additive effects in goal: on(a,b) removed → {}
+  3. Add preconditions: {holding(a), clear(b)}
+  4. Add deletion effects: {holding(a), clear(b)} (no change)
+  Final: {holding(a), clear(b)}
+
+Actual regression result:
+  State(depth=1, preds=[clear(b), holding(a)], constraints=[])
+
+✓ Regression formula correctly applied!
+
+================================================================================
+
+
+
+╔==============================================================================╗
+║                               ALL TESTS COMPLETE                             ║
+╚==============================================================================╝
+
+

@@ -5,9 +5,9 @@ This module provides functionality to normalize grounded predicates into
 schema-level variable predicates for backward planning optimization.
 
 Key idea (Position-Based Normalization):
-- on(a, b) → on(?v0, ?v1)
-- on(c, d) → on(?v0, ?v1)  ✓ SAME SCHEMA!
-- on(b, a) → on(?v0, ?v1)  ✓ SAME SCHEMA!
+- on(a, b) → on(?v1, ?v2)
+- on(c, d) → on(?v1, ?v2)  ✓ SAME SCHEMA!
+- on(b, a) → on(?v1, ?v2)  ✓ SAME SCHEMA!
 
 All goals with the same predicate structure share the same abstract plan,
 regardless of which specific objects are involved. This achieves TRUE
@@ -34,8 +34,8 @@ class VariableMapping:
     Represents a mapping between objects and variables
 
     Attributes:
-        obj_to_var: Object name → Variable name (e.g., {"a": "?v0", "b": "?v1"})
-        var_to_obj: Variable name → Object name (e.g., {"?v0": "a", "?v1": "b"})
+        obj_to_var: Object name → Variable name (e.g., {"a": "?v1", "b": "?v2"})
+        var_to_obj: Variable name → Object name (e.g., {"?v1": "a", "?v2": "b"})
     """
     obj_to_var: Dict[str, str]
     var_to_obj: Dict[str, str]
@@ -46,9 +46,9 @@ class VariableNormalizer:
     Normalizes grounded predicates to schema-level variable predicates
 
     Uses POSITION-BASED normalization for TRUE schema-level abstraction:
-    - on(a, b) → on(?v0, ?v1)
-    - on(c, d) → on(?v0, ?v1)  ✓ SAME SCHEMA - Cache hit!
-    - on(b, a) → on(?v0, ?v1)  ✓ SAME SCHEMA - Cache hit!
+    - on(a, b) → on(?v1, ?v2)
+    - on(c, d) → on(?v1, ?v2)  ✓ SAME SCHEMA - Cache hit!
+    - on(b, a) → on(?v1, ?v2)  ✓ SAME SCHEMA - Cache hit!
 
     All goals with same predicate structure share the same abstract plan,
     regardless of which specific objects are used.
@@ -189,11 +189,11 @@ class VariableNormalizer:
         but same structure AND constants share the same abstract plan!
 
         Examples:
-            Input: [on(a, b)]             → Output: [on(?v0, ?v1)]
-            Input: [on(c, d)]             → Output: [on(?v0, ?v1)]  ✓ SAME SCHEMA!
-            Input: [move(a, -2, 'Left')]  → Output: [move(?v0, -2, 'Left')]  ✓ Constants preserved!
-            Input: [move(b, -2, 'Left')]  → Output: [move(?v0, -2, 'Left')]  ✓ Shares schema!
-            Input: [move(a, 5, 'Right')]  → Output: [move(?v0, 5, 'Right')]  ✓ Different schema (diff constants)!
+            Input: [on(a, b)]             → Output: [on(?v1, ?v2)]
+            Input: [on(c, d)]             → Output: [on(?v1, ?v2)]  ✓ SAME SCHEMA!
+            Input: [move(a, -2, 'Left')]  → Output: [move(?v1, -2, 'Left')]  ✓ Constants preserved!
+            Input: [move(b, -2, 'Left')]  → Output: [move(?v1, -2, 'Left')]  ✓ Shares schema!
+            Input: [move(a, 5, 'Right')]  → Output: [move(?v1, 5, 'Right')]  ✓ Different schema (diff constants)!
 
         Key Insight: We abstract object IDENTITIES, not constant VALUES.
         Constants are part of the schema definition.
@@ -207,7 +207,7 @@ class VariableNormalizer:
         # SCHEMA-LEVEL: Assign variables based on first occurrence order
         # BUT only for objects, not constants
         obj_to_var = {}
-        var_counter = 0
+        var_counter = 1  # Start from 1 for ?v1, ?v2, ?v3, ...
 
         # First pass: collect OBJECTS (not constants) in order of first appearance
         for pred in predicates:
@@ -217,7 +217,7 @@ class VariableNormalizer:
                     continue
 
                 # This is an object - assign a variable
-                # Use ?v{i} naming to match forward planner convention
+                # Use ?v{i} naming to match backward planner convention
                 obj_to_var[arg] = f"?v{var_counter}"
                 var_counter += 1
 
@@ -249,7 +249,7 @@ class VariableNormalizer:
         Convert variable-based predicates back to grounded form
 
         Example:
-            Input: [on(?v0, ?v1), clear(?v0)] + mapping {?v0: a, ?v1: b}
+            Input: [on(?v1, ?v2), clear(?v1)] + mapping {?v1: a, ?v2: b}
             Output: [on(a, b), clear(a)]
 
         Args:
@@ -275,8 +275,8 @@ class VariableNormalizer:
         This is used as the cache key for variable-level goal caching.
 
         Example:
-            Input: [on(?v0, ?v1), clear(?v2)]
-            Output: "clear(?v2)|on(?v0, ?v1)"  (sorted)
+            Input: [on(?v1, ?v2), clear(?v3)]
+            Output: "clear(?v3)|on(?v1, ?v2)"  (sorted)
 
         Args:
             predicates: List of predicates (should be normalized)
@@ -296,9 +296,9 @@ class VariableNormalizer:
             num_objects: Number of objects/variables needed
 
         Returns:
-            List of variable names: ["?v0", "?v1", "?v2", ...]
+            List of variable names: ["?v1", "?v2", "?v3", ...]
         """
-        return [f"?v{i}" for i in range(num_objects)]
+        return [f"?v{i}" for i in range(1, num_objects + 1)]
 
     def create_mapping_from_lists(self, objects: List[str], variables: List[str]) -> VariableMapping:
         """

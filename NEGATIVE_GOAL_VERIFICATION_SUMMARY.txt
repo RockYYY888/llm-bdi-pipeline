@@ -1,0 +1,161 @@
+================================================================================
+NEGATIVE GOAL IMPLEMENTATION VERIFICATION SUMMARY
+================================================================================
+
+Date: 2025-01-24
+Task: Verify that backward search correctly handles negative goals
+
+================================================================================
+USER REQUIREMENT (Final Clarification)
+================================================================================
+
+如果是正向的goal，那么我们找action是找effect里面有正向的goal的。
+如果是带着negation的，那我们找到的合理的actions应该是effect里面有(not goal)的。
+
+Translation:
+- POSITIVE goal (P): Find actions that ADD P in their additive effects
+- NEGATIVE goal (~P): Find actions that DELETE P in their deletion effects
+
+================================================================================
+IMPLEMENTATION VERIFICATION
+================================================================================
+
+1. ACTION FINDING LOGIC (backward_search_refactored.py:411-442)
+   ✓ VERIFIED CORRECT
+
+   Code:
+   ```python
+   if target_predicate.negated:
+       # NEGATIVE goal: ~P
+       # Find actions that DELETE P (have P in deletion effects)
+       positive_target = PredicateAtom(
+           target_predicate.name,
+           target_predicate.args,
+           negated=False
+       )
+       for parsed_action in self.parsed_actions:
+           for del_effect in parsed_action.deletion_effects:
+               binding = self._unify_predicates(del_effect, positive_target)
+               if binding is not None:
+                   achieving_actions.append((parsed_action, binding))
+   
+   else:
+       # POSITIVE goal: P
+       # Find actions that ADD P (have P in additive effects)
+       for parsed_action in self.parsed_actions:
+           for add_effect in parsed_action.additive_effects:
+               binding = self._unify_predicates(add_effect, target_predicate)
+               if binding is not None:
+                   achieving_actions.append((parsed_action, binding))
+   ```
+
+   Result:
+   - POSITIVE goal on(a, b) → finds put-on-block, put-tower-on-block
+   - NEGATIVE goal ~on(a, b) → finds pick-up, pick-tower
+
+
+2. DELETION EFFECTS PARSING (backward_search_refactored.py:330-339)
+   ✓ VERIFIED CORRECT
+
+   Code:
+   ```python
+   # CRITICAL FIX: Remove negation from deletion effects
+   # In PDDL: (not (holding ?b1)) means "delete holding(?b1)"
+   # In regression: We need "holding(?b1)" as a POSITIVE precondition
+   deletion_effects = []
+   for eff in effects:
+       if not eff.is_add:
+           # Create non-negated version of the predicate
+           pred = PredicateAtom(eff.predicate.name, eff.predicate.args, negated=False)
+           deletion_effects.append(pred)
+   ```
+
+   Result:
+   - Deletion effects are stored WITHOUT negation flag
+   - e.g., action pick-up has deletion_effects: [handempty, clear(?b1), on(?b1, ?b2)]
+   - NOT: [~handempty, ~clear(?b1), ~on(?b1, ?b2)]
+
+
+3. CONFLICT DETECTION (backward_search_refactored.py:524-591)
+   ✓ VERIFIED CORRECT
+
+   Key points:
+   - Checks conflicts against ORIGINAL_GOAL (not new_predicates)
+   - Additive effects conflict with negative goals
+   - Deletion effects conflict with positive goals
+   - NO precondition conflict check (correctly removed)
+
+
+4. REGRESSION FORMULA FOR DELETION EFFECTS (backward_search_refactored.py:566-582)
+   ✓ VERIFIED CORRECT
+
+   Code:
+   ```python
+   for del_effect in parsed_action.deletion_effects:
+       instantiated_del = self._instantiate_predicate(del_effect, complete_binding)
+       negated_del = PredicateAtom(
+           instantiated_del.name,
+           instantiated_del.args,
+           negated=not instantiated_del.negated
+       )
+       if negated_del in new_predicates:
+           # SATISFIES NEGATIVE GOAL: Remove ~P from goal
+           new_predicates.discard(negated_del)
+       else:
+           # Add P as positive precondition
+           new_predicates.add(instantiated_del)
+   ```
+
+   Behavior:
+   - If goal contains ~P and action deletes P:
+     → Remove ~P from goal (satisfied)
+   - If goal does NOT contain ~P and action deletes P:
+     → Add P to preconditions (must be true before deletion)
+
+
+================================================================================
+TEST RESULTS
+================================================================================
+
+Test 1: test_negative_goal_verification.py
+   ✓ PASS: Positive goal on(a, b) finds put-on-block
+   ✓ PASS: Negative goal ~on(a, b) finds pick-up
+   ✓ PASS: Deletion effects are non-negated (negated=False)
+
+Test 2: test_negative_goal_search.py
+   ✓ PASS: Negative goal ~on(a, b) generates 161 states
+   ✓ PASS: No contradictions (P and ~P together) in any state
+   ✓ PASS: Sample transition shows pick-up(a, b) achieves ~on(a, b)
+   ✓ PASS: Both positive and negative goals work correctly
+
+Sample Output:
+   Goal: ~on(a, b)
+   Found 2 achieving actions:
+     - Action: pick-up with binding {'?b1': 'a', '?b2': 'b'}
+       Deletion effects: ['handempty', 'clear(?b1)', 'on(?b1, ?b2)']
+     - Action: pick-tower with binding {'?b2': 'a', '?b3': 'b'}
+       Deletion effects: ['handempty', 'on(?b2, ?b3)']
+
+   Sample transition:
+     From: ['clear(a)', 'handempty', 'on(a, b)']
+     Action: pick-up(a, b)
+     To: ['~on(a, b)']
+
+
+================================================================================
+CONCLUSION
+================================================================================
+
+✓✓✓ IMPLEMENTATION IS CORRECT ✓✓✓
+
+The backward search planner now correctly handles negative goals:
+
+1. POSITIVE goals (P): Find actions with P in additive effects
+2. NEGATIVE goals (~P): Find actions with P in deletion effects
+3. Deletion effects are stored without negation
+4. Regression correctly removes ~P when action deletes P
+5. No contradictions (P and ~P) appear in the same state
+
+All requirements have been met and verified with comprehensive tests.
+
+================================================================================

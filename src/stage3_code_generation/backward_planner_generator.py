@@ -153,55 +153,54 @@ class BackwardPlannerGenerator:
                     print(f"    Skipping empty condition (true)")
                     continue
 
-                # Normalize goal predicates to get pattern and mapping
-                # Example: on(a,b) → on(?v0,?v1) with mapping {?v0: a, ?v1: b}
+                # STRATEGY A: GROUNDED SEARCH
+                # Search with actual grounded predicates (e.g., on(a, b))
+                # Variables only generated when parameters can't be fully bound
+                # After search, normalize the result for caching
+
+                # Create cache key from normalized pattern
                 normalized_preds, var_mapping = self.normalizer.normalize_predicates(goal_predicates)
                 pattern_key = self.normalizer.serialize_goal(normalized_preds)
 
-                # CRITICAL: Must pass ALL domain objects as variables for exploration
-                # Why? Because we need to handle "blocking objects" not in the goal
-                # Example: goal=on(a,b) but on(c,b) exists → need to move c first
-                # Solution: Pass all objects, but use normalized pattern for caching
-                num_vars_needed = len(objects)
-                all_variables = self.normalizer.get_variable_list(num_vars_needed)
-
-                print(f"    Original goal: {[str(p) for p in goal_predicates]}")
-                print(f"    Normalized pattern: {[str(p) for p in normalized_preds]}")
-                print(f"    Variables for exploration: {all_variables} (all domain objects)")
+                print(f"    Grounded goal: {[str(p) for p in goal_predicates]}")
+                print(f"    Normalized pattern (for cache): {[str(p) for p in normalized_preds]}")
                 print(f"    Cache key: {pattern_key}")
 
-                # Create goal name from original grounded predicates
+                # Create goal name from grounded predicates
                 goal_name = self._format_goal_name(goal_predicates)
 
                 # Check pattern-based cache
                 state_graph = None
                 if pattern_key in goal_cache:
                     # Cache HIT: Reuse existing exploration
-                    state_graph, _ = goal_cache[pattern_key]
+                    state_graph, cached_var_mapping = goal_cache[pattern_key]
                     cache_hits += 1
-                    print(f"    ✓ Cache HIT")
+                    print(f"    ✓ Cache HIT - reusing state graph")
                 else:
-                    # Cache MISS: Need to explore with variables
+                    # Cache MISS: Need to explore
                     cache_misses += 1
-                    print(f"    Cache MISS - running variable-level exploration...")
+                    print(f"    Cache MISS - running GROUNDED search with actual objects...")
 
                     try:
-                        # REFACTORED: Use BackwardSearchPlanner for proper backward search
-                        # This implements regression-based planning with proper variable handling
+                        # STRATEGY A: Use BackwardSearchPlanner with GROUNDED predicates
+                        # Search with actual objects (e.g., on(a, b))
+                        # Variables generated on-demand when binding fails
                         planner = BackwardSearchPlanner(self.domain)
 
-                        # Explore using normalized (variable-based) goal
+                        # ✓ CORRECT: Search with GROUNDED goal predicates
+                        # Example: goal_predicates = [on(a, b)] - use actual objects!
                         state_graph = planner.search(
-                            goal_predicates=list(normalized_preds),
+                            goal_predicates=list(goal_predicates),  # ← GROUNDED!
                             max_states=200000,
-                            max_depth=5
+                            max_objects=len(objects)  # Cap variable generation
                         )
 
                         # Check if this graph was truncated
                         if state_graph.truncated:
                             any_truncated = True
 
-                        # Cache the result with pattern key
+                        # Cache the GROUNDED state graph with pattern key
+                        # Different grounded goals with same pattern will share this graph
                         goal_cache[pattern_key] = (state_graph, var_mapping)
 
                     except Exception as e:
@@ -210,7 +209,7 @@ class BackwardPlannerGenerator:
                         traceback.print_exc()
                         continue
 
-                # Pattern-based code generation deduplication
+                # Generate code from grounded state graph
                 try:
                     # Always add state graph (needed for shared section)
                     all_state_graphs.append(state_graph)
@@ -222,16 +221,15 @@ class BackwardPlannerGenerator:
                         continue
 
                     # Generate goal-specific section
-                    # The state_graph is already in variable form (?v0, ?v1, ...)
-                    # AgentSpeakCodeGenerator will use variables directly
-                    # CRITICAL FIX: Pass actual objects (b1, b2, b3) not variables (?v0, ?v1)
-                    # Variables are only for planning; initial beliefs need actual objects
+                    # STRATEGY A: state_graph contains GROUNDED predicates (e.g., on(a, b))
+                    # We need to normalize to variables for code generation
+                    # This allows plan reuse: on(a,b) and on(c,d) share normalized code
                     codegen = AgentSpeakCodeGenerator(
                         state_graph=state_graph,
                         goal_name=goal_name,
                         domain=self.domain,
-                        objects=objects,  # Use actual objects for initial beliefs
-                        var_mapping=None  # No mapping needed - state_graph already uses variables
+                        objects=objects,
+                        var_mapping=var_mapping  # Pass mapping to normalize grounded → variables
                     )
 
                     goal_section = codegen.generate_goal_specific_section()
