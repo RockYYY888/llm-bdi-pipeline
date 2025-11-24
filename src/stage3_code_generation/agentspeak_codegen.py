@@ -174,38 +174,103 @@ class AgentSpeakCodeGenerator:
         instantiated = [self.var_mapping.var_to_obj.get(arg, arg) for arg in args]
         return tuple(instantiated)
 
+    def _build_goal_arg_mapping(self) -> Dict[str, str]:
+        """
+        Build mapping from goal predicate arguments to generic Arg names,
+        and from all other variables/objects to V1, V2, etc.
+
+        For goal predicate on(b1, b2):
+        - b1 (first arg) → Arg1
+        - b2 (second arg) → Arg2
+
+        For planning variables ?v1, ?v2, etc. in states:
+        - ?v1 → V1
+        - ?v2 → V2
+
+        Returns:
+            Dictionary mapping concrete args/variables to generic parameter names
+        """
+        mapping = {}
+        goal_preds = list(self.graph.goal_state.predicates)
+
+        if len(goal_preds) != 1:
+            # For compound goals, use unified variable map
+            return self.unified_var_map
+
+        # Single predicate - create Arg-based mapping for goal args
+        goal_pred = goal_preds[0]
+        for idx, arg in enumerate(goal_pred.args, start=1):
+            if arg.startswith('?'):
+                # Planning variable: ?v1 → V1, ?v2 → V2
+                var_name = arg[1:].upper() if len(arg) > 1 else f"V{idx}"
+                mapping[arg] = var_name
+            else:
+                # Ground object: map to ArgN based on position in goal
+                mapping[arg] = f"Arg{idx}"
+
+        # Now add mappings for ALL planning variables in the entire state graph
+        # This includes variables in states AND in action arguments
+        # Variables are numbered in the order they first appear (BFS traversal order)
+        v_counter = 1
+        seen_vars = set(mapping.keys())  # Already includes goal args
+
+        # Traverse states in BFS order (by depth) to maintain consistent ordering
+        states_by_depth = {}
+        for state in self.graph.get_all_states():
+            if state.depth not in states_by_depth:
+                states_by_depth[state.depth] = []
+            states_by_depth[state.depth].append(state)
+
+        # Process states depth by depth
+        for depth in sorted(states_by_depth.keys()):
+            for state in states_by_depth[depth]:
+                # Collect variables from state predicates
+                for pred in state.predicates:
+                    for arg in pred.args:
+                        if arg.startswith('?') and arg not in seen_vars:
+                            mapping[arg] = f"V{v_counter}"
+                            seen_vars.add(arg)
+                            v_counter += 1
+
+        # Also collect from transitions to ensure all action args are mapped
+        for transition in self.graph.transitions:
+            for arg in transition.action_args:
+                if arg.startswith('?') and arg not in seen_vars:
+                    mapping[arg] = f"V{v_counter}"
+                    seen_vars.add(arg)
+                    v_counter += 1
+
+        return mapping
+
     def _get_parameterized_goal_pattern(self) -> str:
         """
-        Get parameterized goal pattern from goal state predicates
+        Get parameterized goal pattern using generic Arg names
 
-        CRITICAL FIX: For variable-level planning, goal pattern must use the SAME
-        variable names as the state graph, not a separate obj_to_var mapping.
-
-        Why? Because:
-        - State predicates use variables from lifted planning (e.g., ?b, ?b1, ?b2)
-        - Goal pattern must match these variable names
-        - Otherwise we get mismatches like +!on(V0,V1) : holding(B)
-          where V0/V1 and B come from different namespaces!
-
-        Example (variable-level):
-            Goal state: [on(?b1, ?b2)]  # From lifted planning
-            Returns: "on(B1, B2)"       # Matches state variables
-
-        Example (object-level with mapping):
-            Goal state: [on(a, b)] with var_mapping {a: ?v0, b: ?v1}
-            Returns: "on(V0, V1)"
+        For on(b1, b2) → returns "on(Arg1, Arg2)"
+        For clear(b3) → returns "clear(Arg1)"
+        For on(?v1, ?v2) → returns "on(V1, V2)"
 
         Returns:
             Parameterized goal pattern string
         """
-        # Get goal predicates (may contain objects or variables)
         goal_preds = list(self.graph.goal_state.predicates)
 
-        # CRITICAL FIX: Use unified variable map for consistent naming
-        # This ensures goal parameters match state/action variables
         if len(goal_preds) == 1:
-            # Single predicate goal
-            return goal_preds[0].to_agentspeak(unified_var_map=self.unified_var_map)
+            # Single predicate goal - use Arg-based naming
+            goal_pred = goal_preds[0]
+            arg_mapping = self._build_goal_arg_mapping()
+
+            # Map arguments to generic names
+            mapped_args = []
+            for arg in goal_pred.args:
+                mapped_args.append(arg_mapping.get(arg, arg))
+
+            # Format as AgentSpeak
+            args_str = ", ".join(mapped_args)
+            if goal_pred.negated:
+                return f"~{goal_pred.name}({args_str})" if args_str else f"~{goal_pred.name}"
+            else:
+                return f"{goal_pred.name}({args_str})" if args_str else goal_pred.name
         else:
             # Multiple predicates - create compound goal name
             pred_strs = [p.to_agentspeak(unified_var_map=self.unified_var_map)
@@ -745,24 +810,33 @@ class AgentSpeakCodeGenerator:
         # Get next transition in path
         next_transition = path[0]
 
-        # Get parameterized goal pattern (uses unified_var_map)
+        # Get parameterized goal pattern (uses Arg1, Arg2, etc.)
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # CRITICAL FIX: Use unified variable map for ALL conversions
-        # This ensures consistent variable naming throughout the plan
-        # Format context (with AgentSpeak variables)
-        context = state.to_agentspeak_context(unified_var_map=self.unified_var_map)
+        # Build goal argument mapping for context conversion
+        goal_arg_mapping = self._build_goal_arg_mapping()
+
+        # Format context using goal argument mapping
+        # This converts:
+        # - Ground objects (b1, b2) to goal args (Arg1, Arg2)
+        # - Planning variables (?v1, ?v2) to uppercase (V1, V2)
+        context = state.to_agentspeak_context(unified_var_map=goal_arg_mapping)
 
         # Format action goal invocation
-        # Action args may contain PDDL variables - convert using unified map
+        # Action args use the same mapping
         action_args_as = []
         for arg in next_transition.action_args:
-            if arg.startswith('?'):
-                # Use unified variable map
-                action_args_as.append(self.unified_var_map.get(arg, arg))
+            if arg in goal_arg_mapping:
+                # Map using goal argument mapping
+                action_args_as.append(goal_arg_mapping[arg])
             else:
-                # Constant/literal: keep as-is
-                action_args_as.append(arg)
+                # Not in goal - use default conversion
+                if arg.startswith('?'):
+                    # Planning variable not in goal: convert to uppercase
+                    action_args_as.append(arg[1:].upper() if len(arg) > 1 else arg)
+                else:
+                    # Ground object not in goal: keep as-is
+                    action_args_as.append(arg)
 
         # Format action goal invocation
         action_goal = self._format_action_goal_invocation(
@@ -842,13 +916,14 @@ class AgentSpeakCodeGenerator:
         This plan uses PARAMETERIZED goal pattern with AgentSpeak variables.
 
         Example:
-            +!on(X, Y) : on(X, Y) <- .print("Goal on(", X, ", ", Y, ") achieved!").
+            +!on(Arg1, Arg2) : on(Arg1, Arg2) <- .print("Goal on(Arg1, Arg2) achieved!").
         """
-        # Get parameterized goal pattern (with AgentSpeak variables)
+        # Get parameterized goal pattern (with Arg names)
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # Get context condition (use unified variable map)
-        context = self.graph.goal_state.to_agentspeak_context(unified_var_map=self.unified_var_map)
+        # Get context condition (use goal argument mapping)
+        goal_arg_mapping = self._build_goal_arg_mapping()
+        context = self.graph.goal_state.to_agentspeak_context(unified_var_map=goal_arg_mapping)
 
         return f"""+!{param_goal_pattern} : {context} <-
     .print("Goal {param_goal_pattern} already achieved!")."""

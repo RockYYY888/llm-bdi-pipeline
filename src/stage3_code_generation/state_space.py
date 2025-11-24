@@ -79,10 +79,9 @@ class PredicateAtom:
         prefix = "~" if self.negated else ""
         if self.args:
             if unified_var_map:
-                # CRITICAL FIX: Use unified variable map for consistent renaming
-                # ?b → V0, ?b1 → V1, ?v0 → V2, etc.
-                args_str = ", ".join(unified_var_map.get(arg, arg) if arg.startswith('?') else arg
-                                   for arg in self.args)
+                # CRITICAL FIX: Use unified variable map for ALL arguments
+                # This includes both PDDL variables (?v1 → V1) and ground objects (b1 → Arg1)
+                args_str = ", ".join(unified_var_map.get(arg, arg) for arg in self.args)
             elif obj_to_var:
                 # Object-level parameterization: a → ?v0 → V0
                 args_str = ", ".join(self._obj_to_agentspeak_var(arg, obj_to_var) for arg in self.args)

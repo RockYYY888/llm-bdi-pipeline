@@ -151,14 +151,16 @@ class BackwardSearchPlanner:
     5. Support variable-level planning with proper variable generation
     """
 
-    def __init__(self, domain: PDDLDomain):
+    def __init__(self, domain: PDDLDomain, domain_path: str = None):
         """
         Initialize backward search planner
 
         Args:
             domain: PDDL domain definition
+            domain_path: Path to PDDL domain file (optional, needed for FD invariant extraction)
         """
         self.domain = domain
+        self.domain_path = domain_path
         self.condition_parser = PDDLConditionParser()
         self.effect_parser = PDDLEffectParser()
         self.max_objects = None  # Will be set in search() method
@@ -678,83 +680,85 @@ class BackwardSearchPlanner:
 
     def _compute_mutex_groups(self) -> Dict[str, Set[str]]:
         """
-        Compute mutex relationships from PDDL domain using Tarski library
+        Compute STATIC mutex relationships using Fast Downward invariant synthesis
 
-        Uses Tarski to parse PDDL domain (no problem file needed) and automatically
-        derive mutex rules by analyzing action effects:
-        - If adding P always deletes Q, then P and Q are mutex
-        - Example: pick-up adds holding(x) and deletes handempty()
+        This extracts true domain invariants (not transient effect-based mutex).
+        Key distinction:
+        - Static mutex: holding(x) ↔ handempty (impossible to co-exist)
+        - Transient mutex: holding(x) ↔ on(x,y) (can be satisfied sequentially)
+
+        In backward planning, we only check static mutex because regression
+        predicates represent goals to achieve at different time points, not
+        simultaneous world state facts.
 
         Returns:
-            Dictionary mapping predicate names to sets of mutex predicates
+            Dictionary mapping predicate names to sets of STATIC mutex predicates
         """
         try:
-            from tarski.io import PDDLReader
-            from tarski.fstrips.fstrips import AddEffect, DelEffect
+            from stage3_code_generation.fd_invariant_extractor import FDInvariantExtractor
 
-            # Read domain file content
+            # Use Fast Downward to extract static invariants
             domain_path = 'src/domains/blocksworld/domain.pddl'
-            with open(domain_path, 'r') as f:
-                domain_str = f.read()
+            objects = ['b1', 'b2', 'b3', 'b4', 'b5']  # Default objects for grounding
 
-            # Parse domain using Tarski (domain-only, no problem file needed)
-            reader = PDDLReader(raise_on_error=True)
-            reader.parse_domain_string(domain_str)
+            print("[Mutex Analysis] Using Fast Downward invariant synthesis...")
+            extractor = FDInvariantExtractor(domain_path, objects)
+            static_mutex_map, singleton_preds = extractor.extract_invariants()
 
-            # Actions are stored in reader.problem after parsing domain
-            problem = reader.problem
-            if not problem or not hasattr(problem, 'actions'):
-                raise RuntimeError("Failed to extract actions from domain")
+            self.singleton_predicates = singleton_preds
 
-            mutex_map = {}
+            print(f"[Mutex Analysis] Extracted {len(static_mutex_map)} static mutex groups")
+            print(f"[Mutex Analysis] Singleton predicates: {singleton_preds}")
 
-            # Analyze action effects to find mutex pairs
-            for action_name, action in problem.actions.items():
-                effects = action.effects if isinstance(action.effects, list) else []
-
-                # Collect add and delete effect predicate names
-                adds = []
-                deletes = []
-
-                for eff in effects:
-                    if isinstance(eff, DelEffect):
-                        # Extract just the predicate name (without arity)
-                        pred_name = str(eff.atom.predicate).split('/')[0]
-                        deletes.append(pred_name)
-                    elif isinstance(eff, AddEffect):
-                        # Extract just the predicate name (without arity)
-                        pred_name = str(eff.atom.predicate).split('/')[0]
-                        adds.append(pred_name)
-
-                # Find mutex pairs: if action adds P and deletes Q, they are mutex
-                for add_name in adds:
-                    for del_name in deletes:
-                        if add_name != del_name:
-                            if add_name not in mutex_map:
-                                mutex_map[add_name] = set()
-                            mutex_map[add_name].add(del_name)
-
-                            # Symmetric relationship
-                            if del_name not in mutex_map:
-                                mutex_map[del_name] = set()
-                            mutex_map[del_name].add(add_name)
-
-            # Singleton predicates (predicates that can only appear once)
-            # For now, we detect this by checking if a predicate is always
-            # in mutex with itself when it appears multiple times
-            self.singleton_predicates = {'holding'}  # Known singleton in blocksworld
-
-            return mutex_map
+            return static_mutex_map
 
         except ImportError:
-            print("[WARNING] Tarski library not available - mutex analysis disabled")
-            self.singleton_predicates = set()
-            return {}
+            print("[WARNING] FD Invariant Extractor not available - using fallback")
+            self.singleton_predicates = {'holding', 'handempty'}
+            # Fallback: only the truly static mutex
+            return {
+                'holding': {'handempty'},
+                'handempty': {'holding'}
+            }
         except Exception as e:
-            print(f"[WARNING] Tarski mutex analysis failed: {e}")
-            self.singleton_predicates = set()
-            return {}
+            print(f"[WARNING] Invariant extraction failed: {e}")
+            print("[WARNING] Using fallback static mutex")
+            self.singleton_predicates = {'holding', 'handempty'}
+            return {
+                'holding': {'handempty'},
+                'handempty': {'holding'}
+            }
 
+
+    def _check_no_singleton_violations(self, predicates: Set[PredicateAtom]) -> bool:
+        """
+        Check if predicates violate singleton constraints (e.g., multiple holding predicates)
+
+        This is used in backward planning where mutex pairs can coexist (representing dependencies),
+        but singleton violations are always invalid (e.g., can't hold two blocks at once).
+
+        Args:
+            predicates: Set of predicates to check
+
+        Returns:
+            True if no singleton violations, False if violation detected
+        """
+        # Collect positive predicates by name
+        preds_by_name = {}
+        for pred in predicates:
+            if not pred.negated:
+                if pred.name not in preds_by_name:
+                    preds_by_name[pred.name] = []
+                preds_by_name[pred.name].append(pred)
+
+        # Check singleton predicates (e.g., handempty, holding)
+        for pred_name in self.singleton_predicates:
+            if pred_name in preds_by_name:
+                if len(preds_by_name[pred_name]) > 1:
+                    # Multiple instances of singleton predicate!
+                    return False
+
+        return True
 
     def _check_no_mutex_violations(self, predicates: Set[PredicateAtom]) -> bool:
         """
