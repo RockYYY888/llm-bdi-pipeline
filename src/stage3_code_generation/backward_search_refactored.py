@@ -151,13 +151,17 @@ class BackwardSearchPlanner:
     5. Support variable-level planning with proper variable generation
     """
 
-    def __init__(self, domain: PDDLDomain, domain_path: str = None):
+    def __init__(self, domain: PDDLDomain, domain_path: str = None,
+                 precomputed_mutex_groups: Dict[str, Set[str]] = None,
+                 precomputed_singleton_predicates: Set[str] = None):
         """
         Initialize backward search planner
 
         Args:
             domain: PDDL domain definition
             domain_path: Path to PDDL domain file (optional, needed for FD invariant extraction)
+            precomputed_mutex_groups: Optional pre-computed static mutex groups (avoids recomputation)
+            precomputed_singleton_predicates: Optional pre-computed singleton predicates
         """
         self.domain = domain
         self.domain_path = domain_path
@@ -168,9 +172,14 @@ class BackwardSearchPlanner:
         # Parse all actions to structured form
         self.parsed_actions: List[ParsedAction] = self._parse_all_actions()
 
-        # Compute mutex groups from domain using h^2 analysis
-        self.mutex_groups = self._compute_mutex_groups()
-        print(f"[Mutex Analysis] Computed {len(self.mutex_groups)} mutex groups from domain")
+        # Use precomputed mutex groups if provided, otherwise compute
+        if precomputed_mutex_groups is not None:
+            self.mutex_groups = precomputed_mutex_groups
+            self.singleton_predicates = precomputed_singleton_predicates or set()
+            # Skip printing - already printed when precomputed
+        else:
+            self.mutex_groups = self._compute_mutex_groups()
+            print(f"[Mutex Analysis] Computed {len(self.mutex_groups)} mutex groups from domain")
 
     def search(self, goal_predicates: List[PredicateAtom],
                max_states: int = 200000,
@@ -682,6 +691,26 @@ class BackwardSearchPlanner:
         """
         Compute STATIC mutex relationships using Fast Downward invariant synthesis
 
+        This is an instance method that calls the static version and stores singleton predicates.
+
+        Returns:
+            Dictionary mapping predicate names to sets of STATIC mutex predicates
+        """
+        mutex_groups, singleton_preds = BackwardSearchPlanner.compute_static_mutex(
+            self.domain_path,
+            objects=['b1', 'b2', 'b3', 'b4', 'b5']  # Default objects for grounding
+        )
+        self.singleton_predicates = singleton_preds
+        return mutex_groups
+
+    @staticmethod
+    def compute_static_mutex(domain_path: str, objects: List[str]) -> Tuple[Dict[str, Set[str]], Set[str]]:
+        """
+        Compute STATIC mutex relationships using Fast Downward invariant synthesis
+
+        This is a STATIC method that can be called before creating planner instances.
+        Use this for precomputing mutex groups to share across multiple planners.
+
         This extracts true domain invariants (not transient effect-based mutex).
         Key distinction:
         - Static mutex: holding(x) ↔ handempty (impossible to co-exist)
@@ -691,43 +720,47 @@ class BackwardSearchPlanner:
         predicates represent goals to achieve at different time points, not
         simultaneous world state facts.
 
+        Args:
+            domain_path: Path to PDDL domain file
+            objects: List of objects for grounding (e.g., ['b1', 'b2', 'b3'])
+
         Returns:
-            Dictionary mapping predicate names to sets of STATIC mutex predicates
+            Tuple of (static_mutex_map, singleton_predicates)
+            - static_mutex_map: Dictionary mapping predicate names to sets of mutex predicates
+            - singleton_predicates: Set of predicate names that can only have one instance
         """
         try:
             from stage3_code_generation.fd_invariant_extractor import FDInvariantExtractor
 
             # Use Fast Downward to extract static invariants
-            domain_path = 'src/domains/blocksworld/domain.pddl'
-            objects = ['b1', 'b2', 'b3', 'b4', 'b5']  # Default objects for grounding
-
             print("[Mutex Analysis] Using Fast Downward invariant synthesis...")
             extractor = FDInvariantExtractor(domain_path, objects)
             static_mutex_map, singleton_preds = extractor.extract_invariants()
 
-            self.singleton_predicates = singleton_preds
-
             print(f"[Mutex Analysis] Extracted {len(static_mutex_map)} static mutex groups")
             print(f"[Mutex Analysis] Singleton predicates: {singleton_preds}")
 
-            return static_mutex_map
+            return static_mutex_map, singleton_preds
 
         except ImportError:
             print("[WARNING] FD Invariant Extractor not available - using fallback")
-            self.singleton_predicates = {'holding', 'handempty'}
+            singleton_preds = {'holding', 'handempty'}
             # Fallback: only the truly static mutex
-            return {
+            static_mutex_map = {
                 'holding': {'handempty'},
                 'handempty': {'holding'}
             }
+            return static_mutex_map, singleton_preds
+
         except Exception as e:
             print(f"[WARNING] Invariant extraction failed: {e}")
             print("[WARNING] Using fallback static mutex")
-            self.singleton_predicates = {'holding', 'handempty'}
-            return {
+            singleton_preds = {'holding', 'handempty'}
+            static_mutex_map = {
                 'holding': {'handempty'},
                 'handempty': {'holding'}
             }
+            return static_mutex_map, singleton_preds
 
 
     def _check_no_singleton_violations(self, predicates: Set[PredicateAtom]) -> bool:

@@ -111,6 +111,16 @@ class BackwardPlannerGenerator:
         # Note: We'll create variables on-demand based on each goal's requirements
         print(f"Variable-level planning enabled: using pattern-based exploration")
 
+        # PRECOMPUTE MUTEX GROUPS (once for all subgoals)
+        # This avoids repeating the same FD invariant extraction for every backward search
+        domain_path = 'src/domains/blocksworld/domain.pddl'  # TODO: make configurable
+        print(f"\n[Mutex Precomputation] Computing static mutex groups for all planners...")
+        precomputed_mutex, precomputed_singletons = BackwardSearchPlanner.compute_static_mutex(
+            domain_path=domain_path,
+            objects=objects
+        )
+        print(f"[Mutex Precomputation] Completed - will be reused for all {len(dfa_info.transitions)} transition(s)")
+
         # OPTIMIZATION: Pattern-based caching for goals
         # Cache using normalized variable patterns (e.g., on(?v0,?v1))
         # All goals with same structure share ONE exploration
@@ -185,7 +195,12 @@ class BackwardPlannerGenerator:
                         # STRATEGY A: Use BackwardSearchPlanner with GROUNDED predicates
                         # Search with actual objects (e.g., on(a, b))
                         # Variables generated on-demand when binding fails
-                        planner = BackwardSearchPlanner(self.domain)
+                        planner = BackwardSearchPlanner(
+                            self.domain,
+                            domain_path=domain_path,
+                            precomputed_mutex_groups=precomputed_mutex,
+                            precomputed_singleton_predicates=precomputed_singletons
+                        )
 
                         # ✓ CORRECT: Search with GROUNDED goal predicates
                         # Example: goal_predicates = [on(a, b)] - use actual objects!
