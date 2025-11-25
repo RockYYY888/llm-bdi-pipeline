@@ -28,7 +28,9 @@ import re
 from pathlib import Path
 
 # Add project root to path
-project_root = Path(__file__).parent.parent.parent
+project_root = Path(__file__).resolve()
+while project_root.name != "llm-bdi-pipeline-dev":
+    project_root = project_root.parent
 sys.path.insert(0, str(project_root))
 
 from src.stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator

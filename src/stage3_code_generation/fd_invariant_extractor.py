@@ -42,11 +42,25 @@ class FDInvariantExtractor:
             (static_mutex_map, singleton_predicates)
             - static_mutex_map: {pred_name: {mutex_pred1, mutex_pred2, ...}}
             - singleton_predicates: {pred_name1, pred_name2, ...}
+
+        Raises:
+            SystemExit: If Fast Downward is not available or extraction fails
         """
         # Check if Fast Downward is available
         if not self._check_fd_available():
-            print("[WARNING] Fast Downward not available - using fallback static mutex")
-            return self._fallback_static_mutex()
+            print("\n" + "="*80)
+            print("[FATAL ERROR] Fast Downward not available")
+            print("="*80)
+            print("\nFast Downward is required for static mutex analysis.")
+            print("\nPlease install Fast Downward:")
+            print("  1. cd /Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev")
+            print("  2. git clone https://github.com/aibasel/downward.git fast-downward")
+            print("  3. cd fast-downward")
+            print("  4. ./build.py")
+            print("\nOr ensure fast-downward.py is in your PATH")
+            print("="*80)
+            import sys
+            sys.exit(1)
 
         # Create mock problem file
         problem_path = self._create_mock_problem()
@@ -61,9 +75,22 @@ class FDInvariantExtractor:
             return static_mutex_map, singleton_predicates
 
         except Exception as e:
-            print(f"[WARNING] Fast Downward invariant extraction failed: {e}")
-            print("[WARNING] Falling back to hardcoded static mutex")
-            return self._fallback_static_mutex()
+            print("\n" + "="*80)
+            print("[FATAL ERROR] Fast Downward invariant extraction failed")
+            print("="*80)
+            print(f"Error: {e}")
+            print(f"\nDomain path: {self.domain_path}")
+            print(f"Objects: {self.objects}")
+            print(f"Problem path: {problem_path}")
+            print("\nPlease check:")
+            print("  1. Domain file is valid PDDL")
+            print("  2. Fast Downward is properly installed")
+            print("  3. Fast Downward can process this domain")
+            print("="*80)
+            import traceback
+            traceback.print_exc()
+            import sys
+            sys.exit(1)
 
         finally:
             # Cleanup mock problem file
@@ -286,27 +313,6 @@ class FDInvariantExtractor:
                     static_mutex_map[pred2].add(pred1)
 
         return static_mutex_map, singleton_predicates
-
-    def _fallback_static_mutex(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
-        """
-        Fallback static mutex when Fast Downward is not available
-
-        Returns:
-            (static_mutex_map, singleton_predicates)
-        """
-        # For blocksworld domain:
-        # - holding ↔ handempty (mutex: can't hold a block and have empty hand)
-        # - holding is singleton (only one block can be held at a time)
-        # - handempty is NOT singleton (it's a boolean predicate, not multi-instance)
-        static_mutex_map = {
-            'holding': {'handempty'},
-            'handempty': {'holding'}
-        }
-
-        singleton_predicates = {'holding'}
-
-        return static_mutex_map, singleton_predicates
-
 
 # Test function
 def test_fd_extractor():

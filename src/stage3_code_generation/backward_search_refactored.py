@@ -728,10 +728,25 @@ class BackwardSearchPlanner:
             Tuple of (static_mutex_map, singleton_predicates)
             - static_mutex_map: Dictionary mapping predicate names to sets of mutex predicates
             - singleton_predicates: Set of predicate names that can only have one instance
+
+        Raises:
+            SystemExit: If Fast Downward invariant extraction fails
         """
         try:
             from stage3_code_generation.fd_invariant_extractor import FDInvariantExtractor
+        except ImportError as e:
+            print("\n" + "="*80)
+            print("[FATAL ERROR] Fast Downward Invariant Extractor not available")
+            print("="*80)
+            print(f"Import error: {e}")
+            print("\nFast Downward is required for static mutex analysis.")
+            print("Please ensure:")
+            print("  1. Fast Downward is installed in the project directory")
+            print("  2. fd_invariant_extractor.py exists in stage3_code_generation/")
+            print("="*80)
+            sys.exit(1)
 
+        try:
             # Use Fast Downward to extract static invariants
             print("[Mutex Analysis] Using Fast Downward invariant synthesis...")
             extractor = FDInvariantExtractor(domain_path, objects)
@@ -742,28 +757,21 @@ class BackwardSearchPlanner:
 
             return static_mutex_map, singleton_preds
 
-        except ImportError:
-            print("[WARNING] FD Invariant Extractor not available - using fallback")
-            # Fallback for blocksworld domain:
-            # - holding ↔ handempty (mutex)
-            # - holding is singleton (only one block can be held at a time)
-            # - handempty is NOT singleton (can appear 0 or 1 times, not multiple instances)
-            singleton_preds = {'holding'}
-            static_mutex_map = {
-                'holding': {'handempty'},
-                'handempty': {'holding'}
-            }
-            return static_mutex_map, singleton_preds
-
         except Exception as e:
-            print(f"[WARNING] Invariant extraction failed: {e}")
-            print("[WARNING] Using fallback static mutex")
-            singleton_preds = {'holding'}
-            static_mutex_map = {
-                'holding': {'handempty'},
-                'handempty': {'holding'}
-            }
-            return static_mutex_map, singleton_preds
+            print("\n" + "="*80)
+            print("[FATAL ERROR] Fast Downward invariant extraction failed")
+            print("="*80)
+            print(f"Error: {e}")
+            print(f"\nDomain path: {domain_path}")
+            print(f"Objects: {objects}")
+            print("\nPlease check:")
+            print("  1. Domain file exists and is valid PDDL")
+            print("  2. Fast Downward is properly installed")
+            print("  3. Fast Downward can process the domain")
+            print("="*80)
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
 
     def _check_no_singleton_violations(self, predicates: Set[PredicateAtom]) -> bool:

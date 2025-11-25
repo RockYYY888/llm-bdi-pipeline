@@ -74,6 +74,9 @@ class AgentSpeakCodeGenerator:
         # Solution: Collect all variables and create consistent V0, V1, V2... mapping
         self.unified_var_map = self._build_unified_variable_map()
 
+        # PERFORMANCE: Cache goal arg mapping (computed once, used many times)
+        self._cached_goal_arg_mapping = self._build_goal_arg_mapping()
+
     def _build_unified_variable_map(self) -> Dict[str, str]:
         """
         Build unified variable renaming map from state graph
@@ -258,7 +261,7 @@ class AgentSpeakCodeGenerator:
         if len(goal_preds) == 1:
             # Single predicate goal - use Arg-based naming
             goal_pred = goal_preds[0]
-            arg_mapping = self._build_goal_arg_mapping()
+            arg_mapping = self._cached_goal_arg_mapping  # Use cached version
 
             # Map arguments to generic names
             mapped_args = []
@@ -813,8 +816,8 @@ class AgentSpeakCodeGenerator:
         # Get parameterized goal pattern (uses Arg1, Arg2, etc.)
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # Build goal argument mapping for context conversion
-        goal_arg_mapping = self._build_goal_arg_mapping()
+        # Use cached goal argument mapping for context conversion
+        goal_arg_mapping = self._cached_goal_arg_mapping
 
         # Format context using goal argument mapping
         # This converts:
@@ -921,8 +924,8 @@ class AgentSpeakCodeGenerator:
         # Get parameterized goal pattern (with Arg names)
         param_goal_pattern = self._get_parameterized_goal_pattern()
 
-        # Get context condition (use goal argument mapping)
-        goal_arg_mapping = self._build_goal_arg_mapping()
+        # Get context condition (use cached goal argument mapping)
+        goal_arg_mapping = self._cached_goal_arg_mapping
         context = self.graph.goal_state.to_agentspeak_context(unified_var_map=goal_arg_mapping)
 
         return f"""+!{param_goal_pattern} : {context} <-

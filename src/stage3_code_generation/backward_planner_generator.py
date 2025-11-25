@@ -224,16 +224,16 @@ class BackwardPlannerGenerator:
                         traceback.print_exc()
                         continue
 
+                # Check if this pattern was already generated BEFORE doing any work
+                if pattern_key in generated_patterns:
+                    # This pattern already generated, skip duplicate plan generation
+                    print(f"    ✓ Pattern '{pattern_key}' already generated, skipping duplicate plans")
+                    continue
+
                 # Generate code from grounded state graph
                 try:
-                    # Always add state graph (needed for shared section)
+                    # Add state graph (needed for shared section) - only for NEW patterns
                     all_state_graphs.append(state_graph)
-
-                    # Check if this pattern was already generated
-                    if pattern_key in generated_patterns:
-                        # This pattern already generated, skip duplicate plan generation
-                        print(f"    ✓ Pattern '{pattern_key}' already generated, skipping duplicate plans")
-                        continue
 
                     # Generate goal-specific section
                     # STRATEGY A: state_graph contains GROUNDED predicates (e.g., on(a, b))
