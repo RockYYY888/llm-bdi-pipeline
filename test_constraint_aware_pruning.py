@@ -18,7 +18,9 @@ from stage3_code_generation.backward_search_refactored import (
     InequalityConstraint,
     _compute_minimum_objects_needed,
     _should_prune_state_constraint_aware,
+    _extract_implicit_constraints_from_predicates,
 )
+from stage3_code_generation.state_space import PredicateAtom
 
 
 def test_constraint_aware_pruning():
@@ -40,8 +42,8 @@ def test_constraint_aware_pruning():
     print(f"Constraints: {[str(c) for c in constraints]}")
     print(f"Max objects: {max_objects}")
 
-    min_needed = _compute_minimum_objects_needed(variables, constraints)
-    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects)
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates=None)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates=None)
 
     print(f"Minimum objects needed (lower bound): {min_needed}")
     print(f"Should prune: {should_prune}")
@@ -76,8 +78,8 @@ def test_constraint_aware_pruning():
     print(f"Constraints: {[str(c) for c in constraints]}")
     print(f"Max objects: {max_objects}")
 
-    min_needed = _compute_minimum_objects_needed(variables, constraints)
-    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects)
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates=None)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates=None)
 
     print(f"Minimum objects needed (lower bound): {min_needed}")
     print(f"Should prune: {should_prune}")
@@ -105,8 +107,8 @@ def test_constraint_aware_pruning():
     print(f"Constraints: {constraints}")
     print(f"Max objects: {max_objects}")
 
-    min_needed = _compute_minimum_objects_needed(variables, constraints, ground_objects)
-    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, ground_objects)
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates=None, ground_objects=ground_objects)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates=None, ground_objects=ground_objects)
 
     print(f"Minimum objects needed (lower bound): {min_needed}")
     print(f"Should prune: {should_prune}")
@@ -140,8 +142,8 @@ def test_constraint_aware_pruning():
     print(f"Constraints: {[str(c) for c in constraints]}")
     print(f"Max objects: {max_objects}")
 
-    min_needed = _compute_minimum_objects_needed(variables, constraints, ground_objects)
-    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, ground_objects)
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates=None, ground_objects=ground_objects)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates=None, ground_objects=ground_objects)
 
     print(f"Minimum objects needed (lower bound): {min_needed}")
     print(f"Should prune: {should_prune}")
@@ -172,8 +174,8 @@ def test_constraint_aware_pruning():
     print(f"Constraints: {[str(c) for c in constraints]}")
     print(f"Max objects: {max_objects}")
 
-    min_needed = _compute_minimum_objects_needed(variables, constraints)
-    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects)
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates=None)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates=None)
 
     print(f"Minimum objects needed (lower bound): {min_needed}")
     print(f"Should prune: {should_prune}")
@@ -181,6 +183,82 @@ def test_constraint_aware_pruning():
     if should_prune:
         print("❌ FAILED: State was incorrectly pruned!")
         print("   Only need 2 objects for on(?v0, ?v1)")
+        return False
+    else:
+        print("✅ PASSED: State correctly NOT pruned")
+    print()
+
+    print("=" * 80)
+    print("Test 6: Implicit constraints from predicates - on(?v0, ?v1)")
+    print("=" * 80)
+
+    # State with on(?v0, ?v1) predicate
+    # This should extract implicit constraint ?v0 != ?v1
+    predicates = {PredicateAtom("on", ["?v0", "?v1"])}
+    variables = {'?v0', '?v1'}
+    constraints = set()  # No explicit constraints
+    max_objects = 1  # Only 1 object available
+
+    print(f"Predicates: {[str(p) for p in predicates]}")
+    print(f"Variables: {variables}")
+    print(f"Explicit constraints: {constraints}")
+    print(f"Max objects: {max_objects}")
+
+    # Extract implicit constraints
+    implicit = _extract_implicit_constraints_from_predicates(predicates)
+    print(f"Implicit constraints from predicates: {[str(c) for c in implicit]}")
+
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates)
+
+    print(f"Minimum objects needed (with implicit): {min_needed}")
+    print(f"Should prune: {should_prune}")
+
+    # Should be pruned because on(?v0, ?v1) implicitly requires ?v0 != ?v1
+    # So we need 2 objects, but only 1 available
+    if not should_prune:
+        print("❌ FAILED: State should have been pruned!")
+        print("   on(?v0, ?v1) implicitly requires ?v0 != ?v1, needing 2 objects")
+        return False
+    else:
+        print("✅ PASSED: State correctly pruned using implicit constraints")
+    print()
+
+    print("=" * 80)
+    print("Test 7: Multiple implicit constraints - on(?v0, ?v1) ∧ on(?v1, ?v2)")
+    print("=" * 80)
+
+    # State with multiple on predicates creating a chain
+    predicates = {
+        PredicateAtom("on", ["?v0", "?v1"]),
+        PredicateAtom("on", ["?v1", "?v2"]),
+    }
+    variables = {'?v0', '?v1', '?v2'}
+    constraints = set()  # No explicit constraints
+    max_objects = 2
+
+    print(f"Predicates: {[str(p) for p in predicates]}")
+    print(f"Variables: {variables}")
+    print(f"Explicit constraints: {constraints}")
+    print(f"Max objects: {max_objects}")
+
+    # Extract implicit constraints
+    implicit = _extract_implicit_constraints_from_predicates(predicates)
+    print(f"Implicit constraints from predicates: {[str(c) for c in implicit]}")
+
+    min_needed = _compute_minimum_objects_needed(variables, constraints, predicates)
+    should_prune = _should_prune_state_constraint_aware(variables, constraints, max_objects, predicates)
+
+    print(f"Minimum objects needed (with implicit): {min_needed}")
+    print(f"Should prune: {should_prune}")
+
+    # Should NOT be pruned:
+    # Implicit constraints: ?v0 != ?v1, ?v1 != ?v2
+    # But NO constraint between ?v0 and ?v2, so they can be the same
+    # So we need only 2 objects: {?v0=a, ?v1=b, ?v2=a}
+    if should_prune:
+        print("❌ FAILED: State was incorrectly pruned!")
+        print("   ?v0 and ?v2 have no constraint, so they can be the same object")
         return False
     else:
         print("✅ PASSED: State correctly NOT pruned")
