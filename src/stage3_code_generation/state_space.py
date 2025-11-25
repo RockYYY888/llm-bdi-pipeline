@@ -325,7 +325,10 @@ class WorldState:
                                         unified_var_map=unified_var_map) for p in sorted_preds]
 
         # Add inequality constraints
-        # Format: ?v1 ≠ ?v2 → V1 \== V2 (AgentSpeak syntax)
+        # Format: ?v1 ≠ ?v2 → (V1 != V2) (Jason/AgentSpeak syntax)
+        # NOTE: While Jason parser grammar includes \== from Prolog,
+        #       actual Jason runtime uses != for inequality comparisons
+        #       Wrap in parentheses for proper precedence when chaining
         if self.constraints:
             for constraint in sorted(self.constraints, key=lambda c: (c.var1, c.var2)):
                 # Map constraint variables using unified_var_map if provided
@@ -337,8 +340,8 @@ class WorldState:
                     var1 = constraint.var1.lstrip('?').upper()
                     var2 = constraint.var2.lstrip('?').upper()
 
-                # AgentSpeak not-equal operator is \==
-                context_parts.append(f"{var1} \\== {var2}")
+                # Jason uses != for inequality (wrap in parens for safety)
+                context_parts.append(f"({var1} != {var2})")
 
         return " & ".join(context_parts) if context_parts else "true"
 
