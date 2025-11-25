@@ -637,12 +637,11 @@ class BackwardSearchPlanner:
         # CRITICAL: Prune states with too many variables
         # If we have more variables than actual objects, the state is unreachable
         if self.max_objects is not None:
-            # Count ACTUAL unique variables in the new state (not just max var number)
+            # Count ALL unique variables in the new state (both grounded and fresh)
             unique_vars = set()
             for pred in new_predicates:
                 for arg in pred.args:
-                    if arg.startswith('?v'):
-                        unique_vars.add(arg)
+                    unique_vars.add(arg)  # Count all variables, not just ?v
 
             if len(unique_vars) > self.max_objects:
                 # Too many variables for available objects - PRUNE
@@ -915,10 +914,10 @@ class BackwardSearchPlanner:
                     next_var_num += 1
                     new_var = f"?v{next_var_num}"
 
-                # NOTE: We do NOT cap variable generation at max_objects
-                # In backward planning, we may need more variables than actual objects
-                # because we're exploring abstract state space
-                # max_objects is only used for final_max_var calculation below
+                # NOTE: Variable generation IS capped at max_objects via pruning check (line 644)
+                # States with more variables than available objects are physically unreachable
+                # and are pruned as infeasible during regression
+                # max_objects is also used for final_max_var calculation below
 
                 complete_binding[param] = new_var
                 used_vars.add(new_var)
@@ -1066,7 +1065,11 @@ class BackwardSearchPlanner:
 
     def _create_empty_state_graph(self, goal_state: BackwardState) -> StateGraph:
         """Create empty state graph for already-achieved goals"""
-        world_state = WorldState(set(goal_state.predicates), depth=0)
+        world_state = WorldState(
+            set(goal_state.predicates),
+            depth=0,
+            constraints=set(goal_state.constraints)  # CRITICAL: Pass constraints!
+        )
         state_graph = StateGraph(world_state)
         state_graph.truncated = False
         return state_graph
@@ -1088,11 +1091,13 @@ class BackwardSearchPlanner:
             StateGraph object
         """
         # Convert BackwardStates to WorldStates
+        # CRITICAL: Must pass constraints from BackwardState to WorldState!
         backward_to_world = {}
         for backward_state in visited.values():
             world_state = WorldState(
                 set(backward_state.predicates),
-                depth=backward_state.depth
+                depth=backward_state.depth,
+                constraints=set(backward_state.constraints)  # ← CRITICAL FIX!
             )
             backward_to_world[backward_state] = world_state
 

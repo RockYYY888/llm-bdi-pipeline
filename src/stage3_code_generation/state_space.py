@@ -248,19 +248,22 @@ class PredicateAtom:
 @dataclass(frozen=True)
 class WorldState:
     """
-    Represents a world state as a set of predicates
+    Represents a world state as a set of predicates with inequality constraints
 
     Example:
-        State({on(a, b), clear(c), handempty})
+        State({on(a, b), clear(c), handempty}, constraints={?v1 ≠ ?v2})
 
     Attributes:
         predicates: Frozen set of PredicateAtoms
         depth: Distance from goal state (used during exploration)
+        constraints: Frozen set of inequality constraints (e.g., ?v1 ≠ ?v2)
+                    Used for variable-based planning to ensure distinctness
     """
     predicates: FrozenSet[PredicateAtom]
     depth: int = 0
+    constraints: FrozenSet['InequalityConstraint'] = frozenset()
 
-    def __init__(self, predicates, depth: int = 0):
+    def __init__(self, predicates, depth: int = 0, constraints=None):
         """
         Initialize WorldState
 
@@ -268,6 +271,7 @@ class WorldState:
             predicates: Either a Set[PredicateAtom] or FrozenSet[PredicateAtom]
                        If already a frozenset, reuse it to save memory
             depth: Distance from goal state
+            constraints: Set of InequalityConstraint objects (optional)
         """
         if isinstance(predicates, frozenset):
             # Reuse existing frozenset to avoid duplication
@@ -276,6 +280,14 @@ class WorldState:
             # Convert set to frozenset
             object.__setattr__(self, 'predicates', frozenset(predicates))
         object.__setattr__(self, 'depth', depth)
+
+        # Handle constraints
+        if constraints is None:
+            object.__setattr__(self, 'constraints', frozenset())
+        elif isinstance(constraints, frozenset):
+            object.__setattr__(self, 'constraints', constraints)
+        else:
+            object.__setattr__(self, 'constraints', frozenset(constraints))
 
     def contains(self, predicate: PredicateAtom) -> bool:
         """Check if predicate exists in this state"""
@@ -292,7 +304,7 @@ class WorldState:
     def to_agentspeak_context(self, convert_vars: bool = False, obj_to_var: dict = None,
                             unified_var_map: dict = None) -> str:
         """
-        Convert to AgentSpeak context condition
+        Convert to AgentSpeak context condition INCLUDING inequality constraints
 
         Args:
             convert_vars: If True, convert PDDL variables to AgentSpeak variables
@@ -300,16 +312,35 @@ class WorldState:
             unified_var_map: Optional unified variable renaming map (CRITICAL FIX)
 
         Returns:
-            String like "on(a, b) & clear(c) & handempty" or "true" if empty
+            String like "on(a, b) & clear(c) & V1 \\== V2" or "true" if empty
             With convert_vars=True or obj_to_var: "on(V0, V1) & clear(V0)" etc.
+            Constraints are appended as "Var1 \\== Var2" (AgentSpeak not-equal operator)
         """
-        if self.is_empty():
+        if self.is_empty() and len(self.constraints) == 0:
             return "true"
 
-        # Sort for deterministic output
+        # Sort predicates for deterministic output
         sorted_preds = sorted(self.predicates, key=lambda p: (p.name, p.args))
-        return " & ".join(p.to_agentspeak(convert_vars=convert_vars, obj_to_var=obj_to_var,
-                                        unified_var_map=unified_var_map) for p in sorted_preds)
+        context_parts = [p.to_agentspeak(convert_vars=convert_vars, obj_to_var=obj_to_var,
+                                        unified_var_map=unified_var_map) for p in sorted_preds]
+
+        # Add inequality constraints
+        # Format: ?v1 ≠ ?v2 → V1 \== V2 (AgentSpeak syntax)
+        if self.constraints:
+            for constraint in sorted(self.constraints, key=lambda c: (c.var1, c.var2)):
+                # Map constraint variables using unified_var_map if provided
+                if unified_var_map:
+                    var1 = unified_var_map.get(constraint.var1, constraint.var1.lstrip('?').upper())
+                    var2 = unified_var_map.get(constraint.var2, constraint.var2.lstrip('?').upper())
+                else:
+                    # Default: ?v1 → V1, ?v2 → V2
+                    var1 = constraint.var1.lstrip('?').upper()
+                    var2 = constraint.var2.lstrip('?').upper()
+
+                # AgentSpeak not-equal operator is \==
+                context_parts.append(f"{var1} \\== {var2}")
+
+        return " & ".join(context_parts) if context_parts else "true"
 
     def __str__(self) -> str:
         if self.is_empty():
