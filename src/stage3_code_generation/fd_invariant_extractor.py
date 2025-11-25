@@ -294,13 +294,16 @@ class FDInvariantExtractor:
         Returns:
             (static_mutex_map, singleton_predicates)
         """
-        # For blocksworld, only one static mutex: holding vs handempty
+        # For blocksworld domain:
+        # - holding ↔ handempty (mutex: can't hold a block and have empty hand)
+        # - holding is singleton (only one block can be held at a time)
+        # - handempty is NOT singleton (it's a boolean predicate, not multi-instance)
         static_mutex_map = {
             'holding': {'handempty'},
             'handempty': {'holding'}
         }
 
-        singleton_predicates = {'holding', 'handempty'}
+        singleton_predicates = {'holding'}
 
         return static_mutex_map, singleton_predicates
 

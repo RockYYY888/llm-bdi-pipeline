@@ -744,8 +744,11 @@ class BackwardSearchPlanner:
 
         except ImportError:
             print("[WARNING] FD Invariant Extractor not available - using fallback")
-            singleton_preds = {'holding', 'handempty'}
-            # Fallback: only the truly static mutex
+            # Fallback for blocksworld domain:
+            # - holding ↔ handempty (mutex)
+            # - holding is singleton (only one block can be held at a time)
+            # - handempty is NOT singleton (can appear 0 or 1 times, not multiple instances)
+            singleton_preds = {'holding'}
             static_mutex_map = {
                 'holding': {'handempty'},
                 'handempty': {'holding'}
@@ -755,7 +758,7 @@ class BackwardSearchPlanner:
         except Exception as e:
             print(f"[WARNING] Invariant extraction failed: {e}")
             print("[WARNING] Using fallback static mutex")
-            singleton_preds = {'holding', 'handempty'}
+            singleton_preds = {'holding'}
             static_mutex_map = {
                 'holding': {'handempty'},
                 'handempty': {'holding'}
