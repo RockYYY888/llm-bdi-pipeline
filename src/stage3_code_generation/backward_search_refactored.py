@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 from typing import List, Dict, Set, Tuple, Optional, FrozenSet
-from collections import deque
+from collections import deque, defaultdict
 from dataclasses import dataclass
 
 # Add parent directory to path
@@ -58,6 +58,204 @@ class InequalityConstraint:
             return False
         # Order-independent equality
         return {self.var1, self.var2} == {other.var1, other.var2}
+
+
+class ConstraintGraph:
+    """
+    Constraint graph for analyzing variable inequality relationships.
+
+    Graph structure:
+    - Nodes = variables (including ground objects)
+    - Edges = inequality constraints (must be different)
+
+    Ground objects like 'a', 'b' implicitly have edges between them
+    since they are definitionally different.
+
+    Used to determine minimum number of objects needed to satisfy all constraints
+    by finding maximum clique (variables that are ALL mutually constrained).
+    """
+
+    def __init__(self):
+        self.nodes: Set[str] = set()
+        self.edges: Set[Tuple[str, str]] = set()  # (var1, var2) where var1 < var2
+        self.adjacency: Dict[str, Set[str]] = defaultdict(set)
+
+    def add_node(self, var: str):
+        """Add a variable node to the graph"""
+        self.nodes.add(var)
+
+    def add_edge(self, var1: str, var2: str):
+        """Add inequality constraint: var1 != var2"""
+        if var1 == var2:
+            return  # No self-loops
+
+        # Normalize edge
+        if var1 > var2:
+            var1, var2 = var2, var1
+
+        self.nodes.add(var1)
+        self.nodes.add(var2)
+        self.edges.add((var1, var2))
+        self.adjacency[var1].add(var2)
+        self.adjacency[var2].add(var1)
+
+    def find_maximum_clique_greedy(self) -> Set[str]:
+        """
+        Find a maximal clique using greedy algorithm.
+
+        A clique = set of variables that are ALL mutually constrained (all != each other).
+        These variables MUST all bind to different objects.
+
+        Returns a maximal clique (not necessarily maximum, but good enough for pruning).
+        """
+        if not self.nodes:
+            return set()
+
+        # Sort nodes by degree (most constrained first) for better greedy choices
+        nodes_by_degree = sorted(
+            self.nodes,
+            key=lambda n: len(self.adjacency.get(n, set())),
+            reverse=True
+        )
+
+        best_clique = set()
+
+        # Try starting from each node (limit iterations for efficiency)
+        for start_node in nodes_by_degree[:10]:
+            clique = {start_node}
+            candidates = self.adjacency.get(start_node, set()).copy()
+
+            while candidates:
+                # Find node in candidates connected to all clique members
+                best_candidate = None
+                best_future_candidates = -1
+
+                for candidate in candidates:
+                    # Check if candidate is connected to ALL current clique members
+                    neighbors = self.adjacency.get(candidate, set())
+                    if clique.issubset(neighbors | {candidate}):
+                        # Valid candidate - count future candidates
+                        future = len(candidates & neighbors)
+                        if future > best_future_candidates:
+                            best_future_candidates = future
+                            best_candidate = candidate
+
+                if best_candidate is None:
+                    break
+
+                clique.add(best_candidate)
+                # Update candidates to only include nodes connected to all clique members
+                candidates = candidates & self.adjacency.get(best_candidate, set())
+
+            if len(clique) > len(best_clique):
+                best_clique = clique
+
+        return best_clique
+
+
+def _build_constraint_graph(
+    variables: Set[str],
+    inequality_constraints: Set[InequalityConstraint],
+    ground_objects: Set[str] = None
+) -> ConstraintGraph:
+    """
+    Build constraint graph from variables and constraints.
+
+    Args:
+        variables: All variables in the state (both ?v-style and ground like 'a')
+        inequality_constraints: Explicit != constraints
+        ground_objects: Set of known ground objects (if provided, adds implicit constraints)
+
+    Returns:
+        ConstraintGraph with all constraints
+    """
+    graph = ConstraintGraph()
+
+    # Add all variables as nodes
+    for var in variables:
+        graph.add_node(var)
+
+    # Add explicit inequality constraints
+    for constraint in inequality_constraints:
+        graph.add_edge(constraint.var1, constraint.var2)
+
+    # Add implicit constraints between ground objects
+    # Ground objects are definitionally different: a != b, a != c, b != c, etc.
+    if ground_objects:
+        ground_list = list(ground_objects)
+        for i in range(len(ground_list)):
+            for j in range(i + 1, len(ground_list)):
+                graph.add_edge(ground_list[i], ground_list[j])
+    else:
+        # Infer ground objects from variables (those not starting with ?)
+        ground_vars = [v for v in variables if not v.startswith('?')]
+        for i in range(len(ground_vars)):
+            for j in range(i + 1, len(ground_vars)):
+                graph.add_edge(ground_vars[i], ground_vars[j])
+
+    return graph
+
+
+def _compute_minimum_objects_needed(
+    variables: Set[str],
+    inequality_constraints: Set[InequalityConstraint],
+    ground_objects: Set[str] = None
+) -> int:
+    """
+    Compute lower bound on minimum objects needed to satisfy all constraints.
+
+    The exact answer is the chromatic number (NP-hard).
+    We return the size of the maximum clique as a lower bound.
+
+    Args:
+        variables: All variables in state
+        inequality_constraints: Explicit != constraints
+        ground_objects: Known ground objects
+
+    Returns:
+        Lower bound on minimum objects needed
+    """
+    graph = _build_constraint_graph(variables, inequality_constraints, ground_objects)
+
+    if not graph.nodes:
+        return 0
+
+    # The size of the maximum clique is a lower bound on chromatic number
+    # (A clique of size k needs k colors/objects)
+    max_clique = graph.find_maximum_clique_greedy()
+
+    return len(max_clique)
+
+
+def _should_prune_state_constraint_aware(
+    variables: Set[str],
+    inequality_constraints: Set[InequalityConstraint],
+    max_objects: int,
+    ground_objects: Set[str] = None
+) -> bool:
+    """
+    Determine if a state should be pruned based on constraint analysis.
+
+    A state should be pruned if we can PROVE it's unreachable:
+    - If there's a clique larger than max_objects, we need more objects than available
+
+    This is SOUND (never prunes reachable states) but not COMPLETE
+    (may not prune all unreachable states). That's appropriate for search.
+
+    Args:
+        variables: All variables in state
+        inequality_constraints: Explicit != constraints
+        max_objects: Maximum available objects
+        ground_objects: Known ground objects (optional)
+
+    Returns:
+        True if state should be pruned, False otherwise
+    """
+    min_objects_needed = _compute_minimum_objects_needed(
+        variables, inequality_constraints, ground_objects
+    )
+
+    return min_objects_needed > max_objects
 
 
 @dataclass
@@ -634,18 +832,33 @@ class BackwardSearchPlanner:
                 # Mutex violation detected - skip this state
                 return []
 
-        # CRITICAL: Prune states with too many variables
-        # If we have more variables than actual objects, the state is unreachable
+        # CRITICAL: Constraint-aware pruning based on variable feasibility
+        # OLD LOGIC (TOO AGGRESSIVE): if len(unique_vars) > max_objects → PRUNE
+        # This was wrong because variables WITHOUT constraints can share objects
+        # NEW LOGIC: Use constraint graph analysis to find maximum clique
+        # Only prune if the clique size > max_objects (variables that MUST be different)
         if self.max_objects is not None:
-            # Count ALL unique variables in the new state (both grounded and fresh)
+            # Extract all unique variables from predicates
             unique_vars = set()
             for pred in new_predicates:
                 for arg in pred.args:
-                    unique_vars.add(arg)  # Count all variables, not just ?v
+                    unique_vars.add(arg)
 
+            # Quick check: if unique_vars <= max_objects, definitely feasible
             if len(unique_vars) > self.max_objects:
-                # Too many variables for available objects - PRUNE
-                return []
+                # Need constraint analysis - check if state is actually infeasible
+                # Extract ground objects (those not starting with ?)
+                ground_objects = {v for v in unique_vars if not v.startswith('?')}
+
+                # Use constraint-aware pruning
+                if _should_prune_state_constraint_aware(
+                    variables=unique_vars,
+                    inequality_constraints=new_constraints,
+                    max_objects=self.max_objects,
+                    ground_objects=ground_objects if ground_objects else None
+                ):
+                    # Proven unreachable - maximum clique exceeds available objects
+                    return []
 
         # Create predecessor state
         predecessor = BackwardState(
