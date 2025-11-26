@@ -153,75 +153,23 @@ class ConstraintGraph:
         return best_clique
 
 
-def _extract_implicit_constraints_from_predicates(predicates) -> Set[InequalityConstraint]:
-    """
-    Extract implicit inequality constraints from predicates.
-
-    CRITICAL: Predicates like on(?v0, ?v1) implicitly require ?v0 != ?v1
-    (can't stack a block on itself).
-
-    This function extracts these implicit constraints based on predicate semantics:
-    - Binary predicates with different argument positions → implicit !=
-    - Examples: on(X, Y) → X != Y, holding(X) → (no implicit constraint)
-
-    Args:
-        predicates: Set of PredicateAtom
-
-    Returns:
-        Set of implicit InequalityConstraint
-    """
-    implicit_constraints = set()
-
-    # Predicates that imply inequality between their arguments
-    # This is a heuristic based on common PDDL domains
-    inequality_predicates = {
-        'on',       # on(X, Y) → X != Y (can't be on itself)
-        'above',    # above(X, Y) → X != Y
-        'below',    # below(X, Y) → X != Y
-        'beside',   # beside(X, Y) → X != Y
-        'ontable',  # Usually unary, but if binary: ontable(X, Y) → X != Y
-    }
-
-    for pred in predicates:
-        # Only extract from positive predicates (negative don't imply constraints)
-        if pred.negated:
-            continue
-
-        # Check if this predicate type implies inequality
-        if pred.name in inequality_predicates:
-            # For binary predicates, add constraint between different positions
-            if len(pred.args) >= 2:
-                # Add constraint for each pair of different argument positions
-                for i in range(len(pred.args)):
-                    for j in range(i + 1, len(pred.args)):
-                        arg_i = pred.args[i]
-                        arg_j = pred.args[j]
-                        if arg_i != arg_j:  # Don't add self-constraints
-                            implicit_constraints.add(InequalityConstraint(arg_i, arg_j))
-
-    return implicit_constraints
-
-
 def _build_constraint_graph(
     variables: Set[str],
     inequality_constraints: Set[InequalityConstraint],
-    predicates=None,
     ground_objects: Set[str] = None
 ) -> ConstraintGraph:
     """
-    Build constraint graph from variables, constraints, and predicates.
+    Build constraint graph from variables and constraints.
 
-    CRITICAL: This now extracts implicit constraints from predicates!
-    Example: on(?v0, ?v1) → implicit constraint ?v0 != ?v1
+    Uses ONLY explicit constraints from PDDL (not (= ?x ?y)) - no implicit inference.
 
     Args:
         variables: All variables in the state (both ?v-style and ground like 'a')
         inequality_constraints: Explicit != constraints from PDDL
-        predicates: Set of PredicateAtom (optional, for extracting implicit constraints)
         ground_objects: Set of known ground objects (if provided, adds implicit constraints)
 
     Returns:
-        ConstraintGraph with all constraints (explicit + implicit)
+        ConstraintGraph with all constraints
     """
     graph = ConstraintGraph()
 
@@ -232,12 +180,6 @@ def _build_constraint_graph(
     # Add explicit inequality constraints from PDDL
     for constraint in inequality_constraints:
         graph.add_edge(constraint.var1, constraint.var2)
-
-    # CRITICAL FIX: Extract implicit constraints from predicates
-    if predicates:
-        implicit_constraints = _extract_implicit_constraints_from_predicates(predicates)
-        for constraint in implicit_constraints:
-            graph.add_edge(constraint.var1, constraint.var2)
 
     # Add implicit constraints between ground objects
     # Ground objects are definitionally different: a != b, a != c, b != c, etc.
@@ -259,7 +201,6 @@ def _build_constraint_graph(
 def _compute_minimum_objects_needed(
     variables: Set[str],
     inequality_constraints: Set[InequalityConstraint],
-    predicates=None,
     ground_objects: Set[str] = None
 ) -> int:
     """
@@ -268,18 +209,17 @@ def _compute_minimum_objects_needed(
     The exact answer is the chromatic number (NP-hard).
     We return the size of the maximum clique as a lower bound.
 
-    CRITICAL: Now includes implicit constraints from predicates!
+    Uses ONLY explicit PDDL constraints (not (= ?x ?y)) - no implicit inference.
 
     Args:
         variables: All variables in state
-        inequality_constraints: Explicit != constraints
-        predicates: Set of PredicateAtom (for extracting implicit constraints)
+        inequality_constraints: Explicit != constraints from PDDL
         ground_objects: Known ground objects
 
     Returns:
         Lower bound on minimum objects needed
     """
-    graph = _build_constraint_graph(variables, inequality_constraints, predicates, ground_objects)
+    graph = _build_constraint_graph(variables, inequality_constraints, ground_objects)
 
     if not graph.nodes:
         return 0
@@ -295,7 +235,6 @@ def _should_prune_state_constraint_aware(
     variables: Set[str],
     inequality_constraints: Set[InequalityConstraint],
     max_objects: int,
-    predicates=None,
     ground_objects: Set[str] = None
 ) -> bool:
     """
@@ -307,20 +246,19 @@ def _should_prune_state_constraint_aware(
     This is SOUND (never prunes reachable states) but not COMPLETE
     (may not prune all unreachable states). That's appropriate for search.
 
-    CRITICAL: Now includes implicit constraints from predicates!
+    Uses ONLY explicit PDDL constraints (not (= ?x ?y)) - no implicit inference.
 
     Args:
         variables: All variables in state
-        inequality_constraints: Explicit != constraints
+        inequality_constraints: Explicit != constraints from PDDL
         max_objects: Maximum available objects
-        predicates: Set of PredicateAtom (for extracting implicit constraints)
         ground_objects: Known ground objects (optional)
 
     Returns:
         True if state should be pruned, False otherwise
     """
     min_objects_needed = _compute_minimum_objects_needed(
-        variables, inequality_constraints, predicates, ground_objects
+        variables, inequality_constraints, ground_objects
     )
 
     return min_objects_needed > max_objects
@@ -918,13 +856,11 @@ class BackwardSearchPlanner:
                 # Extract ground objects (those not starting with ?)
                 ground_objects = {v for v in unique_vars if not v.startswith('?')}
 
-                # CRITICAL FIX: Pass predicates to extract implicit constraints!
-                # Example: on(?v0, ?v1) → implicit constraint ?v0 != ?v1
+                # Use constraint-aware pruning with explicit PDDL constraints only
                 if _should_prune_state_constraint_aware(
                     variables=unique_vars,
                     inequality_constraints=new_constraints,
                     max_objects=self.max_objects,
-                    predicates=new_predicates,  # ← CRITICAL: Now passes predicates!
                     ground_objects=ground_objects if ground_objects else None
                 ):
                     # Proven unreachable - maximum clique exceeds available objects
