@@ -114,8 +114,8 @@ class BackwardPlannerGenerator:
         # PRECOMPUTE MUTEX GROUPS (once for all subgoals)
         # This avoids repeating the same FD invariant extraction for every backward search
         domain_path = 'src/domains/blocksworld/domain.pddl'  # TODO: make configurable
-        print(f"\n[Mutex Precomputation] Computing static mutex groups for all planners...")
-        precomputed_mutex, precomputed_singletons = BackwardSearchPlanner.compute_static_mutex(
+        print(f"\n[Mutex Precomputation] Computing static mutex patterns for all planners...")
+        precomputed_singletons, precomputed_lifted = BackwardSearchPlanner.compute_static_mutex(
             domain_path=domain_path,
             objects=objects
         )
@@ -198,8 +198,8 @@ class BackwardPlannerGenerator:
                         planner = BackwardSearchPlanner(
                             self.domain,
                             domain_path=domain_path,
-                            precomputed_mutex_groups=precomputed_mutex,
-                            precomputed_singleton_predicates=precomputed_singletons
+                            precomputed_singleton_predicates=precomputed_singletons,
+                            precomputed_lifted_patterns=precomputed_lifted
                         )
 
                         # ✓ CORRECT: Search with GROUNDED goal predicates

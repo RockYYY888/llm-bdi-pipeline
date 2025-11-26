@@ -231,6 +231,67 @@ def _compute_minimum_objects_needed(
     return len(max_clique)
 
 
+def _count_free_variables(
+    variables: Set[str],
+    inequality_constraints: Set[InequalityConstraint],
+    ground_objects: Set[str] = None
+) -> Set[str]:
+    """
+    Find "free" variables - lifted variables with no inter-variable constraints.
+
+    A variable ?v is FREE if:
+    1. It's a lifted variable (starts with ?)
+    2. It has NO inequality constraints with ANY other lifted variable
+       (constraints with ground objects don't count)
+
+    Example:
+        Variables: {a, b, ?v1, ?v2, ?v3}
+        Constraints: {a != ?v1, a != ?v2, a != ?v3, ?v1 != ?v2}
+
+        ?v1 is NOT free (constrained with ?v2)
+        ?v2 is NOT free (constrained with ?v1)
+        ?v3 IS free (only constrained with ground object 'a')
+
+    Why this matters:
+        Free variables can all bind to the same object.
+        If ?v3, ?v4, ?v5 are all free, they can ALL be 'b'.
+        So having multiple free vars doesn't require more objects.
+
+    Args:
+        variables: All variables in state
+        inequality_constraints: Set of InequalityConstraint
+        ground_objects: Known ground objects (optional, will infer if not provided)
+
+    Returns:
+        Set of free variable names
+    """
+    # Identify ground objects
+    if ground_objects is None:
+        ground_objects = {v for v in variables if not v.startswith('?')}
+
+    # Identify lifted variables
+    lifted_vars = {v for v in variables if v.startswith('?')}
+
+    if not lifted_vars:
+        return set()
+
+    # Build adjacency for lifted variables only
+    # (ignore constraints with ground objects)
+    var_neighbors: Dict[str, Set[str]] = defaultdict(set)
+
+    for c in inequality_constraints:
+        v1, v2 = c.var1, c.var2
+        # Only count if BOTH are lifted variables
+        if v1.startswith('?') and v2.startswith('?'):
+            var_neighbors[v1].add(v2)
+            var_neighbors[v2].add(v1)
+
+    # A variable is free if it has no lifted-variable neighbors
+    free_vars = {v for v in lifted_vars if len(var_neighbors[v]) == 0}
+
+    return free_vars
+
+
 def _should_prune_state_constraint_aware(
     variables: Set[str],
     inequality_constraints: Set[InequalityConstraint],
@@ -262,6 +323,57 @@ def _should_prune_state_constraint_aware(
     )
 
     return min_objects_needed > max_objects
+
+
+def _should_prune_state_combined(
+    variables: Set[str],
+    inequality_constraints: Set[InequalityConstraint],
+    max_objects: int,
+    ground_objects: Set[str] = None,
+    max_free_variables: int = 1
+) -> Tuple[bool, str]:
+    """
+    Combined pruning rules for backward search.
+
+    RULE 1 - SOUND (never prunes reachable states):
+        If max_clique > max_objects → PRUNE
+        Reason: A clique of size k REQUIRES k different objects
+
+    RULE 2 - HEURISTIC (may prune reachable but redundant states):
+        If free_variables > max_free_variables → PRUNE
+        Reason: Multiple free variables are redundant - they can all
+                bind to the same object, so we only need to explore
+                states with at most 1 free variable
+
+    Args:
+        variables: Set of variables in state
+        inequality_constraints: Set of inequality constraints
+        max_objects: Maximum available objects
+        ground_objects: Known ground objects
+        max_free_variables: Maximum allowed free variables (default: 1)
+
+    Returns:
+        Tuple of (should_prune, reason)
+    """
+    # Infer ground objects if not provided
+    if ground_objects is None:
+        ground_objects = {v for v in variables if not v.startswith('?')}
+
+    # RULE 1: Sound pruning based on maximum clique
+    # Build constraint graph with ground object implicit constraints
+    graph = _build_constraint_graph(variables, inequality_constraints, ground_objects)
+    max_clique = graph.find_maximum_clique_greedy()
+
+    if len(max_clique) > max_objects:
+        return True, f"clique_size={len(max_clique)} > max_objects={max_objects}"
+
+    # RULE 2: Heuristic pruning based on free variables
+    free_vars = _count_free_variables(variables, inequality_constraints, ground_objects)
+
+    if len(free_vars) > max_free_variables:
+        return True, f"free_vars={len(free_vars)} > max_free={max_free_variables}"
+
+    return False, "feasible"
 
 
 @dataclass
@@ -356,16 +468,16 @@ class BackwardSearchPlanner:
     """
 
     def __init__(self, domain: PDDLDomain, domain_path: str = None,
-                 precomputed_mutex_groups: Dict[str, Set[str]] = None,
-                 precomputed_singleton_predicates: Set[str] = None):
+                 precomputed_singleton_predicates: Set[str] = None,
+                 precomputed_lifted_patterns: Set['LiftedMutexPattern'] = None):
         """
         Initialize backward search planner
 
         Args:
             domain: PDDL domain definition
             domain_path: Path to PDDL domain file (optional, needed for FD invariant extraction)
-            precomputed_mutex_groups: Optional pre-computed static mutex groups (avoids recomputation)
             precomputed_singleton_predicates: Optional pre-computed singleton predicates
+            precomputed_lifted_patterns: Optional pre-computed lifted mutex patterns
         """
         self.domain = domain
         self.domain_path = domain_path
@@ -376,14 +488,14 @@ class BackwardSearchPlanner:
         # Parse all actions to structured form
         self.parsed_actions: List[ParsedAction] = self._parse_all_actions()
 
-        # Use precomputed mutex groups if provided, otherwise compute
-        if precomputed_mutex_groups is not None:
-            self.mutex_groups = precomputed_mutex_groups
+        # Use precomputed lifted patterns if provided, otherwise compute
+        if precomputed_lifted_patterns is not None:
             self.singleton_predicates = precomputed_singleton_predicates or set()
+            self.lifted_mutex_patterns = precomputed_lifted_patterns
             # Skip printing - already printed when precomputed
         else:
-            self.mutex_groups = self._compute_mutex_groups()
-            print(f"[Mutex Analysis] Computed {len(self.mutex_groups)} mutex groups from domain")
+            self.singleton_predicates, self.lifted_mutex_patterns = self._compute_mutex_groups()
+            print(f"[Mutex Analysis] Computed {len(self.lifted_mutex_patterns)} lifted patterns, {len(self.singleton_predicates)} singleton predicates")
 
     def search(self, goal_predicates: List[PredicateAtom],
                max_states: int = 200000,
@@ -839,11 +951,10 @@ class BackwardSearchPlanner:
             # Contradiction detected - skip this state
             return []
 
-        # CRITICAL: Check for mutex violations using h^2 analysis
-        if hasattr(self, 'mutex_groups') and self.mutex_groups:
-            if not self._check_no_mutex_violations(new_predicates):
-                # Mutex violation detected - skip this state
-                return []
+        # CRITICAL: Check for mutex violations using h^2 lifted patterns
+        if not self._check_no_mutex_violations(new_predicates):
+            # Mutex violation detected - skip this state
+            return []
 
         # CRITICAL: Constraint-aware pruning based on variable feasibility
         # OLD LOGIC (TOO AGGRESSIVE): if len(unique_vars) > max_objects → PRUNE
@@ -857,37 +968,19 @@ class BackwardSearchPlanner:
                 for arg in pred.args:
                     unique_vars.add(arg)
 
-            # Quick check: if unique_vars <= max_objects, definitely feasible
-            if len(unique_vars) > self.max_objects:
-                # Need constraint analysis - check if state is actually infeasible
-                # CRITICAL: Use stored ground_objects from search() method
-                # This ensures we have the complete list of ground objects (a, b, c, ...)
-                # which creates implicit constraints between them (a != b, a != c, b != c)
-
-                # # DEBUG: Build constraint graph for debugging
-                # graph = _build_constraint_graph(unique_vars, new_constraints, self.ground_objects)
-                # max_clique = graph.find_maximum_clique_greedy()
-
-                # # Debug logging every 10000 states
-                # if current_state.depth <= 3 or (hasattr(self, '_states_explored') and self._states_explored % 10000 == 0):
-                #     ground_vars = [v for v in unique_vars if not v.startswith('?')]
-                #     print(f"\n[Constraint Debug] Depth={current_state.depth}")
-                #     print(f"  Variables: {len(unique_vars)} total, {len(ground_vars)} ground")
-                #     print(f"  Explicit constraints: {len(new_constraints)}")
-                #     print(f"  Ground objects (stored): {self.ground_objects}")
-                #     print(f"  Constraint graph edges: {len(graph.edges)}")
-                #     print(f"  Max clique size: {len(max_clique)} - {max_clique}")
-                #     print(f"  Max objects allowed: {self.max_objects}")
-                #     print(f"  Will prune: {len(max_clique) > self.max_objects}")
-
-                if _should_prune_state_constraint_aware(
-                    variables=unique_vars,
-                    inequality_constraints=new_constraints,
-                    max_objects=self.max_objects,
-                    ground_objects=self.ground_objects  # ← Use stored ground objects!
-                ):
-                    # Proven unreachable - maximum clique exceeds available objects
-                    return []
+            # Combined pruning: clique-based (sound) + free variable heuristic
+            # IMPORTANT: Run pruning for ALL states, not just those with many variables
+            # Even states with few variables can have many free variables
+            should_prune, reason = _should_prune_state_combined(
+                variables=unique_vars,
+                inequality_constraints=new_constraints,
+                max_objects=self.max_objects,
+                ground_objects=self.ground_objects,  # Use stored ground objects
+                max_free_variables=1  # Tunable: allow at most 1 free variable
+            )
+            if should_prune:
+                # Pruned: either proven unreachable (clique) or heuristically redundant (free vars)
+                return []
 
         # Create predecessor state
         predecessor = BackwardState(
@@ -928,29 +1021,26 @@ class BackwardSearchPlanner:
 
         return True
 
-    def _compute_mutex_groups(self) -> Dict[str, Set[str]]:
+    def _compute_mutex_groups(self) -> Tuple[Set[str], Set['LiftedMutexPattern']]:
         """
-        Compute STATIC mutex relationships using Fast Downward invariant synthesis
-
-        This is an instance method that calls the static version and stores singleton predicates.
+        Compute STATIC mutex relationships using Fast Downward invariant synthesis.
 
         Returns:
-            Dictionary mapping predicate names to sets of STATIC mutex predicates
+            Tuple of (singleton_predicates, lifted_mutex_patterns)
         """
-        mutex_groups, singleton_preds = BackwardSearchPlanner.compute_static_mutex(
+        singleton_preds, lifted_patterns = BackwardSearchPlanner.compute_static_mutex(
             self.domain_path,
             objects=['b1', 'b2', 'b3', 'b4', 'b5']  # Default objects for grounding
         )
-        self.singleton_predicates = singleton_preds
-        return mutex_groups
+        return singleton_preds, lifted_patterns
 
     @staticmethod
-    def compute_static_mutex(domain_path: str, objects: List[str]) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    def compute_static_mutex(domain_path: str, objects: List[str]) -> Tuple[Set[str], Set['LiftedMutexPattern']]:
         """
         Compute STATIC mutex relationships using Fast Downward invariant synthesis
 
         This is a STATIC method that can be called before creating planner instances.
-        Use this for precomputing mutex groups to share across multiple planners.
+        Use this for precomputing mutex patterns to share across multiple planners.
 
         This extracts true domain invariants (not transient effect-based mutex).
         Key distinction:
@@ -966,9 +1056,9 @@ class BackwardSearchPlanner:
             objects: List of objects for grounding (e.g., ['b1', 'b2', 'b3'])
 
         Returns:
-            Tuple of (static_mutex_map, singleton_predicates)
-            - static_mutex_map: Dictionary mapping predicate names to sets of mutex predicates
+            Tuple of (singleton_predicates, lifted_mutex_patterns)
             - singleton_predicates: Set of predicate names that can only have one instance
+            - lifted_mutex_patterns: Set of LiftedMutexPattern for precise mutex checking
 
         Raises:
             SystemExit: If Fast Downward invariant extraction fails
@@ -991,12 +1081,12 @@ class BackwardSearchPlanner:
             # Use Fast Downward to extract static invariants
             print("[Mutex Analysis] Using Fast Downward invariant synthesis...")
             extractor = FDInvariantExtractor(domain_path, objects)
-            static_mutex_map, singleton_preds = extractor.extract_invariants()
+            singleton_preds, lifted_patterns = extractor.extract_invariants()
 
-            print(f"[Mutex Analysis] Extracted {len(static_mutex_map)} static mutex groups")
             print(f"[Mutex Analysis] Singleton predicates: {singleton_preds}")
+            print(f"[Mutex Analysis] Lifted mutex patterns: {len(lifted_patterns)}")
 
-            return static_mutex_map, singleton_preds
+            return singleton_preds, lifted_patterns
 
         except Exception as e:
             print("\n" + "="*80)
@@ -1047,7 +1137,10 @@ class BackwardSearchPlanner:
 
     def _check_no_mutex_violations(self, predicates: Set[PredicateAtom]) -> bool:
         """
-        Check if predicates violate any mutex constraints derived from domain
+        Check if predicates violate any mutex constraints using lifted patterns.
+
+        Uses LiftedMutexPattern for precise mutex checking that respects
+        argument structure, not just predicate names.
 
         Args:
             predicates: Set of predicates to check
@@ -1055,30 +1148,26 @@ class BackwardSearchPlanner:
         Returns:
             True if no mutex violations, False if violation detected
         """
-        # Collect positive predicates by name
-        preds_by_name = {}
-        for pred in predicates:
-            if not pred.negated:
-                if pred.name not in preds_by_name:
-                    preds_by_name[pred.name] = []
-                preds_by_name[pred.name].append(pred)
+        # Check if lifted patterns are available
+        if not hasattr(self, 'lifted_mutex_patterns') or not self.lifted_mutex_patterns:
+            # No mutex constraints available - accept all states
+            return True
 
-        # Check Pattern 1: Mutex pairs (e.g., handempty vs holding)
-        for pred_name, mutex_names in self.mutex_groups.items():
-            if pred_name in preds_by_name:
-                # This predicate appears in the state
-                # Check if any of its mutex predicates also appear
-                for mutex_name in mutex_names:
-                    if mutex_name in preds_by_name:
-                        # Mutex violation!
+        # Collect positive predicates only (negated predicates are goals, not facts)
+        positive_preds = [p for p in predicates if not p.negated]
+
+        # Check all pairs against lifted mutex patterns
+        for i, pred1 in enumerate(positive_preds):
+            for pred2 in positive_preds[i+1:]:
+                # Skip if same predicate instance
+                if pred1 == pred2:
+                    continue
+
+                # Check against all lifted patterns
+                for pattern in self.lifted_mutex_patterns:
+                    if pattern.matches(pred1.name, pred1.args, pred2.name, pred2.args):
+                        # Mutex violation detected!
                         return False
-
-        # Check Pattern 2: Singleton predicates (e.g., multiple holding)
-        for pred_name in self.singleton_predicates:
-            if pred_name in preds_by_name:
-                if len(preds_by_name[pred_name]) > 1:
-                    # Multiple instances of singleton predicate!
-                    return False
 
         return True
 
