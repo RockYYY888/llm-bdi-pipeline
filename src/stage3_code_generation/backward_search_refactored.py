@@ -864,21 +864,21 @@ class BackwardSearchPlanner:
                 # This ensures we have the complete list of ground objects (a, b, c, ...)
                 # which creates implicit constraints between them (a != b, a != c, b != c)
 
-                # Build constraint graph for debugging
-                graph = _build_constraint_graph(unique_vars, new_constraints, self.ground_objects)
-                max_clique = graph.find_maximum_clique_greedy()
+                # # DEBUG: Build constraint graph for debugging
+                # graph = _build_constraint_graph(unique_vars, new_constraints, self.ground_objects)
+                # max_clique = graph.find_maximum_clique_greedy()
 
-                # Debug logging every 10000 states
-                if current_state.depth <= 3 or (hasattr(self, '_states_explored') and self._states_explored % 10000 == 0):
-                    ground_vars = [v for v in unique_vars if not v.startswith('?')]
-                    print(f"\n[Constraint Debug] Depth={current_state.depth}")
-                    print(f"  Variables: {len(unique_vars)} total, {len(ground_vars)} ground")
-                    print(f"  Explicit constraints: {len(new_constraints)}")
-                    print(f"  Ground objects (stored): {self.ground_objects}")
-                    print(f"  Constraint graph edges: {len(graph.edges)}")
-                    print(f"  Max clique size: {len(max_clique)} - {max_clique}")
-                    print(f"  Max objects allowed: {self.max_objects}")
-                    print(f"  Will prune: {len(max_clique) > self.max_objects}")
+                # # Debug logging every 10000 states
+                # if current_state.depth <= 3 or (hasattr(self, '_states_explored') and self._states_explored % 10000 == 0):
+                #     ground_vars = [v for v in unique_vars if not v.startswith('?')]
+                #     print(f"\n[Constraint Debug] Depth={current_state.depth}")
+                #     print(f"  Variables: {len(unique_vars)} total, {len(ground_vars)} ground")
+                #     print(f"  Explicit constraints: {len(new_constraints)}")
+                #     print(f"  Ground objects (stored): {self.ground_objects}")
+                #     print(f"  Constraint graph edges: {len(graph.edges)}")
+                #     print(f"  Max clique size: {len(max_clique)} - {max_clique}")
+                #     print(f"  Max objects allowed: {self.max_objects}")
+                #     print(f"  Will prune: {len(max_clique) > self.max_objects}")
 
                 if _should_prune_state_constraint_aware(
                     variables=unique_vars,
