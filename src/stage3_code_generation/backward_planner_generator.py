@@ -207,7 +207,8 @@ class BackwardPlannerGenerator:
                         state_graph = planner.search(
                             goal_predicates=list(goal_predicates),  # ← GROUNDED!
                             max_states=200000,
-                            max_objects=len(objects)  # Cap variable generation
+                            max_objects=len(objects),  # Cap variable generation
+                            objects=objects  # ← CRITICAL: Pass ground objects for constraints!
                         )
 
                         # Check if this graph was truncated

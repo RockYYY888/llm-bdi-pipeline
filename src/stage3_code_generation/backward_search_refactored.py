@@ -387,7 +387,8 @@ class BackwardSearchPlanner:
 
     def search(self, goal_predicates: List[PredicateAtom],
                max_states: int = 200000,
-               max_objects: Optional[int] = None) -> StateGraph:
+               max_objects: Optional[int] = None,
+               objects: Optional[List[str]] = None) -> StateGraph:
         """
         Perform backward search from goal
 
@@ -395,17 +396,21 @@ class BackwardSearchPlanner:
             goal_predicates: Goal predicates to achieve
             max_states: Maximum states to explore (防止无限搜索)
             max_objects: Maximum number of objects (caps variable generation)
+            objects: List of ground objects (e.g., ['a', 'b', 'c']) for constraint graph
 
         Returns:
             StateGraph containing all explored states and transitions
         """
-        # Store max_objects for use in _complete_binding
+        # Store max_objects and objects for use in _complete_binding and pruning
         self.max_objects = max_objects
+        self.ground_objects = set(objects) if objects else None
 
         print(f"\n[Backward Search] Starting from goal: {[str(p) for p in goal_predicates]}")
         print(f"[Backward Search] Max states: {max_states:,}")
         if max_objects is not None:
             print(f"[Backward Search] Max objects: {max_objects} (variable cap)")
+        if objects:
+            print(f"[Backward Search] Ground objects: {objects}")
 
         # Create initial goal state
         goal_state = self._create_initial_goal_state(goal_predicates)
@@ -423,10 +428,12 @@ class BackwardSearchPlanner:
 
         transitions = []
         states_explored = 0
+        self._states_explored = 0  # For debugging in _apply_regression
 
         while queue and states_explored < max_states:
             current_state = queue.popleft()
             states_explored += 1
+            self._states_explored = states_explored  # Update for debugging
 
             if states_explored % 10000 == 0:
                 print(f"  Explored {states_explored:,} states, queue: {len(queue):,}")
@@ -853,15 +860,31 @@ class BackwardSearchPlanner:
             # Quick check: if unique_vars <= max_objects, definitely feasible
             if len(unique_vars) > self.max_objects:
                 # Need constraint analysis - check if state is actually infeasible
-                # Extract ground objects (those not starting with ?)
-                ground_objects = {v for v in unique_vars if not v.startswith('?')}
+                # CRITICAL: Use stored ground_objects from search() method
+                # This ensures we have the complete list of ground objects (a, b, c, ...)
+                # which creates implicit constraints between them (a != b, a != c, b != c)
 
-                # Use constraint-aware pruning with explicit PDDL constraints only
+                # Build constraint graph for debugging
+                graph = _build_constraint_graph(unique_vars, new_constraints, self.ground_objects)
+                max_clique = graph.find_maximum_clique_greedy()
+
+                # Debug logging every 10000 states
+                if current_state.depth <= 3 or (hasattr(self, '_states_explored') and self._states_explored % 10000 == 0):
+                    ground_vars = [v for v in unique_vars if not v.startswith('?')]
+                    print(f"\n[Constraint Debug] Depth={current_state.depth}")
+                    print(f"  Variables: {len(unique_vars)} total, {len(ground_vars)} ground")
+                    print(f"  Explicit constraints: {len(new_constraints)}")
+                    print(f"  Ground objects (stored): {self.ground_objects}")
+                    print(f"  Constraint graph edges: {len(graph.edges)}")
+                    print(f"  Max clique size: {len(max_clique)} - {max_clique}")
+                    print(f"  Max objects allowed: {self.max_objects}")
+                    print(f"  Will prune: {len(max_clique) > self.max_objects}")
+
                 if _should_prune_state_constraint_aware(
                     variables=unique_vars,
                     inequality_constraints=new_constraints,
                     max_objects=self.max_objects,
-                    ground_objects=ground_objects if ground_objects else None
+                    ground_objects=self.ground_objects  # ← Use stored ground objects!
                 ):
                     # Proven unreachable - maximum clique exceeds available objects
                     return []
