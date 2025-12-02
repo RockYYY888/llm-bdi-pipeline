@@ -1,5 +1,7 @@
 # LTL-BDI Pipeline: LLM AgentSpeak Generation
 
+> **Disclaimer**: This project is undergoing a major refactoring in January 2026. The planning approach will be migrated from the current Variable-Level Planning to **HTN (Hierarchical Task Network) Planning**. The main branch on the remote repository may not reflect the latest development work. Updates will be pushed upon completion of the refactoring.
+
 Research pipeline for generating BDI agent code from natural language using LLMs and Linear Temporal Logic (LTLf).
 
 ---
