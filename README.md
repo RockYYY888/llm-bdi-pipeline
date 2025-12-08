@@ -2,7 +2,7 @@
 
 > **Disclaimer**: This project is undergoing a major refactoring in January 2026. The planning approach will be migrated from the current Variable-Level Planning to **HTN (Hierarchical Task Network) Planning**. The main branch on the remote repository may not reflect the latest development work. Updates will be pushed upon completion of the refactoring.
 
-Research pipeline for generating BDI agent code from natural language using LLMs and Linear Temporal Logic (LTLf).
+This research pipeline translates natural language commands into executable AgentSpeak programs through a three-stage process: large language model-based formalization into Linear Temporal Logic on Finite Traces (LTLf), recursive decomposition of temporal formulas into hierarchical deterministic finite automata via depth-first traversal, and variable-level backward planning with Robinson's unification algorithm for plan synthesis. The system achieves scalability by operating on lifted representations rather than ground objects, resulting in state space complexity independent of domain instance size.
 
 ---
 
