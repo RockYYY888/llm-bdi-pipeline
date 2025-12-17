@@ -22,19 +22,5 @@
     :precondition (holding ?b)
     :effect (and (ontable ?b) (handempty) (clear ?b) (not (holding ?b)))
   )
-  (:action pick-tower
-    :parameters (?b1 ?b2 ?b3 - block)
-    :precondition (and (not (= ?b1 ?b2)) (not (= ?b2 ?b3)) (not (= ?b1 ?b3)) (handempty) (on ?b1 ?b2) (on ?b2 ?b3))
-    :effect (and (holding ?b2) (clear ?b3) (not (handempty)) (not (on ?b2 ?b3)))
-  )
-  (:action put-tower-on-block
-    :parameters (?b1 ?b2 ?b3 - block)
-    :precondition (and (not (= ?b1 ?b2)) (not (= ?b2 ?b3)) (not (= ?b1 ?b3)) (holding ?b2) (on ?b1 ?b2) (clear ?b3))
-    :effect (and (on ?b2 ?b3) (handempty) (not (holding ?b2)) (not (clear ?b3)))
-  )
-  (:action put-tower-down
-    :parameters (?b1 ?b2 - block)
-    :precondition (and (not (= ?b1 ?b2)) (holding ?b2) (on ?b1 ?b2))
-    :effect (and (ontable ?b2) (handempty) (not (holding ?b2)))
-  )
+
 )
