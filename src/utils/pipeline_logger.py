@@ -192,7 +192,7 @@ class PipelineLogger:
 		if not self.current_record:
 			return
 
-		self.current_record.stage3_metadata = metadata
+		self.current_record.stage3_metadata = dict(metadata or {})
 		if model:
 			self.current_record.stage3_used_llm = True
 			self.current_record.stage3_model = model
@@ -204,6 +204,10 @@ class PipelineLogger:
 		if status == "Success" and method_library is not None:
 			self.current_record.stage3_status = "success"
 			self.current_record.stage3_method_library = method_library
+			self.current_record.stage3_metadata = self._build_stage3_summary(
+				method_library,
+				self.current_record.stage3_metadata,
+			)
 			if self.current_log_dir:
 				(self.current_log_dir / "htn_method_library.json").write_text(
 					json.dumps(method_library, indent=2)
@@ -212,7 +216,52 @@ class PipelineLogger:
 			self.current_record.stage3_status = "failed"
 			self.current_record.stage3_error = str(error)
 
-		self._save_current_state()
+			self._save_current_state()
+
+	def _build_stage3_summary(
+		self,
+		method_library: Dict[str, Any],
+		base_metadata: Optional[Dict[str, Any]] = None,
+	) -> Dict[str, Any]:
+		summary = dict(base_metadata or {})
+		compound_tasks = method_library.get("compound_tasks", [])
+		primitive_tasks = method_library.get("primitive_tasks", [])
+		methods = method_library.get("methods", [])
+		target_literals = method_library.get("target_literals", [])
+		target_task_bindings = method_library.get("target_task_bindings", [])
+
+		method_counts_by_task: Dict[str, int] = {}
+		for method in methods:
+			task_name = method.get("task_name")
+			if not task_name:
+				continue
+			method_counts_by_task[task_name] = method_counts_by_task.get(task_name, 0) + 1
+
+		summary.update(
+			{
+				"target_literals": [
+					self._literal_signature(item)
+					for item in target_literals
+				],
+				"target_task_bindings": target_task_bindings,
+				"target_task_binding_count": len(target_task_bindings),
+				"compound_tasks": len(compound_tasks),
+				"compound_task_names": [task.get("name") for task in compound_tasks if task.get("name")],
+				"primitive_tasks": len(primitive_tasks),
+				"primitive_task_names": [task.get("name") for task in primitive_tasks if task.get("name")],
+				"methods": len(methods),
+				"method_counts_by_task": method_counts_by_task,
+			}
+		)
+		return summary
+
+	@staticmethod
+	def _literal_signature(item: Dict[str, Any]) -> str:
+		predicate = item.get("predicate", "")
+		args = item.get("args", [])
+		is_positive = bool(item.get("is_positive", True))
+		inner = f"{predicate}({', '.join(args)})" if args else predicate
+		return inner if is_positive else f"!{inner}"
 
 	def log_stage4_panda_planning(
 		self,

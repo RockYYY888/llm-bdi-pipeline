@@ -9,6 +9,81 @@ if _src_dir not in sys.path:
 from utils.pipeline_logger import PipelineLogger
 
 
+def test_stage3_success_summary_in_execution_json_is_derived_from_method_library(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path))
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        output_dir=str(tmp_path),
+    )
+
+    method_library = {
+        "compound_tasks": [
+            {"name": "place_on", "parameters": ["B1", "B2"], "is_primitive": False},
+            {"name": "hold_block", "parameters": ["B"], "is_primitive": False},
+        ],
+        "primitive_tasks": [
+            {"name": "pick_up_from_table", "parameters": ["B"], "is_primitive": True},
+        ],
+        "methods": [
+            {"method_name": "m_place_on_stack", "task_name": "place_on"},
+            {"method_name": "m_place_on_noop", "task_name": "place_on"},
+            {"method_name": "m_hold_block_from_table", "task_name": "hold_block"},
+        ],
+        "target_literals": [
+            {
+                "predicate": "on",
+                "args": ["a", "b"],
+                "is_positive": True,
+                "source_symbol": "on_a_b",
+            },
+        ],
+        "target_task_bindings": [
+            {"target_literal": "on(a, b)", "task_name": "place_on"},
+        ],
+    }
+
+    logger.log_stage3_method_synthesis(
+        method_library,
+        "Success",
+        model="deepseek-chat",
+        llm_prompt={"system": "SYSTEM", "user": "USER"},
+        llm_response='{"ok":true}',
+        metadata={
+            "used_llm": True,
+            "llm_attempted": True,
+        },
+    )
+    logger.end_pipeline(success=True)
+
+    log_dir = logger.current_log_dir
+    assert log_dir is not None
+
+    execution = json.loads((log_dir / "execution.json").read_text())
+
+    assert execution["stage3_status"] == "success"
+    assert execution["stage3_method_library"]["target_task_bindings"] == [
+        {"target_literal": "on(a, b)", "task_name": "place_on"},
+    ]
+    assert execution["stage3_metadata"]["target_literals"] == ["on(a, b)"]
+    assert execution["stage3_metadata"]["target_task_bindings"] == [
+        {"target_literal": "on(a, b)", "task_name": "place_on"},
+    ]
+    assert execution["stage3_metadata"]["target_task_binding_count"] == 1
+    assert execution["stage3_metadata"]["compound_tasks"] == 2
+    assert execution["stage3_metadata"]["compound_task_names"] == ["place_on", "hold_block"]
+    assert execution["stage3_metadata"]["primitive_tasks"] == 1
+    assert execution["stage3_metadata"]["primitive_task_names"] == ["pick_up_from_table"]
+    assert execution["stage3_metadata"]["methods"] == 3
+    assert execution["stage3_metadata"]["method_counts_by_task"] == {
+        "place_on": 2,
+        "hold_block": 1,
+    }
+    assert execution["stage3_metadata"]["used_llm"] is True
+    assert execution["stage3_metadata"]["llm_attempted"] is True
+
+
 def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
     logger = PipelineLogger(logs_dir=str(tmp_path))
     logger.start_pipeline(
