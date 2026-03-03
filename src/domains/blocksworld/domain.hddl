@@ -1,0 +1,115 @@
+(define (domain blocksworld)
+  (:requirements :typing :equality :hierarchy :negative-preconditions)
+  (:types block)
+
+  (:predicates
+    (holding ?b - block)
+    (handempty)
+    (ontable ?b - block)
+    (on ?b1 ?b2 - block)
+    (clear ?b - block)
+  )
+
+  (:task achieve_on
+    :parameters (?b1 ?b2 - block)
+  )
+
+  (:task achieve_holding
+    :parameters (?b - block)
+  )
+
+  (:task achieve_clear
+    :parameters (?b - block)
+  )
+
+  (:method achieve_on__via_put_on_block
+    :parameters (?b1 ?b2 - block)
+    :task (achieve_on ?b1 ?b2)
+    :precondition (and (not (= ?b1 ?b2)))
+    :ordered-subtasks (and
+      (s1 (achieve_holding ?b1))
+      (s2 (achieve_clear ?b2))
+      (s3 (put-on-block ?b1 ?b2))
+    )
+  )
+
+  (:method achieve_on__guard
+    :parameters (?b1 ?b2 - block)
+    :task (achieve_on ?b1 ?b2)
+    :precondition (and (on ?b1 ?b2))
+    :ordered-subtasks (and)
+  )
+
+  (:method achieve_holding__via_pick_up_from_table
+    :parameters (?b - block)
+    :task (achieve_holding ?b)
+    :precondition (and (handempty) (clear ?b) (ontable ?b))
+    :ordered-subtasks (and
+      (s1 (pick-up-from-table ?b))
+    )
+  )
+
+  (:method achieve_holding__via_pick_up_from_stack
+    :parameters (?b ?support - block)
+    :task (achieve_holding ?b)
+    :precondition (and
+      (not (= ?b ?support))
+      (handempty)
+      (clear ?b)
+      (on ?b ?support)
+    )
+    :ordered-subtasks (and
+      (s1 (pick-up ?b ?support))
+    )
+  )
+
+  (:method achieve_holding__guard
+    :parameters (?b - block)
+    :task (achieve_holding ?b)
+    :precondition (and (holding ?b))
+    :ordered-subtasks (and)
+  )
+
+  (:method achieve_clear__guard
+    :parameters (?b - block)
+    :task (achieve_clear ?b)
+    :precondition (and (clear ?b))
+    :ordered-subtasks (and)
+  )
+
+  (:action pick-up
+    :parameters (?b1 ?b2 - block)
+    :precondition (and (not (= ?b1 ?b2)) (handempty) (clear ?b1) (on ?b1 ?b2))
+    :effect (and
+      (holding ?b1)
+      (clear ?b2)
+      (not (handempty))
+      (not (clear ?b1))
+      (not (on ?b1 ?b2))
+    )
+  )
+
+  (:action pick-up-from-table
+    :parameters (?b - block)
+    :precondition (and (handempty) (clear ?b) (ontable ?b))
+    :effect (and (holding ?b) (not (handempty)) (not (ontable ?b)))
+  )
+
+  (:action put-on-block
+    :parameters (?b1 ?b2 - block)
+    :precondition (and (not (= ?b1 ?b2)) (holding ?b1) (clear ?b2))
+    :effect (and
+      (on ?b1 ?b2)
+      (handempty)
+      (clear ?b1)
+      (not (holding ?b1))
+      (not (clear ?b2))
+    )
+  )
+
+  (:action put-down
+    :parameters (?b - block)
+    :precondition (holding ?b)
+    :effect (and (ontable ?b) (handempty) (clear ?b) (not (holding ?b)))
+  )
+)

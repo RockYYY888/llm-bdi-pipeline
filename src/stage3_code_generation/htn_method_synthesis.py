@@ -1,9 +1,9 @@
 """
 HTN method synthesis for Stage 3A.
 
-The synthesizer builds a deterministic baseline HTN method library from PDDL,
-and can optionally replace/augment it with an LLM-produced library when an API
-client is configured.
+The synthesizer uses LLM output as the only source of compound tasks and methods.
+Primitive action tasks are still injected from the domain so Stage 3 can render
+and validate executable AgentSpeak wrappers.
 """
 
 from __future__ import annotations
@@ -24,10 +24,10 @@ from stage3_code_generation.htn_schema import (
     HTNMethodStep,
     HTNTask,
 )
-from stage3_code_generation.pddl_condition_parser import (
-    PDDLConditionParser,
-    PDDLLiteralPattern,
-    ParsedActionSemantics,
+from stage3_code_generation.hddl_condition_parser import (
+    HDDLConditionParser,
+    HDDLLiteralPattern,
+    ParsedActionSchema,
 )
 
 
@@ -46,7 +46,7 @@ class HTNMethodSynthesizer:
         self.model = model or "deepseek-chat"
         self.base_url = base_url
         self.timeout = timeout
-        self.parser = PDDLConditionParser()
+        self.parser = HDDLConditionParser()
         self.client = client
 
         if self.client is None and api_key:
@@ -67,22 +67,25 @@ class HTNMethodSynthesizer:
 
         normalised_grounding_map = self._normalise_grounding_map(grounding_map)
         target_literals = self.extract_target_literals(normalised_grounding_map, dfa_result)
-        baseline = self._build_baseline_library(domain, target_literals)
+        primitive_tasks = self._build_primitive_tasks(domain)
 
         metadata: Dict[str, Any] = {
             "used_llm": False,
             "model": self.model if self.client else None,
             "target_literals": [literal.to_signature() for literal in target_literals],
-            "compound_tasks": len(baseline.compound_tasks),
-            "primitive_tasks": len(baseline.primitive_tasks),
-            "methods": len(baseline.methods),
+            "compound_tasks": 0,
+            "primitive_tasks": len(primitive_tasks),
+            "methods": 0,
             "fallback_reason": None,
             "llm_prompt": None,
             "llm_response": None,
         }
 
         if not self.client:
-            return baseline, metadata
+            raise RuntimeError(
+                "LLM-only HTN synthesis requires a configured API client. "
+                "No deterministic baseline library is available."
+            )
 
         prompt = {
             "system": build_htn_system_prompt(),
@@ -94,21 +97,22 @@ class HTNMethodSynthesizer:
         }
         metadata["llm_prompt"] = prompt
 
-        try:
-            response_text = self._call_llm(prompt)
-            llm_library = self._parse_llm_library(response_text)
-            self._validate_library(llm_library, domain)
-            merged = self._merge_libraries(baseline, llm_library, target_literals)
+        response_text = self._call_llm(prompt)
+        llm_library = self._parse_llm_library(response_text)
+        llm_only_library = HTNMethodLibrary(
+            compound_tasks=list(llm_library.compound_tasks),
+            primitive_tasks=primitive_tasks,
+            methods=list(llm_library.methods),
+            target_literals=list(target_literals),
+        )
+        self._validate_library(llm_only_library, domain)
 
-            metadata["used_llm"] = True
-            metadata["llm_response"] = response_text
-            metadata["compound_tasks"] = len(merged.compound_tasks)
-            metadata["primitive_tasks"] = len(merged.primitive_tasks)
-            metadata["methods"] = len(merged.methods)
-            return merged, metadata
-        except Exception as exc:  # noqa: BLE001 - we need a reliable fallback.
-            metadata["fallback_reason"] = f"{type(exc).__name__}: {exc}"
-            return baseline, metadata
+        metadata["used_llm"] = True
+        metadata["llm_response"] = response_text
+        metadata["compound_tasks"] = len(llm_only_library.compound_tasks)
+        metadata["primitive_tasks"] = len(llm_only_library.primitive_tasks)
+        metadata["methods"] = len(llm_only_library.methods)
+        return llm_only_library, metadata
 
     def extract_target_literals(
         self,
@@ -154,6 +158,20 @@ class HTNMethodSynthesizer:
 
         return literals
 
+    def _build_primitive_tasks(self, domain: Any) -> List[HTNTask]:
+        actions = [self.parser.parse_action(action) for action in domain.actions]
+        return [
+            HTNTask(
+                name=self._sanitize_name(action.name),
+                parameters=tuple(f"X{index + 1}" for index, _ in enumerate(action.parameters)),
+                is_primitive=True,
+                source_predicates=tuple(
+                    sorted({literal.predicate for literal in action.positive_effects})
+                ),
+            )
+            for action in actions
+        ]
+
     def _build_baseline_library(
         self,
         domain: Any,
@@ -175,6 +193,13 @@ class HTNMethodSynthesizer:
         compound_tasks: Dict[str, HTNTask] = {}
         methods: Dict[str, HTNMethod] = {}
 
+        self._import_domain_methods(
+            domain=domain,
+            actions=actions,
+            compound_tasks=compound_tasks,
+            methods=methods,
+        )
+
         for literal in target_literals:
             self._ensure_task_for_literal(
                 literal=literal,
@@ -191,10 +216,109 @@ class HTNMethodSynthesizer:
             target_literals=list(target_literals),
         )
 
+    def _import_domain_methods(
+        self,
+        domain: Any,
+        actions: Sequence[ParsedActionSchema],
+        compound_tasks: Dict[str, HTNTask],
+        methods: Dict[str, HTNMethod],
+    ) -> None:
+        action_map = {
+            self._sanitize_name(action.name): action
+            for action in actions
+        }
+
+        for task in getattr(domain, "tasks", []):
+            task_name = self._sanitize_name(task.name)
+            compound_tasks.setdefault(
+                task_name,
+                HTNTask(
+                    name=task_name,
+                    parameters=tuple(self._extract_parameter_names(task.parameters)),
+                    is_primitive=False,
+                    source_predicates=self._source_predicates_for_task(task_name),
+                ),
+            )
+
+        for domain_method in getattr(domain, "methods", []):
+            task_name = self._sanitize_name(domain_method.task_name)
+            task_parameters = tuple(domain_method.task_args)
+            if task_name not in compound_tasks:
+                compound_tasks[task_name] = HTNTask(
+                    name=task_name,
+                    parameters=task_parameters,
+                    is_primitive=False,
+                    source_predicates=self._source_predicates_for_task(task_name),
+                )
+
+            context = tuple(
+                self._literal_pattern_to_htn_literal(item)
+                for item in self.parser.parse_literals(domain_method.precondition)
+            )
+
+            subtasks: List[HTNMethodStep] = []
+            for subtask in domain_method.subtasks:
+                subtask_name = self._sanitize_name(subtask.task_name)
+                parsed_action = action_map.get(subtask_name)
+
+                if parsed_action is None:
+                    subtasks.append(
+                        HTNMethodStep(
+                            step_id=subtask.label,
+                            task_name=subtask_name,
+                            args=tuple(subtask.args),
+                            kind="compound",
+                            literal=self._infer_literal_for_task(
+                                task_name=subtask_name,
+                                args=tuple(subtask.args),
+                            ),
+                        )
+                    )
+                    continue
+
+                bindings = {
+                    parameter: value
+                    for parameter, value in zip(parsed_action.parameters, subtask.args)
+                }
+                subtasks.append(
+                    HTNMethodStep(
+                        step_id=subtask.label,
+                        task_name=subtask_name,
+                        args=tuple(subtask.args),
+                        kind="primitive",
+                        action_name=parsed_action.name,
+                        literal=self._infer_literal_for_task(
+                            task_name=task_name,
+                            args=task_parameters,
+                        ),
+                        preconditions=tuple(
+                            self._pattern_to_literal(item, bindings)
+                            for item in parsed_action.preconditions
+                        ),
+                        effects=tuple(
+                            self._pattern_to_literal(item, bindings)
+                            for item in parsed_action.effects
+                        ),
+                    )
+                )
+
+            methods.setdefault(
+                self._sanitize_name(domain_method.name),
+                HTNMethod(
+                    method_name=self._sanitize_name(domain_method.name),
+                    task_name=task_name,
+                    parameters=task_parameters,
+                    context=context,
+                    subtasks=tuple(subtasks),
+                    ordering=tuple(domain_method.ordering),
+                    origin="guard" if not subtasks else "domain",
+                ),
+            )
+
     def _ensure_task_for_literal(
         self,
         literal: HTNLiteral,
-        actions: Sequence[ParsedActionSemantics],
+        actions: Sequence[ParsedActionSchema],
         compound_tasks: Dict[str, HTNTask],
         methods: Dict[str, HTNMethod],
         ancestry: Tuple[str, ...],
@@ -265,8 +389,8 @@ class HTNMethodSynthesizer:
         literal: HTNLiteral,
         task_name: str,
         task_parameters: Tuple[str, ...],
-        action: ParsedActionSemantics,
-        matched_effect: PDDLLiteralPattern,
+        action: ParsedActionSchema,
+        matched_effect: HDDLLiteralPattern,
     ) -> Tuple[HTNMethod, List[HTNLiteral]]:
         bindings: Dict[str, str] = {}
         for index, symbol in enumerate(matched_effect.args):
@@ -346,9 +470,9 @@ class HTNMethodSynthesizer:
     def _select_action(
         self,
         literal: HTNLiteral,
-        actions: Sequence[ParsedActionSemantics],
-    ) -> Optional[Tuple[ParsedActionSemantics, PDDLLiteralPattern]]:
-        candidates: List[Tuple[int, int, int, int, ParsedActionSemantics, PDDLLiteralPattern]] = []
+        actions: Sequence[ParsedActionSchema],
+    ) -> Optional[Tuple[ParsedActionSchema, HDDLLiteralPattern]]:
+        candidates: List[Tuple[int, int, int, int, ParsedActionSchema, HDDLLiteralPattern]] = []
 
         for action_index, action in enumerate(actions):
             for effect in action.positive_effects:
@@ -441,12 +565,19 @@ class HTNMethodSynthesizer:
 
     def _pattern_to_literal(
         self,
-        pattern: PDDLLiteralPattern,
+        pattern: HDDLLiteralPattern,
         bindings: Dict[str, str],
     ) -> HTNLiteral:
         return HTNLiteral(
             predicate=pattern.predicate,
             args=tuple(bindings.get(arg, arg) for arg in pattern.args),
+            is_positive=pattern.is_positive,
+        )
+
+    def _literal_pattern_to_htn_literal(self, pattern: HDDLLiteralPattern) -> HTNLiteral:
+        return HTNLiteral(
+            predicate=pattern.predicate,
+            args=pattern.args,
             is_positive=pattern.is_positive,
         )
 
@@ -457,6 +588,44 @@ class HTNMethodSynthesizer:
     @staticmethod
     def _sanitize_name(name: str) -> str:
         return name.replace("-", "_")
+
+    @staticmethod
+    def _extract_parameter_names(parameters: Sequence[str]) -> Tuple[str, ...]:
+        names: List[str] = []
+        for item in parameters:
+            parts = item.split("-")[0].strip().split()
+            for part in parts:
+                if part:
+                    names.append(part)
+        return tuple(names)
+
+    @classmethod
+    def _source_predicates_for_task(cls, task_name: str) -> Tuple[str, ...]:
+        if task_name.startswith("achieve_"):
+            return (task_name.removeprefix("achieve_"),)
+        if task_name.startswith("maintain_not_"):
+            return (task_name.removeprefix("maintain_not_"),)
+        return ()
+
+    @classmethod
+    def _infer_literal_for_task(
+        cls,
+        task_name: str,
+        args: Tuple[str, ...],
+    ) -> HTNLiteral | None:
+        if task_name.startswith("achieve_"):
+            return HTNLiteral(
+                predicate=task_name.removeprefix("achieve_"),
+                args=args,
+                is_positive=True,
+            )
+        if task_name.startswith("maintain_not_"):
+            return HTNLiteral(
+                predicate=task_name.removeprefix("maintain_not_"),
+                args=args,
+                is_positive=False,
+            )
+        return None
 
     def _task_name_for_literal(self, literal: HTNLiteral) -> str:
         base = self._sanitize_name(literal.predicate)
@@ -473,14 +642,6 @@ class HTNMethodSynthesizer:
                         "name": "achieve_on",
                         "parameters": ["X1", "X2"],
                         "is_primitive": False,
-                        "source_predicates": ["on"],
-                    }
-                ],
-                "primitive_tasks": [
-                    {
-                        "name": "put_on_block",
-                        "parameters": ["X1", "X2"],
-                        "is_primitive": True,
                         "source_predicates": ["on"],
                     }
                 ],
@@ -510,8 +671,7 @@ class HTNMethodSynthesizer:
                         "ordering": [],
                         "origin": "llm",
                     }
-                ],
-                "target_literals": [],
+                ]
             },
             indent=2,
         )

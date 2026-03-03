@@ -18,7 +18,7 @@ def build_htn_system_prompt() -> str:
     )
 
 
-def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], baseline_schema: str) -> str:
+def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], schema_hint: str) -> str:
     action_lines = []
     for action in domain.actions:
         params = ", ".join(action.parameters) if action.parameters else "none"
@@ -34,11 +34,12 @@ def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], baseline_
         f"Predicates:\n{chr(10).join(predicate_lines)}\n\n"
         f"Primitive actions:\n{chr(10).join(action_lines)}\n\n"
         f"Target literals that must be supported:\n{targets}\n\n"
-        "Return JSON with this exact top-level schema:\n"
-        f"{baseline_schema}\n\n"
+        "Return JSON with this top-level shape. Primitive tasks are injected automatically, "
+        "so only define compound tasks and methods:\n"
+        f"{schema_hint}\n\n"
         "Requirements:\n"
         "- Each method must reference an existing task.\n"
-        "- Each primitive subtask must reference an existing primitive action task.\n"
+        "- Each primitive subtask must reference one of the provided primitive actions by name.\n"
         "- Use parameter names already introduced by the task or method.\n"
         "- Keep methods deterministic and concise.\n"
         "- Do not include explanations."
