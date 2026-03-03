@@ -178,6 +178,9 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "method_name must follow exactly: m_{task_name}_{strategy}." in system_prompt
 	assert "Never use prefixes achieve_, maintain_not_, ensure_, or goal_." in system_prompt
 	assert "ordering must be a list of edges [from_step_id, to_step_id]." in system_prompt
+	assert "Do an internal two-pass review before returning" in system_prompt
+	assert "Do not overfit to one witness plan or one canonical initial state." in system_prompt
+	assert "Do not rely on later stages to invent missing helper-task branches." in system_prompt
 
 	assert "REQUIRED target_task_bindings ENTRIES:" in user_prompt
 	assert '{"target_literal": "on(a, b)", "task_name": "<semantic_task_name>"}' in user_prompt
@@ -185,6 +188,10 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "For every method, method_name must be exactly 'm_' + task_name + '_' + a short strategy suffix." in user_prompt
 	assert "For a single-step method, ordering may be []." in user_prompt
 	assert "Do all methods use the exact m_task_strategy naming pattern?" in user_prompt
+	assert "Do not overfit methods to the default all-objects-on-table example state." in user_prompt
+	assert "Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you." in user_prompt
+	assert "For every helper task that denotes a reusable stateful intention" in user_prompt
+	assert "Think twice before returning: first verify the JSON shape, then verify task coverage." in user_prompt
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
