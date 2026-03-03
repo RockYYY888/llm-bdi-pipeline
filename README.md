@@ -20,7 +20,7 @@ The only actively maintained planning domain in this repository is **blocksworld
 3. **Stage 3: DFA -> AgentSpeak**
    - `src/stage3_code_generation/`
    - **Stage 3A**: HTN method synthesis
-     - Builds a deterministic baseline HTN method library from PDDL
+     - Builds a deterministic baseline HTN method library from HDDL
      - Can optionally ask an LLM to replace or augment the library
      - Falls back to the deterministic library if the LLM output is invalid
    - **Stage 3B**: HTN decomposition
@@ -42,7 +42,7 @@ The only actively maintained planning domain in this repository is **blocksworld
 - Stage 3A is **LLM-backed but not LLM-dependent**:
   - If Stage 3 has an API client, it can synthesize an HTN library through a strict JSON schema.
   - If not, it uses the deterministic heuristic synthesizer.
-- Stage 3 works from DFA transition literals and symbolic PDDL action schemas.
+- Stage 3 works from DFA transition literals and symbolic HDDL action schemas.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
 - The full end-to-end pipeline still requires an API key because Stage 1 is LLM-only.
 - Stage 3 itself can still complete without Stage 3 LLM output because the HTN synthesizer has
@@ -214,7 +214,7 @@ The logger also records the HTN metadata inside the run log.
 
 The active benchmark surface is:
 
-- the blocksworld PDDL domain in `src/domains/blocksworld/`
+- the blocksworld HDDL domain in `src/domains/blocksworld/`
 - the Stage 2 formula regression cases in `tests/stage2_dfa_generation/test_ltlf2dfa.py`
 - the Stage 3 HTN regression cases in `tests/stage3_code_generation/test_stage3_htn.py`
 - the pipeline-level integration check in `tests/test_pipeline.py`

@@ -1,6 +1,10 @@
-(define (problem mock-blocks-invariant-extraction)
+(define (problem example-blocksworld)
   (:domain blocksworld)
   (:objects b1 b2 b3 b4 b5 - block)
+  (:htn
+    :parameters ()
+    :ordered-subtasks (and)
+  )
   (:init
     (ontable b1)
     (ontable b2)

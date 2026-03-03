@@ -150,13 +150,7 @@ def create_spec_from_formula_string(formula_str: str, objects: List[str]) -> LTL
     Returns:
         LTLSpecification with grounding map
     """
-    from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
-
-    # Parse the formula string to create proper LTLFormula objects
-    # For now, we'll create a temporary generator and parse it
-    generator = NLToLTLfGenerator(api_key="dummy", model="gpt-4")
-
-    # Create a mock spec with the formula string
+    # Create a minimal spec with the formula string.
     # We need to actually parse this into LTLFormula objects
     # For simplicity, let's just use the string directly via ltlf2dfa
     spec = LTLSpecification()
@@ -423,7 +417,7 @@ def run_all_tests(csv_path: Path, output_path: Path):
     # Initialize generator using the actual pipeline's domain configuration
     config = get_config()
     # Use default blocksworld domain (same as main pipeline)
-    domain_file = str(Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.pddl")
+    domain_file = str(Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl")
 
     generator = NLToLTLfGenerator(
         api_key=config.openai_api_key,

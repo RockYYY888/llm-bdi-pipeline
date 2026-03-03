@@ -9,8 +9,8 @@ from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, Logica
 from .ltlf_generator import NLToLTLfGenerator
 from .grounding_map import GroundingMap, GroundedAtom, create_propositional_symbol
 
-# Re-export PDDL parser from utils for backward compatibility
-from utils.pddl_parser import PDDLParser, PDDLDomain, PDDLPredicate, PDDLAction
+# Re-export HDDL parser from utils for domain access across the pipeline
+from utils.hddl_parser import HDDLParser, HDDLDomain, HDDLPredicate, HDDLAction, HDDLTask, HDDLMethod
 
 __all__ = [
     'LTLFormula',
@@ -18,10 +18,12 @@ __all__ = [
     'TemporalOperator',
     'LogicalOperator',
     'NLToLTLfGenerator',
-    'PDDLParser',
-    'PDDLDomain',
-    'PDDLPredicate',
-    'PDDLAction',
+    'HDDLParser',
+    'HDDLDomain',
+    'HDDLPredicate',
+    'HDDLAction',
+    'HDDLTask',
+    'HDDLMethod',
     'GroundingMap',
     'GroundedAtom',
     'create_propositional_symbol',

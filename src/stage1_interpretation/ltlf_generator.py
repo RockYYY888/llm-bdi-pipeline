@@ -33,7 +33,7 @@ class NLToLTLfGenerator:
             api_key: OpenAI API key
             model: Model name
             base_url: Custom API base URL
-            domain_file: Path to PDDL domain file (for dynamic prompt construction)
+            domain_file: Path to HDDL domain file (for dynamic prompt construction)
         """
         self.api_key = api_key
         self.model = model or "deepseek-chat"
@@ -44,8 +44,8 @@ class NLToLTLfGenerator:
         # Parse domain if provided
         self.domain = None
         if domain_file:
-            from utils.pddl_parser import PDDLParser
-            self.domain = PDDLParser.parse_domain(domain_file)
+            from utils.hddl_parser import HDDLParser
+            self.domain = HDDLParser.parse_domain(domain_file)
 
         if api_key:
             from openai import OpenAI

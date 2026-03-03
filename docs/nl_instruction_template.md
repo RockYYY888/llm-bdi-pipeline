@@ -14,8 +14,8 @@ This template serves as a **reference guide** for:
 
 Before creating NL instructions for a new domain, you need:
 
-### 1. Domain Definition (PDDL File)
-A PDDL domain file (`domain.pddl`) that specifies:
+### 1. Domain Definition (HDDL File)
+An HDDL domain file (`domain.hddl`) that specifies:
 - **Predicates**: The states/properties that can be true or false
   - Example (Blocksworld): `on(?x - block, ?y - block)`, `clear(?x - block)`, `handempty`, `holding(?x - block)`, `ontable(?x - block)`
 - **Actions**: The operations that can be performed
@@ -540,7 +540,7 @@ Inconsistent object references: "block a", "block-1", "blocka"
 **Solution:**
 - Choose consistent naming: "block a" → object `a`
 - With hyphens: "block-1" → object `block-1`
-- Always use the exact object name from the PDDL problem file
+- Always use the exact object name from the HDDL problem file
 
 ---
 
@@ -570,7 +570,7 @@ Inconsistent object references: "block a", "block-1", "blocka"
 
 #### For New Domain Setup:
 
-1. **Parse PDDL domain file** to extract predicates and actions
+1. **Parse HDDL domain file** to extract predicates and actions
 2. **Create domain-specific predicate table** (Step 1 in Section 8)
 3. **Generate common NL phrasings** for each predicate (Step 3 in Section 8)
 4. **Start with simple test cases** (propositional, unary, binary)
@@ -633,4 +633,3 @@ Match: DFA equivalence check
 - "X is on table" → `ontable(X)`
 - "Pick up X" → Goal implies `F(holding(X))` or context-dependent
 - "Keep hand empty" → `G(handempty)`
-

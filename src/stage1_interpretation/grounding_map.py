@@ -7,7 +7,7 @@ their original parameterized predicates (e.g., on(a, b)).
 This is essential because LTLf only supports propositional atoms, not
 parameterized predicates. The grounding map serves as a bridge between:
 - LTLf formulas (using propositional symbols)
-- Domain knowledge (predicates and objects from PDDL)
+- Domain knowledge (predicates and objects from HDDL)
 - AgentSpeak code generation (needs human-readable predicates)
 """
 
@@ -47,8 +47,8 @@ class GroundedAtom:
             "args": self.args
         }
 
-    def to_pddl_format(self) -> str:
-        """Convert to PDDL format: (on a b)"""
+    def to_hddl_format(self) -> str:
+        """Convert to HDDL-style format: (on a b)"""
         if not self.args:
             return self.predicate
         return f"({self.predicate} {' '.join(self.args)})"
@@ -249,7 +249,7 @@ def test_grounding_map():
 
     print(f"\nAtoms: {len(gmap.atoms)}")
     for symbol, atom in gmap.atoms.items():
-        print(f"  {symbol} -> {atom.to_readable_format()} | PDDL: {atom.to_pddl_format()}")
+        print(f"  {symbol} -> {atom.to_readable_format()} | HDDL: {atom.to_hddl_format()}")
 
     print(f"\nPredicates: {gmap.predicates}")
     print(f"Objects: {gmap.objects}")

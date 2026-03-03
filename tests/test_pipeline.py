@@ -104,10 +104,11 @@ def test_blocksworld_example_pipeline_records_live_execution():
     assert execution["stage3_artifacts"]["method_library"] is not None
     assert execution["stage3_artifacts"]["transitions"] is not None
     assert result["agentspeak_code"] == execution["stage3_agentspeak"]
+    assert "+!achieve_on(a, b)" in execution["stage3_agentspeak"]
+    assert "+!achieve_on(a, b) : true <-\n\ttrue.\n" not in execution["stage3_agentspeak"]
 
     assert "STAGE 1: Natural Language" in execution_txt
     assert "Parser: LLM (" in execution_txt
-    assert "Parser: Mock" not in execution_txt
     assert "LLM RESPONSE (Stage 1)" in execution_txt
     assert "PARSED OUTPUT (Stage 1)" in execution_txt
     assert "STAGE 2: LTL Specification" in execution_txt

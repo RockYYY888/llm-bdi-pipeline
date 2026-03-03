@@ -186,17 +186,17 @@ class LTLfToDFA:
 def test_converter():
     """Test the LTLf to DFA converter"""
 
-    # Mock LTL specification
-    class MockFormula:
+    # Example LTL specification
+    class ExampleFormula:
         def __init__(self, formula_str):
             self.formula_str = formula_str
 
         def to_string(self):
             return self.formula_str
 
-    class MockLTLSpec:
+    class ExampleLTLSpec:
         def __init__(self, formulas):
-            self.formulas = [MockFormula(f) for f in formulas]
+            self.formulas = [ExampleFormula(f) for f in formulas]
 
     print("="*80)
     print("LTLf TO DFA CONVERTER TEST")
@@ -217,7 +217,7 @@ def test_converter():
         print(f"Test: {description}")
         print(f"Input formulas: {formulas}")
 
-        spec = MockLTLSpec(formulas)
+        spec = ExampleLTLSpec(formulas)
 
         try:
             dfa_dot, metadata = converter.convert(spec)

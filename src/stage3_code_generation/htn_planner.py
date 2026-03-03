@@ -186,6 +186,11 @@ class HTNPlanner:
         if token in bindings:
             return bindings[token]
 
+        if token.startswith("?"):
+            value = f"{token.lstrip('?').replace('-', '_')}_{node_id}_{child_index}"
+            bindings[token] = value
+            return value
+
         if token and token[0].isupper():
             value = f"{token.lower()}_{node_id}_{child_index}"
             bindings[token] = value

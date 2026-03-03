@@ -11,7 +11,7 @@ and AgentSpeak rendering.
 
 ## What It Verifies
 
-- Stage 3A synthesizes an HTN library from the blocksworld PDDL domain
+- Stage 3A synthesizes an HTN library from the blocksworld HDDL domain
 - The synthesizer creates both goal tasks and support tasks
 - The planner builds a decomposition trace for target literals
 - Preferred specialisation retains the relevant abstract cut

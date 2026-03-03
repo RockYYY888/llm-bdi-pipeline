@@ -11,14 +11,14 @@ from stage3_code_generation.htn_schema import (
     DecompositionTrace,
     SpecialisationResult,
 )
-from stage3_code_generation.pddl_condition_parser import PDDLConditionParser
+from stage3_code_generation.hddl_condition_parser import HDDLConditionParser
 
 
 class AgentSpeakCodeGenerator:
     """Render specialised HTN traces as AgentSpeak code."""
 
     def __init__(self) -> None:
-        self.parser = PDDLConditionParser()
+        self.parser = HDDLConditionParser()
 
     def generate(
         self,
