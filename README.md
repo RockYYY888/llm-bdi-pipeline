@@ -31,10 +31,11 @@ The only actively maintained planning domain in this repository is **blocksworld
    - Does: builds a temporary HDDL domain/problem pair, augments export-time noop guards for already-satisfied literal-check helper tasks, and solves it with the PANDA PI toolchain
    - Output: PANDA plan records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
 
-5. **Stage 5: PANDA Plans -> AgentSpeak Rendering**
+5. **Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering**
    - `src/stage5_agentspeak_rendering/`
-   - Input: PANDA plan records + HDDL domain
-   - Does: emits primitive action wrappers, goal plans, and transition dispatch plans
+   - Input: `HTNMethodLibrary` + validated PANDA transition records + HDDL domain
+   - Does: emits primitive action wrappers, the full HTN method library as AgentSpeak plans,
+     and DFA state-aware transition wrappers
    - Output: `agentspeak_generated.asl`
 
 6. **Stage 6 Assets: Jason Validation**
@@ -48,7 +49,8 @@ The only actively maintained planning domain in this repository is **blocksworld
 - Stage 4 uses the PANDA PI toolchain on temporary HDDL domain/problem files.
 - Stage 4 keeps the problem-instance builder separate from the planner entrypoint. The default
   builder is explicit and configurable instead of hard-coding initial-state facts inside the planner.
-- Stage 5 renders static, domain-specific AgentSpeak from PANDA-generated primitive plans.
+- Stage 5 renders static, domain-specific AgentSpeak from the HTN method library, while Stage 4
+  PANDA results remain validation artifacts plus DFA-edge witnesses.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
 - The full end-to-end pipeline still requires an API key because Stage 1 is LLM-only.
 - The full Stage 4 path requires the PANDA PI toolchain (`pandaPIparser`, `pandaPIgrounder`,

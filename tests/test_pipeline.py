@@ -157,12 +157,16 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 			)
 
 	stage5_code = execution.get("stage5_agentspeak") or ""
+	if "/* HTN Method Plans */" not in stage5_code:
+		bug_messages.append("Stage 5 code is missing rendered HTN method plans")
 	if "dfa_edge_label(" not in stage5_code:
 		bug_messages.append("Stage 5 code is missing dfa_edge_label metadata")
 	if "dfa_state(" not in stage5_code:
 		bug_messages.append("Stage 5 code is missing dfa_state state-tracking facts or guards")
 	if "+!dfa_step_" not in stage5_code:
 		bug_messages.append("Stage 5 code is missing state-aware dfa_step wrappers")
+	if "/* PANDA Goal Plans */" in stage5_code:
+		bug_messages.append("legacy PANDA-only task plan section still present in Stage 5 code")
 	if "target_label(" in stage5_code:
 		bug_messages.append("legacy target_label facts still present in Stage 5 code")
 	if "+!transition_" in stage5_code:
@@ -182,7 +186,7 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 		bug_messages.append("execution.txt is missing Stage 3 section")
 	if "STAGE 4: HTN Method Library → PANDA Planning" not in execution_txt:
 		bug_messages.append("execution.txt is missing Stage 4 section")
-	if "STAGE 5: PANDA Plans → AgentSpeak Rendering" not in execution_txt:
+	if "STAGE 5: HTN Methods + DFA Wrappers → AgentSpeak Rendering" not in execution_txt:
 		bug_messages.append("execution.txt is missing Stage 5 section")
 
 	return {

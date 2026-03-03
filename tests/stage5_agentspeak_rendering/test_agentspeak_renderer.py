@@ -9,8 +9,15 @@ _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
-from stage3_method_synthesis.htn_schema import HTNLiteral
-from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
+from stage3_method_synthesis.htn_schema import (
+	HTNLiteral,
+	HTNMethod,
+	HTNMethodLibrary,
+	HTNMethodStep,
+	HTNTargetTaskBinding,
+	HTNTask,
+)
+from stage4_panda_planning.panda_schema import PANDAPlanResult
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from utils.hddl_parser import HDDLParser
 
@@ -26,11 +33,94 @@ def _domain():
 	return HDDLParser.parse_domain(str(domain_path))
 
 
-def test_renderer_emits_transition_goal_and_primitive_wrappers():
+def _method_library() -> HTNMethodLibrary:
+	return HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(
+				name="place_on",
+				parameters=("B1", "B2"),
+				is_primitive=False,
+				source_predicates=("on",),
+			),
+			HTNTask(
+				name="hold_block",
+				parameters=("B1",),
+				is_primitive=False,
+				source_predicates=("holding",),
+			),
+		],
+		primitive_tasks=[
+			HTNTask(
+				name="pick_up_from_table",
+				parameters=("B1",),
+				is_primitive=True,
+			),
+			HTNTask(
+				name="put_on_block",
+				parameters=("B1", "B2"),
+				is_primitive=True,
+			),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_place_on_noop",
+				task_name="place_on",
+				parameters=("B1", "B2"),
+				context=(HTNLiteral("on", ("B1", "B2")),),
+			),
+			HTNMethod(
+				method_name="m_place_on_stack",
+				task_name="place_on",
+				parameters=("B1", "B2"),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s2",
+						task_name="put_on_block",
+						args=("B1", "B2"),
+						kind="primitive",
+						action_name="put-on-block",
+					),
+					HTNMethodStep(
+						step_id="s1",
+						task_name="hold_block",
+						args=("B1",),
+						kind="compound",
+					),
+				),
+				ordering=(("s1", "s2"),),
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_table",
+				task_name="hold_block",
+				parameters=("B1",),
+				context=(
+					HTNLiteral("ontable", ("B1",)),
+					HTNLiteral("clear", ("B1",)),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up_from_table",
+						args=("B1",),
+						kind="primitive",
+						action_name="pick-up-from-table",
+					),
+				),
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="on(a, b)", task_name="place_on"),
+		],
+	)
+
+
+def test_renderer_emits_method_library_and_state_aware_wrappers():
 	renderer = AgentSpeakRenderer()
 	code = renderer.generate(
 		domain=_domain(),
 		objects=("a", "b"),
+		method_library=_method_library(),
 		plan_records=[
 			{
 				"transition_name": "dfa_step_q1_q2_on_a_b",
@@ -42,30 +132,33 @@ def test_renderer_emits_transition_goal_and_primitive_wrappers():
 					task_name="place_on",
 					task_args=("a", "b"),
 					target_literal=HTNLiteral("on", ("a", "b"), True, "on_a_b"),
-					steps=[
-						PANDAPlanStep("put_on_block", "put-on-block", ("a", "b")),
-					],
 				),
 			},
 		],
 	)
 
-	assert "/* PANDA Goal Plans */" in code
+	assert "/* HTN Method Plans */" in code
 	assert "dfa_state(q1)." in code
 	assert 'dfa_edge_label(dfa_step_q1_q2_on_a_b, "on(a, b)").' in code
-	assert "+!place_on(a, b) : true <-" in code
-	assert "\t!put_on_block(a, b)." in code
+	assert "+!place_on(B1, B2) : on(B1, B2) <-" in code
+	assert "+!place_on(B1, B2) : true <-" in code
+	assert "\t!hold_block(B1);" in code
+	assert "\t!put_on_block(B1, B2)." in code
+	assert "+!hold_block(B1) : ontable(B1) & clear(B1) <-" in code
+	assert "\t!pick_up_from_table(B1)." in code
 	assert "+!dfa_step_q1_q2_on_a_b : dfa_state(q1) <-" in code
+	assert "\t!place_on(a, b);" in code
 	assert "\t-dfa_state(q1);" in code
 	assert "\t+dfa_state(q2)." in code
 	assert "+!put_on_block(X1, X2) :" in code
 
 
-def test_renderer_accepts_zero_step_panda_plans():
+def test_renderer_accepts_zero_step_wrappers_when_stage4_returns_no_witness_steps():
 	renderer = AgentSpeakRenderer()
 	code = renderer.generate(
 		domain=_domain(),
 		objects=("a", "b"),
+		method_library=_method_library(),
 		plan_records=[
 			{
 				"transition_name": "dfa_step_q2_q2_not_on_a_b",
@@ -83,6 +176,5 @@ def test_renderer_accepts_zero_step_panda_plans():
 		],
 	)
 
-	assert "+!keep_apart(a, b) : true <-" in code
-	assert "\ttrue." in code
+	assert "/* HTN Method Plans */" in code
 	assert "+!dfa_step_q2_q2_not_on_a_b : dfa_state(q2) <-" in code

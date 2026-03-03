@@ -508,7 +508,7 @@ class PipelineLogger:
 
 	def _write_stage5(self, handle: Any, record: Dict[str, Any]) -> None:
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 5: PANDA Plans → AgentSpeak Rendering\n")
+		handle.write("STAGE 5: HTN Methods + DFA Wrappers → AgentSpeak Rendering\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage5_status'].upper()}\n")
 

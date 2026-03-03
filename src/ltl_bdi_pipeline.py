@@ -22,7 +22,7 @@ class LTL_BDI_Pipeline:
     Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
     Stage 3: DFA -> HTN Method Synthesis
     Stage 4: HTN Method Library -> PANDA Planning
-    Stage 5: PANDA Plans -> AgentSpeak Rendering
+    Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering
     """
 
     def __init__(self, domain_file: str = None):
@@ -126,8 +126,8 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 4", "error": "PANDA planning failed"}
 
-        # Stage 5: PANDA plans -> AgentSpeak rendering
-        asl_code, _ = self._stage5_agentspeak_rendering(ltl_spec, plan_records)
+        # Stage 5: HTN method library + validated DFA wrappers -> AgentSpeak rendering
+        asl_code, _ = self._stage5_agentspeak_rendering(ltl_spec, method_library, plan_records)
         if not asl_code:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -413,8 +413,8 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None, None
 
-    def _stage5_agentspeak_rendering(self, ltl_spec, plan_records):
-        """Stage 5: PANDA plans -> AgentSpeak rendering."""
+    def _stage5_agentspeak_rendering(self, ltl_spec, method_library, plan_records):
+        """Stage 5: HTN methods + validated DFA wrappers -> AgentSpeak rendering."""
         print("\n[STAGE 5] AgentSpeak Rendering")
         print("-"*80)
 
@@ -423,10 +423,12 @@ class LTL_BDI_Pipeline:
             asl_code = renderer.generate(
                 domain=self.domain,
                 objects=ltl_spec.objects,
+                method_library=method_library,
                 plan_records=plan_records,
             )
             metadata = {
                 "transition_count": len(plan_records),
+                "rendered_methods": len(method_library.methods),
                 "code_size_chars": len(asl_code),
             }
             self.logger.log_stage5_agentspeak_rendering(
