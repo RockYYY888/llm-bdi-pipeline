@@ -1,7 +1,7 @@
-# LTLf to HTN-Specialised BDI Pipeline
+# LTLf to PANDA-Backed BDI Pipeline
 
 This repository generates AgentSpeak plan libraries from natural-language goals.
-The pipeline now uses **HTN method synthesis + decomposition + preferred specialisation**
+The pipeline now uses **HTN method synthesis + PANDA planning**
 for Stage 3.
 The only actively maintained planning domain in this repository is **blocksworld**.
 
@@ -20,15 +20,11 @@ The only actively maintained planning domain in this repository is **blocksworld
 3. **Stage 3: DFA -> AgentSpeak**
    - `src/stage3_code_generation/`
    - **Stage 3A**: HTN method synthesis
-     - Builds a deterministic baseline HTN method library from HDDL
-     - Can optionally ask an LLM to replace or augment the library
-     - Falls back to the deterministic library if the LLM output is invalid
-   - **Stage 3B**: HTN decomposition
-     - Expands each target literal into a decomposition trace
-   - **Stage 3C**: Preferred specialisation
-     - Prunes irrelevant leaves and retains the most abstract valid cut
-   - **Stage 3D**: AgentSpeak rendering
-     - Emits primitive action wrappers and specialised HTN goal plans
+     - Uses an LLM to synthesize the HTN method library for the current DFA targets
+   - **Stage 3B**: PANDA planning
+     - Exports a temporary HDDL planning problem and solves it with the PANDA PI toolchain
+   - **Stage 3C**: AgentSpeak rendering
+     - Emits primitive action wrappers and PANDA-backed HTN goal plans
 
 4. **Stage 4 Assets: Jason Validation**
    - `src/stage4_jason_validation/`
@@ -37,16 +33,14 @@ The only actively maintained planning domain in this repository is **blocksworld
 
 ## Important Design Choices
 
-- Stage 3 is implemented entirely through HTN method synthesis, decomposition, and specialisation.
+- Stage 3 is implemented through HTN method synthesis and PANDA-backed planning.
 - The codebase contains a single Stage 3 path.
-- Stage 3A is **LLM-backed but not LLM-dependent**:
-  - If Stage 3 has an API client, it can synthesize an HTN library through a strict JSON schema.
-  - If not, it uses the deterministic heuristic synthesizer.
-- Stage 3 works from DFA transition literals and symbolic HDDL action schemas.
+- Stage 3A is **LLM-only** and rejects missing or malformed live model output.
+- Stage 3 works from DFA transition literals, symbolic HDDL action schemas, and a PANDA-generated primitive plan.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
 - The full end-to-end pipeline still requires an API key because Stage 1 is LLM-only.
-- Stage 3 itself can still complete without Stage 3 LLM output because the HTN synthesizer has
-  a deterministic fallback.
+- The full Stage 3 path also requires the PANDA PI toolchain (`pandaPIparser`, `pandaPIgrounder`,
+  `pandaPIengine`) to be available on `PATH`.
 
 ## Repository Layout
 
@@ -60,9 +54,8 @@ The only actively maintained planning domain in this repository is **blocksworld
 │   ├── stage3_code_generation/
 │   │   ├── htn_schema.py
 │   │   ├── htn_method_synthesis.py
-│   │   ├── htn_planner.py
-│   │   ├── htn_specialiser.py
-│   │   ├── htn_planner_generator.py
+│   │   ├── panda_planner.py
+│   │   ├── panda_planner_generator.py
 │   │   └── agentspeak_codegen.py
 │   ├── stage4_jason_validation/
 │   └── utils/
@@ -70,7 +63,7 @@ The only actively maintained planning domain in this repository is **blocksworld
 │   ├── stage1_interpretation/
 │   ├── stage2_dfa_generation/
 │   ├── stage3_code_generation/
-│   │   └── test_stage3_htn.py
+│   │   └── test_stage3_panda.py
 │   └── test_pipeline.py
 └── TO-DO-LIST.md
 ```
@@ -134,6 +127,8 @@ cd ../../..
 ./.venv/bin/pytest -q tests/test_pipeline.py
 ```
 
+This test now also requires the PANDA PI toolchain to be installed and on `PATH`.
+
 6. Run the full pipeline on a real blocksworld instruction:
 
 ```bash
@@ -152,7 +147,7 @@ cd ../../..
   - `dfa.json`
   - `agentspeak_generated.asl`
   - `htn_method_library.json`
-  - `htn_transitions.json`
+  - `panda_transitions.json`
 
 ## Running the Pipeline
 
@@ -166,17 +161,16 @@ Notes:
 
 - Stage 1 requires an LLM API key.
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
-- The Stage 3 synthesizer still falls back to deterministic HTN synthesis when no valid Stage 3
-  LLM output is available.
+- Stage 3 also requires `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` on `PATH`.
 - The maintained domain is `src/domains/blocksworld/`.
 - Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
 
 ## Running Tests
 
-Run the focused HTN Stage 3 tests:
+Run the focused Stage 3 tests:
 
 ```bash
-./.venv/bin/pytest -q tests/stage3_code_generation/test_stage3_htn.py
+./.venv/bin/pytest -q tests/stage3_code_generation/test_stage3_panda.py
 ./.venv/bin/pytest -q tests/test_pipeline.py
 ```
 
@@ -206,9 +200,9 @@ A successful Stage 3 run writes:
 
 - `agentspeak_generated.asl`
 - `htn_method_library.json`
-- `htn_transitions.json`
+- `panda_transitions.json`
 
-The logger also records the HTN metadata inside the run log.
+The logger also records the PANDA planning metadata inside the run log.
 
 ## Current Benchmarks
 
@@ -216,5 +210,5 @@ The active benchmark surface is:
 
 - the blocksworld HDDL domain in `src/domains/blocksworld/`
 - the Stage 2 formula regression cases in `tests/stage2_dfa_generation/test_ltlf2dfa.py`
-- the Stage 3 HTN regression cases in `tests/stage3_code_generation/test_stage3_htn.py`
+- the Stage 3 PANDA regression cases in `tests/stage3_code_generation/test_stage3_panda.py`
 - the pipeline-level integration check in `tests/test_pipeline.py`

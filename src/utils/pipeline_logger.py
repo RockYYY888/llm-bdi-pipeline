@@ -46,7 +46,7 @@ class PipelineRecord:
     stage3_llm_response: Optional[str] = None
 
     # Stage 3 metadata
-    stage3_method: str = "htn"
+    stage3_method: str = "panda"
     stage3_states_explored: int = 0
     stage3_transitions_generated: int = 0
     stage3_goal_plans_count: int = 0
@@ -211,7 +211,7 @@ class PipelineLogger:
                    error: str = None, model: str = None, llm_prompt: Dict[str, str] = None,
                    llm_response: str = None,
                    # Backward planning statistics
-                   method: str = "htn", states_explored: int = 0, transitions_generated: int = 0,
+                   method: str = "panda", states_explored: int = 0, transitions_generated: int = 0,
                    goal_plans_count: int = 0, action_plans_count: int = 0,
                    cache_hits: int = 0, cache_misses: int = 0, ground_actions_cached: int = 0,
                    redundancy_eliminated_pct: float = 0.0,
@@ -273,7 +273,7 @@ class PipelineLogger:
 
                     transitions = artifacts.get("transitions")
                     if transitions is not None:
-                        transitions_path = self.current_log_dir / "htn_transitions.json"
+                        transitions_path = self.current_log_dir / "panda_transitions.json"
                         with open(transitions_path, 'w') as f:
                             json.dump(transitions, f, indent=2)
 
@@ -419,7 +419,9 @@ class PipelineLogger:
                 f.write("~"*40 + "\n")
                 ltlf = record['stage1_ltlf_spec']
                 f.write(f"Objects: {ltlf.get('objects', [])}\n")
-                f.write(f"\nLTLf Formulas (goal-oriented, no initial state assumptions):\n")
+                f.write(
+                    "\nLTLf Formulas (goal semantics only; Stage 3 later instantiates planning state):\n"
+                )
                 for i, formula_str in enumerate(ltlf.get('formulas_string', []), 1):
                     f.write(f"  {i}. {formula_str}\n")
 
@@ -492,8 +494,8 @@ class PipelineLogger:
 
             if record.get('stage3_used_llm'):
                 f.write(f"Generator: LLM ({record.get('stage3_model', 'N/A')})\n")
-            elif record.get('stage3_method') == 'htn':
-                f.write("Generator: HTN method synthesis + specialisation\n")
+            elif record.get('stage3_method') == 'panda':
+                f.write("Generator: HTN method synthesis + PANDA planning\n")
 
             # LLM Prompt/Response for Stage 3
             if record.get('stage3_used_llm') and record.get('stage3_llm_prompt'):
@@ -516,18 +518,18 @@ class PipelineLogger:
                 f.write("\n")
 
             metadata = record.get('stage3_metadata') or {}
-            if record.get('stage3_method') == 'htn' and metadata:
+            if record.get('stage3_method') == 'panda' and metadata:
                 f.write("\n" + "~"*40 + "\n")
                 if record.get('stage3_status') == 'success':
-                    f.write("HTN GENERATION SUMMARY\n")
+                    f.write("PANDA GENERATION SUMMARY\n")
                 else:
-                    f.write("HTN GENERATION DIAGNOSTICS\n")
+                    f.write("PANDA GENERATION DIAGNOSTICS\n")
                 f.write("~"*40 + "\n")
                 for key, value in metadata.items():
                     f.write(f"{key}: {value}\n")
                 f.write("\n")
 
-            if record.get('stage3_method') == 'htn' and record.get('stage3_status') == 'success':
+            if record.get('stage3_method') == 'panda' and record.get('stage3_status') == 'success':
                 artifacts = record.get('stage3_artifacts') or {}
                 method_library = artifacts.get('method_library')
                 if method_library is not None:
@@ -541,9 +543,9 @@ class PipelineLogger:
                 transitions = artifacts.get('transitions')
                 if transitions is not None:
                     f.write("\n" + "~"*40 + "\n")
-                    f.write("HTN DECOMPOSITION TRACES (Stage 3B/3C)\n")
+                    f.write("PANDA PLAN ARTIFACTS (Stage 3B)\n")
                     f.write("~"*40 + "\n")
-                    f.write("Full JSON also saved to htn_transitions.json\n")
+                    f.write("Full JSON also saved to panda_transitions.json\n")
                     f.write(json.dumps(transitions, indent=2))
                     f.write("\n")
 

@@ -386,7 +386,8 @@ Predicates have different arities (number of arguments). You MUST include the co
    - WRONG: {{{{"not": ["on"]}}}} ❌ Missing arguments!
    - Output formula: G(!(on(a, b)))
 
-**IMPORTANT**: Do NOT assume or specify any initial state. The generated plans must work from ANY initial configuration.
+**IMPORTANT**: Do NOT assume or specify any initial state while extracting the LTL goal.
+Only capture the requested goal semantics. Stage 3 will build the concrete HDDL planning problem later.
 Only extract:
 1. The objects (blocks) mentioned in the instruction
 2. The LTL goal formulas (what should be achieved)

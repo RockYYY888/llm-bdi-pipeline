@@ -311,8 +311,27 @@ class HTNMethodSynthesizer:
         compound_names = {task.name for task in library.compound_tasks}
         all_tasks = compound_names | {task.name for task in library.primitive_tasks}
 
+        method_counts: Dict[str, int] = {}
+        for method in library.methods:
+            method_counts[method.task_name] = method_counts.get(method.task_name, 0) + 1
+
         if primitive_names - {task.name for task in library.primitive_tasks}:
             raise ValueError("HTN library is missing primitive action tasks")
+
+        for literal in library.target_literals:
+            preferred_task_name = self._preferred_task_name(literal)
+            if preferred_task_name not in compound_names:
+                raise ValueError(
+                    "HTN library is missing the top-level compound task "
+                    f"'{preferred_task_name}' required for target literal "
+                    f"'{literal.to_signature()}'."
+                )
+            if method_counts.get(preferred_task_name, 0) == 0:
+                raise ValueError(
+                    "HTN library is missing a method for the top-level task "
+                    f"'{preferred_task_name}' required for target literal "
+                    f"'{literal.to_signature()}'."
+                )
 
         for task in library.compound_tasks + library.primitive_tasks:
             if not re.fullmatch(r"[a-z][a-z0-9_]*", task.name):
@@ -437,6 +456,13 @@ class HTNMethodSynthesizer:
     @staticmethod
     def _sanitize_name(name: str) -> str:
         return name.replace("-", "_")
+
+    @classmethod
+    def _preferred_task_name(cls, literal: HTNLiteral) -> str:
+        predicate = cls._sanitize_name(literal.predicate)
+        if literal.is_positive:
+            return f"achieve_{predicate}"
+        return f"maintain_not_{predicate}"
 
     @staticmethod
     def _schema_hint() -> str:

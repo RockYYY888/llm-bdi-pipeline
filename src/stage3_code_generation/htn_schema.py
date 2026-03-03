@@ -1,13 +1,13 @@
 """
 Stage 3 HTN data structures.
 
-These types define the HTN method library, decomposition traces, and
-specialisation output used by the refactored Stage 3 pipeline.
+These types define the Stage 3A HTN method library and the PANDA-backed
+planning artifacts used by the current Stage 3 pipeline.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 
@@ -20,7 +20,7 @@ def _serialise_literal_list(values: Iterable["HTNLiteral"]) -> List[Dict[str, An
 
 @dataclass(frozen=True)
 class HTNLiteral:
-    """A symbolic literal used by HTN methods and decomposition traces."""
+    """A symbolic literal used by HTN methods and PANDA planning artifacts."""
 
     predicate: str
     args: Tuple[str, ...] = ()
@@ -232,76 +232,59 @@ class HTNMethodLibrary:
         )
 
 
-@dataclass
-class DecompositionNode:
-    """A node in the chosen decomposition trace."""
+@dataclass(frozen=True)
+class PANDAPlanStep:
+    """One primitive step in a PANDA-generated executable plan."""
 
-    node_id: str
     task_name: str
-    args: Tuple[str, ...]
-    kind: TaskKind
-    context: Tuple[HTNLiteral, ...] = ()
-    method_name: Optional[str] = None
-    action_name: Optional[str] = None
-    literal: Optional[HTNLiteral] = None
-    preconditions: Tuple[HTNLiteral, ...] = ()
-    effects: Tuple[HTNLiteral, ...] = ()
-    children: List["DecompositionNode"] = field(default_factory=list)
+    action_name: str
+    args: Tuple[str, ...] = ()
+    source_line: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "node_id": self.node_id,
             "task_name": self.task_name,
-            "args": list(self.args),
-            "kind": self.kind,
-            "context": _serialise_literal_list(self.context),
-            "method_name": self.method_name,
             "action_name": self.action_name,
-            "literal": self.literal.to_dict() if self.literal else None,
-            "preconditions": _serialise_literal_list(self.preconditions),
-            "effects": _serialise_literal_list(self.effects),
-            "children": [child.to_dict() for child in self.children],
+            "args": list(self.args),
+            "source_line": self.source_line,
         }
 
-    def is_leaf(self) -> bool:
-        return not self.children
-
 
 @dataclass
-class DecompositionTrace:
-    """The Stage 3B output: a fully expanded decomposition tree."""
+class PANDAPlanResult:
+    """The Stage 3B output: a PANDA-generated primitive plan."""
 
-    root: DecompositionNode
-
-    def iter_nodes(self) -> Iterable[DecompositionNode]:
-        stack = [self.root]
-        while stack:
-            node = stack.pop()
-            yield node
-            stack.extend(reversed(node.children))
-
-    def node_map(self) -> Dict[str, DecompositionNode]:
-        return {node.node_id: node for node in self.iter_nodes()}
-
-    def leaf_nodes(self) -> List[DecompositionNode]:
-        return [node for node in self.iter_nodes() if node.is_leaf()]
-
-    def primitive_leaves(self) -> List[DecompositionNode]:
-        return [node for node in self.leaf_nodes() if node.kind == "primitive"]
+    task_name: str
+    task_args: Tuple[str, ...]
+    target_literal: HTNLiteral
+    steps: List[PANDAPlanStep] = field(default_factory=list)
+    domain_hddl: str = ""
+    problem_hddl: str = ""
+    parser_stdout: str = ""
+    parser_stderr: str = ""
+    grounder_stdout: str = ""
+    grounder_stderr: str = ""
+    engine_stdout: str = ""
+    engine_stderr: str = ""
+    raw_plan: str = ""
+    actual_plan: str = ""
+    work_dir: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"root": self.root.to_dict()}
-
-
-@dataclass
-class SpecialisationResult:
-    """The Stage 3C output: the specialised, non-redundant HTN cut."""
-
-    relevant_node_ids: List[str]
-    retained_cut_node_ids: List[str]
-    relevant_leaf_ids: List[str]
-    dropped_node_ids: List[str]
-    metrics: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {
+            "task_name": self.task_name,
+            "task_args": list(self.task_args),
+            "target_literal": self.target_literal.to_dict(),
+            "steps": [step.to_dict() for step in self.steps],
+            "domain_hddl": self.domain_hddl,
+            "problem_hddl": self.problem_hddl,
+            "parser_stdout": self.parser_stdout,
+            "parser_stderr": self.parser_stderr,
+            "grounder_stdout": self.grounder_stdout,
+            "grounder_stderr": self.grounder_stderr,
+            "engine_stdout": self.engine_stdout,
+            "engine_stderr": self.engine_stderr,
+            "raw_plan": self.raw_plan,
+            "actual_plan": self.actual_plan,
+            "work_dir": self.work_dir,
+        }

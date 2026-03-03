@@ -23,16 +23,17 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
         None,
         None,
         "Failed",
-        error="HTN synthesis failed during library_validation: bad task name",
-        method="htn",
+        error="PANDA planner failed during engine: no plan generated",
+        method="panda",
         model="deepseek-chat",
         llm_prompt={"system": "SYSTEM", "user": "USER"},
         llm_response='{"bad":"payload"}',
         metadata={
             "used_llm": False,
+            "backend": "pandaPI",
             "model": "deepseek-chat",
-            "failure_stage": "library_validation",
-            "failure_reason": "bad task name",
+            "stage": "engine",
+            "stderr": "no plan generated",
         },
     )
     logger.end_pipeline(success=False)
@@ -44,16 +45,18 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
     execution_txt = (log_dir / "execution.txt").read_text()
 
     assert execution["stage3_status"] == "failed"
-    assert execution["stage3_method"] == "htn"
+    assert execution["stage3_method"] == "panda"
     assert execution["stage3_used_llm"] is True
     assert execution["stage3_model"] == "deepseek-chat"
     assert execution["stage3_llm_prompt"]["system"] == "SYSTEM"
     assert execution["stage3_llm_response"] == '{"bad":"payload"}'
-    assert execution["stage3_metadata"]["failure_stage"] == "library_validation"
-    assert execution["stage3_metadata"]["failure_reason"] == "bad task name"
+    assert execution["stage3_metadata"]["backend"] == "pandaPI"
+    assert execution["stage3_metadata"]["stage"] == "engine"
+    assert execution["stage3_metadata"]["stderr"] == "no plan generated"
 
-    assert "HTN GENERATION DIAGNOSTICS" in execution_txt
-    assert "failure_stage: library_validation" in execution_txt
-    assert "failure_reason: bad task name" in execution_txt
+    assert "PANDA GENERATION DIAGNOSTICS" in execution_txt
+    assert "backend: pandaPI" in execution_txt
+    assert "stage: engine" in execution_txt
+    assert "stderr: no plan generated" in execution_txt
     assert "LLM RESPONSE (Stage 3)" in execution_txt
-    assert "Error: HTN synthesis failed during library_validation: bad task name" in execution_txt
+    assert "Error: PANDA planner failed during engine: no plan generated" in execution_txt

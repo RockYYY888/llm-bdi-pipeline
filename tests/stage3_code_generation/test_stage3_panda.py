@@ -1,5 +1,5 @@
 """
-Focused live tests for the HTN-based Stage 3 pipeline.
+Focused live tests for the PANDA-backed Stage 3 pipeline.
 """
 
 import sys
@@ -19,7 +19,8 @@ from stage1_interpretation.ltlf_formula import (
     TemporalOperator,
 )
 from stage3_code_generation.htn_method_synthesis import HTNMethodSynthesizer
-from stage3_code_generation.htn_planner_generator import HTNPlannerGenerator
+from stage3_code_generation.panda_planner import PANDAPlanner
+from stage3_code_generation.panda_planner_generator import PANDAPlannerGenerator
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 
@@ -46,6 +47,11 @@ def _live_stage3_kwargs() -> dict:
         "base_url": config.openai_base_url,
         "timeout": float(config.openai_timeout),
     }
+
+
+def _require_panda_toolchain() -> None:
+    if not PANDAPlanner().toolchain_available():
+        pytest.skip("Stage 3 live tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
 
 
 def _atomic_formula(predicate: str, args: list[str]) -> LTLFormula:
@@ -144,7 +150,8 @@ def test_method_synthesizer_uses_live_llm_output():
     assert all(method.task_name in compound_task_names for method in library.methods)
 
 
-def test_generator_emits_specialised_transition_and_primitive_plans():
+def test_generator_emits_panda_transition_and_primitive_plans():
+    _require_panda_toolchain()
     domain = _domain()
     spec = _eventually_on_spec()
     dfa_result = _dfa_result_for_labels("on_a_b")
@@ -154,13 +161,14 @@ def test_generator_emits_specialised_transition_and_primitive_plans():
         "grounding_map": spec.grounding_map,
     }
 
-    code, artifacts = HTNPlannerGenerator(
+    code, artifacts = PANDAPlannerGenerator(
         domain,
         spec.grounding_map,
         **_live_stage3_kwargs(),
     ).generate(ltl_dict, dfa_result)
 
-    assert artifacts["summary"]["method"] == "htn"
+    assert artifacts["summary"]["method"] == "panda"
+    assert artifacts["summary"]["backend"] == "pandaPI"
     assert artifacts["summary"]["used_llm"] is True
     assert artifacts["summary"]["transition_count"] == 1
     assert artifacts["llm"]["response"]
@@ -174,6 +182,7 @@ def test_generator_emits_specialised_transition_and_primitive_plans():
 
 
 def test_negative_goal_generates_guard_plan():
+    _require_panda_toolchain()
     domain = _domain()
     spec = _globally_not_on_spec()
     dfa_result = _dfa_result_for_labels("!on_a_b")
@@ -183,7 +192,7 @@ def test_negative_goal_generates_guard_plan():
         "grounding_map": spec.grounding_map,
     }
 
-    code, artifacts = HTNPlannerGenerator(
+    code, artifacts = PANDAPlannerGenerator(
         domain,
         spec.grounding_map,
         **_live_stage3_kwargs(),

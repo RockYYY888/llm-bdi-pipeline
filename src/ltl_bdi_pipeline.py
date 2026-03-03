@@ -1,5 +1,5 @@
 """
-LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN-specialised AgentSpeak.
+LTL-BDI pipeline: NL -> LTLf -> DFA -> PANDA-backed AgentSpeak.
 """
 
 from pathlib import Path
@@ -8,7 +8,7 @@ from typing import Dict, Any
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.dfa_builder import DFABuilder
-from stage3_code_generation.htn_planner_generator import HTNPlannerGenerator
+from stage3_code_generation.panda_planner_generator import PANDAPlannerGenerator
 from utils.pipeline_logger import PipelineLogger
 
 
@@ -18,7 +18,7 @@ class LTL_BDI_Pipeline:
 
     Stage 1: Natural Language -> LTLf Specification
     Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
-    Stage 3: DFA -> AgentSpeak Code Generation (HTN planning + specialisation)
+    Stage 3: DFA -> AgentSpeak Code Generation (HTN synthesis + PANDA planning)
     """
 
     def __init__(self, domain_file: str = None):
@@ -67,7 +67,7 @@ class LTL_BDI_Pipeline:
         if mode != "dfa_agentspeak":
             raise ValueError(
                 f"Unknown mode '{mode}'. Only 'dfa_agentspeak' is supported. "
-                "The pipeline currently supports the HTN-specialised AgentSpeak path only."
+                "The pipeline currently supports the PANDA-backed AgentSpeak path only."
             )
 
         # Start logger (creates timestamped directory in logs/)
@@ -106,8 +106,8 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
 
-        # Stage 3: DFA -> AgentSpeak Code (HTN)
-        asl_code, stage3_stats = self._stage3_htn_generation(ltl_spec, dfa_result)
+        # Stage 3: DFA -> AgentSpeak Code (PANDA)
+        asl_code, stage3_stats = self._stage3_panda_generation(ltl_spec, dfa_result)
         if not asl_code:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -154,7 +154,7 @@ class LTL_BDI_Pipeline:
             formulas_string = [f.to_string() for f in ltl_spec.formulas]
             print(f"✓ LTLf Formula: {formulas_string}")
             print(f"  Objects: {ltl_spec.objects}")
-            print(f"  (No initial state - plans work from any configuration)")
+            print("  (Stage 1 only captures goal semantics; Stage 3 instantiates a concrete HDDL problem)")
 
             return ltl_spec
 
@@ -210,30 +210,31 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None
 
-    def _stage3_htn_generation(self, ltl_spec, dfa_result):
-        """Stage 3: DFA -> HTN-specialised AgentSpeak generation."""
-        print("\n[STAGE 3] HTN Method Synthesis + Planning + Specialisation")
+    def _stage3_panda_generation(self, ltl_spec, dfa_result):
+        """Stage 3: DFA -> PANDA-backed AgentSpeak generation."""
+        print("\n[STAGE 3] HTN Method Synthesis + PANDA Planning")
         print("-"*80)
 
         try:
             # Create grounding map from ltl_spec
             grounding_map = ltl_spec.grounding_map
 
-            # Initialize HTN planner generator
-            generator = HTNPlannerGenerator(
+            # Initialize PANDA planner generator
+            generator = PANDAPlannerGenerator(
                 self.domain,
                 grounding_map,
                 api_key=self.config.openai_api_key,
                 model=self.config.openai_model,
                 base_url=self.config.openai_base_url,
                 timeout=float(self.config.openai_timeout),
+                workspace=str(self.output_dir),
             )
 
             # Convert ltl_spec to dict format for generator
             ltl_dict = {
                 "objects": ltl_spec.objects,
                 "formulas_string": [f.to_string() for f in ltl_spec.formulas],
-                "grounding_map": grounding_map
+                "grounding_map": grounding_map,
             }
 
             # Generate AgentSpeak code
@@ -244,23 +245,23 @@ class LTL_BDI_Pipeline:
 
             summary = artifacts["summary"]
             stage3_stats = {
-                "method": "htn",
+                "method": "panda",
                 "code_size_chars": len(asl_code),
                 "used_llm": artifacts["llm"]["used"],
                 "compound_tasks": summary["compound_tasks"],
                 "methods": summary["methods"],
                 "transition_count": summary["transition_count"],
-                "generation_time_seconds": elapsed
+                "generation_time_seconds": elapsed,
             }
 
-            # Log Stage 3 success with HTN metadata
+            # Log Stage 3 success with PANDA metadata
             llm_attempted = artifacts["llm"]["prompt"] is not None
             self.logger.log_stage3(
                 ltl_spec,
                 dfa_result,
                 asl_code,
                 "Success",
-                method="htn",
+                method="panda",
                 model=artifacts["llm"]["model"] if llm_attempted else None,
                 llm_prompt=artifacts["llm"]["prompt"],
                 llm_response=artifacts["llm"]["response"],
@@ -272,9 +273,10 @@ class LTL_BDI_Pipeline:
             )
 
             print(f"\n✓ AgentSpeak Code Generated ({len(asl_code)} characters in {elapsed:.2f}s)")
-            print("  Method: HTN method synthesis + specialisation")
+            print("  Method: HTN method synthesis + PANDA planning")
             print(f"  Attempted LLM synthesis in Stage 3A: {llm_attempted}")
             print(f"  Accepted LLM output in Stage 3A: {artifacts['llm']['used']}")
+            print(f"  Planning backend: {summary['backend']}")
             print(f"  Compound tasks: {summary['compound_tasks']}")
             print(f"  Methods: {summary['methods']}")
             print(f"  Transition plans: {summary['transition_count']}")
@@ -293,9 +295,9 @@ class LTL_BDI_Pipeline:
             method_library_file.write_text(json.dumps(artifacts["method_library"], indent=2))
             print(f"  ✓ HTN method library saved to: {method_library_file}")
 
-            transitions_file = self.output_dir / "htn_transitions.json"
+            transitions_file = self.output_dir / "panda_transitions.json"
             transitions_file.write_text(json.dumps(artifacts["transitions"], indent=2))
-            print(f"  ✓ HTN decomposition traces saved to: {transitions_file}")
+            print(f"  ✓ PANDA planning artifacts saved to: {transitions_file}")
 
             return asl_code, stage3_stats
 
@@ -312,7 +314,7 @@ class LTL_BDI_Pipeline:
                 None,
                 "Failed",
                 error=str(e),
-                method="htn",
+                method="panda",
                 model=stage3_model,
                 llm_prompt=stage3_llm_prompt,
                 llm_response=stage3_llm_response,

@@ -1,7 +1,7 @@
 """
-Stage 3 exports for HTN-based AgentSpeak generation.
+Stage 3 exports for PANDA-backed AgentSpeak generation.
 """
 
-from .htn_planner_generator import HTNPlannerGenerator
+from .panda_planner_generator import PANDAPlannerGenerator
 
-__all__ = ["HTNPlannerGenerator"]
+__all__ = ["PANDAPlannerGenerator"]

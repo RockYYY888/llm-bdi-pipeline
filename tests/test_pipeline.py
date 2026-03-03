@@ -20,6 +20,7 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from ltl_bdi_pipeline import LTL_BDI_Pipeline
+from stage3_code_generation.panda_planner import PANDAPlanner
 from utils.config import get_config
 from utils.pipeline_logger import PipelineLogger
 
@@ -33,6 +34,8 @@ def test_blocksworld_example_pipeline_records_live_execution():
         pytest.skip(
             "Live pipeline test requires a valid OPENAI_API_KEY, matching src/main.py",
         )
+    if not PANDAPlanner().toolchain_available():
+        pytest.skip("Live pipeline test requires pandaPIparser, pandaPIgrounder, and pandaPIengine")
 
     pipeline = LTL_BDI_Pipeline()
     test_logs_dir = Path(__file__).parent / "logs"
@@ -53,7 +56,7 @@ def test_blocksworld_example_pipeline_records_live_execution():
     dfa_simplified_path = log_dir / "dfa_simplified.dot"
     agentspeak_path = log_dir / "agentspeak_generated.asl"
     method_library_path = log_dir / "htn_method_library.json"
-    transitions_path = log_dir / "htn_transitions.json"
+    transitions_path = log_dir / "panda_transitions.json"
     dfa_json_path = log_dir / "dfa.json"
 
     for path in [
@@ -93,13 +96,14 @@ def test_blocksworld_example_pipeline_records_live_execution():
     assert execution["stage2_num_transitions"] >= 1
 
     assert execution["stage3_status"] == "success"
-    assert execution["stage3_method"] == "htn"
+    assert execution["stage3_method"] == "panda"
     assert execution["stage3_used_llm"] is True
     assert execution["stage3_llm_prompt"] is not None
     assert execution["stage3_metadata"]["llm_attempted"] is True
     assert execution["stage3_code_size_chars"] > 0
     assert execution["stage3_code_size_chars"] == len(execution["stage3_agentspeak"])
-    assert execution["stage3_metadata"]["method"] == "htn"
+    assert execution["stage3_metadata"]["method"] == "panda"
+    assert execution["stage3_metadata"]["backend"] == "pandaPI"
     assert execution["stage3_metadata"]["transition_count"] >= 1
     assert execution["stage3_artifacts"]["method_library"] is not None
     assert execution["stage3_artifacts"]["transitions"] is not None
@@ -114,7 +118,7 @@ def test_blocksworld_example_pipeline_records_live_execution():
     assert "STAGE 2: LTL Specification" in execution_txt
     assert "DFA GENERATION RESULT" in execution_txt
     assert "STAGE 3: DFA" in execution_txt
-    assert "HTN GENERATION SUMMARY" in execution_txt
+    assert "PANDA GENERATION SUMMARY" in execution_txt
     assert "HTN METHOD LIBRARY (Stage 3A)" in execution_txt
-    assert "HTN DECOMPOSITION TRACES (Stage 3B/3C)" in execution_txt
+    assert "PANDA PLAN ARTIFACTS (Stage 3B)" in execution_txt
     assert "GENERATED AGENTSPEAK CODE (Stage 3)" in execution_txt
