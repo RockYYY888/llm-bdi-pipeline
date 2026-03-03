@@ -75,6 +75,85 @@ The only actively maintained planning domain in this repository is **blocksworld
 └── TO-DO-LIST.md
 ```
 
+## Quick Start
+
+From a fresh clone to a full pipeline run:
+
+1. Clone the repository and enter it:
+
+```bash
+git clone https://github.com/RockYYY888/llm-bdi-pipeline.git
+cd llm-bdi-pipeline
+```
+
+2. Create the Python environment and install dependencies:
+
+```bash
+uv venv
+uv sync
+```
+
+3. Prepare your API configuration:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` so it follows this format:
+
+```bash
+# OpenAI API Configuration
+OPENAI_API_KEY=
+
+# Optional: Model selection
+OPENAI_MODEL=deepseek-chat
+
+# Optional: Base URL (for DeepSeek or other custom endpoints)
+OPENAI_BASE_URL=https://api.deepseek.com
+
+# Optional: API timeout (seconds)
+OPENAI_TIMEOUT=120
+```
+
+4. Ensure MONA is available for `ltlf2dfa`:
+
+The repository already includes a local MONA build under `src/external/mona-1.4/`.
+If it is missing or needs to be rebuilt, run:
+
+```bash
+cd src/external/mona-1.4
+./configure --prefix=$(pwd)/mona-install --disable-shared --enable-static
+make
+make install-strip
+cd ../../..
+```
+
+5. Run the canonical acceptance test:
+
+```bash
+./.venv/bin/pytest -q tests/test_pipeline.py
+```
+
+6. Run the full pipeline on a real blocksworld instruction:
+
+```bash
+./.venv/bin/python src/main.py "Using blocks a and b, arrange them so that a is on b."
+```
+
+7. Inspect the generated artifacts:
+
+- The pipeline writes a timestamped directory under `logs/`
+- Each successful run contains:
+  - `execution.json`
+  - `execution.txt`
+  - `grounding_map.json`
+  - `dfa_original.dot`
+  - `dfa_simplified.dot`
+  - `dfa.json`
+  - `agentspeak_generated.asl`
+  - `htn_method_library.json`
+  - `htn_transitions.json`
+
 ## Running the Pipeline
 
 The default entry point is:
