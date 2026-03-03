@@ -12,7 +12,7 @@ from utils.hddl_condition_parser import HDDLConditionParser
 
 
 class AgentSpeakRenderer:
-    """Render PANDA-generated goal plans as AgentSpeak code."""
+    """Render the HTN method library plus DFA wrappers as AgentSpeak code."""
 
     def __init__(self) -> None:
         self.parser = HDDLConditionParser()
@@ -105,8 +105,9 @@ class AgentSpeakRenderer:
         task_schema = task_lookup.get(method.task_name)
         trigger_args = task_schema.parameters if task_schema else method.parameters
         trigger = self._call(method.task_name, trigger_args)
-        context = self._literal_clause(method.context)
         ordered_steps = self._ordered_method_steps(method)
+        context_literals = self._method_context_literals(method, ordered_steps)
+        context = self._literal_clause(context_literals)
         body = [
             f"!{self._call(step.task_name, step.args)}"
             for step in ordered_steps
@@ -179,6 +180,47 @@ class AgentSpeakRenderer:
 
         return ordered_steps
 
+    def _method_context_literals(
+        self,
+        method: HTNMethod,
+        ordered_steps: Sequence[Any],
+    ) -> Tuple[Any, ...]:
+        context_literals: List[Any] = list(method.context)
+        seen_literals = set(context_literals)
+        bound_variables = set(method.parameters)
+        bound_variables.update(self._bound_variables_from_literals(tuple(context_literals)))
+
+        for step in ordered_steps:
+            for literal in step.preconditions:
+                literal_variables = [
+                    arg
+                    for arg in self._literal_variables(literal)
+                    if self._looks_like_variable(arg)
+                ]
+                if not literal_variables:
+                    continue
+
+                has_unbound_variable = any(
+                    arg not in bound_variables
+                    for arg in literal_variables
+                )
+                if not has_unbound_variable:
+                    continue
+
+                has_anchor = any(
+                    (not self._looks_like_variable(arg)) or arg in bound_variables
+                    for arg in literal.args
+                )
+                if not has_anchor:
+                    continue
+
+                if literal not in seen_literals:
+                    context_literals.append(literal)
+                    seen_literals.add(literal)
+                bound_variables.update(literal_variables)
+
+        return tuple(context_literals)
+
     def _literal_clause(self, literals: Iterable[Any]) -> str:
         parts = [
             literal.to_agentspeak()
@@ -186,9 +228,49 @@ class AgentSpeakRenderer:
         ]
         return " & ".join(parts) if parts else "true"
 
+    def _bound_variables_from_literals(self, literals: Tuple[Any, ...]) -> set[str]:
+        known_variables: set[str] = set()
+        changed = True
+
+        while changed:
+            changed = False
+            for literal in literals:
+                literal_variables = [
+                    arg
+                    for arg in self._literal_variables(literal)
+                    if self._looks_like_variable(arg)
+                ]
+                if not literal_variables:
+                    continue
+                has_anchor = any(
+                    (not self._looks_like_variable(arg)) or arg in known_variables
+                    for arg in literal.args
+                )
+                if not has_anchor:
+                    continue
+                new_variables = [
+                    arg
+                    for arg in literal_variables
+                    if arg not in known_variables
+                ]
+                if not new_variables:
+                    continue
+                known_variables.update(new_variables)
+                changed = True
+
+        return known_variables
+
     @staticmethod
     def _sanitize_name(name: str) -> str:
         return name.replace("-", "_")
+
+    @staticmethod
+    def _literal_variables(literal: Any) -> Tuple[str, ...]:
+        return tuple(literal.args)
+
+    @staticmethod
+    def _looks_like_variable(symbol: str) -> bool:
+        return bool(symbol) and symbol[0].isupper()
 
     def _context_clause(
         self,

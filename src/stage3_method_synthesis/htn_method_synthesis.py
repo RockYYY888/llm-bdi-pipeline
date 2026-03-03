@@ -720,6 +720,8 @@ class HTNMethodSynthesizer:
 						f"'{method.method_name}'. Known tasks: {sorted(all_tasks)}",
 					)
 
+			self._validate_method_variable_binding(method)
+
 	def _build_synthesis_error(
 		self,
 		metadata: Dict[str, Any],
@@ -773,6 +775,154 @@ class HTNMethodSynthesizer:
 	@staticmethod
 	def _sanitize_name(name: str) -> str:
 		return name.replace("-", "_")
+
+	def _validate_method_variable_binding(self, method: HTNMethod) -> None:
+		bound_variables = set(method.parameters)
+		ordered_steps = self._ordered_method_steps(method)
+		bound_variables = self._extend_bound_variables_from_literals(
+			bound_variables,
+			method.context,
+		)
+		self._ensure_literals_are_bound(
+			method,
+			method.context,
+			bound_variables,
+			"context",
+		)
+
+		for step in ordered_steps:
+			bound_variables = self._extend_bound_variables_from_literals(
+				bound_variables,
+				step.preconditions,
+			)
+			for arg in step.args:
+				if self._is_unbound_variable(arg, bound_variables):
+					raise ValueError(
+						f"Method '{method.method_name}' uses unbound variable '{arg}' in "
+						f"subtask '{step.step_id}'. Every variable must be introduced by "
+						"the method parameters or constrained in method.context.",
+					)
+
+			for literal in (step.literal, *step.preconditions, *step.effects):
+				if literal is None:
+					continue
+				self._ensure_literals_are_bound(
+					method,
+					(literal,),
+					bound_variables,
+					f"subtask '{step.step_id}'",
+				)
+
+	def _ordered_method_steps(self, method: HTNMethod) -> List[HTNMethodStep]:
+		if len(method.subtasks) <= 1 or not method.ordering:
+			return list(method.subtasks)
+
+		step_lookup = {
+			step.step_id: step
+			for step in method.subtasks
+		}
+		dependents: Dict[str, List[str]] = {
+			step.step_id: []
+			for step in method.subtasks
+		}
+		in_degree: Dict[str, int] = {
+			step.step_id: 0
+			for step in method.subtasks
+		}
+
+		for before, after in method.ordering:
+			if before not in step_lookup or after not in step_lookup:
+				return list(method.subtasks)
+			dependents[before].append(after)
+			in_degree[after] += 1
+
+		ordered_steps: List[HTNMethodStep] = []
+		ready = [
+			step.step_id
+			for step in method.subtasks
+			if in_degree[step.step_id] == 0
+		]
+
+		while ready:
+			current_id = ready.pop(0)
+			ordered_steps.append(step_lookup[current_id])
+			for next_id in dependents[current_id]:
+				in_degree[next_id] -= 1
+				if in_degree[next_id] == 0:
+					ready.append(next_id)
+
+		if len(ordered_steps) != len(method.subtasks):
+			return list(method.subtasks)
+
+		return ordered_steps
+
+	def _extend_bound_variables_from_literals(
+		self,
+		bound_variables: set[str],
+		literals: Tuple[HTNLiteral, ...],
+	) -> set[str]:
+		known_variables = set(bound_variables)
+		changed = True
+
+		while changed:
+			changed = False
+			for literal in literals:
+				literal_variables = [
+					arg
+					for arg in self._literal_variables(literal)
+					if self._looks_like_variable(arg)
+				]
+				if not literal_variables:
+					continue
+				has_anchor = any(
+					(not self._looks_like_variable(arg)) or arg in known_variables
+					for arg in literal.args
+				)
+				if not has_anchor:
+					continue
+				new_variables = [
+					arg
+					for arg in literal_variables
+					if arg not in known_variables
+				]
+				if not new_variables:
+					continue
+				known_variables.update(new_variables)
+				changed = True
+
+		return known_variables
+
+	def _ensure_literals_are_bound(
+		self,
+		method: HTNMethod,
+		literals: Tuple[HTNLiteral, ...],
+		bound_variables: set[str],
+		location: str,
+	) -> None:
+		for literal in literals:
+			for arg in self._literal_variables(literal):
+				if self._is_unbound_variable(arg, bound_variables):
+					raise ValueError(
+						f"Method '{method.method_name}' uses unbound variable '{arg}' in "
+						f"{location}. Every variable must be introduced by the method "
+						"parameters or explicitly constrained by context/preconditions.",
+					)
+
+	@staticmethod
+	def _literal_variables(literal: HTNLiteral) -> Tuple[str, ...]:
+		return tuple(literal.args)
+
+	@staticmethod
+	def _is_unbound_variable(symbol: str, bound_variables: set[str]) -> bool:
+		return (
+			bool(symbol)
+			and symbol not in bound_variables
+			and HTNMethodSynthesizer._looks_like_variable(symbol)
+		)
+
+	@staticmethod
+	def _looks_like_variable(symbol: str) -> bool:
+		return bool(symbol) and symbol[0].isupper()
 
 	@classmethod
 	def _is_legacy_task_name(cls, task_name: str) -> bool:

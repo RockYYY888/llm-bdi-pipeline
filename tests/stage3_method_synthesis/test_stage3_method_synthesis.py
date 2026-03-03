@@ -255,6 +255,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Do an internal two-pass review before returning" in system_prompt
 	assert "Do not overfit to one witness plan or one canonical initial state." in system_prompt
 	assert "Do not rely on later stages to invent missing helper-task branches." in system_prompt
+	assert "Never introduce free variables in subtasks." in system_prompt
 
 	assert "REQUIRED target_task_bindings ENTRIES:" in user_prompt
 	assert '{"target_literal": "on(a, b)", "task_name": "<semantic_task_name>"}' in user_prompt
@@ -266,6 +267,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you." in user_prompt
 	assert "For every helper task that denotes a reusable stateful intention" in user_prompt
 	assert "Think twice before returning: first verify the JSON shape, then verify task coverage." in user_prompt
+	assert "Do not invent free variables such as TOP, SUPPORT, X, or Y" in user_prompt
+	assert "Did you avoid every unbound free variable in subtasks" in user_prompt
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
@@ -441,6 +444,135 @@ def test_negative_target_requires_constructive_method():
 
 	with pytest.raises(ValueError, match="has no constructive non-zero-subtask method"):
 		synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_rejects_unbound_free_variables_in_subtasks():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+			HTNTask("hold_block", ("B",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_clear_top_recursive",
+				task_name="clear_top",
+				parameters=("B",),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="hold_block",
+						args=("TOP",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="put_down",
+						args=("TOP",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="uses unbound variable 'TOP'"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_allows_local_variables_when_bound_in_context():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+			HTNTask("hold_block", ("B",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_clear_top_recursive",
+				task_name="clear_top",
+				parameters=("B",),
+				context=(
+					HTNLiteral("on", ("TOP", "B"), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="hold_block",
+						args=("TOP",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="put_down",
+						args=("TOP",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_allows_local_variables_when_bound_in_preconditions():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("hold_block", ("B",), False, ("holding",)),
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_hold_block_from_block",
+				task_name="hold_block",
+				parameters=("B",),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="clear_top",
+						args=("B",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up",
+						args=("B", "SUPPORT"),
+						kind="primitive",
+						action_name="pick-up",
+						preconditions=(
+							HTNLiteral("on", ("B", "SUPPORT"), True, None),
+						),
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)
 
 
 def test_primitive_alias_cannot_use_non_primitive_subtask_kind():

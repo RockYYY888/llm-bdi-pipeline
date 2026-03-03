@@ -178,3 +178,51 @@ def test_renderer_accepts_zero_step_wrappers_when_stage4_returns_no_witness_step
 
 	assert "/* HTN Method Plans */" in code
 	assert "+!dfa_step_q2_q2_not_on_a_b : dfa_state(q2) <-" in code
+
+
+def test_renderer_hoists_binding_preconditions_into_method_context():
+	renderer = AgentSpeakRenderer()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("hold_block", ("B",), False, ("holding",)),
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_hold_block_from_block",
+				task_name="hold_block",
+				parameters=("B",),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="clear_top",
+						args=("B",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up",
+						args=("B", "SUPPORT"),
+						kind="primitive",
+						action_name="pick-up",
+						preconditions=(
+							HTNLiteral("on", ("B", "SUPPORT"), True, None),
+						),
+					),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+	)
+
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a", "b"),
+		method_library=method_library,
+		plan_records=[],
+	)
+
+	assert "+!hold_block(B) : on(B, SUPPORT) <-" in code
+	assert "\t!pick_up(B, SUPPORT)." in code

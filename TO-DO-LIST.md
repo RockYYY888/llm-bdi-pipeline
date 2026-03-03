@@ -18,3 +18,4 @@
 - [x] Milestone 7: Stage 3 validator tightening and no-silent-sanitisation
 - [x] Milestone 8: Semantic task naming, query_i live harness, and negative-goal validation fixes
 - [x] Milestone 9: DFA progress-edge wrappers and Stage 5 HTN method-library rendering
+- [x] Milestone 10: Free-variable binding validation and context hoisting for Stage 5 methods

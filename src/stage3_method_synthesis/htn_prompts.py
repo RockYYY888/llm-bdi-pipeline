@@ -85,6 +85,10 @@ def build_htn_system_prompt() -> str:
         "- For a single-step method, ordering may be [].\n"
         "- For zero-subtask methods, ordering must be [].\n"
         "- Every step args list must use only parameters already introduced by the method.\n"
+        "- Never introduce free variables in subtasks. Every upper-case placeholder used in "
+        "subtask args, subtask literals, preconditions, or effects must already appear in the "
+        "method parameters or be explicitly constrained in method.context or in a binding "
+        "subtask.preconditions literal.\n"
     )
 
 
@@ -246,6 +250,12 @@ Valid method fragments:
         "- For zero-subtask methods, prefer a strategy suffix of noop or already_<state>.\n"
         "- Do not use any other method naming pattern.\n"
         "- Use parameter names already introduced by the task or method.\n"
+        "- Do not invent free variables such as TOP, SUPPORT, X, or Y unless they are already "
+        "task parameters or are explicitly constrained in method.context or by a binding "
+        "subtask.preconditions literal.\n"
+        "- If a helper method needs a local helper variable, bind it in method.context first "
+        "or by an explicit binding precondition (for example a predicate relating that variable "
+        "to an existing task parameter) before reusing it in subtasks.\n"
         "- For a zero-subtask method, use a non-empty context, an empty subtasks list, and an empty ordering list.\n"
         "- For a non-zero-subtask method, put method-wide decomposition checks in context; "
         "put step-local checks in subtask.preconditions.\n"
@@ -273,4 +283,6 @@ Valid method fragments:
         "zero-subtask method with a non-empty context?\n"
         "13. For every helper task with multiple common runtime modes, did you include the distinct relevant methods?\n"
         "14. Did you avoid overfitting to one canonical initial state or one witness plan?\n"
+        "15. Did you avoid every unbound free variable in subtasks by binding it in the task "
+        "parameters or method.context first?\n"
     )
