@@ -1,12 +1,5 @@
 """
-LTL-BDI Pipeline: DFA-AgentSpeak Generation
-
-Implements the 3-stage architecture:
-    Stage 1: NL -> LTLf Goals
-    Stage 2: LTLf -> DFA Conversion
-    Stage 3: LTLf -> AgentSpeak Code Generation
-
-Note: FOND Planning (Branch B) has been moved to legacy/fond/
+LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN-specialised AgentSpeak.
 """
 
 from pathlib import Path
@@ -15,7 +8,7 @@ from typing import Dict, Any
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.dfa_builder import DFABuilder
-from stage3_code_generation.backward_planner_generator import BackwardPlannerGenerator
+from stage3_code_generation.htn_planner_generator import HTNPlannerGenerator
 from utils.pipeline_logger import PipelineLogger
 
 
@@ -25,10 +18,7 @@ class LTL_BDI_Pipeline:
 
     Stage 1: Natural Language -> LTLf Specification
     Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
-    Stage 3: DFA -> AgentSpeak Code Generation (Backward Planning)
-
-    Legacy Note: FOND Planning (Branch B) has been deprecated and moved to src/legacy/fond/
-    The pipeline now focuses exclusively on DFA-AgentSpeak generation using backward planning.
+    Stage 3: DFA -> AgentSpeak Code Generation (HTN planning + specialisation)
     """
 
     def __init__(self, domain_file: str = None):
@@ -108,8 +98,8 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
 
-        # Stage 3: DFA -> AgentSpeak Code (Backward Planning)
-        asl_code, stage3_stats = self._stage3_backward_planning_generation(ltl_spec, dfa_result)
+        # Stage 3: DFA -> AgentSpeak Code (HTN)
+        asl_code, stage3_stats = self._stage3_htn_generation(ltl_spec, dfa_result)
         if not asl_code:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -138,6 +128,7 @@ class LTL_BDI_Pipeline:
         generator = NLToLTLfGenerator(
             api_key=self.config.openai_api_key,
             model=self.config.openai_model,
+            base_url=self.config.openai_base_url,
             domain_file=self.domain_file  # Pass domain file for dynamic prompt
         )
 
@@ -211,17 +202,24 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None
 
-    def _stage3_backward_planning_generation(self, ltl_spec, dfa_result):
-        """Stage 3: DFA -> Backward Planning AgentSpeak Generation (Non-LLM)"""
-        print("\n[STAGE 3] Backward Planning AgentSpeak Generation")
+    def _stage3_htn_generation(self, ltl_spec, dfa_result):
+        """Stage 3: DFA -> HTN-specialised AgentSpeak generation."""
+        print("\n[STAGE 3] HTN Method Synthesis + Planning + Specialisation")
         print("-"*80)
 
         try:
             # Create grounding map from ltl_spec
             grounding_map = ltl_spec.grounding_map
 
-            # Initialize backward planner generator
-            generator = BackwardPlannerGenerator(self.domain, grounding_map)
+            # Initialize HTN planner generator
+            generator = HTNPlannerGenerator(
+                self.domain,
+                grounding_map,
+                api_key=self.config.openai_api_key,
+                model=self.config.openai_model,
+                base_url=self.config.openai_base_url,
+                timeout=float(self.config.openai_timeout),
+            )
 
             # Convert ltl_spec to dict format for generator
             ltl_dict = {
@@ -233,39 +231,39 @@ class LTL_BDI_Pipeline:
             # Generate AgentSpeak code
             import time
             start_time = time.time()
-            asl_code, truncated = generator.generate(ltl_dict, dfa_result)
+            asl_code, artifacts = generator.generate(ltl_dict, dfa_result)
             elapsed = time.time() - start_time
 
-            # Extract statistics from generator output (printed during generation)
-            # Note: BackwardPlannerGenerator prints statistics but doesn't return them yet
-            # We'll capture what we can from the generation process
+            summary = artifacts["summary"]
             stage3_stats = {
-                "method": "backward_planning",
+                "method": "htn",
                 "code_size_chars": len(asl_code),
-                "truncated": truncated,
+                "used_llm": artifacts["llm"]["used"],
+                "compound_tasks": summary["compound_tasks"],
+                "methods": summary["methods"],
+                "transition_count": summary["transition_count"],
                 "generation_time_seconds": elapsed
             }
 
-            # Log Stage 3 success with backward planning statistics
+            # Log Stage 3 success with HTN metadata
             self.logger.log_stage3(
                 ltl_spec,
                 dfa_result,
                 asl_code,
                 "Success",
-                method="backward_planning",
-                states_explored=0,  # TODO: Extract from generator
-                transitions_generated=0,  # TODO: Extract from generator
-                goal_plans_count=0,  # TODO: Extract from generator
-                action_plans_count=0,  # TODO: Extract from generator
-                cache_hits=0,  # TODO: Extract from generator
-                cache_misses=0,  # TODO: Extract from generator
-                ground_actions_cached=0,  # TODO: Extract from generator
-                redundancy_eliminated_pct=0.0  # TODO: Extract from generator
+                method="htn",
+                model=artifacts["llm"]["model"] if artifacts["llm"]["used"] else None,
+                llm_prompt=artifacts["llm"]["prompt"] if artifacts["llm"]["used"] else None,
+                llm_response=artifacts["llm"]["response"] if artifacts["llm"]["used"] else None,
+                metadata=summary,
             )
 
             print(f"\n✓ AgentSpeak Code Generated ({len(asl_code)} characters in {elapsed:.2f}s)")
-            print(f"  Method: Backward Planning (non-LLM)")
-            print(f"  Truncated: {truncated}")
+            print("  Method: HTN method synthesis + specialisation")
+            print(f"  Used LLM for Stage 3A: {artifacts['llm']['used']}")
+            print(f"  Compound tasks: {summary['compound_tasks']}")
+            print(f"  Methods: {summary['methods']}")
+            print(f"  Transition plans: {summary['transition_count']}")
             print("\n  First 10 lines of generated code:")
             for i, line in enumerate(asl_code.split('\n')[:10], 1):
                 if line.strip():
@@ -275,6 +273,15 @@ class LTL_BDI_Pipeline:
             output_file = self.output_dir / "agentspeak_generated.asl"
             output_file.write_text(asl_code)
             print(f"\n  ✓ Complete AgentSpeak code saved to: {output_file}")
+
+            import json
+            method_library_file = self.output_dir / "htn_method_library.json"
+            method_library_file.write_text(json.dumps(artifacts["method_library"], indent=2))
+            print(f"  ✓ HTN method library saved to: {method_library_file}")
+
+            transitions_file = self.output_dir / "htn_transitions.json"
+            transitions_file.write_text(json.dumps(artifacts["transitions"], indent=2))
+            print(f"  ✓ HTN decomposition traces saved to: {transitions_file}")
 
             return asl_code, stage3_stats
 
@@ -286,7 +293,7 @@ class LTL_BDI_Pipeline:
                 None,
                 "Failed",
                 error=str(e),
-                method="backward_planning"
+                method="htn"
             )
             print(f"✗ Stage 3 Failed: {e}")
             import traceback

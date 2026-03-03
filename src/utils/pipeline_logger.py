@@ -1,14 +1,5 @@
 """
-Pipeline Logger
-
-Records the complete execution trace of the LTLf-BDI pipeline:
-- Natural language input
-- LTLf specification generated
-- DFA conversion (optional)
-- AgentSpeak code generation
-- Any errors encountered
-
-Each run is saved with a timestamp for easy tracking.
+Pipeline logger for the LTLf -> DFA -> HTN AgentSpeak pipeline.
 """
 
 import json
@@ -54,8 +45,8 @@ class PipelineRecord:
     stage3_llm_prompt: Optional[Dict[str, str]] = None
     stage3_llm_response: Optional[str] = None
 
-    # Stage 3: Backward Planning Statistics (non-LLM method)
-    stage3_method: str = "llm"  # "llm" or "backward_planning"
+    # Stage 3 metadata
+    stage3_method: str = "htn"
     stage3_states_explored: int = 0
     stage3_transitions_generated: int = 0
     stage3_goal_plans_count: int = 0
@@ -65,6 +56,7 @@ class PipelineRecord:
     stage3_ground_actions_cached: int = 0
     stage3_code_size_chars: int = 0
     stage3_redundancy_eliminated_pct: float = 0.0
+    stage3_metadata: Optional[Dict[str, Any]] = None
 
     # Metadata
     domain_file: str = "domains/blocksworld/domain.pddl"
@@ -218,10 +210,11 @@ class PipelineLogger:
                    error: str = None, model: str = None, llm_prompt: Dict[str, str] = None,
                    llm_response: str = None,
                    # Backward planning statistics
-                   method: str = "llm", states_explored: int = 0, transitions_generated: int = 0,
+                   method: str = "htn", states_explored: int = 0, transitions_generated: int = 0,
                    goal_plans_count: int = 0, action_plans_count: int = 0,
                    cache_hits: int = 0, cache_misses: int = 0, ground_actions_cached: int = 0,
-                   redundancy_eliminated_pct: float = 0.0):
+                   redundancy_eliminated_pct: float = 0.0,
+                   metadata: Optional[Dict[str, Any]] = None):
         """
         Log Stage 3: DFA -> AgentSpeak Code Generation
 
@@ -234,8 +227,8 @@ class PipelineLogger:
             model: LLM model name (if using LLM method)
             llm_prompt: LLM prompt dict (if using LLM method)
             llm_response: LLM response text (if using LLM method)
-            method: "llm" or "backward_planning"
-            states_explored: Number of states explored (backward planning)
+            method: Generation method, e.g. "htn"
+            states_explored: Legacy field kept for compatibility
             transitions_generated: Number of transitions generated
             goal_plans_count: Number of goal achievement plans generated
             action_plans_count: Number of action plans generated
@@ -243,12 +236,14 @@ class PipelineLogger:
             cache_misses: Number of goal exploration cache misses
             ground_actions_cached: Number of ground actions cached
             redundancy_eliminated_pct: Percentage of redundancy eliminated
+            metadata: Additional Stage 3 metadata
         """
         if not self.current_record:
             return
 
         # Set generation method
         self.current_record.stage3_method = method
+        self.current_record.stage3_metadata = metadata
 
         # ALWAYS log model and prompt if provided (regardless of success/failure)
         if model:
@@ -487,8 +482,10 @@ class PipelineLogger:
 
             if record.get('stage3_used_llm'):
                 f.write(f"Generator: LLM ({record.get('stage3_model', 'N/A')})\n")
+            elif record.get('stage3_method') == 'htn':
+                f.write("Generator: HTN method synthesis + specialisation\n")
             elif record.get('stage3_method') == 'backward_planning':
-                f.write("Generator: Backward Planning (non-LLM)\n")
+                f.write("Generator: Backward Planning (legacy)\n")
 
             # LLM Prompt/Response for Stage 3
             if record.get('stage3_used_llm') and record.get('stage3_llm_prompt'):
@@ -530,6 +527,16 @@ class PipelineLogger:
                 f.write(f"  Code Redundancy Eliminated: {record.get('stage3_redundancy_eliminated_pct', 0):.1f}%\n")
                 f.write(f"\nCode Size: {record.get('stage3_code_size_chars', 0):,} characters\n")
                 f.write("\n")
+
+            if record.get('stage3_method') == 'htn' and record.get('stage3_status') == 'success':
+                metadata = record.get('stage3_metadata') or {}
+                if metadata:
+                    f.write("\n" + "~"*40 + "\n")
+                    f.write("HTN GENERATION SUMMARY\n")
+                    f.write("~"*40 + "\n")
+                    for key, value in metadata.items():
+                        f.write(f"{key}: {value}\n")
+                    f.write("\n")
 
             if record.get('stage3_status') == 'success' and record.get('stage3_agentspeak'):
                 f.write("\n" + "~"*40 + "\n")

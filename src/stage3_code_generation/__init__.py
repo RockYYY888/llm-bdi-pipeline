@@ -1,17 +1,7 @@
 """
-Stage 3: AgentSpeak Code Generation from DFA Decomposition
-
-This module provides both LLM-based and backward planning-based
-AgentSpeak code generation from DFA transitions.
+Stage 3 exports for HTN-based AgentSpeak generation.
 """
 
-# Legacy LLM-based generator (requires openai)
-# from .agentspeak_generator import AgentSpeakGenerator
+from .htn_planner_generator import HTNPlannerGenerator
 
-# New backward planning-based generator (no LLM required)
-# from .backward_planner_generator import BackwardPlannerGenerator
-
-__all__ = [
-    # 'AgentSpeakGenerator',
-    # 'BackwardPlannerGenerator'
-]
+__all__ = ["HTNPlannerGenerator"]
