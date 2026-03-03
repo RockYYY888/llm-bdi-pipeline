@@ -71,7 +71,7 @@ The only actively maintained planning domain in this repository is **blocksworld
 │   ├── stage2_dfa_generation/
 │   ├── stage3_code_generation/
 │   │   └── test_stage3_htn.py
-│   └── test_pipeline_stage3_htn.py
+│   └── test_pipeline.py
 └── TO-DO-LIST.md
 ```
 
@@ -99,13 +99,13 @@ Run the focused HTN Stage 3 tests:
 
 ```bash
 ./.venv/bin/pytest -q tests/stage3_code_generation/test_stage3_htn.py
-./.venv/bin/pytest -q tests/test_pipeline_stage3_htn.py
+./.venv/bin/pytest -q tests/test_pipeline.py
 ```
 
 The canonical example acceptance test is:
 
 ```bash
-./.venv/bin/pytest -q tests/test_pipeline_stage3_htn.py
+./.venv/bin/pytest -q tests/test_pipeline.py
 ```
 
 It runs a fixed blocksworld example through `pipeline.execute()` and checks that the logger
@@ -137,4 +137,4 @@ The active benchmark surface is:
 - the blocksworld PDDL domain in `src/domains/blocksworld/`
 - the Stage 2 formula regression cases in `tests/stage2_dfa_generation/test_ltlf2dfa.py`
 - the Stage 3 HTN regression cases in `tests/stage3_code_generation/test_stage3_htn.py`
-- the pipeline-level Stage 3 integration check in `tests/test_pipeline_stage3_htn.py`
+- the pipeline-level integration check in `tests/test_pipeline.py`
