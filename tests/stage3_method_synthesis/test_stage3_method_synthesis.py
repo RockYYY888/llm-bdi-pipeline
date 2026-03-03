@@ -1170,3 +1170,77 @@ def test_method_validation_accepts_supported_equality_constraints():
 	)
 
 	synthesizer._validate_library(library, domain)
+
+
+def test_parse_llm_library_rejects_truncated_json_with_clear_error():
+	synthesizer = HTNMethodSynthesizer()
+
+	with pytest.raises(ValueError, match="appears truncated"):
+		synthesizer._parse_llm_library(
+			'{"target_task_bindings": [], "compound_tasks": [',
+		)
+
+
+def test_negative_target_binding_accepts_helper_mediated_removal():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("remove_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
+			HTNTask("hold_block", ("BLOCK",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_remove_on_noop",
+				task_name="remove_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("on", ("BLOCK1", "BLOCK2"), False, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_remove_on_from_block",
+				task_name="remove_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="hold_block",
+						args=("BLOCK1",),
+						kind="compound",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_block",
+				task_name="hold_block",
+				parameters=("BLOCK", "SUPPORT"),
+				context=(
+					HTNLiteral("on", ("BLOCK", "SUPPORT"), True, None),
+					HTNLiteral("clear", ("BLOCK",), True, None),
+					HTNLiteral("handempty", (), True, None),
+					HTNLiteral("=", ("BLOCK", "SUPPORT"), False, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up",
+						args=("BLOCK", "SUPPORT"),
+						kind="primitive",
+						action_name="pick-up",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), False, "on_a_b")],
+		target_task_bindings=[HTNTargetTaskBinding("!on(a, b)", "remove_on")],
+	)
+
+	synthesizer._validate_library(library, domain)

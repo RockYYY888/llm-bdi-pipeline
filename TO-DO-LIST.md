@@ -28,3 +28,5 @@
   and full live revalidation for query_1 through query_6
 - [x] Milestone 14: Root-method validation wrapper fix, equality/disequality preservation,
   and full live revalidation for query_1 through query_6
+- [x] Milestone 15: Validation-task closure from target bindings, generic Stage 4 builder defaults,
+  and Stage 3 truncation-safe live synthesis

@@ -84,8 +84,13 @@ def test_panda_planner_resolves_relative_workspace_to_absolute_path():
 	assert planner.workspace.is_absolute()
 
 
-def test_panda_problem_export_builds_canonical_blocksworld_init():
-	builder = PANDAProblemBuilder()
+def test_panda_problem_export_uses_explicit_blocksworld_style_defaults_when_requested():
+	builder = PANDAProblemBuilder(
+		config=PANDAProblemBuilderConfig(
+			global_initial_predicates=("handempty",),
+			per_object_initial_predicates=("ontable", "clear"),
+		),
+	)
 	problem_hddl = builder.build_problem_hddl(
 		domain=_domain(),
 		domain_name="blocksworld_transition_1",
@@ -100,6 +105,21 @@ def test_panda_problem_export_builds_canonical_blocksworld_init():
 	assert "(ontable a)" in problem_hddl
 	assert "(clear b)" in problem_hddl
 	assert "(t1 (place_on a b))" in problem_hddl
+
+
+def test_panda_problem_export_is_generic_by_default_without_domain_specific_facts():
+	builder = PANDAProblemBuilder()
+	problem_hddl = builder.build_problem_hddl(
+		domain=_domain(),
+		domain_name="blocksworld_transition_1",
+		objects=("a", "b"),
+		task_name="place_on",
+		task_args=("a", "b"),
+	)
+
+	assert "(handempty)" not in problem_hddl
+	assert "(ontable a)" not in problem_hddl
+	assert "(clear b)" not in problem_hddl
 
 
 def test_panda_problem_builder_accepts_explicit_initial_fact_configuration():

@@ -56,11 +56,13 @@ class HTNMethodSynthesizer:
 		model: Optional[str] = None,
 		base_url: Optional[str] = None,
 		timeout: float = 60.0,
+		max_tokens: int = 8192,
 	) -> None:
 		self.api_key = api_key
 		self.model = model or "deepseek-chat"
 		self.base_url = base_url
 		self.timeout = timeout
+		self.max_tokens = max_tokens
 		self.parser = HDDLConditionParser()
 		self.client = None
 
@@ -95,6 +97,7 @@ class HTNMethodSynthesizer:
 			"failure_reason": None,
 			"llm_prompt": None,
 			"llm_response": None,
+			"llm_finish_reason": None,
 			"pruned_constructive_siblings": 0,
 			"generated_target_guard_methods": 0,
 		}
@@ -120,7 +123,7 @@ class HTNMethodSynthesizer:
 		metadata["llm_prompt"] = prompt
 
 		try:
-			response_text = self._call_llm(prompt)
+			response_text, finish_reason = self._call_llm(prompt)
 		except Exception as exc:
 			raise self._build_synthesis_error(
 				metadata,
@@ -129,6 +132,7 @@ class HTNMethodSynthesizer:
 			) from exc
 
 		metadata["llm_response"] = response_text
+		metadata["llm_finish_reason"] = finish_reason
 
 		try:
 			llm_library = self._normalise_llm_library(
@@ -440,7 +444,7 @@ class HTNMethodSynthesizer:
 			for action in actions
 		]
 
-	def _call_llm(self, prompt: Dict[str, str]) -> str:
+	def _call_llm(self, prompt: Dict[str, str]) -> Tuple[str, Optional[str]]:
 		response = self.client.chat.completions.create(
 			model=self.model,
 			messages=[
@@ -448,16 +452,42 @@ class HTNMethodSynthesizer:
 				{"role": "user", "content": prompt["user"]},
 			],
 			temperature=0.0,
+			max_tokens=self.max_tokens,
 			timeout=self.timeout,
 		)
-		return response.choices[0].message.content.strip()
+		choice = response.choices[0]
+		finish_reason = getattr(choice, "finish_reason", None)
+		content = (choice.message.content or "").strip()
+		if finish_reason == "length":
+			raise ValueError(
+				"LLM response was truncated before completion (finish_reason=length). "
+				"The HTN library was not fully returned.",
+			)
+		return content, finish_reason
 
 	def _parse_llm_library(self, response_text: str) -> HTNMethodLibrary:
 		clean_text = self._strip_code_fences(response_text)
+		if self._appears_truncated_json(clean_text):
+			raise ValueError(
+				"LLM response appears truncated before the JSON object closed. "
+				"The HTN library was cut off mid-response.",
+			)
 		payload = json.loads(clean_text)
 		if not isinstance(payload, dict):
 			raise ValueError("HTN synthesis response must be a JSON object")
 		return HTNMethodLibrary.from_dict(payload)
+
+	@staticmethod
+	def _appears_truncated_json(text: str) -> bool:
+		open_curly = text.count("{")
+		close_curly = text.count("}")
+		open_square = text.count("[")
+		close_square = text.count("]")
+		if open_curly > close_curly:
+			return True
+		if open_square > close_square:
+			return True
+		return False
 
 	def _normalise_llm_library(
 		self,
@@ -1075,6 +1105,7 @@ class HTNMethodSynthesizer:
 				self._method_constructively_supports_literal(
 					method,
 					expected_literal,
+					methods_by_task,
 					task_lookup,
 					action_schemas,
 					predicate_arities,
@@ -1403,11 +1434,21 @@ class HTNMethodSynthesizer:
 		self,
 		method: HTNMethod,
 		expected_literal: HTNLiteral,
+		methods_by_task: Dict[str, List[HTNMethod]],
 		task_lookup: Dict[str, HTNTask],
 		action_schemas: Dict[str, Any],
 		predicate_arities: Dict[str, int],
+		parameter_bindings: Optional[Dict[str, str]] = None,
+		visiting: Optional[set[Tuple[str, str]]] = None,
 	) -> bool:
 		expected_signature = expected_literal.to_signature()
+		parameter_bindings = dict(parameter_bindings or {})
+		visiting = set() if visiting is None else visiting
+		visit_key = (method.method_name, expected_signature)
+		if visit_key in visiting:
+			return False
+		visiting.add(visit_key)
+
 		for step in method.subtasks:
 			candidate_literals: List[HTNLiteral] = []
 			if step.literal is not None:
@@ -1421,10 +1462,44 @@ class HTNMethodSynthesizer:
 				),
 			)
 			if any(
-				literal.to_signature() == expected_signature
+				self._literal_matches_expected_signature(
+					literal,
+					expected_literal,
+					parameter_bindings,
+				)
 				for literal in candidate_literals
 			):
+				visiting.remove(visit_key)
 				return True
+
+			if step.kind == "compound":
+				child_task = task_lookup.get(step.task_name)
+				rebound_step_args = tuple(
+					parameter_bindings.get(arg, arg)
+					for arg in step.args
+				)
+				child_bindings = {
+					parameter: arg
+					for parameter, arg in zip(
+						child_task.parameters if child_task is not None else (),
+						rebound_step_args,
+					)
+				}
+				for child_method in methods_by_task.get(step.task_name, []):
+					if self._method_constructively_supports_literal(
+						child_method,
+						expected_literal,
+						methods_by_task,
+						task_lookup,
+						action_schemas,
+						predicate_arities,
+						parameter_bindings=child_bindings,
+						visiting=visiting,
+					):
+						visiting.remove(visit_key)
+						return True
+
+		visiting.remove(visit_key)
 		return False
 
 	def _promoted_method_context(
@@ -1547,6 +1622,36 @@ class HTNMethodSynthesizer:
 	@staticmethod
 	def _literal_signature(literal: HTNLiteral) -> str:
 		return literal.to_signature()
+
+	@classmethod
+	def _literal_matches_expected_signature(
+		cls,
+		candidate: HTNLiteral,
+		expected: HTNLiteral,
+		parameter_bindings: Dict[str, str],
+	) -> bool:
+		if candidate.predicate != expected.predicate:
+			return False
+		if candidate.is_positive != expected.is_positive:
+			return False
+		if len(candidate.args) != len(expected.args):
+			return False
+
+		local_bindings: Dict[str, str] = {}
+		for raw_candidate_arg, expected_arg in zip(candidate.args, expected.args):
+			candidate_arg = parameter_bindings.get(raw_candidate_arg, raw_candidate_arg)
+			if cls._looks_like_variable(candidate_arg):
+				bound_value = local_bindings.get(candidate_arg)
+				if bound_value is None:
+					local_bindings[candidate_arg] = expected_arg
+					continue
+				if bound_value != expected_arg:
+					return False
+				continue
+			if candidate_arg != expected_arg:
+				return False
+
+		return True
 
 	@staticmethod
 	def _validate_literal_shape(

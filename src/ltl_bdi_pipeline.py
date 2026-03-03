@@ -528,9 +528,13 @@ class LTL_BDI_Pipeline:
     @staticmethod
     def _query_relevant_task_names(method_library, plan_records):
         task_names = {
+            binding.task_name
+            for binding in method_library.target_task_bindings
+        }
+        task_names.update({
             record["plan"].task_name
             for record in plan_records
-        }
+        })
         queue = list(task_names)
 
         while queue:

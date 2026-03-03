@@ -17,8 +17,8 @@ class PANDAProblemBuilderConfig:
 
 	object_type: Optional[str] = None
 	initial_facts: Optional[Tuple[str, ...]] = None
-	global_initial_predicates: Tuple[str, ...] = ("handempty",)
-	per_object_initial_predicates: Tuple[str, ...] = ("ontable", "clear")
+	global_initial_predicates: Tuple[str, ...] = ()
+	per_object_initial_predicates: Tuple[str, ...] = ()
 
 
 @dataclass

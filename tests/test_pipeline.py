@@ -26,6 +26,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethod,
 	HTNMethodLibrary,
 	HTNMethodStep,
+	HTNTargetTaskBinding,
 	HTNTask,
 )
 from stage4_panda_planning.panda_planner import PANDAPlanner
@@ -234,6 +235,46 @@ def _binding_semantic_messages(stage3_library: Dict[str, Any]) -> List[str]:
 			)
 
 	return messages
+
+
+def test_query_relevant_task_names_starts_from_target_bindings_not_only_witnesses():
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("top_goal", ("BLOCK",), False, ("clear",)),
+			HTNTask("hidden_helper", ("BLOCK",), False, ("holding",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_top_goal_use_helper",
+				task_name="top_goal",
+				parameters=("BLOCK",),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="hidden_helper",
+						args=("BLOCK",),
+						kind="compound",
+					),
+				),
+			),
+			HTNMethod(
+				method_name="m_hidden_helper_noop",
+				task_name="hidden_helper",
+				parameters=("BLOCK",),
+				context=(HTNLiteral("holding", ("BLOCK",), True, None),),
+			),
+		],
+		target_literals=[HTNLiteral("clear", ("a",), True, "clear_a")],
+		target_task_bindings=[
+			HTNTargetTaskBinding("clear(a)", "top_goal"),
+		],
+	)
+	plan_records = []
+
+	relevant = LTL_BDI_Pipeline._query_relevant_task_names(method_library, plan_records)
+
+	assert relevant == ["hidden_helper", "top_goal"]
 
 
 def _run_query_case(query_id: str) -> Dict[str, Any]:
