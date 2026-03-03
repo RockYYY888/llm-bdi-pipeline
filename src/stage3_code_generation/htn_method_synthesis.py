@@ -27,6 +27,25 @@ from stage3_code_generation.htn_schema import (
 from stage3_code_generation.hddl_condition_parser import HDDLConditionParser
 
 
+class HTNSynthesisError(RuntimeError):
+    """Raised when Stage 3A cannot produce a valid HTN method library."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model: Optional[str],
+        llm_prompt: Optional[Dict[str, str]],
+        llm_response: Optional[str],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.model = model
+        self.llm_prompt = llm_prompt
+        self.llm_response = llm_response
+        self.metadata = dict(metadata or {})
+
+
 class HTNMethodSynthesizer:
     """Build an HTN method library for the current DFA targets."""
 
@@ -36,16 +55,15 @@ class HTNMethodSynthesizer:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 60.0,
-        client: Any = None,
     ) -> None:
         self.api_key = api_key
         self.model = model or "deepseek-chat"
         self.base_url = base_url
         self.timeout = timeout
         self.parser = HDDLConditionParser()
-        self.client = client
+        self.client = None
 
-        if self.client is None and api_key:
+        if api_key:
             from openai import OpenAI
 
             if base_url:
@@ -72,15 +90,20 @@ class HTNMethodSynthesizer:
             "compound_tasks": 0,
             "primitive_tasks": len(primitive_tasks),
             "methods": 0,
-            "fallback_reason": None,
+            "failure_stage": None,
+            "failure_reason": None,
             "llm_prompt": None,
             "llm_response": None,
         }
 
         if not self.client:
-            raise RuntimeError(
-                "LLM-only HTN synthesis requires a configured API client. "
-                "No deterministic baseline library is available."
+            raise self._build_synthesis_error(
+                metadata,
+                "preflight",
+                (
+                    "Stage 3A requires a configured OPENAI_API_KEY. "
+                    "HTN method synthesis only accepts live LLM output."
+                ),
             )
 
         prompt = {
@@ -93,18 +116,45 @@ class HTNMethodSynthesizer:
         }
         metadata["llm_prompt"] = prompt
 
-        response_text = self._call_llm(prompt)
-        llm_library = self._normalise_llm_library(self._parse_llm_library(response_text))
+        try:
+            response_text = self._call_llm(prompt)
+        except Exception as exc:
+            raise self._build_synthesis_error(
+                metadata,
+                "llm_call",
+                f"LLM request failed: {exc}",
+            ) from exc
+
+        metadata["llm_response"] = response_text
+
+        try:
+            llm_library = self._normalise_llm_library(
+                self._parse_llm_library(response_text),
+                domain,
+            )
+        except Exception as exc:
+            raise self._build_synthesis_error(
+                metadata,
+                "response_parse",
+                f"LLM response could not be parsed as a valid HTN library: {exc}",
+            ) from exc
+
         llm_only_library = HTNMethodLibrary(
             compound_tasks=list(llm_library.compound_tasks),
             primitive_tasks=primitive_tasks,
             methods=list(llm_library.methods),
             target_literals=list(target_literals),
         )
-        self._validate_library(llm_only_library, domain)
+        try:
+            self._validate_library(llm_only_library, domain)
+        except Exception as exc:
+            raise self._build_synthesis_error(
+                metadata,
+                "library_validation",
+                f"LLM HTN library failed validation: {exc}",
+            ) from exc
 
         metadata["used_llm"] = True
-        metadata["llm_response"] = response_text
         metadata["compound_tasks"] = len(llm_only_library.compound_tasks)
         metadata["primitive_tasks"] = len(llm_only_library.primitive_tasks)
         metadata["methods"] = len(llm_only_library.methods)
@@ -187,7 +237,12 @@ class HTNMethodSynthesizer:
             raise ValueError("HTN synthesis response must be a JSON object")
         return HTNMethodLibrary.from_dict(payload)
 
-    def _normalise_llm_library(self, library: HTNMethodLibrary) -> HTNMethodLibrary:
+    def _normalise_llm_library(
+        self,
+        library: HTNMethodLibrary,
+        domain: Any,
+    ) -> HTNMethodLibrary:
+        action_schemas = self._action_schema_map(domain)
         compound_tasks = [
             HTNTask(
                 name=self._sanitize_name(task.name),
@@ -200,25 +255,45 @@ class HTNMethodSynthesizer:
 
         methods = []
         for method in library.methods:
+            normalised_steps = []
+            for step in method.subtasks:
+                preconditions = step.preconditions
+                effects = step.effects
+
+                if step.kind == "primitive":
+                    action_schema = self._resolve_action_schema(step, action_schemas)
+                    if action_schema is not None:
+                        preconditions = self._materialise_action_literals(
+                            action_schema.preconditions,
+                            action_schema.parameters,
+                            step.args,
+                        )
+                        effects = self._materialise_action_literals(
+                            action_schema.effects,
+                            action_schema.parameters,
+                            step.args,
+                        )
+
+                normalised_steps.append(
+                    HTNMethodStep(
+                        step_id=step.step_id,
+                        task_name=self._sanitize_name(step.task_name),
+                        args=step.args,
+                        kind=step.kind,
+                        action_name=step.action_name,
+                        literal=step.literal,
+                        preconditions=preconditions,
+                        effects=effects,
+                    )
+                )
+
             methods.append(
                 HTNMethod(
                     method_name=self._sanitize_name(method.method_name),
                     task_name=self._sanitize_name(method.task_name),
                     parameters=method.parameters,
                     context=method.context,
-                    subtasks=tuple(
-                        HTNMethodStep(
-                            step_id=step.step_id,
-                            task_name=self._sanitize_name(step.task_name),
-                            args=step.args,
-                            kind=step.kind,
-                            action_name=step.action_name,
-                            literal=step.literal,
-                            preconditions=step.preconditions,
-                            effects=step.effects,
-                        )
-                        for step in method.subtasks
-                    ),
+                    subtasks=tuple(normalised_steps),
                     ordering=method.ordering,
                     origin=method.origin,
                 )
@@ -308,6 +383,56 @@ class HTNMethodSynthesizer:
                         f"Unknown subtask reference '{step.task_name}' in method '{method.method_name}'. "
                         f"Known tasks: {sorted(all_tasks)}"
                     )
+
+    def _build_synthesis_error(
+        self,
+        metadata: Dict[str, Any],
+        failure_stage: str,
+        failure_reason: str,
+    ) -> HTNSynthesisError:
+        error_metadata = dict(metadata)
+        error_metadata["failure_stage"] = failure_stage
+        error_metadata["failure_reason"] = failure_reason
+        return HTNSynthesisError(
+            f"HTN synthesis failed during {failure_stage}: {failure_reason}",
+            model=error_metadata.get("model"),
+            llm_prompt=error_metadata.get("llm_prompt"),
+            llm_response=error_metadata.get("llm_response"),
+            metadata=error_metadata,
+        )
+
+    def _action_schema_map(self, domain: Any) -> Dict[str, Any]:
+        action_schemas: Dict[str, Any] = {}
+        for action in domain.actions:
+            parsed_action = self.parser.parse_action(action)
+            action_schemas[action.name] = parsed_action
+            action_schemas[self._sanitize_name(action.name)] = parsed_action
+        return action_schemas
+
+    def _resolve_action_schema(self, step: HTNMethodStep, action_schemas: Dict[str, Any]) -> Any:
+        if step.action_name and step.action_name in action_schemas:
+            return action_schemas[step.action_name]
+        return action_schemas.get(self._sanitize_name(step.task_name))
+
+    def _materialise_action_literals(
+        self,
+        patterns: Tuple[Any, ...],
+        schema_parameters: Tuple[str, ...],
+        step_args: Tuple[str, ...],
+    ) -> Tuple[HTNLiteral, ...]:
+        bindings = {
+            parameter: arg
+            for parameter, arg in zip(schema_parameters, step_args)
+        }
+        return tuple(
+            HTNLiteral(
+                predicate=pattern.predicate,
+                args=tuple(bindings.get(arg, arg) for arg in pattern.args),
+                is_positive=pattern.is_positive,
+                source_symbol=None,
+            )
+            for pattern in patterns
+        )
 
     @staticmethod
     def _sanitize_name(name: str) -> str:

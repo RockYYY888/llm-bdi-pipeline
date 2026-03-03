@@ -26,7 +26,7 @@ class LTL_BDI_Pipeline:
         Initialize pipeline
 
         Args:
-            domain_file: Path to PDDL domain file. If None, uses default blocksworld domain.
+            domain_file: Path to HDDL domain file. If None, uses default blocksworld domain.
         """
         self.config = get_config()
 
@@ -40,13 +40,13 @@ class LTL_BDI_Pipeline:
         if domain_file is None:
             # Default to blocksworld domain
             from pathlib import Path
-            domain_file = str(Path(__file__).parent / "domains" / "blocksworld" / "domain.pddl")
+            domain_file = str(Path(__file__).parent / "domains" / "blocksworld" / "domain.hddl")
 
         self.domain_file = domain_file
 
-        # Parse domain to extract actions and predicates
-        from utils.pddl_parser import PDDLParser
-        self.domain = PDDLParser.parse_domain(domain_file)
+        # Parse domain to extract actions, predicates, tasks, and methods
+        from utils.hddl_parser import HDDLParser
+        self.domain = HDDLParser.parse_domain(domain_file)
         self.domain_actions = self.domain.get_action_names()
         self.domain_predicates = self.domain.get_predicate_signatures()
 
@@ -300,6 +300,11 @@ class LTL_BDI_Pipeline:
             return asl_code, stage3_stats
 
         except Exception as e:
+            stage3_metadata = getattr(e, "metadata", None)
+            stage3_model = getattr(e, "model", None)
+            stage3_llm_prompt = getattr(e, "llm_prompt", None)
+            stage3_llm_response = getattr(e, "llm_response", None)
+
             # Log failure
             self.logger.log_stage3(
                 ltl_spec,
@@ -307,7 +312,11 @@ class LTL_BDI_Pipeline:
                 None,
                 "Failed",
                 error=str(e),
-                method="htn"
+                method="htn",
+                model=stage3_model,
+                llm_prompt=stage3_llm_prompt,
+                llm_response=stage3_llm_response,
+                metadata=stage3_metadata,
             )
             print(f"✗ Stage 3 Failed: {e}")
             import traceback

@@ -24,7 +24,6 @@ class HTNPlannerGenerator:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 60.0,
-        client: Any = None,
     ) -> None:
         self.domain = domain
         self.grounding_map = grounding_map
@@ -33,7 +32,6 @@ class HTNPlannerGenerator:
             model=model,
             base_url=base_url,
             timeout=timeout,
-            client=client,
         )
         self.planner = HTNPlanner()
         self.specialiser = HTNSpecialiser()
@@ -99,7 +97,6 @@ class HTNPlannerGenerator:
                 "methods": len(method_library.methods),
                 "transition_count": len(plan_records),
                 "code_size_chars": len(agentspeak_code),
-                "fallback_reason": synthesis_meta["fallback_reason"],
             },
             "llm": {
                 "used": synthesis_meta["used_llm"],

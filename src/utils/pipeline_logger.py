@@ -60,7 +60,7 @@ class PipelineRecord:
     stage3_artifacts: Optional[Dict[str, Any]] = None
 
     # Metadata
-    domain_file: str = "domains/blocksworld/domain.pddl"
+    domain_file: str = "domains/blocksworld/domain.hddl"
     output_dir: str = "output"
     execution_time_seconds: float = 0.0
 
@@ -89,7 +89,7 @@ class PipelineLogger:
     def start_pipeline(self,
                       natural_language: str,
                       mode: str = "both",
-                      domain_file: str = "domains/blocksworld/domain.pddl",
+                      domain_file: str = "domains/blocksworld/domain.hddl",
                       output_dir: str = "output",
                       timestamp: str = None):
         """
@@ -98,7 +98,7 @@ class PipelineLogger:
         Args:
             natural_language: The input instruction
             mode: Execution mode - "both", "llm_agentspeak", or "fond"
-            domain_file: PDDL domain file used
+            domain_file: HDDL domain file used
             output_dir: Output directory for generated files
             timestamp: Optional timestamp string (YYYYMMDD_HHMMSS format). If not provided, current time is used.
         """
@@ -134,7 +134,7 @@ class PipelineLogger:
 
         Args:
             ltl_spec: The generated LTL specification
-            used_llm: Whether LLM was used (vs mock parser)
+            used_llm: Whether LLM was used
             model: Model name if LLM was used
             llm_prompt: LLM prompt (system + user messages)
             llm_response: Raw LLM response text
@@ -391,7 +391,7 @@ class PipelineLogger:
             if record['stage1_used_llm']:
                 f.write(f"Parser: LLM ({record['stage1_model']})\n")
             else:
-                f.write("Parser: Mock\n")
+                f.write("Parser: Not configured\n")
 
             # LLM Prompt/Response for Stage 1
             if record['stage1_used_llm'] and record['stage1_llm_prompt']:
@@ -515,16 +515,19 @@ class PipelineLogger:
                 f.write(record['stage3_llm_response'])
                 f.write("\n")
 
-            if record.get('stage3_method') == 'htn' and record.get('stage3_status') == 'success':
-                metadata = record.get('stage3_metadata') or {}
-                if metadata:
-                    f.write("\n" + "~"*40 + "\n")
+            metadata = record.get('stage3_metadata') or {}
+            if record.get('stage3_method') == 'htn' and metadata:
+                f.write("\n" + "~"*40 + "\n")
+                if record.get('stage3_status') == 'success':
                     f.write("HTN GENERATION SUMMARY\n")
-                    f.write("~"*40 + "\n")
-                    for key, value in metadata.items():
-                        f.write(f"{key}: {value}\n")
-                    f.write("\n")
+                else:
+                    f.write("HTN GENERATION DIAGNOSTICS\n")
+                f.write("~"*40 + "\n")
+                for key, value in metadata.items():
+                    f.write(f"{key}: {value}\n")
+                f.write("\n")
 
+            if record.get('stage3_method') == 'htn' and record.get('stage3_status') == 'success':
                 artifacts = record.get('stage3_artifacts') or {}
                 method_library = artifacts.get('method_library')
                 if method_library is not None:
@@ -587,13 +590,16 @@ def test_logger():
     )
 
     # Log Stage 2
-    pddl = """(define (problem test)
-  (:domain blocksworld)
-  (:objects a b)
-  (:init (ontable a) (ontable b) (clear a) (clear b) (handempty))
-  (:goal (and (on a b)))
-)"""
-    logger.log_stage2_success(pddl)
+    dfa_result = {
+        "formula": "F(on(a, b))",
+        "dfa_dot": "digraph {}",
+        "original_dfa_dot": "digraph {}",
+        "num_states": 2,
+        "num_transitions": 4,
+        "original_num_states": 2,
+        "original_num_transitions": 4,
+    }
+    logger.log_stage2_dfas(None, dfa_result, "Success")
 
     # End pipeline
     filepath = logger.end_pipeline(success=True)

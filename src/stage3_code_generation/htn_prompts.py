@@ -33,6 +33,12 @@ def build_htn_system_prompt() -> str:
         "2. Return exactly one top-level JSON object.\n"
         "3. The top-level object must contain only the keys requested in the prompt.\n"
         "4. Every identifier that becomes AgentSpeak code must already be AgentSpeak-safe.\n"
+        "5. Always include both top-level keys: compound_tasks and methods.\n"
+        "6. Every method object must contain exactly: method_name, task_name, parameters, "
+        "context, subtasks, ordering, origin.\n"
+        "7. Every subtask object must contain exactly: step_id, task_name, args, kind, "
+        "action_name, literal, preconditions, effects.\n"
+        "8. Use JSON null for missing optional values. Never omit required keys.\n"
         "\n"
         "AGENTSPEAK IDENTIFIER CONTRACT:\n"
         "- task_name and method_name must match [a-z][a-z0-9_]*.\n"
@@ -44,6 +50,10 @@ def build_htn_system_prompt() -> str:
         "HTN STRUCTURE CONTRACT:\n"
         "- Only create reusable compound tasks and methods.\n"
         "- Primitive action tasks are injected automatically by the runtime.\n"
+        "- The library must be closed under compound references.\n"
+        "- If a compound subtask mentions helper task X, X must appear in compound_tasks.\n"
+        "- If a compound subtask mentions helper task X, at least one method must have task_name X.\n"
+        "- Never reference an undefined helper task. If you cannot define it, inline primitive steps instead.\n"
         "- For positive literals, prefer compound task names shaped like achieve_<predicate>.\n"
         "- For negative literals, prefer compound task names shaped like maintain_not_<predicate>.\n"
         "- When a negative target can be satisfied by context alone, emit a guard method with empty subtasks.\n"
@@ -74,6 +84,10 @@ Few-shot guidance (illustrative only, not your domain):
 Example 1: Positive target with runtime primitive aliases
 Target literal: delivered(pkg1)
 Preferred compound task: achieve_delivered
+Because the first compound step references achieve_loaded, the final top-level
+compound_tasks array must include BOTH achieve_delivered and achieve_loaded, and
+the final methods array must include at least one method whose task_name is
+achieve_loaded.
 Valid method fragment:
 {
   "method_name": "achieve_delivered__via_drop_parcel",
@@ -141,17 +155,24 @@ Valid method fragment:
         "- Each primitive subtask.task_name must match one of the provided runtime primitive action aliases exactly.\n"
         "- If the source action is written with hyphens, convert task_name to the provided underscore alias.\n"
         "- Each compound subtask.task_name must reference a compound task that exists in compound_tasks.\n"
+        "- For every compound subtask.task_name X, include a compound_tasks entry named X.\n"
+        "- For every compound subtask.task_name X, include at least one method whose task_name is X.\n"
+        "- Do not reference helper tasks unless you fully define them in the same JSON object.\n"
+        "- If you only need one extra primitive step, inline it instead of inventing an undefined helper.\n"
         "- Every task_name and method_name must already be underscore_case.\n"
         "- Keep method names stable and descriptive, e.g. achieve_loaded__via_drop_parcel.\n"
         "- Use parameter names already introduced by the task or method.\n"
         "- For a guard method, use a non-empty context, an empty subtasks list, and an empty ordering list.\n"
         "- Do not invent unsupported top-level keys.\n"
+        "- Do not omit required method keys or required subtask keys.\n"
+        "- Use JSON null, not the string \"null\", for missing optional values.\n"
         "- Do not include explanations.\n"
         "\n"
         "FINAL SELF-CHECK BEFORE RETURNING JSON:\n"
         "1. Are all task_name values underscore_case?\n"
         "2. Do primitive steps use runtime aliases rather than raw source action names?\n"
         "3. Do all ordering edges reference real step_id values?\n"
-        "4. Does the JSON contain only the requested keys?\n"
-        "5. Would each task_name compile cleanly inside +!task_name(...) AgentSpeak syntax?\n"
+        "4. Is every compound helper task declared in compound_tasks and implemented by at least one method?\n"
+        "5. Does the JSON contain only the requested keys?\n"
+        "6. Would each task_name compile cleanly inside +!task_name(...) AgentSpeak syntax?\n"
     )
