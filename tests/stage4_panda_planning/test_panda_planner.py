@@ -205,3 +205,85 @@ def test_panda_plan_parser_extracts_converted_plan_steps():
 	assert [step.task_name for step in steps] == ["pick_up_from_table", "put_on_block"]
 	assert steps[0].args == ("a",)
 	assert steps[1].args == ("a", "b")
+
+
+def test_root_method_restriction_keeps_only_selected_sibling_for_root_task():
+	planner = PANDAPlanner()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("hold_block", ("BLOCK",), False, ("holding",)),
+			HTNTask("clear_top", ("BLOCK",), False, ("clear",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_hold_block_noop",
+				task_name="hold_block",
+				parameters=("BLOCK",),
+				context=(HTNLiteral("holding", ("BLOCK",), True, None),),
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_table",
+				task_name="hold_block",
+				parameters=("BLOCK",),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="clear_top",
+						args=("BLOCK",),
+						kind="compound",
+					),
+				),
+			),
+			HTNMethod(
+				method_name="m_clear_top_noop",
+				task_name="clear_top",
+				parameters=("BLOCK",),
+				context=(HTNLiteral("clear", ("BLOCK",), True, None),),
+			),
+		],
+	)
+
+	filtered = planner._restrict_library_to_root_method(library, library.methods[1])
+
+	assert [method.method_name for method in filtered.methods if method.task_name == "hold_block"] == [
+		"m_hold_block_from_table",
+	]
+	assert [method.method_name for method in filtered.methods if method.task_name == "clear_top"] == [
+		"m_clear_top_noop",
+	]
+
+
+def test_domain_export_can_suppress_auto_generated_guard_for_root_task():
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=_domain(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m_place_on_stack",
+					task_name="place_on",
+					parameters=("BLOCK1", "BLOCK2"),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="put_on_block",
+							args=("BLOCK1", "BLOCK2"),
+							kind="primitive",
+							action_name="put-on-block",
+						),
+					),
+				),
+			],
+			target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+			target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
+		),
+		domain_name="blocksworld_transition_1",
+		suppress_guard_tasks={"place_on"},
+	)
+
+	assert "(:method m_place_on_noop" not in domain_hddl

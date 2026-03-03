@@ -140,17 +140,17 @@ def test_renderer_emits_method_library_and_state_aware_wrappers():
 	assert "/* HTN Method Plans */" in code
 	assert "dfa_state(q1)." in code
 	assert 'dfa_edge_label(dfa_step_q1_q2_on_a_b, "on(a, b)").' in code
-	assert "+!place_on(B1, B2) : on(B1, B2) <-" in code
-	assert "+!place_on(B1, B2) : true <-" in code
-	assert "\t!hold_block(B1);" in code
-	assert "\t!put_on_block(B1, B2)." in code
-	assert "+!hold_block(B1) : ontable(B1) & clear(B1) <-" in code
-	assert "\t!pick_up_from_table(B1)." in code
+	assert "+!place_on(BLOCK1, BLOCK2) : on(BLOCK1, BLOCK2) <-" in code
+	assert "+!place_on(BLOCK1, BLOCK2) : clear(BLOCK2) <-" in code
+	assert "\t!hold_block(BLOCK1);" in code
+	assert "\t!put_on_block(BLOCK1, BLOCK2)." in code
+	assert "+!hold_block(BLOCK) : ontable(BLOCK) & clear(BLOCK) <-" in code
+	assert "\t!pick_up_from_table(BLOCK)." in code
 	assert "+!dfa_step_q1_q2_on_a_b : dfa_state(q1) <-" in code
 	assert "\t!place_on(a, b);" in code
 	assert "\t-dfa_state(q1);" in code
 	assert "\t+dfa_state(q2)." in code
-	assert "+!put_on_block(X1, X2) :" in code
+	assert "+!put_on_block(BLOCK1, BLOCK2) :" in code
 
 
 def test_renderer_accepts_zero_step_wrappers_when_stage4_returns_no_witness_steps():
@@ -224,5 +224,87 @@ def test_renderer_hoists_binding_preconditions_into_method_context():
 		plan_records=[],
 	)
 
-	assert "+!hold_block(B) : on(B, SUPPORT) <-" in code
-	assert "\t!pick_up(B, SUPPORT)." in code
+	assert "+!hold_block(BLOCK1) : on(BLOCK1, BLOCK2) <-" in code
+	assert "\t!pick_up(BLOCK1, BLOCK2)." in code
+
+
+def test_renderer_hoists_branch_discriminators_from_action_schema():
+	renderer = AgentSpeakRenderer()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("hold_block", ("B",), False, ("holding",)),
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_hold_block_noop",
+				task_name="hold_block",
+				parameters=("B",),
+				context=(
+					HTNLiteral("holding", ("B",), True, None),
+				),
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_table",
+				task_name="hold_block",
+				parameters=("B",),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="clear_top",
+						args=("B",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up_from_table",
+						args=("B",),
+						kind="primitive",
+						action_name="pick-up-from-table",
+					),
+				),
+				ordering=(("s1", "s2"),),
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_block",
+				task_name="hold_block",
+				parameters=("B",),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="clear_top",
+						args=("B",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up",
+						args=("B", "SUPPORT"),
+						kind="primitive",
+						action_name="pick-up",
+						preconditions=(
+							HTNLiteral("on", ("B", "SUPPORT"), True, None),
+						),
+					),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+	)
+
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a", "b"),
+		method_library=method_library,
+		plan_records=[],
+	)
+
+	assert "+!hold_block(BLOCK1) : holding(BLOCK1) <-" in code
+	assert "+!hold_block(BLOCK1) : ontable(BLOCK1) <-" in code
+	assert "\t!clear_top(BLOCK1);" in code
+	assert "\t!pick_up_from_table(BLOCK1)." in code
+	assert "+!hold_block(BLOCK1) : on(BLOCK1, BLOCK2) <-" in code
+	assert "\t!pick_up(BLOCK1, BLOCK2)." in code

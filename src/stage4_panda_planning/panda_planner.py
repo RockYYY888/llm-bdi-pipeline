@@ -65,24 +65,43 @@ class PANDAPlanner:
 		domain: Any,
 		method_library: HTNMethodLibrary,
 		objects: Sequence[str],
-		target_literal: HTNLiteral,
+		target_literal: Optional[HTNLiteral],
 		task_name: str,
 		transition_name: str,
+		*,
+		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
+		task_args: Optional[Sequence[str]] = None,
+		root_method: Optional[HTNMethod] = None,
+		allow_empty_plan: bool = False,
+		initial_facts: Optional[Sequence[str]] = None,
 	) -> PANDAPlanResult:
 		self._require_toolchain()
 
-		task_args = tuple(target_literal.args)
+		task_args_tuple = tuple(task_args if task_args is not None else (target_literal.args if target_literal else ()))
 		domain_name = f"{domain.name}_{transition_name}"
 		work_dir = self._resolve_work_dir(transition_name)
 		work_dir.mkdir(parents=True, exist_ok=True)
 
-		domain_hddl = self._build_domain_hddl(domain, method_library, domain_name)
+		export_library = (
+			self._restrict_library_to_root_method(method_library, root_method)
+			if root_method is not None
+			else method_library
+		)
+		suppress_guard_tasks = {root_method.task_name} if root_method is not None else None
+		domain_hddl = self._build_domain_hddl(
+			domain,
+			export_library,
+			domain_name,
+			suppress_guard_tasks=suppress_guard_tasks,
+		)
 		problem_hddl = self.problem_builder.build_problem_hddl(
 			domain=domain,
 			domain_name=domain_name,
 			objects=objects,
+			typed_objects=typed_objects,
 			task_name=task_name,
-			task_args=task_args,
+			task_args=task_args_tuple,
+			initial_facts=initial_facts,
 		)
 
 		domain_path = work_dir / "domain.hddl"
@@ -137,14 +156,14 @@ class PANDAPlanner:
 			actual_plan_text = raw_plan_path.read_text()
 
 		steps = self._parse_plan_steps(actual_plan_text or raw_plan_text, domain)
-		if not steps and "->" not in actual_plan_text:
+		if not steps and not allow_empty_plan and "->" not in actual_plan_text:
 			raise PANDAPlanningError(
-				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args)})",
+				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args_tuple)})",
 				metadata={
 					"backend": "pandaPI",
 					"transition_name": transition_name,
 					"task_name": task_name,
-					"task_args": list(task_args),
+					"task_args": list(task_args_tuple),
 					"work_dir": str(work_dir),
 					"domain_hddl": domain_hddl,
 					"problem_hddl": problem_hddl,
@@ -163,7 +182,7 @@ class PANDAPlanner:
 
 		return PANDAPlanResult(
 			task_name=task_name,
-			task_args=task_args,
+			task_args=task_args_tuple,
 			target_literal=target_literal,
 			steps=steps,
 			domain_hddl=domain_hddl,
@@ -207,6 +226,8 @@ class PANDAPlanner:
 		domain: Any,
 		method_library: HTNMethodLibrary,
 		domain_name: str,
+		*,
+		suppress_guard_tasks: Optional[set[str]] = None,
 	) -> str:
 		requirements = list(domain.requirements or [])
 		if ":hierarchy" not in requirements:
@@ -236,7 +257,10 @@ class PANDAPlanner:
 		for method in method_library.methods:
 			lines.extend(self._render_method(method, task_lookup, domain.types))
 			lines.append("")
-		for method in self._build_guard_completion_methods(method_library):
+		for method in self._build_guard_completion_methods(
+			method_library,
+			suppress_tasks=suppress_guard_tasks or set(),
+		):
 			lines.extend(self._render_method(method, task_lookup, domain.types))
 			lines.append("")
 
@@ -304,11 +328,15 @@ class PANDAPlanner:
 	def _build_guard_completion_methods(
 		self,
 		method_library: HTNMethodLibrary,
+		*,
+		suppress_tasks: set[str],
 	) -> List[HTNMethod]:
 		generated: List[HTNMethod] = []
 		existing_names = {method.method_name for method in method_library.methods}
 
 		for task in method_library.compound_tasks:
+			if task.name in suppress_tasks:
+				continue
 			literal = self._guard_literal_for_task(task, method_library)
 			if literal is None:
 				continue
@@ -330,6 +358,23 @@ class PANDAPlanner:
 			)
 
 		return generated
+
+	def _restrict_library_to_root_method(
+		self,
+		method_library: HTNMethodLibrary,
+		root_method: HTNMethod,
+	) -> HTNMethodLibrary:
+		return HTNMethodLibrary(
+			compound_tasks=list(method_library.compound_tasks),
+			primitive_tasks=list(method_library.primitive_tasks),
+			methods=[
+				method
+				for method in method_library.methods
+				if method.task_name != root_method.task_name or method.method_name == root_method.method_name
+			],
+			target_literals=list(method_library.target_literals),
+			target_task_bindings=list(method_library.target_task_bindings),
+		)
 
 	def _guard_literal_for_task(
 		self,

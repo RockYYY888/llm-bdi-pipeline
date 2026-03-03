@@ -3,9 +3,10 @@
 ## Current Focus
 
 - Keep the split Stage 3/4/5 path green under live Stage 1 and Stage 3 API runs.
-- Push Stage 5 toward query-complete output by rendering the full HTN library while
-  retaining PANDA as the Stage 4 validation backend.
-- Keep the PANDA toolchain setup reproducible across machines.
+- Keep PANDA as the default Stage 4 validation backend while validating every
+  retained DFA edge and every remaining reachable sibling method branch.
+- Keep Stage 5 rendering aligned with a query-complete HTN method library rather
+  than a single PANDA witness path.
 
 ## Milestones
 
@@ -19,3 +20,9 @@
 - [x] Milestone 8: Semantic task naming, query_i live harness, and negative-goal validation fixes
 - [x] Milestone 9: DFA progress-edge wrappers and Stage 5 HTN method-library rendering
 - [x] Milestone 10: Free-variable binding validation and context hoisting for Stage 5 methods
+- [x] Milestone 11: Stable type-based AgentSpeak variables, Stage 3 CoT-style prompt hardening,
+  and semantic target-binding validation
+- [x] Milestone 12: Default per-sibling PANDA validation, typed witness-object support,
+  and branch-specific method-validation initial-fact construction
+- [x] Milestone 13: Stage 3 target-guard completion, direct self-recursive sibling pruning,
+  and full live revalidation for query_1 through query_6

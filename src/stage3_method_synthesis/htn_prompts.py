@@ -56,6 +56,10 @@ def build_htn_system_prompt() -> str:
         "- Primitive action tasks are injected automatically by the runtime.\n"
         "- target_task_bindings must contain one entry for every target literal in the prompt.\n"
         "- Each target_task_bindings.task_name must match a compound task declared in compound_tasks.\n"
+        "- Each target_task_binding must be semantically aligned with the bound literal. "
+        "A positive literal must bind to a task whose methods make that predicate true. "
+        "A negative literal must bind to a task whose methods remove, prevent, or keep the "
+        "predicate false. Never bind !p(...) to a task that constructively establishes p(...).\n"
         "- The library must be closed under compound references.\n"
         "- If a compound subtask mentions helper task X, X must appear in compound_tasks.\n"
         "- If a compound subtask mentions helper task X, at least one method must have task_name X.\n"
@@ -80,6 +84,10 @@ def build_htn_system_prompt() -> str:
         "zero-subtask method with a non-empty context.\n"
         "- For every helper task that can be achieved in multiple common ways, include separate methods "
         "for those distinct ways when they are relevant (for example from_table vs from_block).\n"
+        "- Do not invent an extra sibling method whose only difference is that it performs extra "
+        "prerequisite helper steps under the same applicability conditions. If two constructive "
+        "siblings would apply in the same state, merge the prerequisite helper work into the "
+        "correctly-scoped strategy method instead of emitting a redundant clear_first/prepare_first branch.\n"
         "- Do not rely on later stages to invent missing helper-task branches.\n"
         "- context is for method-level preconditions checked before decomposition.\n"
         "- subtask.preconditions is for step-level checks that hold when that step executes.\n"
@@ -96,10 +104,21 @@ def build_htn_system_prompt() -> str:
         "- If two roles must stay distinct for the method to make sense, do not silently alias "
         "them to the same variable. Use separate variables and explicit binding conditions.\n"
         "- Every step args list must use only parameters already introduced by the method.\n"
+        "- If a method needs an extra local helper variable beyond the task arguments, you may "
+        "introduce it in method.parameters, but you must still connect it to the task arguments "
+        "with a positive binding condition before first use.\n"
+        "- Use stable upper-case variable names derived from the domain types whenever possible.\n"
+        "- If a type appears once in a scope, use TYPE (for example BLOCK, ROOM, PACKAGE).\n"
+        "- If the same type appears multiple times in one task or method scope, use TYPE1, TYPE2, "
+        "TYPE3 in left-to-right semantic order.\n"
+        "- Keep the task-level parameter names stable across all methods of that task.\n"
         "- Never introduce free variables in subtasks. Every upper-case placeholder used in "
         "subtask args, subtask literals, preconditions, or effects must already appear in the "
         "method parameters or be explicitly constrained in method.context or in a binding "
         "subtask.preconditions literal.\n"
+        "- Constructive sibling methods for the same task must be semantically distinguishable by "
+        "their promoted method-level context. Do not return multiple constructive siblings that all "
+        "use the same empty or generic context.\n"
     )
 
 
@@ -170,31 +189,23 @@ Valid method fragments:
 {
   "method_name": "m_keep_not_clear_stack",
   "task_name": "keep_not_clear",
-  "parameters": ["X1", "X2"],
-  "context": [],
+  "parameters": ["BLOCK", "BLOCK1"],
+  "context": [
+    {"predicate": "holding", "args": ["BLOCK1"], "is_positive": true, "source_symbol": null}
+  ],
   "subtasks": [
     {
       "step_id": "s1",
-      "task_name": "hold_block",
-      "args": ["X1"],
-      "kind": "compound",
-      "action_name": null,
-      "literal": {"predicate": "holding", "args": ["X1"], "is_positive": true, "source_symbol": null},
-      "preconditions": [],
-      "effects": []
-    },
-    {
-      "step_id": "s2",
       "task_name": "put_on_block",
-      "args": ["X1", "X2"],
+      "args": ["BLOCK1", "BLOCK"],
       "kind": "primitive",
       "action_name": "put-on-block",
-      "literal": {"predicate": "clear", "args": ["X2"], "is_positive": false, "source_symbol": null},
+      "literal": {"predicate": "clear", "args": ["BLOCK"], "is_positive": false, "source_symbol": null},
       "preconditions": [],
       "effects": []
     }
   ],
-  "ordering": [["s1", "s2"]],
+  "ordering": [],
   "origin": "llm"
 }
 {
@@ -208,6 +219,16 @@ Valid method fragments:
   "ordering": [],
   "origin": "llm"
 }
+
+Example 3: Never bind a negative target to a task that establishes the opposite relation
+Target literal: !linked(node1, node2)
+INVALID target_task_bindings entry:
+{"target_literal": "!linked(node1, node2)", "task_name": "link_nodes"}
+Why invalid: link_nodes constructively makes linked(...) true, so it cannot represent !linked(...).
+VALID target_task_bindings entry:
+{"target_literal": "!linked(node1, node2)", "task_name": "unlink_nodes"}
+Rule: if the literal is negated, the task name and its constructive methods must semantically
+remove, undo, block, or keep false that same relation.
 """.strip()
 
     return (
@@ -233,6 +254,11 @@ Valid method fragments:
         "Do not print your reasoning.\n"
         "- For every negative target literal, include at least one constructive (non-zero-subtask) "
         "method for its bound task. Do not return only a noop/already-satisfied method.\n"
+        "- For every negative target literal, bind it to a task that semantically makes the negated "
+        "relation true (for example remove_on, detach_block, keep_not_clear). Never bind a negative "
+        "literal to a task whose constructive branch makes the positive relation true.\n"
+        "- Invalid pattern: binding !p(...) to a task like add_p, place_p, connect_p, or any other "
+        "task whose constructive branch establishes p(...).\n"
         "- For every target-bound task, do not stop at one witness path. Include the key reusable "
         "branches needed by the agent across different runtime situations.\n"
         "- Think in explicit case splits before returning. For each target-bound task, first "
@@ -259,6 +285,9 @@ Valid method fragments:
         "really allow that aliasing.\n"
         "- If a decomposition needs two different objects, keep two distinct variables and bind them "
         "explicitly; do not fake distinctness by reusing one variable name.\n"
+        "- If a task changes the state of object X because another object is blocking, supporting, "
+        "or occupying X, introduce and bind the actual blocker/support object as a separate variable. "
+        "Do not incorrectly reuse X where the domain action really operates on a distinct related object.\n"
         "- If your method logic depends on two objects being different, encode that with safe symbolic "
         "binding conditions that the downstream pipeline can represent. Do not rely on unsupported "
         "equality or inequality syntax.\n"
@@ -269,6 +298,14 @@ Valid method fragments:
         "already hold at runtime.\n"
         "- If a helper task has multiple common acquisition modes that matter at runtime (for example "
         "from_table and from_block), include separate methods for each relevant mode.\n"
+        "- Those sibling strategy methods must be distinguishable by reusable method-level context. "
+        "For example, a from_table branch should expose a context such as ontable(BLOCK), while a "
+        "from_block branch should expose a context such as on(BLOCK1, BLOCK2).\n"
+        "- Do not create a generic clear_first or prepare_first sibling unless it has its own real "
+        "method-level applicability condition that is different from every other sibling. Extra helper "
+        "steps alone are not a valid reason to add another sibling.\n"
+        "- Invalid pattern: one sibling says acquire, another says stack, but acquire has no unique "
+        "context and merely performs prerequisite work for stack. Merge them instead of emitting both.\n"
         "- Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you.\n"
         "- Do not use achieve_, maintain_not_, ensure_, or goal_ prefixes anywhere in compound task names.\n"
         "- Every task_name and method_name must already be underscore_case.\n"
@@ -279,9 +316,14 @@ Valid method fragments:
         "- Do not invent free variables such as TOP, SUPPORT, X, or Y unless they are already "
         "task parameters or are explicitly constrained in method.context or by a binding "
         "subtask.preconditions literal.\n"
+        "- If you introduce an extra local variable in method.parameters (for example a blocker or "
+        "support object), do not leave it floating. Add a positive binding relation in method.context "
+        "before any subtask uses it.\n"
         "- Do not rename an existing task parameter to a fresh variable. If the task parameter "
         "is B, B1, B2, PKG, ROOM, or similar, keep using that same variable name instead of "
         "switching to X, Y, OBJ, or another alias.\n"
+        "- Prefer type-based upper-case variable names in the final JSON. For example, use BLOCK "
+        "or BLOCK1/BLOCK2 instead of random X/Y placeholders.\n"
         "- If a helper method needs a local helper variable, bind it in method.context first "
         "or by an explicit binding precondition (for example a predicate relating that variable "
         "to an existing task parameter) before reusing it in subtasks.\n"
@@ -321,4 +363,12 @@ Valid method fragments:
         "binding conditions only?\n"
         "19. Did you keep existing task parameters stable instead of renaming them to fresh "
         "single-letter aliases such as X or Y?\n"
+        "20. Did every constructive sibling method for the same task expose a distinguishable "
+        "method-level context rather than sharing the same generic context?\n"
+        "21. Did you use stable upper-case type-based variable names such as BLOCK or BLOCK1/BLOCK2 "
+        "instead of random placeholders?\n"
+        "22. Did every target_task_binding use a task whose semantics match the target literal's "
+        "polarity, especially for negative literals?\n"
+        "23. Did you avoid adding redundant clear_first/prepare_first siblings that do not introduce "
+        "a new applicability condition?\n"
     )

@@ -9,8 +9,10 @@ from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.dfa_builder import DFABuilder
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
+from stage3_method_synthesis.htn_schema import HTNLiteral
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
+from utils.hddl_condition_parser import HDDLConditionParser
 from utils.pipeline_logger import PipelineLogger
 
 
@@ -329,13 +331,34 @@ class LTL_BDI_Pipeline:
                         "Stage 3 output is missing a target_task_binding for "
                         f"'{literal.to_signature()}'."
                     )
+                witness_objects, witness_object_types = self._seed_validation_scope(
+                    task_name,
+                    method_library,
+                    tuple(literal.args),
+                    ltl_spec.objects,
+                )
+                witness_initial_facts = self._task_witness_initial_facts(
+                    planner,
+                    task_name,
+                    method_library,
+                    tuple(literal.args),
+                    ltl_spec.objects,
+                    object_pool=witness_objects,
+                    object_types=witness_object_types,
+                )
                 plan = planner.plan(
                     domain=self.domain,
                     method_library=method_library,
-                    objects=ltl_spec.objects,
+                    objects=tuple(witness_objects),
                     target_literal=literal,
                     task_name=task_name,
                     transition_name=transition_name,
+                    typed_objects=self._typed_object_entries(
+                        witness_objects,
+                        witness_object_types,
+                    ),
+                    allow_empty_plan=True,
+                    initial_facts=witness_initial_facts,
                 )
                 label = literal.to_signature()
                 plan_records.append(
@@ -348,6 +371,8 @@ class LTL_BDI_Pipeline:
                         "initial_state": transition_spec["initial_state"],
                         "label": label,
                         "target_literal": literal,
+                        "objects": list(witness_objects),
+                        "initial_facts": witness_initial_facts,
                         "plan": plan,
                     }
                 )
@@ -361,13 +386,98 @@ class LTL_BDI_Pipeline:
                         "initial_state": transition_spec["initial_state"],
                         "label": label,
                         "target_literal": literal.to_dict(),
+                        "objects": list(witness_objects),
+                        "initial_facts": list(witness_initial_facts),
                         "plan": plan.to_dict(),
                     }
                 )
 
+            method_validation_artifacts = []
+            relevant_task_names = self._query_relevant_task_names(method_library, plan_records)
+            for task_name in relevant_task_names:
+                representative_args = self._representative_task_args(
+                    task_name,
+                    method_library,
+                    ltl_spec.objects,
+                    plan_records,
+                )
+                for method in method_library.methods_for_task(task_name):
+                    validation_name = f"method_{method.method_name}"
+                    validation_objects, validation_object_types = self._seed_validation_scope(
+                        task_name,
+                        method_library,
+                        representative_args,
+                        ltl_spec.objects,
+                    )
+                    validation_initial_facts = self._method_validation_initial_facts(
+                        planner,
+                        method,
+                        method_library,
+                        representative_args,
+                        ltl_spec.objects,
+                        object_pool=validation_objects,
+                        object_types=validation_object_types,
+                    )
+                    try:
+                        validation_plan = planner.plan(
+                            domain=self.domain,
+                            method_library=method_library,
+                            objects=tuple(validation_objects),
+                            target_literal=None,
+                            task_name=task_name,
+                            transition_name=validation_name,
+                            typed_objects=self._typed_object_entries(
+                                validation_objects,
+                                validation_object_types,
+                            ),
+                            task_args=representative_args,
+                            root_method=method,
+                            allow_empty_plan=not method.subtasks,
+                            initial_facts=validation_initial_facts,
+                        )
+                        method_validation_artifacts.append(
+                            {
+                                "validation_name": validation_name,
+                                "task_name": task_name,
+                                "task_args": list(representative_args),
+                                "method_name": method.method_name,
+                                "allow_empty_plan": not method.subtasks,
+                                "objects": list(validation_objects),
+                                "initial_facts": list(validation_initial_facts),
+                                "status": "success",
+                                "plan": validation_plan.to_dict(),
+                            }
+                        )
+                    except Exception as exc:
+                        method_validation_artifacts.append(
+                            {
+                                "validation_name": validation_name,
+                                "task_name": task_name,
+                                "task_args": list(representative_args),
+                                "method_name": method.method_name,
+                                "allow_empty_plan": not method.subtasks,
+                                "objects": list(validation_objects),
+                                "initial_facts": list(validation_initial_facts),
+                                "status": "failed",
+                                "error": str(exc),
+                                "metadata": getattr(exc, "metadata", None),
+                            }
+                        )
+
             summary = {
                 "backend": "pandaPI",
                 "transition_count": len(transition_artifacts),
+                "validated_method_count": len(method_validation_artifacts),
+                "successful_method_validations": sum(
+                    1
+                    for item in method_validation_artifacts
+                    if item["status"] == "success"
+                ),
+                "failed_method_validations": sum(
+                    1
+                    for item in method_validation_artifacts
+                    if item["status"] == "failed"
+                ),
                 "dfa_states": sorted(
                     {
                         transition["source_state"]
@@ -385,6 +495,7 @@ class LTL_BDI_Pipeline:
             self.logger.log_stage4_panda_planning(
                 {
                     "transitions": transition_artifacts,
+                    "method_validations": method_validation_artifacts,
                 },
                 "Success",
                 metadata=summary,
@@ -399,6 +510,7 @@ class LTL_BDI_Pipeline:
             return plan_records, {
                 "summary": summary,
                 "transitions": transition_artifacts,
+                "method_validations": method_validation_artifacts,
             }
 
         except Exception as e:
@@ -412,6 +524,550 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None, None
+
+    @staticmethod
+    def _query_relevant_task_names(method_library, plan_records):
+        task_names = {
+            record["plan"].task_name
+            for record in plan_records
+        }
+        queue = list(task_names)
+
+        while queue:
+            task_name = queue.pop(0)
+            for method in method_library.methods_for_task(task_name):
+                for step in method.subtasks:
+                    if step.kind != "compound" or step.task_name in task_names:
+                        continue
+                    task_names.add(step.task_name)
+                    queue.append(step.task_name)
+
+        return sorted(task_names)
+
+    @staticmethod
+    def _representative_task_args(task_name, method_library, objects, plan_records):
+        for record in plan_records:
+            plan = record["plan"]
+            if plan.task_name == task_name and plan.task_args:
+                return tuple(plan.task_args)
+
+        for binding in method_library.target_task_bindings:
+            if binding.task_name != task_name:
+                continue
+            for literal in method_library.target_literals:
+                if literal.to_signature() == binding.target_literal:
+                    return tuple(literal.args)
+
+        task_schema = method_library.task_for_name(task_name)
+        arity = len(task_schema.parameters) if task_schema else 0
+        if arity == 0:
+            return ()
+
+        source_objects = list(objects)
+        if not source_objects:
+            return tuple(f"obj{index + 1}" for index in range(arity))
+        if len(source_objects) >= arity:
+            return tuple(source_objects[:arity])
+
+        values = list(source_objects)
+        while len(values) < arity:
+            values.append(source_objects[(len(values)) % len(source_objects)])
+        return tuple(values[:arity])
+
+    def _seed_validation_scope(
+        self,
+        task_name,
+        method_library,
+        task_args,
+        objects,
+    ):
+        default_type = self._default_object_type()
+        object_pool = list(dict.fromkeys(objects or task_args))
+        object_types = {
+            obj: default_type
+            for obj in object_pool
+        }
+
+        task_schema = method_library.task_for_name(task_name)
+        if task_schema is not None:
+            for parameter, arg in zip(task_schema.parameters, task_args):
+                object_types[arg] = self._infer_type_from_symbol(parameter)
+
+        return object_pool, object_types
+
+    def _typed_object_entries(self, object_pool, object_types):
+        default_type = self._default_object_type()
+        return tuple(
+            (obj, object_types.get(obj, default_type))
+            for obj in object_pool
+        )
+
+    def _default_object_type(self):
+        if getattr(self.domain, "types", None):
+            return self.domain.types[0]
+        return "object"
+
+    def _infer_type_from_symbol(self, symbol):
+        if not symbol:
+            return self._default_object_type()
+        base = symbol.rstrip("0123456789").lower()
+        domain_types = set(getattr(self.domain, "types", []) or [])
+        if base in domain_types:
+            return base
+        return self._default_object_type()
+
+    def _method_validation_initial_facts(
+        self,
+        planner,
+        method,
+        method_library,
+        task_args,
+        objects,
+        object_pool=None,
+        object_types=None,
+    ):
+        predicate_arity = {
+            predicate.name: len(predicate.parameters)
+            for predicate in getattr(self.domain, "predicates", [])
+        }
+        bindings = {
+            parameter: arg
+            for parameter, arg in zip(method.parameters, task_args)
+        }
+        object_pool = object_pool if object_pool is not None else list(dict.fromkeys(objects or task_args))
+        if not object_pool:
+            object_pool = list(task_args)
+        object_types = object_types if object_types is not None else {
+            obj: self._default_object_type()
+            for obj in object_pool
+        }
+
+        def bind_symbol(symbol):
+            if not symbol:
+                return symbol
+            if symbol[0].islower():
+                return symbol
+            if symbol not in bindings:
+                for candidate in object_pool:
+                    if candidate not in bindings.values():
+                        bindings[symbol] = candidate
+                        break
+                else:
+                    candidate_type = self._infer_type_from_symbol(symbol)
+                    index = 1
+                    candidate = f"witness_{candidate_type}_{index}"
+                    while candidate in object_pool:
+                        index += 1
+                        candidate = f"witness_{candidate_type}_{index}"
+                    object_pool.append(candidate)
+                    object_types[candidate] = candidate_type
+                    bindings[symbol] = candidate
+            return bindings[symbol]
+
+        blocked_signatures = set()
+        for literal in method.context:
+            if literal.is_positive:
+                continue
+            grounded_args = tuple(bind_symbol(arg) for arg in literal.args)
+            signature = (
+                f"{literal.predicate}({', '.join(grounded_args)})"
+                if grounded_args
+                else literal.predicate
+            )
+            blocked_signatures.add(signature)
+
+        literal_pool = []
+        seen_literal_signatures = set()
+
+        def add_grounded_literal(literal):
+            if not literal.is_positive:
+                return
+            grounded_literal = HTNLiteral(
+                predicate=literal.predicate,
+                args=tuple(bind_symbol(arg) for arg in literal.args),
+                is_positive=True,
+                source_symbol=None,
+            )
+            signature = grounded_literal.to_signature()
+            if signature in blocked_signatures or signature in seen_literal_signatures:
+                return
+            seen_literal_signatures.add(signature)
+            literal_pool.append(grounded_literal)
+
+        for literal in method.context:
+            add_grounded_literal(literal)
+
+        parser = HDDLConditionParser()
+        action_semantics = {
+            action.name: parser.parse_action(action)
+            for action in self.domain.actions
+        }
+        for action in self.domain.actions:
+            action_semantics[action.name.replace("-", "_")] = action_semantics[action.name]
+        witness_steps = tuple(method.subtasks)
+        step_positive_literals = {}
+        planning_hint_signatures = set(seen_literal_signatures)
+
+        for step in witness_steps:
+            step_preconditions = list(step.preconditions)
+            explicit_signatures = {
+                literal.to_signature()
+                for literal in step_preconditions
+            }
+            if step.kind == "primitive":
+                action_schema = action_semantics.get(step.action_name or step.task_name)
+                if action_schema is not None:
+                    step_bindings = {
+                        parameter: arg
+                        for parameter, arg in zip(action_schema.parameters, step.args)
+                    }
+                    for pattern in action_schema.preconditions:
+                        literal = HTNLiteral(
+                            predicate=pattern.predicate,
+                            args=tuple(step_bindings.get(arg, arg) for arg in pattern.args),
+                            is_positive=pattern.is_positive,
+                            source_symbol=None,
+                        )
+                        signature = literal.to_signature()
+                        if signature in explicit_signatures:
+                            continue
+                        explicit_signatures.add(signature)
+                        step_preconditions.append(literal)
+
+            grounded_positive_literals = []
+            grounded_seen = set()
+            for literal in step_preconditions:
+                if not literal.is_positive:
+                    continue
+                grounded_literal = HTNLiteral(
+                    predicate=literal.predicate,
+                    args=tuple(bind_symbol(arg) for arg in literal.args),
+                    is_positive=True,
+                    source_symbol=None,
+                )
+                signature = grounded_literal.to_signature()
+                if signature in blocked_signatures or signature in grounded_seen:
+                    continue
+                grounded_seen.add(signature)
+                grounded_positive_literals.append(grounded_literal)
+                planning_hint_signatures.add(signature)
+
+            step_positive_literals[step.step_id] = tuple(grounded_positive_literals)
+
+        for step in witness_steps:
+            for literal in step_positive_literals.get(step.step_id, ()):
+                if literal.to_signature() in seen_literal_signatures:
+                    continue
+                seen_literal_signatures.add(literal.to_signature())
+                literal_pool.append(literal)
+            if step.kind == "compound":
+                grounded_args = tuple(bind_symbol(arg) for arg in step.args)
+                child_literals = self._select_child_witness_context(
+                    method_library,
+                    step.task_name,
+                    grounded_args,
+                    blocked_signatures,
+                    planning_hint_signatures | set(seen_literal_signatures),
+                    action_semantics,
+                    object_pool,
+                    object_types,
+                )
+                for literal in child_literals:
+                    if literal.to_signature() in seen_literal_signatures:
+                        continue
+                    seen_literal_signatures.add(literal.to_signature())
+                    literal_pool.append(literal)
+
+        facts = []
+        seen = set()
+
+        for literal in literal_pool:
+            grounded_args = literal.args
+            signature = (
+                f"{literal.predicate}({', '.join(grounded_args)})"
+                if grounded_args
+                else literal.predicate
+            )
+            if signature in blocked_signatures:
+                continue
+            fact = (
+                f"({literal.predicate} {' '.join(grounded_args)})"
+                if grounded_args
+                else f"({literal.predicate})"
+            )
+            if fact in seen:
+                continue
+            seen.add(fact)
+            facts.append(fact)
+
+        return tuple(facts)
+
+    @staticmethod
+    def _initial_frontier_steps(method):
+        if not method.subtasks:
+            return ()
+        if not method.ordering:
+            return tuple(method.subtasks)
+
+        in_degree = {
+            step.step_id: 0
+            for step in method.subtasks
+        }
+        step_lookup = {
+            step.step_id: step
+            for step in method.subtasks
+        }
+        for _, after in method.ordering:
+            if after in in_degree:
+                in_degree[after] += 1
+
+        return tuple(
+            step_lookup[step.step_id]
+            for step in method.subtasks
+            if in_degree.get(step.step_id, 0) == 0
+        )
+
+    def _select_child_witness_context(
+        self,
+        method_library,
+        task_name,
+        grounded_args,
+        blocked_signatures,
+        known_signatures,
+        action_semantics,
+        object_pool,
+        object_types,
+    ):
+        best_literals = ()
+        best_score = (-1, -1)
+        parsed_known_signatures = [
+            parsed
+            for parsed in (
+                self._parse_signature_text(signature)
+                for signature in known_signatures
+            )
+            if parsed is not None
+        ]
+
+        for child_method in method_library.methods_for_task(task_name):
+            local_bindings = {
+                parameter: arg
+                for parameter, arg in zip(child_method.parameters, grounded_args)
+            }
+            grounded_literals = []
+            grounded_seen = set()
+            promoted_literals = self._promoted_child_context_literals(
+                child_method,
+                action_semantics,
+            )
+
+            for literal in promoted_literals:
+                grounded_literal = self._ground_child_witness_literal(
+                    literal,
+                    local_bindings,
+                    parsed_known_signatures,
+                    object_pool,
+                    object_types,
+                )
+                signature = grounded_literal.to_signature()
+                if signature in blocked_signatures or signature in grounded_seen:
+                    continue
+                grounded_seen.add(signature)
+                grounded_literals.append(grounded_literal)
+
+            overlap = sum(
+                1
+                for literal in grounded_literals
+                if literal.to_signature() in known_signatures
+            )
+            score = (overlap, len(grounded_literals))
+            if score > best_score:
+                best_score = score
+                best_literals = tuple(grounded_literals)
+
+        return best_literals
+
+    def _promoted_child_context_literals(self, method, action_semantics):
+        literals = []
+        seen = set()
+
+        def add(literal):
+            if not literal.is_positive:
+                return
+            signature = literal.to_signature()
+            if signature in seen:
+                return
+            seen.add(signature)
+            literals.append(literal)
+
+        for literal in method.context:
+            add(literal)
+
+        for step in method.subtasks:
+            for literal in step.preconditions:
+                add(literal)
+            if step.kind != "primitive":
+                continue
+
+            action_schema = action_semantics.get(step.action_name or step.task_name)
+            if action_schema is None:
+                continue
+
+            step_bindings = {
+                parameter: arg
+                for parameter, arg in zip(action_schema.parameters, step.args)
+            }
+            for pattern in action_schema.preconditions:
+                add(
+                    HTNLiteral(
+                        predicate=pattern.predicate,
+                        args=tuple(step_bindings.get(arg, arg) for arg in pattern.args),
+                        is_positive=pattern.is_positive,
+                        source_symbol=None,
+                    )
+                )
+
+        return tuple(literals)
+
+    def _ground_child_witness_literal(
+        self,
+        literal,
+        local_bindings,
+        parsed_known_signatures,
+        object_pool,
+        object_types,
+    ):
+        for candidate in parsed_known_signatures:
+            if candidate["predicate"] != literal.predicate:
+                continue
+            if len(candidate["args"]) != len(literal.args):
+                continue
+
+            trial_bindings = dict(local_bindings)
+            grounded_args = []
+            matches = True
+            for token, actual in zip(literal.args, candidate["args"]):
+                if not token:
+                    grounded_args.append(actual)
+                    continue
+                if token[0].islower():
+                    if token != actual:
+                        matches = False
+                        break
+                    grounded_args.append(actual)
+                    continue
+
+                bound_value = trial_bindings.get(token)
+                if bound_value is not None and bound_value != actual:
+                    matches = False
+                    break
+                trial_bindings[token] = actual
+                grounded_args.append(actual)
+
+            if not matches:
+                continue
+
+            local_bindings.clear()
+            local_bindings.update(trial_bindings)
+            return HTNLiteral(
+                predicate=literal.predicate,
+                args=tuple(grounded_args),
+                is_positive=literal.is_positive,
+                source_symbol=None,
+            )
+
+        grounded_args = []
+        used_values = set(local_bindings.values())
+        for token in literal.args:
+            if not token:
+                grounded_args.append(token)
+                continue
+            if token[0].islower():
+                grounded_args.append(token)
+                continue
+            if token not in local_bindings:
+                candidate = next(
+                    (obj for obj in object_pool if obj not in used_values),
+                    None,
+                )
+                if candidate is None:
+                    candidate_type = self._infer_type_from_symbol(token)
+                    index = 1
+                    candidate = f"witness_{candidate_type}_{index}"
+                    while candidate in object_pool:
+                        index += 1
+                        candidate = f"witness_{candidate_type}_{index}"
+                    object_pool.append(candidate)
+                    object_types[candidate] = candidate_type
+                local_bindings[token] = candidate
+                used_values.add(candidate)
+            grounded_args.append(local_bindings[token])
+
+        return HTNLiteral(
+            predicate=literal.predicate,
+            args=tuple(grounded_args),
+            is_positive=literal.is_positive,
+            source_symbol=None,
+        )
+
+    @staticmethod
+    def _parse_signature_text(signature):
+        if not signature:
+            return None
+        is_positive = not signature.startswith("!")
+        text = signature[1:] if not is_positive else signature
+        if "(" not in text:
+            return {
+                "predicate": text,
+                "args": (),
+                "is_positive": is_positive,
+            }
+
+        predicate, remainder = text.split("(", 1)
+        args_blob = remainder.rsplit(")", 1)[0]
+        args = tuple(
+            part.strip()
+            for part in args_blob.split(",")
+            if part.strip()
+        )
+        return {
+            "predicate": predicate,
+            "args": args,
+            "is_positive": is_positive,
+        }
+
+    def _task_witness_initial_facts(
+        self,
+        planner,
+        task_name,
+        method_library,
+        task_args,
+        objects,
+        object_pool=None,
+        object_types=None,
+    ):
+        facts = []
+        seen = set()
+        task_methods = method_library.methods_for_task(task_name)
+        if not task_methods:
+            return ()
+
+        for method in task_methods:
+            for fact in self._method_validation_initial_facts(
+                planner,
+                method,
+                method_library,
+                task_args,
+                objects,
+                object_pool=object_pool,
+                object_types=object_types,
+            ):
+                if fact in seen:
+                    continue
+                seen.add(fact)
+                facts.append(fact)
+
+        return tuple(facts)
 
     def _stage5_agentspeak_rendering(self, ltl_spec, method_library, plan_records):
         """Stage 5: HTN methods + validated DFA wrappers -> AgentSpeak rendering."""

@@ -21,6 +21,13 @@ if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
 from ltl_bdi_pipeline import LTL_BDI_Pipeline
+from stage3_method_synthesis.htn_schema import (
+	HTNLiteral,
+	HTNMethod,
+	HTNMethodLibrary,
+	HTNMethodStep,
+	HTNTask,
+)
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from utils.config import get_config
 from utils.pipeline_logger import PipelineLogger
@@ -152,6 +159,83 @@ def _method_free_variable_messages(stage5_code: str) -> List[str]:
 	return free_variable_messages
 
 
+def _reachable_compound_task_names(stage3_library: Dict[str, Any]) -> List[str]:
+	task_names = {
+		binding["task_name"]
+		for binding in (stage3_library.get("target_task_bindings") or [])
+	}
+	methods = stage3_library.get("methods") or []
+	queue = list(task_names)
+
+	while queue:
+		task_name = queue.pop(0)
+		for method in methods:
+			if method.get("task_name") != task_name:
+				continue
+			for step in method.get("subtasks", []):
+				if step.get("kind") != "compound":
+					continue
+				helper_name = step.get("task_name")
+				if not helper_name or helper_name in task_names:
+					continue
+				task_names.add(helper_name)
+				queue.append(helper_name)
+
+	return sorted(task_names)
+
+
+def _binding_semantic_messages(stage3_library: Dict[str, Any]) -> List[str]:
+	compound_tasks = {
+		task["name"]: task
+		for task in (stage3_library.get("compound_tasks") or [])
+	}
+	methods_by_task: Dict[str, List[Dict[str, Any]]] = {}
+	for method in (stage3_library.get("methods") or []):
+		methods_by_task.setdefault(method["task_name"], []).append(method)
+
+	messages: List[str] = []
+	for binding in (stage3_library.get("target_task_bindings") or []):
+		target_literal = binding["target_literal"]
+		if not target_literal.startswith("!"):
+			continue
+		task_name = binding["task_name"]
+		task = compound_tasks.get(task_name)
+		if task is None:
+			continue
+
+		predicate_part = target_literal[1:]
+		predicate_name, _, args_part = predicate_part.partition("(")
+		task_parameters = task.get("parameters") or []
+		expected_guard_signature = (
+			f"!{predicate_name}({', '.join(task_parameters)})"
+			if args_part
+			else f"!{predicate_name}"
+		)
+		methods = methods_by_task.get(task_name, [])
+		has_negative_guard = any(
+			any(
+				(
+					("!" if not literal.get("is_positive", True) else "")
+					+ literal["predicate"]
+					+ (
+						f"({', '.join(literal.get('args', []))})"
+						if literal.get("args")
+						else ""
+					)
+				) == expected_guard_signature
+				for literal in (method.get("context") or [])
+			)
+			for method in methods
+		)
+		if not has_negative_guard:
+			messages.append(
+				f"Negative target binding '{target_literal}' -> '{task_name}' has no matching "
+				f"negative guard context '{expected_guard_signature}'.",
+			)
+
+	return messages
+
+
 def _run_query_case(query_id: str) -> Dict[str, Any]:
 	if query_id not in QUERY_CASES:
 		raise KeyError(
@@ -202,6 +286,7 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 	target_bindings = stage3_library.get("target_task_bindings") or []
 	if not target_bindings:
 		bug_messages.append("Stage 3 produced no target_task_bindings")
+	bug_messages.extend(_binding_semantic_messages(stage3_library))
 
 	target_literals = execution.get("stage3_metadata", {}).get("target_literals", [])
 	for required_target_literal in case["required_target_literals"]:
@@ -209,6 +294,37 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 			bug_messages.append(
 				f"required target literal '{required_target_literal}' not present in Stage 3 metadata",
 			)
+
+	stage4_artifacts = execution.get("stage4_artifacts") or {}
+	method_validations = stage4_artifacts.get("method_validations") or []
+	if not method_validations:
+		bug_messages.append("Stage 4 recorded no per-method validation artifacts")
+	if any(item.get("status") != "success" for item in method_validations):
+		failed_methods = sorted(
+			item.get("method_name")
+			for item in method_validations
+			if item.get("status") != "success"
+		)
+		bug_messages.append(
+			f"Stage 4 has failed per-method validations: {failed_methods}",
+		)
+
+	expected_method_names = {
+		method["method_name"]
+		for method in (stage3_library.get("methods") or [])
+		if method.get("task_name") in _reachable_compound_task_names(stage3_library)
+	}
+	validated_method_names = {
+		item.get("method_name")
+		for item in method_validations
+		if item.get("method_name")
+	}
+	missing_method_validations = sorted(expected_method_names - validated_method_names)
+	if missing_method_validations:
+		bug_messages.append(
+			"Stage 4 did not validate all reachable sibling methods: "
+			f"{missing_method_validations}",
+		)
 
 	stage5_code = execution.get("stage5_agentspeak") or ""
 	if "/* HTN Method Plans */" not in stage5_code:
@@ -253,6 +369,227 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 		"bug_messages": bug_messages,
 		"has_bug": bool(bug_messages),
 	}
+
+
+def test_method_validation_initial_facts_are_branch_specific():
+	pipeline = LTL_BDI_Pipeline()
+	planner = PANDAPlanner()
+	method = HTNMethod(
+		method_name="m_hold_block_from_block",
+		task_name="hold_block",
+		parameters=("BLOCK1",),
+		context=(),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="clear_top",
+				args=("BLOCK1",),
+				kind="compound",
+			),
+			HTNMethodStep(
+				step_id="s2",
+				task_name="pick_up",
+				args=("BLOCK1", "BLOCK2"),
+				kind="primitive",
+				action_name="pick-up",
+				preconditions=(
+					HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),
+				),
+			),
+		),
+		ordering=(("s1", "s2"),),
+	)
+	method_library = HTNMethodLibrary(
+		methods=[
+			method,
+			HTNMethod(
+				method_name="m_clear_top_noop",
+				task_name="clear_top",
+				parameters=("BLOCK1",),
+				context=(HTNLiteral("clear", ("BLOCK1",), True, None),),
+			),
+		],
+	)
+
+	facts = pipeline._method_validation_initial_facts(
+		planner,
+		method,
+		method_library,
+		("a",),
+		("a", "b", "c"),
+	)
+
+	assert "(handempty)" in facts
+	assert "(clear a)" in facts
+	assert "(on a b)" in facts
+
+
+def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
+	pipeline = LTL_BDI_Pipeline()
+	planner = PANDAPlanner()
+	method = HTNMethod(
+		method_name="m_place_on_direct",
+		task_name="place_on",
+		parameters=("BLOCK1", "BLOCK2"),
+		context=(),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="hold_block",
+				args=("BLOCK1",),
+				kind="compound",
+			),
+			HTNMethodStep(
+				step_id="s2",
+				task_name="clear_top",
+				args=("BLOCK2",),
+				kind="compound",
+			),
+			HTNMethodStep(
+				step_id="s3",
+				task_name="put_on_block",
+				args=("BLOCK1", "BLOCK2"),
+				kind="primitive",
+				action_name="put-on-block",
+			),
+		),
+		ordering=(("s1", "s2"), ("s2", "s3")),
+	)
+	method_library = HTNMethodLibrary(
+		methods=[
+			method,
+			HTNMethod(
+				method_name="m_hold_block_already",
+				task_name="hold_block",
+				parameters=("BLOCK1",),
+				context=(HTNLiteral("holding", ("BLOCK1",), True, None),),
+			),
+			HTNMethod(
+				method_name="m_clear_top_already",
+				task_name="clear_top",
+				parameters=("BLOCK1",),
+				context=(HTNLiteral("clear", ("BLOCK1",), True, None),),
+			),
+		],
+	)
+
+	facts = pipeline._method_validation_initial_facts(
+		planner,
+		method,
+		method_library,
+		("a", "b"),
+		("a", "b", "c"),
+	)
+
+	assert "(holding a)" in facts
+	assert "(clear b)" in facts
+	assert "(handempty)" not in facts
+
+
+def test_task_witness_initial_facts_merge_sibling_branches():
+	pipeline = LTL_BDI_Pipeline()
+	planner = PANDAPlanner()
+	method_library = HTNMethodLibrary(
+		methods=[
+			HTNMethod(
+				method_name="m_place_on_direct",
+				task_name="place_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(
+					HTNLiteral("holding", ("BLOCK1",), True, None),
+					HTNLiteral("clear", ("BLOCK2",), True, None),
+				),
+			),
+			HTNMethod(
+				method_name="m_place_on_acquire",
+				task_name="place_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up_from_table",
+						args=("BLOCK1",),
+						kind="primitive",
+						action_name="pick-up-from-table",
+					),
+				),
+			),
+		],
+	)
+
+	facts = pipeline._task_witness_initial_facts(
+		planner,
+		"place_on",
+		method_library,
+		("a", "b"),
+		("a", "b", "c"),
+	)
+
+	assert "(holding a)" in facts
+	assert "(clear b)" in facts
+	assert "(ontable a)" in facts
+
+
+def test_method_validation_initial_facts_allocate_typed_witness_objects():
+	pipeline = LTL_BDI_Pipeline()
+	planner = PANDAPlanner()
+	method = HTNMethod(
+		method_name="m_remove_on_clear_first",
+		task_name="remove_on",
+		parameters=("BLOCK1", "BLOCK2"),
+		context=(
+			HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),
+			HTNLiteral("clear", ("BLOCK1",), False, None),
+		),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="clear_top",
+				args=("BLOCK1",),
+				kind="compound",
+			),
+			HTNMethodStep(
+				step_id="s2",
+				task_name="remove_on",
+				args=("BLOCK1", "BLOCK2"),
+				kind="compound",
+			),
+		),
+		ordering=(("s1", "s2"),),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("remove_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
+			HTNTask("clear_top", ("BLOCK1",), False, ("clear",)),
+		],
+		methods=[
+			method,
+			HTNMethod(
+				method_name="m_clear_top_remove",
+				task_name="clear_top",
+				parameters=("BLOCK1", "BLOCK3"),
+				context=(HTNLiteral("holding", ("BLOCK3",), True, None),),
+				subtasks=(),
+			),
+		],
+	)
+	object_pool = ["a"]
+	object_types = {"a": "block"}
+
+	facts = pipeline._method_validation_initial_facts(
+		planner,
+		method,
+		method_library,
+		("a", "b"),
+		("a", "b"),
+		object_pool=object_pool,
+		object_types=object_types,
+	)
+
+	assert "(holding witness_block_1)" in facts
+	assert "witness_block_1" in object_pool
+	assert object_types["witness_block_1"] == "block"
 
 
 @pytest.mark.parametrize("query_id", sorted(QUERY_CASES))
