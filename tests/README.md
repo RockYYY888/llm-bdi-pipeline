@@ -33,4 +33,5 @@ This repository keeps the tests focused on the active pipeline.
 ## Notes
 
 - Stage 4 live planning requires `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine`.
+- The planner auto-discovers a default local install under `$HOME/.local/pandaPI/bin`.
 - `tests/test_pipeline.py` is the default example test to run for acceptance.

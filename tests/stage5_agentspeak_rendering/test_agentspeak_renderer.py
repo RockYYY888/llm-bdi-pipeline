@@ -52,3 +52,26 @@ def test_renderer_emits_transition_goal_and_primitive_wrappers():
 	assert "\t!put_on_block(a, b)." in code
 	assert "+!transition_1 : true <-" in code
 	assert "+!put_on_block(X1, X2) :" in code
+
+
+def test_renderer_accepts_zero_step_panda_plans():
+	renderer = AgentSpeakRenderer()
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a", "b"),
+		plan_records=[
+			{
+				"transition_name": "transition_1",
+				"label": "!on(a, b)",
+				"plan": PANDAPlanResult(
+					task_name="maintain_not_on",
+					task_args=("a", "b"),
+					target_literal=HTNLiteral("on", ("a", "b"), False, "on_a_b"),
+					steps=[],
+				),
+			},
+		],
+	)
+
+	assert "+!maintain_not_on(a, b) : true <-" in code
+	assert "\ttrue." in code

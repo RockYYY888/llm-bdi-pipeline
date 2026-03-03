@@ -7,6 +7,7 @@ invokes the PANDA toolchain, and parses the resulting primitive plan.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -19,6 +20,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethod,
 	HTNMethodLibrary,
 )
+from stage4_panda_planning.problem_builder import PANDAProblemBuilder
 from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
 
 
@@ -44,15 +46,17 @@ class PANDAPlanner:
 		parser_cmd: str = "pandaPIparser",
 		grounder_cmd: str = "pandaPIgrounder",
 		engine_cmd: str = "pandaPIengine",
+		problem_builder: Optional[PANDAProblemBuilder] = None,
 	) -> None:
 		self.workspace = Path(workspace) if workspace else None
 		self.parser_cmd = parser_cmd
 		self.grounder_cmd = grounder_cmd
 		self.engine_cmd = engine_cmd
+		self.problem_builder = problem_builder or PANDAProblemBuilder()
 
 	def toolchain_available(self) -> bool:
 		return all(
-			shutil.which(self._command_head(command)) is not None
+			self._resolve_command_head(command) is not None
 			for command in (self.parser_cmd, self.grounder_cmd, self.engine_cmd)
 		)
 
@@ -73,7 +77,7 @@ class PANDAPlanner:
 		work_dir.mkdir(parents=True, exist_ok=True)
 
 		domain_hddl = self._build_domain_hddl(domain, method_library, domain_name)
-		problem_hddl = self._build_problem_hddl(
+		problem_hddl = self.problem_builder.build_problem_hddl(
 			domain=domain,
 			domain_name=domain_name,
 			objects=objects,
@@ -102,10 +106,12 @@ class PANDAPlanner:
 			work_dir,
 		)
 		engine_run = self._run_command(
-			self._build_command(self.engine_cmd, str(grounded_path), str(raw_plan_path)),
+			self._build_command(self.engine_cmd, str(grounded_path)),
 			"engine",
 			work_dir,
 		)
+		raw_plan_text = engine_run["stdout"]
+		raw_plan_path.write_text(raw_plan_text)
 
 		actual_plan_text = ""
 		conversion_stdout = ""
@@ -130,9 +136,8 @@ class PANDAPlanner:
 		elif raw_plan_path.exists():
 			actual_plan_text = raw_plan_path.read_text()
 
-		raw_plan_text = raw_plan_path.read_text() if raw_plan_path.exists() else ""
 		steps = self._parse_plan_steps(actual_plan_text or raw_plan_text, domain)
-		if not steps:
+		if not steps and "->" not in actual_plan_text:
 			raise PANDAPlanningError(
 				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args)})",
 				metadata={
@@ -183,7 +188,7 @@ class PANDAPlanner:
 		missing = [
 			command
 			for command in (self.parser_cmd, self.grounder_cmd, self.engine_cmd)
-			if shutil.which(self._command_head(command)) is None
+			if self._resolve_command_head(command) is None
 		]
 		if not missing:
 			return
@@ -231,6 +236,9 @@ class PANDAPlanner:
 		for method in method_library.methods:
 			lines.extend(self._render_method(method, task_lookup, domain.types))
 			lines.append("")
+		for method in self._build_guard_completion_methods(method_library):
+			lines.extend(self._render_method(method, task_lookup, domain.types))
+			lines.append("")
 
 		for action in domain.actions:
 			lines.append(f"  (:action {action.name}")
@@ -269,64 +277,141 @@ class PANDAPlanner:
 		lines.append(
 			f"    :precondition {self._render_literal_conjunction(method.context, variable_map)}"
 		)
-		lines.append("    :ordered-subtasks (and")
+		subtasks_keyword = ":subtasks" if method.ordering else ":ordered-subtasks"
+		lines.append(f"    {subtasks_keyword} (and")
 		for step in method.subtasks:
+			step_name = self._render_method_step_name(step)
 			lines.append(
-				f"      ({step.step_id} ({step.task_name}"
+				f"      ({step.step_id} ({step_name}"
 				f"{self._render_invocation_tokens(step.args, variable_map)}))"
 			)
 		lines.append("    )")
+		if method.ordering:
+			lines.append("    :ordering (and")
+			for before, after in method.ordering:
+				lines.append(f"      (< {before} {after})")
+			lines.append("    )")
 		lines.append("  )")
 		return lines
 
-	def _build_problem_hddl(
+	def _render_method_step_name(self, step: Any) -> str:
+		if getattr(step, "kind", None) == "primitive":
+			if getattr(step, "action_name", None):
+				return step.action_name
+			return step.task_name.replace("_", "-")
+		return step.task_name
+
+	def _build_guard_completion_methods(
 		self,
-		domain: Any,
-		domain_name: str,
-		objects: Sequence[str],
-		task_name: str,
-		task_args: Sequence[str],
-	) -> str:
-		object_list = list(dict.fromkeys(objects or task_args))
-		object_type = domain.types[0] if domain.types else "object"
-		lines = [f"(define (problem {domain_name}_problem)"]
-		lines.append(f"  (:domain {domain_name})")
-		if object_list:
-			lines.append(f"  (:objects {' '.join(object_list)} - {object_type})")
-		lines.append("  (:htn")
-		lines.append("    :parameters ()")
-		lines.append(
-			f"    :ordered-subtasks (and (t1 ({task_name}{self._render_problem_args(task_args)})))"
-		)
-		lines.append("  )")
-		lines.append("  (:init")
-		for fact in self._build_initial_facts(domain, object_list):
-			lines.append(f"    {fact}")
-		lines.append("  )")
-		lines.append("  (:goal (and))")
-		lines.append(")")
-		return "\n".join(lines) + "\n"
+		method_library: HTNMethodLibrary,
+	) -> List[HTNMethod]:
+		generated: List[HTNMethod] = []
+		existing_names = {method.method_name for method in method_library.methods}
 
-	def _build_initial_facts(self, domain: Any, objects: Sequence[str]) -> List[str]:
-		predicates = {predicate.name: len(predicate.parameters) for predicate in domain.predicates}
-		facts: List[str] = []
+		for task in method_library.compound_tasks:
+			literal = self._guard_literal_for_task(task, method_library)
+			if literal is None:
+				continue
+			if self._has_matching_guard_method(method_library, task, literal):
+				continue
 
-		if "handempty" in predicates and predicates["handempty"] == 0:
-			facts.append("(handempty)")
-		if "ontable" in predicates and predicates["ontable"] == 1:
-			for obj in objects:
-				facts.append(f"(ontable {obj})")
-		if "clear" in predicates and predicates["clear"] == 1:
-			for obj in objects:
-				facts.append(f"(clear {obj})")
+			method_name = self._unique_method_name(f"{task.name}__guard", existing_names)
+			existing_names.add(method_name)
+			generated.append(
+				HTNMethod(
+					method_name=method_name,
+					task_name=task.name,
+					parameters=task.parameters,
+					context=(literal,),
+					subtasks=(),
+					ordering=(),
+					origin="stage4_guard_completion",
+				)
+			)
 
-		return facts
+		return generated
+
+	def _guard_literal_for_task(
+		self,
+		task: Any,
+		method_library: HTNMethodLibrary,
+	) -> Optional[HTNLiteral]:
+		if len(getattr(task, "source_predicates", ())) != 1:
+			return None
+
+		predicate = task.source_predicates[0]
+		expected_args = tuple(task.parameters)
+		if task.name == f"achieve_{predicate.replace('-', '_')}":
+			return HTNLiteral(predicate=predicate, args=expected_args, is_positive=True)
+
+		negative_targets = {
+			self._task_name_for_literal(literal)
+			for literal in method_library.target_literals
+			if not literal.is_positive
+		}
+		if (
+			task.name == f"maintain_not_{predicate.replace('-', '_')}"
+			and task.name not in negative_targets
+		):
+			return HTNLiteral(predicate=predicate, args=expected_args, is_positive=True)
+
+		return None
+
+	def _has_matching_guard_method(
+		self,
+		method_library: HTNMethodLibrary,
+		task: Any,
+		literal: HTNLiteral,
+	) -> bool:
+		for method in method_library.methods:
+			if method.task_name != task.name or method.subtasks:
+				continue
+			for context_literal in method.context:
+				if (
+					context_literal.predicate == literal.predicate
+					and context_literal.is_positive == literal.is_positive
+					and tuple(context_literal.args) == tuple(literal.args)
+				):
+					return True
+		return False
+
+	@staticmethod
+	def _unique_method_name(base_name: str, existing_names: set[str]) -> str:
+		if base_name not in existing_names:
+			return base_name
+
+		index = 2
+		while True:
+			candidate = f"{base_name}_{index}"
+			if candidate not in existing_names:
+				return candidate
+			index += 1
 
 	def _parse_plan_steps(self, plan_text: str, domain: Any) -> List[PANDAPlanStep]:
 		action_names = {action.name for action in domain.actions}
 		steps: List[PANDAPlanStep] = []
 
 		for line in plan_text.splitlines():
+			plain_match = re.fullmatch(
+				r"\s*\d+\s+([a-zA-Z][a-zA-Z0-9_-]*)(?:\s+(.*?))?\s*",
+				line,
+			)
+			if plain_match and "->" not in line:
+				action_name = plain_match.group(1)
+				if action_name not in action_names:
+					continue
+				args_blob = plain_match.group(2) or ""
+				args = tuple(token for token in args_blob.strip().split() if token)
+				steps.append(
+					PANDAPlanStep(
+						task_name=self._sanitize_name(action_name),
+						action_name=action_name,
+						args=args,
+						source_line=line.strip(),
+					)
+				)
+				continue
+
 			matches = re.findall(r"\(([a-zA-Z][a-zA-Z0-9_-]*)([^)]*)\)", line)
 			for action_name, args_blob in matches:
 				if action_name not in action_names:
@@ -390,9 +475,46 @@ class PANDAPlanner:
 	def _command_head(command: str) -> str:
 		return shlex.split(command)[0]
 
-	@staticmethod
-	def _build_command(command: str, *args: str) -> List[str]:
-		return [*shlex.split(command), *args]
+	def _build_command(self, command: str, *args: str) -> List[str]:
+		parts = shlex.split(command)
+		resolved = self._resolve_command_head(command)
+		if resolved:
+			parts[0] = resolved
+		return [*parts, *args]
+
+	def _resolve_command_head(self, command: str) -> Optional[str]:
+		head = self._command_head(command)
+		if os.path.sep in head:
+			if Path(head).is_file() and os.access(head, os.X_OK):
+				return head
+			return None
+
+		resolved = shutil.which(head)
+		if resolved:
+			return resolved
+
+		for directory in self._default_command_dirs():
+			candidate = directory / head
+			if candidate.is_file() and os.access(candidate, os.X_OK):
+				return str(candidate)
+
+		return None
+
+	def _default_command_dirs(self) -> Tuple[Path, ...]:
+		directories: List[Path] = []
+		panda_home = os.getenv("PANDA_PI_HOME")
+		if panda_home:
+			directories.append(Path(panda_home) / "bin")
+		panda_bin = os.getenv("PANDA_PI_BIN")
+		if panda_bin:
+			directories.append(Path(panda_bin))
+		directories.append(Path.home() / ".local" / "pandaPI" / "bin")
+
+		unique: List[Path] = []
+		for directory in directories:
+			if directory not in unique:
+				unique.append(directory)
+		return tuple(unique)
 
 	@staticmethod
 	def _render_signature_parameters(parameters: Iterable[str]) -> str:
@@ -472,12 +594,6 @@ class PANDAPlanner:
 			return ""
 		rendered = " ".join(self._render_symbol_token(arg, variable_map) for arg in args)
 		return f" {rendered}"
-
-	@staticmethod
-	def _render_problem_args(args: Sequence[str]) -> str:
-		if not args:
-			return ""
-		return f" {' '.join(args)}"
 
 	@staticmethod
 	def _render_variable(name: str) -> str:

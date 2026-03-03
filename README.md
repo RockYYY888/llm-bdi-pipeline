@@ -9,25 +9,33 @@ The only actively maintained planning domain in this repository is **blocksworld
 
 1. **Stage 1: Natural Language -> LTLf**
    - `src/stage1_interpretation/`
-   - Uses an LLM to convert user instructions into `LTLSpecification`
-   - Produces a `GroundingMap` that links propositional symbols back to domain predicates
+   - Input: natural-language instruction + HDDL domain signatures
+   - Does: uses an LLM to convert the instruction into an `LTLSpecification`
+   - Output: `LTLSpecification` + `GroundingMap` that links propositional symbols back to domain predicates
 
 2. **Stage 2: LTLf -> DFA**
    - `src/stage2_dfa_generation/`
-   - Uses `ltlf2dfa`
-   - Simplifies DFA labels into atomic literals
+   - Input: `LTLSpecification`
+   - Does: uses `ltlf2dfa` and simplifies DFA labels into atomic literals
+   - Output: simplified DFA metadata + DOT artifacts
 
 3. **Stage 3: DFA -> HTN Method Synthesis**
    - `src/stage3_method_synthesis/`
-   - Uses an LLM to synthesize the HTN method library for the current DFA targets
+   - Input: simplified DFA + `GroundingMap` + HDDL domain signatures
+   - Does: uses an LLM to synthesize the HTN method library for the current DFA targets
+   - Output: `HTNMethodLibrary`
 
 4. **Stage 4: HTN Method Library -> PANDA Planning**
    - `src/stage4_panda_planning/`
-   - Exports a temporary HDDL planning problem and solves it with the PANDA PI toolchain
+   - Input: `HTNMethodLibrary` + target transition literals + concrete object set
+   - Does: builds a temporary HDDL domain/problem pair, augments export-time noop guards for already-satisfied literal-check helper tasks, and solves it with the PANDA PI toolchain
+   - Output: PANDA plan records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
 
 5. **Stage 5: PANDA Plans -> AgentSpeak Rendering**
    - `src/stage5_agentspeak_rendering/`
-   - Emits primitive action wrappers, goal plans, and transition dispatch plans
+   - Input: PANDA plan records + HDDL domain
+   - Does: emits primitive action wrappers, goal plans, and transition dispatch plans
+   - Output: `agentspeak_generated.asl`
 
 6. **Stage 6 Assets: Jason Validation**
    - `src/stage6_jason_validation/`
@@ -38,11 +46,14 @@ The only actively maintained planning domain in this repository is **blocksworld
 
 - Stage 3 is **LLM-only** and rejects missing or malformed live model output.
 - Stage 4 uses the PANDA PI toolchain on temporary HDDL domain/problem files.
+- Stage 4 keeps the problem-instance builder separate from the planner entrypoint. The default
+  builder is explicit and configurable instead of hard-coding initial-state facts inside the planner.
 - Stage 5 renders static, domain-specific AgentSpeak from PANDA-generated primitive plans.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
 - The full end-to-end pipeline still requires an API key because Stage 1 is LLM-only.
 - The full Stage 4 path requires the PANDA PI toolchain (`pandaPIparser`, `pandaPIgrounder`,
-  `pandaPIengine`) to be available on `PATH`.
+  `pandaPIengine`). The runtime auto-detects a local install under `$HOME/.local/pandaPI/bin`,
+  or you can expose it through `PATH`, `PANDA_PI_HOME`, or `PANDA_PI_BIN`.
 
 ## Repository Layout
 
@@ -59,6 +70,7 @@ The only actively maintained planning domain in this repository is **blocksworld
 │   │   └── htn_schema.py
 │   ├── stage4_panda_planning/
 │   │   ├── panda_planner.py
+│   │   ├── problem_builder.py
 │   │   └── panda_schema.py
 │   ├── stage5_agentspeak_rendering/
 │   │   └── agentspeak_renderer.py
@@ -131,21 +143,73 @@ make install-strip
 cd ../../..
 ```
 
-5. Run the canonical acceptance test:
+5. Install the PANDA PI toolchain:
+
+The repository does not ship a bundled PANDA binary. The setup below is the
+tested path used for this project on macOS.
+
+```bash
+brew install gengetopt bison flex pkgconf
+
+git clone https://github.com/panda-planner-dev/pandaPIparser.git ~/.local/src/pandaPIparser
+git clone https://github.com/panda-planner-dev/pandaPIgrounder.git ~/.local/src/pandaPIgrounder
+git clone https://github.com/panda-planner-dev/pandaPIengine.git ~/.local/src/pandaPIengine
+
+# parser
+cd ~/.local/src/pandaPIparser
+make -j4 BISON=/opt/homebrew/opt/bison/bin/bison FLEX=/opt/homebrew/opt/flex/bin/flex
+
+# grounder
+cd ~/.local/src/pandaPIgrounder
+git submodule update --init --recursive
+git -C cpddl/third-party/boruvka apply 0001-Removed-non-macos-call-in-unused-function.patch || true
+git -C cpddl/third-party/boruvka apply 0001-boruvka-endian.patch || true
+make boruvka opts bliss lpsolve
+make
+cd src
+make -j4 CXX=g++ CC=gcc
+
+# engine
+cd ~/.local/src/pandaPIengine
+mkdir -p build
+cd build
+cmake ../src
+make -j4
+
+# install binaries to the default auto-detected location
+install -d ~/.local/pandaPI/bin
+install ~/.local/src/pandaPIparser/pandaPIparser ~/.local/pandaPI/bin/pandaPIparser
+install ~/.local/src/pandaPIgrounder/pandaPIgrounder ~/.local/pandaPI/bin/pandaPIgrounder
+install ~/.local/src/pandaPIengine/build/pandaPIengine ~/.local/pandaPI/bin/pandaPIengine
+```
+
+Optional shell setup:
+
+```bash
+export PATH="$HOME/.local/pandaPI/bin:$PATH"
+```
+
+If you do not add that `PATH` export, the Stage 4 runtime still auto-discovers
+the default install directory above.
+
+6. Run the canonical acceptance test:
 
 ```bash
 ./.venv/bin/pytest -q tests/test_pipeline.py
 ```
 
-This test now also requires the PANDA PI toolchain to be installed and on `PATH`.
+This test requires:
+- a valid `OPENAI_API_KEY` in `.env`
+- a working PANDA PI toolchain
+- the default local PANDA install path (`$HOME/.local/pandaPI/bin`) or an equivalent `PATH` / `PANDA_PI_*` configuration
 
-6. Run the full pipeline on a real blocksworld instruction:
+7. Run the full pipeline on a real blocksworld instruction:
 
 ```bash
 ./.venv/bin/python src/main.py "Using blocks a and b, arrange them so that a is on b."
 ```
 
-7. Inspect the generated artifacts:
+8. Inspect the generated artifacts:
 
 - The pipeline writes a timestamped directory under `logs/`
 - Each successful run contains:
@@ -171,7 +235,8 @@ Notes:
 
 - Stage 1 requires an LLM API key.
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
-- Stage 4 requires `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` on `PATH`.
+- Stage 4 looks for `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` in this order:
+  `PATH`, `PANDA_PI_HOME/bin`, `PANDA_PI_BIN`, `$HOME/.local/pandaPI/bin`.
 - The maintained domain is `src/domains/blocksworld/`.
 - Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
 
