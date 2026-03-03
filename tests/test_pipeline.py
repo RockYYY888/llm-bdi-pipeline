@@ -9,6 +9,7 @@ This file is the canonical acceptance entry point:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -98,6 +99,59 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 	]
 
 
+def _agent_vars(text: str) -> set[str]:
+	return set(re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", text))
+
+
+def _method_free_variable_messages(stage5_code: str) -> List[str]:
+	start_marker = "/* HTN Method Plans */"
+	end_marker = "/* DFA Transition Wrappers */"
+	start_index = stage5_code.find(start_marker)
+	end_index = stage5_code.find(end_marker)
+	if start_index == -1 or end_index == -1 or end_index <= start_index:
+		return []
+
+	method_section = stage5_code[start_index + len(start_marker):end_index].strip()
+	if not method_section:
+		return []
+
+	chunks = [
+		chunk.strip()
+		for chunk in re.split(r"\n\s*\n", method_section)
+		if chunk.strip()
+	]
+	free_variable_messages: List[str] = []
+
+	for chunk in chunks:
+		lines = [line.rstrip() for line in chunk.splitlines() if line.strip()]
+		if not lines:
+			continue
+
+		header = lines[0].strip()
+		header_match = re.match(r"^\+!([a-z][a-z0-9_]*)\(([^)]*)\)\s*:\s*(.*?)\s*<-$", header)
+		if not header_match:
+			continue
+
+		task_name, trigger_args_text, context_text = header_match.groups()
+		trigger_vars = _agent_vars(trigger_args_text)
+		context_vars = set() if context_text.strip() == "true" else _agent_vars(context_text)
+		allowed_vars = trigger_vars | context_vars
+
+		for body_line in lines[1:]:
+			body_text = body_line.strip().rstrip(";.")
+			if body_text == "true":
+				continue
+			body_vars = _agent_vars(body_text)
+			free_vars = sorted(body_vars - allowed_vars)
+			if free_vars:
+				free_variable_messages.append(
+					f"Stage 5 method '{task_name}' uses free body variables {free_vars} "
+					f"not present in trigger/context: {body_text}",
+				)
+
+	return free_variable_messages
+
+
 def _run_query_case(query_id: str) -> Dict[str, Any]:
 	if query_id not in QUERY_CASES:
 		raise KeyError(
@@ -171,6 +225,7 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 		bug_messages.append("legacy target_label facts still present in Stage 5 code")
 	if "+!transition_" in stage5_code:
 		bug_messages.append("legacy transition_i wrappers still present in Stage 5 code")
+	bug_messages.extend(_method_free_variable_messages(stage5_code))
 
 	for binding in target_bindings:
 		task_name = binding["task_name"]

@@ -276,10 +276,12 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "For every helper task that denotes a reusable stateful intention" in user_prompt
 	assert "Think twice before returning: first verify the JSON shape, then verify task coverage." in user_prompt
 	assert "Do not invent free variables such as TOP, SUPPORT, X, or Y" in user_prompt
+	assert "Do not rename an existing task parameter to a fresh variable." in user_prompt
 	assert "Did you avoid every unbound free variable in subtasks" in user_prompt
 	assert "Did you explicitly cover the already-satisfied, direct, blocked, and recursive-helper case families" in user_prompt
 	assert "Did every variable and subtask argument respect the domain's declared types?" in user_prompt
 	assert "Did you avoid unsupported equality/inequality constructs" in user_prompt
+	assert "Did you keep existing task parameters stable instead of renaming them" in user_prompt
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():

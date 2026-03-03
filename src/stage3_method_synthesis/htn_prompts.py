@@ -279,6 +279,9 @@ Valid method fragments:
         "- Do not invent free variables such as TOP, SUPPORT, X, or Y unless they are already "
         "task parameters or are explicitly constrained in method.context or by a binding "
         "subtask.preconditions literal.\n"
+        "- Do not rename an existing task parameter to a fresh variable. If the task parameter "
+        "is B, B1, B2, PKG, ROOM, or similar, keep using that same variable name instead of "
+        "switching to X, Y, OBJ, or another alias.\n"
         "- If a helper method needs a local helper variable, bind it in method.context first "
         "or by an explicit binding precondition (for example a predicate relating that variable "
         "to an existing task parameter) before reusing it in subtasks.\n"
@@ -316,4 +319,6 @@ Valid method fragments:
         "17. Did every variable and subtask argument respect the domain's declared types?\n"
         "18. Did you avoid unsupported equality/inequality constructs and instead use representable "
         "binding conditions only?\n"
+        "19. Did you keep existing task parameters stable instead of renaming them to fresh "
+        "single-letter aliases such as X or Y?\n"
     )
