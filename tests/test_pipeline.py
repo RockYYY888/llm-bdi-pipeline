@@ -157,6 +157,17 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 			)
 
 	stage5_code = execution.get("stage5_agentspeak") or ""
+	if "dfa_edge_label(" not in stage5_code:
+		bug_messages.append("Stage 5 code is missing dfa_edge_label metadata")
+	if "dfa_state(" not in stage5_code:
+		bug_messages.append("Stage 5 code is missing dfa_state state-tracking facts or guards")
+	if "+!dfa_step_" not in stage5_code:
+		bug_messages.append("Stage 5 code is missing state-aware dfa_step wrappers")
+	if "target_label(" in stage5_code:
+		bug_messages.append("legacy target_label facts still present in Stage 5 code")
+	if "+!transition_" in stage5_code:
+		bug_messages.append("legacy transition_i wrappers still present in Stage 5 code")
+
 	for binding in target_bindings:
 		task_name = binding["task_name"]
 		if task_name.startswith(BANNED_TASK_PREFIXES):

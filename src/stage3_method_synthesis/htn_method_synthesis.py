@@ -172,85 +172,79 @@ class HTNMethodSynthesizer:
 		if grounding_map is None:
 			return []
 
-		dfa_dot = dfa_result.get("dfa_dot", "")
-		labels = self._extract_relevant_dfa_labels(dfa_dot)
+		transition_specs = self.extract_progressing_transitions(grounding_map, dfa_result)
 		seen: set[str] = set()
 		literals: List[HTNLiteral] = []
 
-		for label in labels:
-			if label in {"true", "false"}:
-				continue
-
-			is_positive = not label.startswith("!")
-			symbol = label[1:] if not is_positive else label
+		for spec in transition_specs:
+			label = spec["label"]
 			if label in seen:
 				continue
 			seen.add(label)
-
-			atom = grounding_map.get_atom(symbol)
-			if atom is None:
-				literal = HTNLiteral(
-					predicate=symbol,
-					args=(),
-					is_positive=is_positive,
-					source_symbol=symbol,
-				)
-			else:
-				literal = HTNLiteral(
-					predicate=atom.predicate,
-					args=tuple(atom.args),
-					is_positive=is_positive,
-					source_symbol=symbol,
-				)
-			literals.append(literal)
+			literals.append(spec["literal"])
 
 		return literals
+
+	def extract_progressing_transitions(
+		self,
+		grounding_map: GroundingMap | None,
+		dfa_result: Dict[str, Any],
+	) -> List[Dict[str, Any]]:
+		"""Preserve DFA state-to-state progress edges for later rendering."""
+
+		if grounding_map is None:
+			return []
+
+		dfa_dot = dfa_result.get("dfa_dot", "")
+		graph = self._parse_dfa_graph(dfa_dot)
+		selected_edges = self._select_relevant_edges(graph)
+		state_aliases = self._build_state_aliases(graph, selected_edges)
+		seen_edges: set[Tuple[str, str, str]] = set()
+		transition_specs: List[Dict[str, Any]] = []
+
+		for source, target, raw_label in selected_edges:
+			if raw_label in {"true", "false"}:
+				continue
+
+			edge_key = (source, target, raw_label)
+			if edge_key in seen_edges:
+				continue
+			seen_edges.add(edge_key)
+
+			literal = self._literal_from_label(raw_label, grounding_map)
+			source_alias = state_aliases[source]
+			target_alias = state_aliases[target]
+			label_signature = literal.to_signature()
+			transition_name = (
+				f"dfa_step_{source_alias}_{target_alias}_"
+				f"{self._transition_suffix_for_literal(literal)}"
+			)
+			transition_specs.append(
+				{
+					"transition_name": transition_name,
+					"label": label_signature,
+					"raw_label": raw_label,
+					"literal": literal,
+					"source_state": source_alias,
+					"target_state": target_alias,
+					"raw_source_state": source,
+					"raw_target_state": target,
+					"initial_state": state_aliases.get(graph.get("init_state")) if graph.get("init_state") else None,
+				},
+			)
+
+		return transition_specs
 
 	def _extract_relevant_dfa_labels(self, dfa_dot: str) -> List[str]:
 		"""Prefer labels on goal-progressing edges; fall back when progress is not encoded."""
 
-		all_labels = re.findall(r'label="([^"]+)"', dfa_dot)
-		progress_labels = self._extract_progressing_labels(dfa_dot)
-		if progress_labels:
-			return progress_labels
-
-		accepting_loop_labels = self._extract_accepting_loop_labels(dfa_dot)
-		if accepting_loop_labels:
-			return accepting_loop_labels
-
-		return all_labels
-
-	def _extract_progressing_labels(self, dfa_dot: str) -> List[str]:
 		graph = self._parse_dfa_graph(dfa_dot)
-		if not graph["edges"] or not graph["accepting"]:
-			return []
-
-		distances = self._distance_to_accepting(graph["edges"], graph["accepting"])
-		labels: List[str] = []
-		for source, target, label in graph["edges"]:
-			source_distance = distances.get(source)
-			target_distance = distances.get(target)
-			if source_distance is None or target_distance is None:
-				continue
-			if target_distance < source_distance:
-				labels.append(label)
-		return labels
-
-	def _extract_accepting_loop_labels(self, dfa_dot: str) -> List[str]:
-		graph = self._parse_dfa_graph(dfa_dot)
-		if not graph["edges"] or not graph["accepting"]:
-			return []
-
-		distances = self._distance_to_accepting(graph["edges"], graph["accepting"])
-		labels: List[str] = []
-		for source, target, label in graph["edges"]:
-			if distances.get(source) == 0 and distances.get(target) == 0:
-				labels.append(label)
-		return labels
+		return [label for _, _, label in self._select_relevant_edges(graph)]
 
 	def _parse_dfa_graph(self, dfa_dot: str) -> Dict[str, Any]:
 		accepting: set[str] = set()
 		edges: List[Tuple[str, str, str]] = []
+		init_state: Optional[str] = None
 
 		for line in dfa_dot.splitlines():
 			stripped = line.strip()
@@ -273,6 +267,14 @@ class HTNMethodSynthesizer:
 				accepting.add(single_accepting.group(1))
 				continue
 
+			init_match = re.match(
+				r'init\s*->\s*([A-Za-z0-9_]+)\s*;',
+				stripped,
+			)
+			if init_match:
+				init_state = init_match.group(1)
+				continue
+
 			edge_match = re.match(
 				r'([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)\s*\[label="([^"]+)"\];',
 				stripped,
@@ -284,7 +286,58 @@ class HTNMethodSynthesizer:
 		return {
 			"accepting": accepting,
 			"edges": edges,
+			"init_state": init_state,
 		}
+
+	def _select_relevant_edges(self, graph: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+		edges = graph.get("edges", [])
+		accepting = graph.get("accepting", set())
+		if not edges:
+			return []
+
+		progress_edges = self._extract_progressing_edges(edges, accepting)
+		if progress_edges:
+			return progress_edges
+
+		accepting_loop_edges = self._extract_accepting_loop_edges(edges, accepting)
+		if accepting_loop_edges:
+			return accepting_loop_edges
+
+		return edges
+
+	def _extract_progressing_edges(
+		self,
+		edges: List[Tuple[str, str, str]],
+		accepting: set[str],
+	) -> List[Tuple[str, str, str]]:
+		if not edges or not accepting:
+			return []
+
+		distances = self._distance_to_accepting(edges, accepting)
+		progress_edges: List[Tuple[str, str, str]] = []
+		for source, target, label in edges:
+			source_distance = distances.get(source)
+			target_distance = distances.get(target)
+			if source_distance is None or target_distance is None:
+				continue
+			if target_distance < source_distance:
+				progress_edges.append((source, target, label))
+		return progress_edges
+
+	def _extract_accepting_loop_edges(
+		self,
+		edges: List[Tuple[str, str, str]],
+		accepting: set[str],
+	) -> List[Tuple[str, str, str]]:
+		if not edges or not accepting:
+			return []
+
+		distances = self._distance_to_accepting(edges, accepting)
+		accepting_loop_edges: List[Tuple[str, str, str]] = []
+		for source, target, label in edges:
+			if distances.get(source) == 0 and distances.get(target) == 0:
+				accepting_loop_edges.append((source, target, label))
+		return accepting_loop_edges
 
 	def _distance_to_accepting(
 		self,
@@ -310,6 +363,57 @@ class HTNMethodSynthesizer:
 				queue.append(predecessor)
 
 		return distances
+
+	def _build_state_aliases(
+		self,
+		graph: Dict[str, Any],
+		preferred_edges: Optional[List[Tuple[str, str, str]]] = None,
+	) -> Dict[str, str]:
+		ordered_states: List[str] = []
+
+		def add(state: Optional[str]) -> None:
+			if state and state not in ordered_states:
+				ordered_states.append(state)
+
+		add(graph.get("init_state"))
+		for source, target, _ in preferred_edges or []:
+			add(source)
+			add(target)
+		for source, target, _ in graph.get("edges", []):
+			add(source)
+			add(target)
+		for state in sorted(graph.get("accepting", set())):
+			add(state)
+
+		return {
+			state: f"q{index}"
+			for index, state in enumerate(ordered_states, start=1)
+		}
+
+	def _literal_from_label(self, label: str, grounding_map: GroundingMap) -> HTNLiteral:
+		is_positive = not label.startswith("!")
+		symbol = label[1:] if not is_positive else label
+
+		atom = grounding_map.get_atom(symbol)
+		if atom is None:
+			return HTNLiteral(
+				predicate=symbol,
+				args=(),
+				is_positive=is_positive,
+				source_symbol=symbol,
+			)
+
+		return HTNLiteral(
+			predicate=atom.predicate,
+			args=tuple(atom.args),
+			is_positive=is_positive,
+			source_symbol=symbol,
+		)
+
+	def _transition_suffix_for_literal(self, literal: HTNLiteral) -> str:
+		prefix = "" if literal.is_positive else "not_"
+		parts = [literal.predicate, *literal.args]
+		return prefix + "_".join(self._sanitize_name(part) for part in parts if part)
 
 	def _build_primitive_tasks(self, domain: Any) -> List[HTNTask]:
 		actions = [self.parser.parse_action(action) for action in domain.actions]

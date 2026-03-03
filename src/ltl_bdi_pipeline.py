@@ -116,7 +116,11 @@ class LTL_BDI_Pipeline:
             return {"success": False, "stage": "Stage 3", "error": "HTN method synthesis failed"}
 
         # Stage 4: HTN method library -> PANDA planning
-        plan_records, stage4_data = self._stage4_panda_planning(ltl_spec, method_library)
+        plan_records, stage4_data = self._stage4_panda_planning(
+            ltl_spec,
+            method_library,
+            stage3_data["transition_specs"],
+        )
         if plan_records is None:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -255,6 +259,11 @@ class LTL_BDI_Pipeline:
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
             }
+            transition_specs = synthesizer.extract_progressing_transitions(
+                grounding_map,
+                dfa_result,
+            )
+            summary["dfa_progress_transitions"] = len(transition_specs)
 
             self.logger.log_stage3_method_synthesis(
                 method_library.to_dict(),
@@ -277,6 +286,7 @@ class LTL_BDI_Pipeline:
             return method_library, {
                 "method_library": method_library.to_dict(),
                 "summary": summary,
+                "transition_specs": transition_specs,
                 "llm": {
                     "used": synthesis_meta["used_llm"],
                     "model": synthesis_meta["model"],
@@ -300,7 +310,7 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None, None
 
-    def _stage4_panda_planning(self, ltl_spec, method_library):
+    def _stage4_panda_planning(self, ltl_spec, method_library, transition_specs):
         """Stage 4: HTN method library -> PANDA planning."""
         print("\n[STAGE 4] PANDA Planning")
         print("-"*80)
@@ -310,8 +320,9 @@ class LTL_BDI_Pipeline:
         try:
             plan_records = []
             transition_artifacts = []
-            for index, literal in enumerate(method_library.target_literals, start=1):
-                transition_name = f"transition_{index}"
+            for transition_spec in transition_specs:
+                literal = transition_spec["literal"]
+                transition_name = transition_spec["transition_name"]
                 task_name = method_library.task_name_for_literal(literal)
                 if not task_name:
                     raise ValueError(
@@ -330,6 +341,11 @@ class LTL_BDI_Pipeline:
                 plan_records.append(
                     {
                         "transition_name": transition_name,
+                        "source_state": transition_spec["source_state"],
+                        "target_state": transition_spec["target_state"],
+                        "raw_source_state": transition_spec["raw_source_state"],
+                        "raw_target_state": transition_spec["raw_target_state"],
+                        "initial_state": transition_spec["initial_state"],
                         "label": label,
                         "target_literal": literal,
                         "plan": plan,
@@ -338,6 +354,11 @@ class LTL_BDI_Pipeline:
                 transition_artifacts.append(
                     {
                         "transition_name": transition_name,
+                        "source_state": transition_spec["source_state"],
+                        "target_state": transition_spec["target_state"],
+                        "raw_source_state": transition_spec["raw_source_state"],
+                        "raw_target_state": transition_spec["raw_target_state"],
+                        "initial_state": transition_spec["initial_state"],
                         "label": label,
                         "target_literal": literal.to_dict(),
                         "plan": plan.to_dict(),
@@ -347,6 +368,17 @@ class LTL_BDI_Pipeline:
             summary = {
                 "backend": "pandaPI",
                 "transition_count": len(transition_artifacts),
+                "dfa_states": sorted(
+                    {
+                        transition["source_state"]
+                        for transition in transition_artifacts
+                    }
+                    |
+                    {
+                        transition["target_state"]
+                        for transition in transition_artifacts
+                    }
+                ),
                 "planned_tasks": [record["plan"].task_name for record in plan_records],
             }
 

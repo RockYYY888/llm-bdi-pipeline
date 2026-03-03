@@ -131,6 +131,22 @@ def test_extract_target_literals_discards_non_progressing_transitions():
 		"on(b, c)",
 	]
 
+	transition_specs = synthesizer.extract_progressing_transitions(grounding_map, dfa_result)
+
+	assert [
+		(
+			spec["transition_name"],
+			spec["source_state"],
+			spec["target_state"],
+			spec["label"],
+		)
+		for spec in transition_specs
+	] == [
+		("dfa_step_q1_q2_clear_a", "q1", "q2", "clear(a)"),
+		("dfa_step_q2_q3_on_a_b", "q2", "q3", "on(a, b)"),
+		("dfa_step_q3_q4_on_b_c", "q3", "q4", "on(b, c)"),
+	]
+
 
 def test_extract_target_literals_keeps_accepting_loops_when_no_progress_edge_exists():
 	synthesizer = HTNMethodSynthesizer()

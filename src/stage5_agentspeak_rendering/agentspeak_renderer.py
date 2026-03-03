@@ -43,9 +43,14 @@ class AgentSpeakRenderer:
         for obj in objects:
             lines.append(f"object({obj}).")
 
+        if plan_records:
+            initial_state = plan_records[0].get("initial_state")
+            if initial_state:
+                lines.append(f"dfa_state({initial_state}).")
+
         for record in plan_records:
             lines.append(
-                f"target_label({record['transition_name']}, \"{record['label']}\")."
+                f"dfa_edge_label({record['transition_name']}, \"{record['label']}\")."
             )
 
         lines.append("")
@@ -99,12 +104,20 @@ class AgentSpeakRenderer:
         return lines
 
     def _render_transition_plans(self, plan_records: Sequence[Dict[str, Any]]) -> List[str]:
-        lines = ["/* Transition Dispatch Plans */"]
+        lines = ["/* DFA Transition Wrappers */"]
 
         for record in plan_records:
             plan: PANDAPlanResult = record["plan"]
-            body = [f"!{self._call(plan.task_name, plan.task_args)}"]
-            lines.append(f"+!{record['transition_name']} : true <-")
+            source_state = record["source_state"]
+            target_state = record["target_state"]
+            body = [
+                f"!{self._call(plan.task_name, plan.task_args)}",
+                f"-{self._call('dfa_state', (source_state,))}",
+                f"+{self._call('dfa_state', (target_state,))}",
+            ]
+            lines.append(
+                f"+!{record['transition_name']} : {self._call('dfa_state', (source_state,))} <-"
+            )
             lines.extend(self._indent_body(body))
             lines.append("")
 
