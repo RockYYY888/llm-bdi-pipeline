@@ -23,5 +23,4 @@ This repository keeps the tests focused on the active pipeline.
 
 ## Notes
 
-- The old backward-planning Stage 3 test suite was removed with the refactor.
 - Stage 1 full end-to-end tests still require an external LLM, so the committed tests avoid that dependency.

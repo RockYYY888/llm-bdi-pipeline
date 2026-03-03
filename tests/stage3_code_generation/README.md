@@ -1,7 +1,7 @@
 # Stage 3 HTN Tests
 
 Stage 3 now uses HTN method synthesis, decomposition, preferred specialisation,
-and AgentSpeak rendering. The old backward-planning tests were removed.
+and AgentSpeak rendering.
 
 ## Main Test File
 
@@ -26,5 +26,4 @@ and AgentSpeak rendering. The old backward-planning tests were removed.
 The goal is to keep Stage 3 verification fast and non-redundant:
 
 - no state-space explosion
-- no dependency on the removed backward planner
 - no dependency on external APIs

@@ -148,5 +148,5 @@ Jason runs in console mode with `--console` flag. If no agent output appears:
 
 - **Maven was initially attempted** but Jason artifacts are not available in Maven Central or JaCaMo repositories
 - **Gradle is the official build tool** for Jason 3.x
-- **Jason CLI** is used instead of the deprecated Jason IDE
+- **Jason CLI** is the maintained workflow for this validation setup
 - The test agents demonstrate that the Jason BDI framework environment is properly configured and functional

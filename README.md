@@ -2,7 +2,7 @@
 
 This repository generates AgentSpeak plan libraries from natural-language goals.
 The pipeline now uses **HTN method synthesis + decomposition + preferred specialisation**
-for Stage 3. The previous backward-planning implementation has been removed.
+for Stage 3.
 The only actively maintained planning domain in this repository is **blocksworld**.
 
 ## Current Architecture
@@ -37,8 +37,8 @@ The only actively maintained planning domain in this repository is **blocksworld
 
 ## Important Design Choices
 
-- Stage 3 no longer performs backward state-space search.
-- There is no backward-planning fallback path in the codebase.
+- Stage 3 is implemented entirely through HTN method synthesis, decomposition, and specialisation.
+- The codebase contains a single Stage 3 path.
 - Stage 3A is **LLM-backed but not LLM-dependent**:
   - If Stage 3 has an API client, it can synthesize an HTN library through a strict JSON schema.
   - If not, it uses the deterministic heuristic synthesizer.
@@ -121,21 +121,9 @@ The logger also records the HTN metadata inside the run log.
 
 ## Current Benchmarks
 
-The repository no longer ships the historical PR2 benchmark pack. The active benchmark surface is:
+The active benchmark surface is:
 
 - the blocksworld PDDL domain in `src/domains/blocksworld/`
 - the Stage 2 formula regression cases in `tests/stage2_dfa_generation/test_ltlf2dfa.py`
 - the Stage 3 HTN regression cases in `tests/stage3_code_generation/test_stage3_htn.py`
 - the pipeline-level Stage 3 integration check in `tests/test_pipeline_stage3_htn.py`
-
-## What Was Removed
-
-The refactor intentionally removed:
-
-- backward state-space planning
-- lifted mutex extraction used only by backward search
-- pruning diagnostics for the old planner
-- the old Stage 3 integration suite tied to backward planning
-- the local `pr2` benchmark/tool bundle that was only kept as historical baggage
-
-If you see references to the old planner in archived notes, treat them as historical context only.
