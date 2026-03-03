@@ -72,7 +72,7 @@ class HDDLTask:
     parameters: List[str]
 
     def to_signature(self) -> str:
-        """Convert to signature format: achieve_on(X, Y)."""
+        """Convert to signature format: place_on(X, Y)."""
         if not self.parameters:
             return self.name
 
@@ -133,7 +133,7 @@ class HDDLDomain:
         return [action.name for action in self.actions]
 
     def get_task_signatures(self) -> List[str]:
-        """Get all task signatures in format: achieve_on(X, Y)."""
+        """Get all task signatures in format: place_on(X, Y)."""
         return [task.to_signature() for task in self.tasks]
 
 

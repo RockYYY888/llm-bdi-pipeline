@@ -66,11 +66,11 @@ class PANDAPlanner:
 		method_library: HTNMethodLibrary,
 		objects: Sequence[str],
 		target_literal: HTNLiteral,
+		task_name: str,
 		transition_name: str,
 	) -> PANDAPlanResult:
 		self._require_toolchain()
 
-		task_name = self._task_name_for_literal(target_literal)
 		task_args = tuple(target_literal.args)
 		domain_name = f"{domain.name}_{transition_name}"
 		work_dir = self._resolve_work_dir(transition_name)
@@ -315,7 +315,7 @@ class PANDAPlanner:
 			if self._has_matching_guard_method(method_library, task, literal):
 				continue
 
-			method_name = self._unique_method_name(f"{task.name}__guard", existing_names)
+			method_name = self._unique_method_name(f"m_{task.name}_noop", existing_names)
 			existing_names.add(method_name)
 			generated.append(
 				HTNMethod(
@@ -341,21 +341,24 @@ class PANDAPlanner:
 
 		predicate = task.source_predicates[0]
 		expected_args = tuple(task.parameters)
-		if task.name == f"achieve_{predicate.replace('-', '_')}":
-			return HTNLiteral(predicate=predicate, args=expected_args, is_positive=True)
-
-		negative_targets = {
-			self._task_name_for_literal(literal)
+		target_lookup = {
+			literal.to_signature(): literal
 			for literal in method_library.target_literals
-			if not literal.is_positive
 		}
-		if (
-			task.name == f"maintain_not_{predicate.replace('-', '_')}"
-			and task.name not in negative_targets
-		):
-			return HTNLiteral(predicate=predicate, args=expected_args, is_positive=True)
-
-		return None
+		bound_polarities = {
+			target_lookup[binding.target_literal].is_positive
+			for binding in method_library.target_task_bindings
+			if binding.task_name == task.name and binding.target_literal in target_lookup
+		}
+		if len(bound_polarities) > 1:
+			return None
+		if bound_polarities:
+			return HTNLiteral(
+				predicate=predicate,
+				args=expected_args,
+				is_positive=bound_polarities.pop(),
+			)
+		return HTNLiteral(predicate=predicate, args=expected_args, is_positive=True)
 
 	def _has_matching_guard_method(
 		self,
@@ -459,13 +462,6 @@ class PANDAPlanner:
 				"work_dir": str(work_dir),
 			},
 		)
-
-	@staticmethod
-	def _task_name_for_literal(literal: HTNLiteral) -> str:
-		predicate = literal.predicate.replace("-", "_")
-		if literal.is_positive:
-			return f"achieve_{predicate}"
-		return f"maintain_not_{predicate}"
 
 	@staticmethod
 	def _sanitize_name(name: str) -> str:

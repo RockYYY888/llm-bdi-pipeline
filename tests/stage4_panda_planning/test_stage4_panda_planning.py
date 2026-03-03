@@ -99,16 +99,19 @@ def test_stage4_planner_generates_live_plan_from_synthesised_library(tmp_path):
 	assert metadata["used_llm"] is True
 
 	planner = PANDAPlanner(workspace=str(tmp_path))
+	bound_task = method_library.task_name_for_literal(method_library.target_literals[0])
+	assert bound_task is not None
 	plan = planner.plan(
 		domain=domain,
 		method_library=method_library,
 		objects=spec.objects,
 		target_literal=method_library.target_literals[0],
+		task_name=bound_task,
 		transition_name="transition_1",
 	)
 
-	assert plan.task_name == "achieve_on"
+	assert plan.task_name == bound_task
 	assert plan.task_args == ("a", "b")
 	assert plan.steps
 	assert any(step.task_name == "put_on_block" for step in plan.steps)
-	assert "(t1 (achieve_on a b))" in plan.problem_hddl
+	assert f"(t1 ({bound_task} a b))" in plan.problem_hddl

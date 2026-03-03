@@ -125,6 +125,20 @@ class HTNMethod:
         }
 
 
+@dataclass(frozen=True)
+class HTNTargetTaskBinding:
+    """Maps one target literal signature to the top-level task chosen by the LLM."""
+
+    target_literal: str
+    task_name: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_literal": self.target_literal,
+            "task_name": self.task_name,
+        }
+
+
 @dataclass
 class HTNMethodLibrary:
     """The Stage 3 output: a reusable HTN method library."""
@@ -133,6 +147,7 @@ class HTNMethodLibrary:
     primitive_tasks: List[HTNTask] = field(default_factory=list)
     methods: List[HTNMethod] = field(default_factory=list)
     target_literals: List[HTNLiteral] = field(default_factory=list)
+    target_task_bindings: List[HTNTargetTaskBinding] = field(default_factory=list)
 
     def methods_for_task(self, task_name: str) -> List[HTNMethod]:
         return [method for method in self.methods if method.task_name == task_name]
@@ -143,12 +158,20 @@ class HTNMethodLibrary:
                 return task
         return None
 
+    def task_name_for_literal(self, literal: HTNLiteral) -> Optional[str]:
+        signature = literal.to_signature()
+        for binding in self.target_task_bindings:
+            if binding.target_literal == signature:
+                return binding.task_name
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "compound_tasks": [task.to_dict() for task in self.compound_tasks],
             "primitive_tasks": [task.to_dict() for task in self.primitive_tasks],
             "methods": [method.to_dict() for method in self.methods],
             "target_literals": _serialise_literal_list(self.target_literals),
+            "target_task_bindings": [binding.to_dict() for binding in self.target_task_bindings],
         }
 
     @classmethod
@@ -215,6 +238,12 @@ class HTNMethodLibrary:
                 origin=item.get("origin", "heuristic"),
             )
 
+        def load_binding(item: Dict[str, Any]) -> HTNTargetTaskBinding:
+            return HTNTargetTaskBinding(
+                target_literal=item["target_literal"],
+                task_name=item["task_name"],
+            )
+
         return HTNMethodLibrary(
             compound_tasks=[load_task(item) for item in payload.get("compound_tasks", [])],
             primitive_tasks=[load_task(item) for item in payload.get("primitive_tasks", [])],
@@ -225,5 +254,8 @@ class HTNMethodLibrary:
                     load_literal(item) for item in payload.get("target_literals", [])
                 )
                 if literal is not None
+            ],
+            target_task_bindings=[
+                load_binding(item) for item in payload.get("target_task_bindings", [])
             ],
         )

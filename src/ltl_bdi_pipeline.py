@@ -312,11 +312,18 @@ class LTL_BDI_Pipeline:
             transition_artifacts = []
             for index, literal in enumerate(method_library.target_literals, start=1):
                 transition_name = f"transition_{index}"
+                task_name = method_library.task_name_for_literal(literal)
+                if not task_name:
+                    raise ValueError(
+                        "Stage 3 output is missing a target_task_binding for "
+                        f"'{literal.to_signature()}'."
+                    )
                 plan = planner.plan(
                     domain=self.domain,
                     method_library=method_library,
                     objects=ltl_spec.objects,
                     target_literal=literal,
+                    task_name=task_name,
                     transition_name=transition_name,
                 )
                 label = literal.to_signature()

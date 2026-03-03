@@ -113,8 +113,19 @@ def test_blocksworld_example_pipeline_records_live_execution():
     assert execution["stage5_code_size_chars"] > 0
     assert execution["stage5_code_size_chars"] == len(execution["stage5_agentspeak"])
     assert result["agentspeak_code"] == execution["stage5_agentspeak"]
-    assert "+!achieve_on(a, b)" in execution["stage5_agentspeak"]
-    assert "+!achieve_on(a, b) : true <-\n\ttrue.\n" not in execution["stage5_agentspeak"]
+
+    target_bindings = execution["stage3_method_library"]["target_task_bindings"]
+    top_level_task = next(
+        (
+            binding["task_name"]
+            for binding in target_bindings
+            if binding["target_literal"] == "on(a, b)"
+        ),
+        None,
+    )
+    assert top_level_task is not None
+    assert f"+!{top_level_task}(a, b)" in execution["stage5_agentspeak"]
+    assert f"+!{top_level_task}(a, b) : true <-\n\ttrue.\n" not in execution["stage5_agentspeak"]
 
     assert "STAGE 1: Natural Language" in execution_txt
     assert "Parser: LLM (" in execution_txt

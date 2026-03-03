@@ -15,6 +15,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethodLibrary,
 	HTNMethodStep,
 	HTNTask,
+	HTNTargetTaskBinding,
 )
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage4_panda_planning.problem_builder import (
@@ -38,20 +39,20 @@ def _domain():
 def _library() -> HTNMethodLibrary:
 	return HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask("achieve_on", ("B1", "B2"), False, ("on",)),
-			HTNTask("achieve_holding", ("B",), False, ("holding",)),
+			HTNTask("place_on", ("B1", "B2"), False, ("on",)),
+			HTNTask("hold_block", ("B",), False, ("holding",)),
 		],
 		primitive_tasks=[],
 		methods=[
 			HTNMethod(
-				method_name="achieve_on__via_put_on_block",
-				task_name="achieve_on",
+				method_name="m_place_on_stack",
+				task_name="place_on",
 				parameters=("B1", "B2"),
 				context=(),
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
-						task_name="achieve_holding",
+						task_name="hold_block",
 						args=("B1",),
 						kind="compound",
 					),
@@ -70,6 +71,9 @@ def _library() -> HTNMethodLibrary:
 		target_literals=[
 			HTNLiteral("on", ("a", "b"), True, "on_a_b"),
 		],
+		target_task_bindings=[
+			HTNTargetTaskBinding("on(a, b)", "place_on"),
+		],
 	)
 
 
@@ -79,7 +83,7 @@ def test_panda_problem_export_builds_canonical_blocksworld_init():
 		domain=_domain(),
 		domain_name="blocksworld_transition_1",
 		objects=("a", "b"),
-		task_name="achieve_on",
+		task_name="place_on",
 		task_args=("a", "b"),
 	)
 
@@ -88,7 +92,7 @@ def test_panda_problem_export_builds_canonical_blocksworld_init():
 	assert "(handempty)" in problem_hddl
 	assert "(ontable a)" in problem_hddl
 	assert "(clear b)" in problem_hddl
-	assert "(t1 (achieve_on a b))" in problem_hddl
+	assert "(t1 (place_on a b))" in problem_hddl
 
 
 def test_panda_problem_builder_accepts_explicit_initial_fact_configuration():
@@ -101,7 +105,7 @@ def test_panda_problem_builder_accepts_explicit_initial_fact_configuration():
 		domain=_domain(),
 		domain_name="blocksworld_transition_1",
 		objects=("a", "b"),
-		task_name="achieve_on",
+		task_name="place_on",
 		task_args=("a", "b"),
 	)
 
@@ -120,33 +124,54 @@ def test_panda_domain_export_uses_llm_method_library():
 	)
 
 	assert "(define (domain blocksworld_transition_1)" in domain_hddl
-	assert "(:task achieve_on" in domain_hddl
-	assert "(:method achieve_on__via_put_on_block" in domain_hddl
+	assert "(:task place_on" in domain_hddl
+	assert "(:method m_place_on_stack" in domain_hddl
 	assert ":subtasks (and" in domain_hddl
 	assert "(s2 (put-on-block ?b1 ?b2))" in domain_hddl
 	assert "(< s1 s2)" in domain_hddl
 	assert "(:action put-on-block" in domain_hddl
-	assert "(:method achieve_on__guard" in domain_hddl
+	assert "(:method m_place_on_noop" in domain_hddl
 	assert ":precondition (and (on ?b1 ?b2))" in domain_hddl
 
 
-def test_panda_domain_export_adds_positive_guard_for_non_target_negative_helper():
+def test_panda_domain_export_adds_positive_guard_for_non_target_helper():
 	planner = PANDAPlanner()
 	domain_hddl = planner._build_domain_hddl(
 		domain=_domain(),
 		method_library=HTNMethodLibrary(
 			compound_tasks=[
-				HTNTask("maintain_not_handempty", (), False, ("handempty",)),
+				HTNTask("free_hand", (), False, ("handempty",)),
 			],
 			primitive_tasks=[],
 			methods=[],
-			target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+			target_literals=[],
+			target_task_bindings=[],
 		),
 		domain_name="blocksworld_transition_1",
 	)
 
-	assert "(:method maintain_not_handempty__guard" in domain_hddl
+	assert "(:method m_free_hand_noop" in domain_hddl
 	assert ":precondition (and (handempty))" in domain_hddl
+
+
+def test_panda_domain_export_adds_negative_guard_for_negative_target_task():
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=_domain(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("keep_clear", ("B",), False, ("clear",)),
+			],
+			primitive_tasks=[],
+			methods=[],
+			target_literals=[HTNLiteral("clear", ("a",), False, "clear_a")],
+			target_task_bindings=[HTNTargetTaskBinding("!clear(a)", "keep_clear")],
+		),
+		domain_name="blocksworld_transition_1",
+	)
+
+	assert "(:method m_keep_clear_noop" in domain_hddl
+	assert ":precondition (and (not (clear ?b)))" in domain_hddl
 
 
 def test_panda_plan_parser_extracts_primitive_steps():
@@ -166,7 +191,7 @@ def test_panda_plan_parser_extracts_converted_plan_steps():
 		"15 pick-up-from-table a\n"
 		"16 put-on-block a b\n"
 		"root 2\n"
-		"2 achieve_on a b -> achieve_on__via_put_on_block 8 3 16\n"
+		"2 place_on a b -> m_place_on_stack 8 3 16\n"
 	)
 	steps = planner._parse_plan_steps(plan_text, _domain())
 

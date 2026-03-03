@@ -29,6 +29,6 @@ def test_blocksworld_hddl_domain_exposes_tasks_methods_and_actions():
 
     assert domain.name == "blocksworld"
     assert ":hierarchy" in domain.requirements
-    assert "achieve_on" in task_names
-    assert "achieve_holding__via_pick_up_from_stack" in method_names
+    assert "place_on" in task_names
+    assert "m_hold_block_from_stack" in method_names
     assert "put-on-block" in action_names

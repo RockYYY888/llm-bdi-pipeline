@@ -36,7 +36,7 @@ def test_renderer_emits_transition_goal_and_primitive_wrappers():
 				"transition_name": "transition_1",
 				"label": "on(a, b)",
 				"plan": PANDAPlanResult(
-					task_name="achieve_on",
+					task_name="place_on",
 					task_args=("a", "b"),
 					target_literal=HTNLiteral("on", ("a", "b"), True, "on_a_b"),
 					steps=[
@@ -48,7 +48,7 @@ def test_renderer_emits_transition_goal_and_primitive_wrappers():
 	)
 
 	assert "/* PANDA Goal Plans */" in code
-	assert "+!achieve_on(a, b) : true <-" in code
+	assert "+!place_on(a, b) : true <-" in code
 	assert "\t!put_on_block(a, b)." in code
 	assert "+!transition_1 : true <-" in code
 	assert "+!put_on_block(X1, X2) :" in code
@@ -64,7 +64,7 @@ def test_renderer_accepts_zero_step_panda_plans():
 				"transition_name": "transition_1",
 				"label": "!on(a, b)",
 				"plan": PANDAPlanResult(
-					task_name="maintain_not_on",
+					task_name="keep_apart",
 					task_args=("a", "b"),
 					target_literal=HTNLiteral("on", ("a", "b"), False, "on_a_b"),
 					steps=[],
@@ -73,5 +73,5 @@ def test_renderer_accepts_zero_step_panda_plans():
 		],
 	)
 
-	assert "+!maintain_not_on(a, b) : true <-" in code
+	assert "+!keep_apart(a, b) : true <-" in code
 	assert "\ttrue." in code
