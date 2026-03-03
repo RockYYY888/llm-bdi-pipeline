@@ -370,6 +370,22 @@ class HTNMethodSynthesizer:
 					f"'{bound_task_name}' required for target literal '{target_signature}'.",
 				)
 
+		for literal in library.target_literals:
+			if literal.is_positive:
+				continue
+			bound_task_name = binding_lookup[literal.to_signature()]
+			bound_methods = [
+				method for method in library.methods if method.task_name == bound_task_name
+			]
+			if not any(method.subtasks for method in bound_methods):
+				raise ValueError(
+					"Negative target literal "
+					f"'{literal.to_signature()}' is bound to task '{bound_task_name}', "
+					"but that task has no constructive non-zero-subtask method. "
+					"Negative targets must include at least one method that can make the "
+					"predicate false, not only a noop/already-satisfied method.",
+				)
+
 		for method in library.methods:
 			if not re.fullmatch(r"[a-z][a-z0-9_]*", method.method_name):
 				raise ValueError(
@@ -434,10 +450,30 @@ class HTNMethodSynthesizer:
 					)
 
 			for step in method.subtasks:
+				if step.kind not in {"primitive", "compound"}:
+					raise ValueError(
+						f"Unsupported subtask kind '{step.kind}' in method "
+						f"'{method.method_name}'. Subtasks must use only 'primitive' or "
+						"'compound'.",
+					)
+
 				if not re.fullmatch(r"[a-z][a-z0-9_]*", step.task_name):
 					raise ValueError(
 						f"Invalid subtask identifier '{step.task_name}' in method "
 						f"'{method.method_name}'. Subtask names must match [a-z][a-z0-9_]*.",
+					)
+
+				if step.task_name in primitive_names and step.kind != "primitive":
+					raise ValueError(
+						f"Subtask '{step.step_id}' in method '{method.method_name}' uses "
+						f"primitive task '{step.task_name}' but marks kind='{step.kind}'. "
+						"Primitive aliases must use kind='primitive'.",
+					)
+				if step.task_name in compound_names and step.kind != "compound":
+					raise ValueError(
+						f"Subtask '{step.step_id}' in method '{method.method_name}' uses "
+						f"compound task '{step.task_name}' but marks kind='{step.kind}'. "
+						"Compound helpers must use kind='compound'.",
 					)
 
 				if step.kind == "primitive":

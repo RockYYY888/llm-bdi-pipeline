@@ -77,6 +77,13 @@ def _library() -> HTNMethodLibrary:
 	)
 
 
+def test_panda_planner_resolves_relative_workspace_to_absolute_path():
+	planner = PANDAPlanner(workspace="tests/logs")
+
+	assert planner.workspace is not None
+	assert planner.workspace.is_absolute()
+
+
 def test_panda_problem_export_builds_canonical_blocksworld_init():
 	builder = PANDAProblemBuilder()
 	problem_hddl = builder.build_problem_hddl(

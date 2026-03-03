@@ -48,7 +48,7 @@ class PANDAPlanner:
 		engine_cmd: str = "pandaPIengine",
 		problem_builder: Optional[PANDAProblemBuilder] = None,
 	) -> None:
-		self.workspace = Path(workspace) if workspace else None
+		self.workspace = Path(workspace).resolve() if workspace else None
 		self.parser_cmd = parser_cmd
 		self.grounder_cmd = grounder_cmd
 		self.engine_cmd = engine_cmd

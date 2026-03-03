@@ -36,6 +36,7 @@ def build_htn_system_prompt() -> str:
         "- task_name and method_name must match [a-z][a-z0-9_]*.\n"
         "- Never use hyphens, spaces, CamelCase, quotes, or punctuation in identifiers.\n"
         "- Primitive subtasks must use the runtime aliases provided in the prompt, not raw source action names.\n"
+        "- subtask.kind must be exactly 'primitive' or 'compound'. Never use 'guard' in subtasks.\n"
         "- action_name may keep the source action name, but task_name must use the runtime alias.\n"
         "- Predicate names inside literal objects must also be simple lower-case atoms.\n"
         "- Compound task names must be semantic intention names such as place_on, "
@@ -135,17 +136,47 @@ Valid method fragment:
   "origin": "llm"
 }
 
-Example 2: Negative target as a guard method
-Target literal: !door_open(room1)
+Example 2: Negative target needs BOTH a constructive method and an already-satisfied method
+Target literal: !clear(block2)
 Required target_task_bindings entry:
-{"target_literal": "!door_open(room1)", "task_name": "keep_door_closed"}
-Valid method fragment:
+{"target_literal": "!clear(block2)", "task_name": "keep_not_clear"}
+Valid method fragments:
 {
-  "method_name": "m_keep_door_closed_noop",
-  "task_name": "keep_door_closed",
-  "parameters": ["X1"],
+  "method_name": "m_keep_not_clear_stack",
+  "task_name": "keep_not_clear",
+  "parameters": ["X1", "X2"],
+  "context": [],
+  "subtasks": [
+    {
+      "step_id": "s1",
+      "task_name": "hold_block",
+      "args": ["X1"],
+      "kind": "compound",
+      "action_name": null,
+      "literal": {"predicate": "holding", "args": ["X1"], "is_positive": true, "source_symbol": null},
+      "preconditions": [],
+      "effects": []
+    },
+    {
+      "step_id": "s2",
+      "task_name": "put_on_block",
+      "args": ["X1", "X2"],
+      "kind": "primitive",
+      "action_name": "put-on-block",
+      "literal": {"predicate": "clear", "args": ["X2"], "is_positive": false, "source_symbol": null},
+      "preconditions": [],
+      "effects": []
+    }
+  ],
+  "ordering": [["s1", "s2"]],
+  "origin": "llm"
+}
+{
+  "method_name": "m_keep_not_clear_noop",
+  "task_name": "keep_not_clear",
+  "parameters": ["X2"],
   "context": [
-    {"predicate": "door_open", "args": ["X1"], "is_positive": false, "source_symbol": null}
+    {"predicate": "clear", "args": ["X2"], "is_positive": false, "source_symbol": null}
   ],
   "subtasks": [],
   "ordering": [],
@@ -171,8 +202,12 @@ Valid method fragment:
         "- Include one target_task_bindings entry for every target literal shown above.\n"
         "- Each target_task_bindings.task_name must be a semantic task name, not a mechanical "
         "logic-name such as achieve_on or maintain_not_clear.\n"
+        "- For every negative target literal, include at least one constructive (non-zero-subtask) "
+        "method for its bound task. Do not return only a noop/already-satisfied method.\n"
         "- Each method.task_name must reference an existing compound task.\n"
         "- Each primitive subtask.task_name must match one of the provided runtime primitive action aliases exactly.\n"
+        "- If subtask.task_name is a runtime primitive action alias, then kind must be 'primitive'.\n"
+        "- If subtask.task_name is a compound helper task, then kind must be 'compound'.\n"
         "- If the source action is written with hyphens, convert task_name to the provided underscore alias.\n"
         "- Each compound subtask.task_name must reference a compound task that exists in compound_tasks.\n"
         "- For every compound subtask.task_name X, include a compound_tasks entry named X.\n"
@@ -205,7 +240,8 @@ Valid method fragment:
         "5. Do all ordering edges reference real step_id values?\n"
         "6. Is every compound helper task declared in compound_tasks and implemented by at least one method?\n"
         "7. Do all methods use the exact m_task_strategy naming pattern?\n"
-        "8. Do all zero-subtask methods keep subtasks/orderings empty and use a clear already-satisfied strategy name?\n"
-        "9. Does the JSON contain only the requested keys?\n"
-        "10. Would each task_name compile cleanly inside +!task_name(...) AgentSpeak syntax?\n"
+        "8. Does every negative target task have at least one constructive non-zero-subtask method?\n"
+        "9. Do all zero-subtask methods keep subtasks/orderings empty and use a clear already-satisfied strategy name?\n"
+        "10. Does the JSON contain only the requested keys?\n"
+        "11. Would each task_name compile cleanly inside +!task_name(...) AgentSpeak syntax?\n"
     )

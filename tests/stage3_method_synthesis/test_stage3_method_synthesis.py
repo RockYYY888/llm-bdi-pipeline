@@ -26,6 +26,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
+	HTNMethodStep,
 	HTNTask,
 	HTNTargetTaskBinding,
 )
@@ -273,4 +274,75 @@ def test_method_validation_enforces_method_name_contract():
 	)
 
 	with pytest.raises(ValueError, match="must follow the exact naming pattern"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_negative_target_requires_constructive_method():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("keep_not_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_keep_not_clear_noop",
+				task_name="keep_not_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), False, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[
+			HTNLiteral("clear", ("a",), False, "clear_a"),
+		],
+		target_task_bindings=[
+			HTNTargetTaskBinding("!clear(a)", "keep_not_clear"),
+		],
+	)
+
+	with pytest.raises(ValueError, match="has no constructive non-zero-subtask method"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_primitive_alias_cannot_use_non_primitive_subtask_kind():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("hold_block", ("B1",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_hold_block_from_block",
+				task_name="hold_block",
+				parameters=("B1", "B2"),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up",
+						args=("B1", "B2"),
+						kind="compound",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[
+			HTNLiteral("holding", ("a",), True, "holding_a"),
+		],
+		target_task_bindings=[
+			HTNTargetTaskBinding("holding(a)", "hold_block"),
+		],
+	)
+
+	with pytest.raises(ValueError, match="Primitive aliases must use kind='primitive'"):
 		synthesizer._validate_library(library, domain)
