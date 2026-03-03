@@ -3,6 +3,7 @@
 This repository generates AgentSpeak plan libraries from natural-language goals.
 The pipeline now uses **HTN method synthesis + decomposition + preferred specialisation**
 for Stage 3. The previous backward-planning implementation has been removed.
+The only actively maintained planning domain in this repository is **blocksworld**.
 
 ## Current Architecture
 
@@ -29,6 +30,11 @@ for Stage 3. The previous backward-planning implementation has been removed.
    - **Stage 3D**: AgentSpeak rendering
      - Emits primitive action wrappers and specialised HTN goal plans
 
+4. **Stage 4 Assets: Jason Validation**
+   - `src/stage4_jason_validation/`
+   - Contains Jason source and a local validation project
+   - This is not part of the default Stage 1-3 generation path
+
 ## Important Design Choices
 
 - Stage 3 no longer performs backward state-space search.
@@ -38,6 +44,9 @@ for Stage 3. The previous backward-planning implementation has been removed.
   - If not, it uses the deterministic heuristic synthesizer.
 - Stage 3 works from DFA transition literals and symbolic PDDL action schemas.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
+- The full end-to-end pipeline still requires an API key because Stage 1 is LLM-only.
+- Stage 3 itself can still complete without Stage 3 LLM output because the HTN synthesizer has
+  a deterministic fallback.
 
 ## Repository Layout
 
@@ -45,6 +54,7 @@ for Stage 3. The previous backward-planning implementation has been removed.
 .
 ├── src/
 │   ├── domains/
+│   ├── external/
 │   ├── stage1_interpretation/
 │   ├── stage2_dfa_generation/
 │   ├── stage3_code_generation/
@@ -54,8 +64,10 @@ for Stage 3. The previous backward-planning implementation has been removed.
 │   │   ├── htn_specialiser.py
 │   │   ├── htn_planner_generator.py
 │   │   └── agentspeak_codegen.py
+│   ├── stage4_jason_validation/
 │   └── utils/
 ├── tests/
+│   ├── stage1_interpretation/
 │   ├── stage2_dfa_generation/
 │   ├── stage3_code_generation/
 │   │   └── test_stage3_htn.py
@@ -73,8 +85,10 @@ python src/main.py "Put block a on block b"
 
 Notes:
 
-- Stage 1 still requires an LLM API key.
-- Stage 3 can run without a Stage 3 API key because it has a deterministic synthesizer.
+- Stage 1 requires an LLM API key.
+- Stage 3 uses the same API configuration if available, but the Stage 3 synthesizer falls back
+  to deterministic HTN synthesis when no valid Stage 3 LLM output is available.
+- The maintained domain is `src/domains/blocksworld/`.
 - Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
 
 ## Running Tests
@@ -92,6 +106,9 @@ Run the Stage 2 DFA tests:
 ./.venv/bin/pytest -q tests/stage2_dfa_generation/test_ltlf2dfa.py
 ```
 
+Stage 1 tests are still present, but they depend on external LLM access and are not part of the
+default fast regression loop.
+
 ## Stage 3 Outputs
 
 A successful Stage 3 run writes:
@@ -102,6 +119,15 @@ A successful Stage 3 run writes:
 
 The logger also records the HTN metadata inside the run log.
 
+## Current Benchmarks
+
+The repository no longer ships the historical PR2 benchmark pack. The active benchmark surface is:
+
+- the blocksworld PDDL domain in `src/domains/blocksworld/`
+- the Stage 2 formula regression cases in `tests/stage2_dfa_generation/test_ltlf2dfa.py`
+- the Stage 3 HTN regression cases in `tests/stage3_code_generation/test_stage3_htn.py`
+- the pipeline-level Stage 3 integration check in `tests/test_pipeline_stage3_htn.py`
+
 ## What Was Removed
 
 The refactor intentionally removed:
@@ -110,5 +136,6 @@ The refactor intentionally removed:
 - lifted mutex extraction used only by backward search
 - pruning diagnostics for the old planner
 - the old Stage 3 integration suite tied to backward planning
+- the local `pr2` benchmark/tool bundle that was only kept as historical baggage
 
 If you see references to the old planner in archived notes, treat them as historical context only.

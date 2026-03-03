@@ -2,7 +2,7 @@
 
 ## In Progress
 
-- Push the completed refactor branch to the remote repository.
+- Push the latest README and cleanup commit to the remote repository.
 
 ## Milestones
 
