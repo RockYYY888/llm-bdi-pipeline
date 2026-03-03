@@ -100,6 +100,15 @@ Run the focused HTN Stage 3 tests:
 ./.venv/bin/pytest -q tests/test_pipeline_stage3_htn.py
 ```
 
+The canonical example acceptance test is:
+
+```bash
+./.venv/bin/pytest -q tests/test_pipeline_stage3_htn.py
+```
+
+It runs a fixed blocksworld example through `pipeline.execute()` and checks that the logger
+captured each stage's inputs, outputs, and persisted artifacts.
+
 Run the Stage 2 DFA tests:
 
 ```bash

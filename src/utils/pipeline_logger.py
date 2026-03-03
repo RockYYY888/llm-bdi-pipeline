@@ -57,6 +57,7 @@ class PipelineRecord:
     stage3_code_size_chars: int = 0
     stage3_redundancy_eliminated_pct: float = 0.0
     stage3_metadata: Optional[Dict[str, Any]] = None
+    stage3_artifacts: Optional[Dict[str, Any]] = None
 
     # Metadata
     domain_file: str = "domains/blocksworld/domain.pddl"
@@ -214,7 +215,8 @@ class PipelineLogger:
                    goal_plans_count: int = 0, action_plans_count: int = 0,
                    cache_hits: int = 0, cache_misses: int = 0, ground_actions_cached: int = 0,
                    redundancy_eliminated_pct: float = 0.0,
-                   metadata: Optional[Dict[str, Any]] = None):
+                   metadata: Optional[Dict[str, Any]] = None,
+                   artifacts: Optional[Dict[str, Any]] = None):
         """
         Log Stage 3: DFA -> AgentSpeak Code Generation
 
@@ -237,6 +239,7 @@ class PipelineLogger:
             ground_actions_cached: Number of ground actions cached
             redundancy_eliminated_pct: Percentage of redundancy eliminated
             metadata: Additional Stage 3 metadata
+            artifacts: Detailed Stage 3 artifacts to persist in the log directory
         """
         if not self.current_record:
             return
@@ -244,6 +247,7 @@ class PipelineLogger:
         # Set generation method
         self.current_record.stage3_method = method
         self.current_record.stage3_metadata = metadata
+        self.current_record.stage3_artifacts = artifacts
 
         # ALWAYS log model and prompt if provided (regardless of success/failure)
         if model:
@@ -264,6 +268,19 @@ class PipelineLogger:
                 asl_filepath = self.current_log_dir / "generated_code.asl"
                 with open(asl_filepath, 'w') as f:
                     f.write(agentspeak_code)
+
+                if artifacts:
+                    method_library = artifacts.get("method_library")
+                    if method_library is not None:
+                        method_library_path = self.current_log_dir / "htn_method_library.json"
+                        with open(method_library_path, 'w') as f:
+                            json.dump(method_library, f, indent=2)
+
+                    transitions = artifacts.get("transitions")
+                    if transitions is not None:
+                        transitions_path = self.current_log_dir / "htn_transitions.json"
+                        with open(transitions_path, 'w') as f:
+                            json.dump(transitions, f, indent=2)
 
         elif error:
             self.current_record.stage3_status = "failed"
@@ -511,6 +528,25 @@ class PipelineLogger:
                     f.write("~"*40 + "\n")
                     for key, value in metadata.items():
                         f.write(f"{key}: {value}\n")
+                    f.write("\n")
+
+                artifacts = record.get('stage3_artifacts') or {}
+                method_library = artifacts.get('method_library')
+                if method_library is not None:
+                    f.write("\n" + "~"*40 + "\n")
+                    f.write("HTN METHOD LIBRARY (Stage 3A)\n")
+                    f.write("~"*40 + "\n")
+                    f.write("Full JSON also saved to htn_method_library.json\n")
+                    f.write(json.dumps(method_library, indent=2))
+                    f.write("\n")
+
+                transitions = artifacts.get('transitions')
+                if transitions is not None:
+                    f.write("\n" + "~"*40 + "\n")
+                    f.write("HTN DECOMPOSITION TRACES (Stage 3B/3C)\n")
+                    f.write("~"*40 + "\n")
+                    f.write("Full JSON also saved to htn_transitions.json\n")
+                    f.write(json.dumps(transitions, indent=2))
                     f.write("\n")
 
             if record.get('stage3_status') == 'success' and record.get('stage3_agentspeak'):

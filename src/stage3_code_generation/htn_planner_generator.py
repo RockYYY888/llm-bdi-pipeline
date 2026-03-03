@@ -93,6 +93,7 @@ class HTNPlannerGenerator:
             "summary": {
                 "method": "htn",
                 "used_llm": synthesis_meta["used_llm"],
+                "llm_attempted": synthesis_meta["llm_prompt"] is not None,
                 "compound_tasks": len(method_library.compound_tasks),
                 "primitive_tasks": len(method_library.primitive_tasks),
                 "methods": len(method_library.methods),

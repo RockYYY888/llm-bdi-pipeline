@@ -11,7 +11,9 @@ This repository keeps the tests focused on the active pipeline.
   - HTN decomposition + preferred specialisation
   - AgentSpeak rendering for positive and negative literals
 - `tests/test_pipeline_stage3_htn.py`
-  - Pipeline-level Stage 3 integration without calling Stage 1
+  - Canonical blocksworld example integration test
+  - Calls `pipeline.execute()` across Stage 1, Stage 2, and Stage 3
+  - Verifies the logger recorded each stage's inputs, outputs, and saved artifacts
 
 ## Recommended Commands
 
@@ -24,3 +26,4 @@ This repository keeps the tests focused on the active pipeline.
 ## Notes
 
 - Stage 1 full end-to-end tests still require an external LLM, so the committed tests avoid that dependency.
+- `tests/test_pipeline_stage3_htn.py` is the default example test to run for acceptance.

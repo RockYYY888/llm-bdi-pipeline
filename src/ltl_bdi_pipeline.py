@@ -71,10 +71,18 @@ class LTL_BDI_Pipeline:
             )
 
         # Start logger (creates timestamped directory in logs/)
-        self.logger.start_pipeline(nl_instruction, mode=mode, domain_file="N/A", output_dir="logs")
+        self.logger.start_pipeline(
+            nl_instruction,
+            mode=mode,
+            domain_file=self.domain_file,
+            output_dir="logs",
+        )
 
         # Use logger's directory for all output files
         self.output_dir = self.logger.current_log_dir
+        if self.logger.current_record is not None and self.output_dir is not None:
+            self.logger.current_record.output_dir = str(self.output_dir)
+            self.logger._save_current_state()
 
         print("="*80)
         print(f"LTL-BDI PIPELINE - {mode.upper()} MODE")
@@ -246,21 +254,27 @@ class LTL_BDI_Pipeline:
             }
 
             # Log Stage 3 success with HTN metadata
+            llm_attempted = artifacts["llm"]["prompt"] is not None
             self.logger.log_stage3(
                 ltl_spec,
                 dfa_result,
                 asl_code,
                 "Success",
                 method="htn",
-                model=artifacts["llm"]["model"] if artifacts["llm"]["used"] else None,
-                llm_prompt=artifacts["llm"]["prompt"] if artifacts["llm"]["used"] else None,
-                llm_response=artifacts["llm"]["response"] if artifacts["llm"]["used"] else None,
+                model=artifacts["llm"]["model"] if llm_attempted else None,
+                llm_prompt=artifacts["llm"]["prompt"],
+                llm_response=artifacts["llm"]["response"],
                 metadata=summary,
+                artifacts={
+                    "method_library": artifacts["method_library"],
+                    "transitions": artifacts["transitions"],
+                },
             )
 
             print(f"\n✓ AgentSpeak Code Generated ({len(asl_code)} characters in {elapsed:.2f}s)")
             print("  Method: HTN method synthesis + specialisation")
-            print(f"  Used LLM for Stage 3A: {artifacts['llm']['used']}")
+            print(f"  Attempted LLM synthesis in Stage 3A: {llm_attempted}")
+            print(f"  Accepted LLM output in Stage 3A: {artifacts['llm']['used']}")
             print(f"  Compound tasks: {summary['compound_tasks']}")
             print(f"  Methods: {summary['methods']}")
             print(f"  Transition plans: {summary['transition_count']}")
