@@ -187,7 +187,9 @@ The canonical example acceptance test is:
 ```
 
 It runs a fixed blocksworld example through `pipeline.execute()` and checks that the logger
-captured each stage's inputs, outputs, and persisted artifacts.
+captured each stage's live inputs, outputs, and persisted artifacts. The test uses the real
+Stage 1/2/3 execution path (no stubbed Stage 1 response) and writes its run records under
+`tests/logs/`.
 
 Run the Stage 2 DFA tests:
 
@@ -195,8 +197,8 @@ Run the Stage 2 DFA tests:
 ./.venv/bin/pytest -q tests/stage2_dfa_generation/test_ltlf2dfa.py
 ```
 
-Stage 1 tests are still present, but they depend on external LLM access and are not part of the
-default fast regression loop.
+The pipeline-level integration test and the Stage 1 tests depend on external LLM access, so they
+are not part of the default fast regression loop in environments without API access.
 
 ## Stage 3 Outputs
 
