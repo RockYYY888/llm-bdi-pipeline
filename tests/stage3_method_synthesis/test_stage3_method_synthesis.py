@@ -170,3 +170,62 @@ def test_stage3_prompts_make_naming_and_ordering_rules_explicit():
     assert "If a helper subtask corresponds to a positive predicate P, name it achieve_P." in user_prompt
     assert "For every non-guard method, method_name must be exactly task_name + '__via_'" in user_prompt
     assert "For every guard method, method_name must end exactly in '__guard'." in user_prompt
+
+
+def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
+    domain = _domain()
+    synthesizer = HTNMethodSynthesizer()
+    library = HTNMethodLibrary(
+        compound_tasks=[
+            HTNTask("achieve-on", ("B1", "B2"), False, ("on",)),
+        ],
+        primitive_tasks=synthesizer._build_primitive_tasks(domain),
+        methods=[
+            HTNMethod(
+                method_name="achieve-on__guard",
+                task_name="achieve-on",
+                parameters=("B1", "B2"),
+                context=(
+                    HTNLiteral("on", ("B1", "B2"), True, None),
+                ),
+                subtasks=(),
+                ordering=(),
+                origin="llm",
+            ),
+        ],
+        target_literals=[],
+    )
+
+    normalised = synthesizer._normalise_llm_library(library, domain)
+    assert normalised.compound_tasks[0].name == "achieve-on"
+
+    with pytest.raises(ValueError, match="Invalid task identifier 'achieve-on'"):
+        synthesizer._validate_library(normalised, domain)
+
+
+def test_method_validation_enforces_method_name_and_guard_contract():
+    domain = _domain()
+    synthesizer = HTNMethodSynthesizer()
+    library = HTNMethodLibrary(
+        compound_tasks=[
+            HTNTask("achieve_on", ("B1", "B2"), False, ("on",)),
+        ],
+        primitive_tasks=synthesizer._build_primitive_tasks(domain),
+        methods=[
+            HTNMethod(
+                method_name="achieve_on__stack",
+                task_name="achieve_on",
+                parameters=("B1", "B2"),
+                context=(),
+                subtasks=(),
+                ordering=(),
+                origin="llm",
+            ),
+        ],
+        target_literals=[
+            HTNLiteral("on", ("a", "b"), True, "on_a_b"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="must start with 'achieve_on__via_'"):
+        synthesizer._validate_library(library, domain)

@@ -245,7 +245,7 @@ class HTNMethodSynthesizer:
         action_schemas = self._action_schema_map(domain)
         compound_tasks = [
             HTNTask(
-                name=self._sanitize_name(task.name),
+                name=task.name,
                 parameters=task.parameters,
                 is_primitive=task.is_primitive,
                 source_predicates=task.source_predicates,
@@ -277,7 +277,7 @@ class HTNMethodSynthesizer:
                 normalised_steps.append(
                     HTNMethodStep(
                         step_id=step.step_id,
-                        task_name=self._sanitize_name(step.task_name),
+                        task_name=step.task_name,
                         args=step.args,
                         kind=step.kind,
                         action_name=step.action_name,
@@ -289,8 +289,8 @@ class HTNMethodSynthesizer:
 
             methods.append(
                 HTNMethod(
-                    method_name=self._sanitize_name(method.method_name),
-                    task_name=self._sanitize_name(method.task_name),
+                    method_name=method.method_name,
+                    task_name=method.task_name,
                     parameters=method.parameters,
                     context=method.context,
                     subtasks=tuple(normalised_steps),
@@ -351,12 +351,48 @@ class HTNMethodSynthesizer:
                     f"Unknown compound task in method '{method.method_name}': {method.task_name}. "
                     f"Known compound tasks: {sorted(compound_names)}"
                 )
+            if method.method_name.endswith("__guard"):
+                expected_guard_name = f"{method.task_name}__guard"
+                if method.method_name != expected_guard_name:
+                    raise ValueError(
+                        f"Guard method '{method.method_name}' must be named exactly "
+                        f"'{expected_guard_name}'."
+                    )
+                if method.subtasks:
+                    raise ValueError(
+                        f"Guard method '{method.method_name}' must have an empty subtasks list."
+                    )
+                if method.ordering:
+                    raise ValueError(
+                        f"Guard method '{method.method_name}' must have an empty ordering list."
+                    )
+                if not method.context:
+                    raise ValueError(
+                        f"Guard method '{method.method_name}' must have a non-empty context."
+                    )
+            else:
+                required_prefix = f"{method.task_name}__via_"
+                if not method.method_name.startswith(required_prefix):
+                    raise ValueError(
+                        f"Non-guard method '{method.method_name}' must start with "
+                        f"'{required_prefix}'."
+                    )
+                if method.method_name == required_prefix:
+                    raise ValueError(
+                        f"Non-guard method '{method.method_name}' must include a strategy suffix "
+                        "after '__via_'."
+                    )
 
             step_ids = {step.step_id for step in method.subtasks}
             if len(step_ids) != len(method.subtasks):
                 raise ValueError(
                     f"Duplicate step_id values in method '{method.method_name}'. "
                     "Each subtask step_id must be unique."
+                )
+            if method.subtasks and not method.ordering:
+                raise ValueError(
+                    f"Method '{method.method_name}' must include explicit ordering edges for "
+                    "its subtasks."
                 )
 
             for before, after in method.ordering:
