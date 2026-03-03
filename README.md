@@ -86,8 +86,10 @@ python src/main.py "Put block a on block b"
 Notes:
 
 - Stage 1 requires an LLM API key.
-- Stage 3 uses the same API configuration if available, but the Stage 3 synthesizer falls back
-  to deterministic HTN synthesis when no valid Stage 3 LLM output is available.
+- Stage 3 can use its own `STAGE3_OPENAI_*` environment variables.
+- If `STAGE3_OPENAI_*` is not set, Stage 3 falls back to the shared `OPENAI_*` settings.
+- The Stage 3 synthesizer still falls back to deterministic HTN synthesis when no valid Stage 3
+  LLM output is available.
 - The maintained domain is `src/domains/blocksworld/`.
 - Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
 

@@ -48,6 +48,26 @@ class Config:
         """Get OpenAI base URL (for custom endpoints like DeepSeek)"""
         return os.getenv('OPENAI_BASE_URL')
 
+    @property
+    def stage3_openai_api_key(self) -> Optional[str]:
+        """Get Stage 3 OpenAI API key, falling back to the shared key."""
+        return os.getenv('STAGE3_OPENAI_API_KEY') or self.openai_api_key
+
+    @property
+    def stage3_openai_model(self) -> str:
+        """Get Stage 3 model, falling back to the shared model."""
+        return os.getenv('STAGE3_OPENAI_MODEL', self.openai_model)
+
+    @property
+    def stage3_openai_timeout(self) -> int:
+        """Get Stage 3 API timeout, falling back to the shared timeout."""
+        return int(os.getenv('STAGE3_OPENAI_TIMEOUT', str(self.openai_timeout)))
+
+    @property
+    def stage3_openai_base_url(self) -> Optional[str]:
+        """Get Stage 3 base URL, falling back to the shared base URL."""
+        return os.getenv('STAGE3_OPENAI_BASE_URL') or self.openai_base_url
+
     def validate(self) -> bool:
         """Validate configuration"""
         if not self.openai_api_key:
