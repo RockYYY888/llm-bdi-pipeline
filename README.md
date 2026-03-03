@@ -86,8 +86,7 @@ python src/main.py "Put block a on block b"
 Notes:
 
 - Stage 1 requires an LLM API key.
-- Stage 3 can use its own `STAGE3_OPENAI_*` environment variables.
-- If `STAGE3_OPENAI_*` is not set, Stage 3 falls back to the shared `OPENAI_*` settings.
+- Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
 - The Stage 3 synthesizer still falls back to deterministic HTN synthesis when no valid Stage 3
   LLM output is available.
 - The maintained domain is `src/domains/blocksworld/`.

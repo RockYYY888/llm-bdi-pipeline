@@ -223,10 +223,10 @@ class LTL_BDI_Pipeline:
             generator = HTNPlannerGenerator(
                 self.domain,
                 grounding_map,
-                api_key=self.config.stage3_openai_api_key,
-                model=self.config.stage3_openai_model,
-                base_url=self.config.stage3_openai_base_url,
-                timeout=float(self.config.stage3_openai_timeout),
+                api_key=self.config.openai_api_key,
+                model=self.config.openai_model,
+                base_url=self.config.openai_base_url,
+                timeout=float(self.config.openai_timeout),
             )
 
             # Convert ltl_spec to dict format for generator
