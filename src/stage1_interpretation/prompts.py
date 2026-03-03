@@ -387,7 +387,7 @@ Predicates have different arities (number of arguments). You MUST include the co
    - Output formula: G(!(on(a, b)))
 
 **IMPORTANT**: Do NOT assume or specify any initial state while extracting the LTL goal.
-Only capture the requested goal semantics. Stage 3 will build the concrete HDDL planning problem later.
+Only capture the requested goal semantics. Stage 4 will build the concrete HDDL planning problem later.
 Only extract:
 1. The objects (blocks) mentioned in the instruction
 2. The LTL goal formulas (what should be achieved)

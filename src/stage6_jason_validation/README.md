@@ -1,11 +1,11 @@
-# Stage 4: Jason AgentSpeak Validation
+# Stage 6: Jason AgentSpeak Validation
 
-This stage validates AgentSpeak (.asl) code generated from Stage 3 using the Jason BDI framework.
+This stage validates AgentSpeak (.asl) code generated from Stage 5 using the Jason BDI framework.
 
 ## Directory Structure
 
 ```
-stage4_jason_validation/
+stage6_jason_validation/
 ├── jason_src/              # Jason framework source code (built from GitHub)
 │   ├── jason-cli/          # Jason command-line interface
 │   └── jason-interpreter/  # Jason interpreter core
@@ -96,9 +96,9 @@ A more comprehensive agent that:
 - Validates all basic BDI operations
 - Includes failure handling
 
-## Usage for Stage 3 Output
+## Usage for Stage 5 Output
 
-To validate AgentSpeak code generated from Stage 3:
+To validate AgentSpeak code generated from Stage 5:
 
 1. Place the generated `.asl` file in `jason_project/src/asl/`
 2. Create or modify the `.mas2j` configuration file:

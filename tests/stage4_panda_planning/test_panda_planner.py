@@ -5,21 +5,18 @@ Focused tests for PANDA HDDL export and plan parsing.
 import sys
 from pathlib import Path
 
-import pytest
-
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
-from stage3_code_generation.htn_method_synthesis import HTNMethodSynthesizer
-from stage3_code_generation.htn_schema import (
+from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
 	HTNMethodStep,
 	HTNTask,
 )
-from stage3_code_generation.panda_planner import PANDAPlanner
+from stage4_panda_planning.panda_planner import PANDAPlanner
 from utils.hddl_parser import HDDLParser
 
 
@@ -113,31 +110,3 @@ def test_panda_plan_parser_extracts_primitive_steps():
 	assert [step.task_name for step in steps] == ["pick_up_from_table", "put_on_block"]
 	assert steps[0].args == ("a",)
 	assert steps[1].args == ("a", "b")
-
-
-def test_method_synthesizer_requires_top_level_task_for_each_target_literal():
-	synthesizer = HTNMethodSynthesizer()
-	domain = _domain()
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("achieve_holding", ("B",), False, ("holding",)),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="achieve_holding__guard",
-				task_name="achieve_holding",
-				parameters=("B",),
-				context=(),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[
-			HTNLiteral("on", ("a", "b"), True, "on_a_b"),
-		],
-	)
-
-	with pytest.raises(ValueError, match="missing the top-level compound task 'achieve_on'"):
-		synthesizer._validate_library(library, domain)

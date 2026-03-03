@@ -1,5 +1,5 @@
 """
-HTN method synthesis for Stage 3A.
+HTN method synthesis for Stage 3.
 
 The synthesizer uses LLM output as the only source of compound tasks and methods.
 Primitive action tasks are still injected from the domain so Stage 3 can render
@@ -13,22 +13,22 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
-from stage3_code_generation.htn_prompts import (
+from stage3_method_synthesis.htn_prompts import (
     build_htn_system_prompt,
     build_htn_user_prompt,
 )
-from stage3_code_generation.htn_schema import (
+from stage3_method_synthesis.htn_schema import (
     HTNLiteral,
     HTNMethod,
     HTNMethodLibrary,
     HTNMethodStep,
     HTNTask,
 )
-from stage3_code_generation.hddl_condition_parser import HDDLConditionParser
+from utils.hddl_condition_parser import HDDLConditionParser
 
 
 class HTNSynthesisError(RuntimeError):
-    """Raised when Stage 3A cannot produce a valid HTN method library."""
+    """Raised when Stage 3 cannot produce a valid HTN method library."""
 
     def __init__(
         self,
@@ -101,7 +101,7 @@ class HTNMethodSynthesizer:
                 metadata,
                 "preflight",
                 (
-                    "Stage 3A requires a configured OPENAI_API_KEY. "
+                    "Stage 3 requires a configured OPENAI_API_KEY. "
                     "HTN method synthesis only accepts live LLM output."
                 ),
             )

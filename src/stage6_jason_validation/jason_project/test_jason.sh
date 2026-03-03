@@ -2,7 +2,7 @@
 # Test script for Jason AgentSpeak validation
 
 echo "========================================"
-echo "Stage 4: Jason AgentSpeak Validation"
+echo "Stage 6: Jason AgentSpeak Validation"
 echo "========================================"
 echo ""
 echo "Testing Jason BDI Framework..."

@@ -1,5 +1,5 @@
 """
-Minimal HDDL condition parser used by the HTN Stage 3 pipeline.
+Minimal HDDL condition parser shared by Stage 3 synthesis and Stage 5 rendering.
 
 The parser keeps only symbolic literals and ignores equality constraints.
 """

@@ -1,7 +1,7 @@
 """
-PANDA-backed Stage 3B planner.
+PANDA-backed Stage 4 planner.
 
-This module exports the Stage 3A HTN method library into temporary HDDL files,
+This module exports the Stage 3 HTN method library into temporary HDDL files,
 invokes the PANDA toolchain, and parses the resulting primitive plan.
 """
 
@@ -14,13 +14,12 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from stage3_code_generation.htn_schema import (
+from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
-	PANDAPlanResult,
-	PANDAPlanStep,
 )
+from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
 
 
 class PANDAPlanningError(RuntimeError):
@@ -137,7 +136,7 @@ class PANDAPlanner:
 			raise PANDAPlanningError(
 				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args)})",
 				metadata={
-					"backend": "panda",
+					"backend": "pandaPI",
 					"transition_name": transition_name,
 					"task_name": task_name,
 					"task_args": list(task_args),
@@ -193,7 +192,7 @@ class PANDAPlanner:
 			"PANDA toolchain is not available on PATH. Missing commands: "
 			+ ", ".join(missing),
 			metadata={
-				"backend": "panda",
+				"backend": "pandaPI",
 				"missing_commands": missing,
 			},
 		)
@@ -367,7 +366,7 @@ class PANDAPlanner:
 		raise PANDAPlanningError(
 			f"PANDA {stage} step failed with exit code {result.returncode}",
 			metadata={
-				"backend": "panda",
+				"backend": "pandaPI",
 				"stage": stage,
 				"command": list(command),
 				"stdout": result.stdout,

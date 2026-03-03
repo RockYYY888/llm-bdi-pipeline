@@ -3,7 +3,7 @@ Live integration test for the full blocksworld example pipeline.
 
 This test mirrors `src/main.py` as closely as possible:
 - it fixes only the user instruction
-- it passes through the real Stage 1, Stage 2, and Stage 3 execution path
+- it passes through the real Stage 1, Stage 2, Stage 3, Stage 4, and Stage 5 execution path
 - it verifies the logger captured the actual prompts, responses, and artifacts
 
 The test is skipped when a valid API configuration is not available.
@@ -20,7 +20,7 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from ltl_bdi_pipeline import LTL_BDI_Pipeline
-from stage3_code_generation.panda_planner import PANDAPlanner
+from stage4_panda_planning.panda_planner import PANDAPlanner
 from utils.config import get_config
 from utils.pipeline_logger import PipelineLogger
 
@@ -44,6 +44,8 @@ def test_blocksworld_example_pipeline_records_live_execution():
     result = pipeline.execute(EXAMPLE_INSTRUCTION, mode="dfa_agentspeak")
 
     assert result["success"] is True
+    assert "method_library" in result
+    assert "plans" in result
     assert "agentspeak_code" in result
 
     log_dir = pipeline.logger.current_log_dir
@@ -96,20 +98,23 @@ def test_blocksworld_example_pipeline_records_live_execution():
     assert execution["stage2_num_transitions"] >= 1
 
     assert execution["stage3_status"] == "success"
-    assert execution["stage3_method"] == "panda"
     assert execution["stage3_used_llm"] is True
     assert execution["stage3_llm_prompt"] is not None
     assert execution["stage3_metadata"]["llm_attempted"] is True
-    assert execution["stage3_code_size_chars"] > 0
-    assert execution["stage3_code_size_chars"] == len(execution["stage3_agentspeak"])
-    assert execution["stage3_metadata"]["method"] == "panda"
-    assert execution["stage3_metadata"]["backend"] == "pandaPI"
-    assert execution["stage3_metadata"]["transition_count"] >= 1
-    assert execution["stage3_artifacts"]["method_library"] is not None
-    assert execution["stage3_artifacts"]["transitions"] is not None
-    assert result["agentspeak_code"] == execution["stage3_agentspeak"]
-    assert "+!achieve_on(a, b)" in execution["stage3_agentspeak"]
-    assert "+!achieve_on(a, b) : true <-\n\ttrue.\n" not in execution["stage3_agentspeak"]
+    assert execution["stage3_method_library"] is not None
+
+    assert execution["stage4_status"] == "success"
+    assert execution["stage4_backend"] == "pandaPI"
+    assert execution["stage4_metadata"]["backend"] == "pandaPI"
+    assert execution["stage4_metadata"]["transition_count"] >= 1
+    assert execution["stage4_artifacts"]["transitions"] is not None
+
+    assert execution["stage5_status"] == "success"
+    assert execution["stage5_code_size_chars"] > 0
+    assert execution["stage5_code_size_chars"] == len(execution["stage5_agentspeak"])
+    assert result["agentspeak_code"] == execution["stage5_agentspeak"]
+    assert "+!achieve_on(a, b)" in execution["stage5_agentspeak"]
+    assert "+!achieve_on(a, b) : true <-\n\ttrue.\n" not in execution["stage5_agentspeak"]
 
     assert "STAGE 1: Natural Language" in execution_txt
     assert "Parser: LLM (" in execution_txt
@@ -117,8 +122,11 @@ def test_blocksworld_example_pipeline_records_live_execution():
     assert "PARSED OUTPUT (Stage 1)" in execution_txt
     assert "STAGE 2: LTL Specification" in execution_txt
     assert "DFA GENERATION RESULT" in execution_txt
-    assert "STAGE 3: DFA" in execution_txt
-    assert "PANDA GENERATION SUMMARY" in execution_txt
-    assert "HTN METHOD LIBRARY (Stage 3A)" in execution_txt
-    assert "PANDA PLAN ARTIFACTS (Stage 3B)" in execution_txt
-    assert "GENERATED AGENTSPEAK CODE (Stage 3)" in execution_txt
+    assert "STAGE 3: DFA → HTN Method Synthesis" in execution_txt
+    assert "HTN METHOD SYNTHESIS SUMMARY" in execution_txt
+    assert "HTN METHOD LIBRARY (Stage 3)" in execution_txt
+    assert "STAGE 4: HTN Method Library → PANDA Planning" in execution_txt
+    assert "PANDA PLANNING SUMMARY" in execution_txt
+    assert "PANDA PLAN ARTIFACTS (Stage 4)" in execution_txt
+    assert "STAGE 5: PANDA Plans → AgentSpeak Rendering" in execution_txt
+    assert "GENERATED AGENTSPEAK CODE (Stage 5)" in execution_txt

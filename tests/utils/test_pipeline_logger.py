@@ -18,22 +18,18 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
         output_dir=str(tmp_path),
     )
 
-    logger.log_stage3(
-        None,
-        None,
+    logger.log_stage3_method_synthesis(
         None,
         "Failed",
-        error="PANDA planner failed during engine: no plan generated",
-        method="panda",
+        error="HTN synthesis failed during response_parse: invalid payload",
         model="deepseek-chat",
         llm_prompt={"system": "SYSTEM", "user": "USER"},
         llm_response='{"bad":"payload"}',
         metadata={
-            "used_llm": False,
-            "backend": "pandaPI",
+            "used_llm": True,
             "model": "deepseek-chat",
-            "stage": "engine",
-            "stderr": "no plan generated",
+            "failure_stage": "response_parse",
+            "failure_reason": "invalid payload",
         },
     )
     logger.end_pipeline(success=False)
@@ -45,18 +41,15 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
     execution_txt = (log_dir / "execution.txt").read_text()
 
     assert execution["stage3_status"] == "failed"
-    assert execution["stage3_method"] == "panda"
     assert execution["stage3_used_llm"] is True
     assert execution["stage3_model"] == "deepseek-chat"
     assert execution["stage3_llm_prompt"]["system"] == "SYSTEM"
     assert execution["stage3_llm_response"] == '{"bad":"payload"}'
-    assert execution["stage3_metadata"]["backend"] == "pandaPI"
-    assert execution["stage3_metadata"]["stage"] == "engine"
-    assert execution["stage3_metadata"]["stderr"] == "no plan generated"
+    assert execution["stage3_metadata"]["failure_stage"] == "response_parse"
+    assert execution["stage3_metadata"]["failure_reason"] == "invalid payload"
 
-    assert "PANDA GENERATION DIAGNOSTICS" in execution_txt
-    assert "backend: pandaPI" in execution_txt
-    assert "stage: engine" in execution_txt
-    assert "stderr: no plan generated" in execution_txt
+    assert "HTN METHOD SYNTHESIS DIAGNOSTICS" in execution_txt
+    assert "failure_stage: response_parse" in execution_txt
+    assert "failure_reason: invalid payload" in execution_txt
     assert "LLM RESPONSE (Stage 3)" in execution_txt
-    assert "Error: PANDA planner failed during engine: no plan generated" in execution_txt
+    assert "Error: HTN synthesis failed during response_parse: invalid payload" in execution_txt

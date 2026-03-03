@@ -1,17 +1,17 @@
 """
-AgentSpeak code generation for the PANDA-backed Stage 3 pipeline.
+Stage 5 AgentSpeak rendering for the PANDA-backed pipeline.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
-from stage3_code_generation.htn_schema import PANDAPlanResult
-from stage3_code_generation.hddl_condition_parser import HDDLConditionParser
+from stage4_panda_planning.panda_schema import PANDAPlanResult
+from utils.hddl_condition_parser import HDDLConditionParser
 
 
-class AgentSpeakCodeGenerator:
-    """Render PANDA-backed HTN goal plans as AgentSpeak code."""
+class AgentSpeakRenderer:
+    """Render PANDA-generated goal plans as AgentSpeak code."""
 
     def __init__(self) -> None:
         self.parser = HDDLConditionParser()

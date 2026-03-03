@@ -1,5 +1,5 @@
 /*
- * Stage 4 - Test AgentSpeak Agent
+ * Stage 6 - Test AgentSpeak Agent
  *
  * A minimal BDI agent to verify Jason environment is working correctly.
  * This agent simply achieves a test goal and prints confirmation.
@@ -12,7 +12,7 @@
 +!test_system
     : true
     <- .print("Jason BDI Framework is working!");
-       .print("Stage 4 environment validation: SUCCESS");
+       .print("Stage 6 environment validation: SUCCESS");
        !verify_beliefs.
 
 // Plan to verify belief operations

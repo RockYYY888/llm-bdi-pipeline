@@ -1,5 +1,5 @@
 """
-Main entry point for the LTLf -> DFA -> PANDA-backed AgentSpeak pipeline.
+Main entry point for the LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak pipeline.
 """
 
 import sys
@@ -29,7 +29,8 @@ Examples:
 
 Note:
   Only 'dfa_agentspeak' mode is supported.
-  The pipeline produces PANDA-backed AgentSpeak code in Stage 3.
+  The pipeline runs Stage 3 (HTN synthesis), Stage 4 (PANDA planning),
+  and Stage 5 (AgentSpeak rendering).
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')

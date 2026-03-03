@@ -1,8 +1,5 @@
 """
-Stage 3 HTN data structures.
-
-These types define the Stage 3A HTN method library and the PANDA-backed
-planning artifacts used by the current Stage 3 pipeline.
+Stage 3 HTN method-synthesis data structures.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ def _serialise_literal_list(values: Iterable["HTNLiteral"]) -> List[Dict[str, An
 
 @dataclass(frozen=True)
 class HTNLiteral:
-    """A symbolic literal used by HTN methods and PANDA planning artifacts."""
+    """A symbolic literal used by HTN methods and downstream planning artifacts."""
 
     predicate: str
     args: Tuple[str, ...] = ()
@@ -130,7 +127,7 @@ class HTNMethod:
 
 @dataclass
 class HTNMethodLibrary:
-    """The Stage 3A output: a reusable HTN method library."""
+    """The Stage 3 output: a reusable HTN method library."""
 
     compound_tasks: List[HTNTask] = field(default_factory=list)
     primitive_tasks: List[HTNTask] = field(default_factory=list)
@@ -230,61 +227,3 @@ class HTNMethodLibrary:
                 if literal is not None
             ],
         )
-
-
-@dataclass(frozen=True)
-class PANDAPlanStep:
-    """One primitive step in a PANDA-generated executable plan."""
-
-    task_name: str
-    action_name: str
-    args: Tuple[str, ...] = ()
-    source_line: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "task_name": self.task_name,
-            "action_name": self.action_name,
-            "args": list(self.args),
-            "source_line": self.source_line,
-        }
-
-
-@dataclass
-class PANDAPlanResult:
-    """The Stage 3B output: a PANDA-generated primitive plan."""
-
-    task_name: str
-    task_args: Tuple[str, ...]
-    target_literal: HTNLiteral
-    steps: List[PANDAPlanStep] = field(default_factory=list)
-    domain_hddl: str = ""
-    problem_hddl: str = ""
-    parser_stdout: str = ""
-    parser_stderr: str = ""
-    grounder_stdout: str = ""
-    grounder_stderr: str = ""
-    engine_stdout: str = ""
-    engine_stderr: str = ""
-    raw_plan: str = ""
-    actual_plan: str = ""
-    work_dir: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "task_name": self.task_name,
-            "task_args": list(self.task_args),
-            "target_literal": self.target_literal.to_dict(),
-            "steps": [step.to_dict() for step in self.steps],
-            "domain_hddl": self.domain_hddl,
-            "problem_hddl": self.problem_hddl,
-            "parser_stdout": self.parser_stdout,
-            "parser_stderr": self.parser_stderr,
-            "grounder_stdout": self.grounder_stdout,
-            "grounder_stderr": self.grounder_stderr,
-            "engine_stdout": self.engine_stdout,
-            "engine_stderr": self.engine_stderr,
-            "raw_plan": self.raw_plan,
-            "actual_plan": self.actual_plan,
-            "work_dir": self.work_dir,
-        }

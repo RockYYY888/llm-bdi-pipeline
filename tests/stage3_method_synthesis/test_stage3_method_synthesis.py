@@ -1,5 +1,5 @@
 """
-Focused live tests for the PANDA-backed Stage 3 pipeline.
+Focused tests for Stage 3 HTN method synthesis.
 """
 
 import sys
@@ -15,12 +15,10 @@ from stage1_interpretation.grounding_map import GroundingMap
 from stage1_interpretation.ltlf_formula import (
     LTLFormula,
     LTLSpecification,
-    LogicalOperator,
     TemporalOperator,
 )
-from stage3_code_generation.htn_method_synthesis import HTNMethodSynthesizer
-from stage3_code_generation.panda_planner import PANDAPlanner
-from stage3_code_generation.panda_planner_generator import PANDAPlannerGenerator
+from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
+from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNTask
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 
@@ -49,11 +47,6 @@ def _live_stage3_kwargs() -> dict:
     }
 
 
-def _require_panda_toolchain() -> None:
-    if not PANDAPlanner().toolchain_available():
-        pytest.skip("Stage 3 live tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
-
-
 def _atomic_formula(predicate: str, args: list[str]) -> LTLFormula:
     return LTLFormula(
         operator=None,
@@ -73,30 +66,6 @@ def _eventually_on_spec() -> LTLSpecification:
             operator=TemporalOperator.FINALLY,
             predicate=None,
             sub_formulas=[_atomic_formula("on", ["a", "b"])],
-            logical_op=None,
-        ),
-    ]
-    return spec
-
-
-def _globally_not_on_spec() -> LTLSpecification:
-    spec = LTLSpecification()
-    spec.objects = ["a", "b"]
-    spec.grounding_map = GroundingMap()
-    spec.grounding_map.add_atom("on_a_b", "on", ["a", "b"])
-
-    atom = _atomic_formula("on", ["a", "b"])
-    negation = LTLFormula(
-        operator=None,
-        predicate=None,
-        sub_formulas=[atom],
-        logical_op=LogicalOperator.NOT,
-    )
-    spec.formulas = [
-        LTLFormula(
-            operator=TemporalOperator.GLOBALLY,
-            predicate=None,
-            sub_formulas=[negation],
             logical_op=None,
         ),
     ]
@@ -150,55 +119,29 @@ def test_method_synthesizer_uses_live_llm_output():
     assert all(method.task_name in compound_task_names for method in library.methods)
 
 
-def test_generator_emits_panda_transition_and_primitive_plans():
-    _require_panda_toolchain()
+def test_method_synthesizer_requires_top_level_task_for_each_target_literal():
     domain = _domain()
-    spec = _eventually_on_spec()
-    dfa_result = _dfa_result_for_labels("on_a_b")
-    ltl_dict = {
-        "objects": spec.objects,
-        "formulas_string": [formula.to_string() for formula in spec.formulas],
-        "grounding_map": spec.grounding_map,
-    }
+    synthesizer = HTNMethodSynthesizer()
+    library = HTNMethodLibrary(
+        compound_tasks=[
+            HTNTask("achieve_holding", ("B",), False, ("holding",)),
+        ],
+        primitive_tasks=synthesizer._build_primitive_tasks(domain),
+        methods=[
+            HTNMethod(
+                method_name="achieve_holding__guard",
+                task_name="achieve_holding",
+                parameters=("B",),
+                context=(),
+                subtasks=(),
+                ordering=(),
+                origin="llm",
+            ),
+        ],
+        target_literals=[
+            HTNLiteral("on", ("a", "b"), True, "on_a_b"),
+        ],
+    )
 
-    code, artifacts = PANDAPlannerGenerator(
-        domain,
-        spec.grounding_map,
-        **_live_stage3_kwargs(),
-    ).generate(ltl_dict, dfa_result)
-
-    assert artifacts["summary"]["method"] == "panda"
-    assert artifacts["summary"]["backend"] == "pandaPI"
-    assert artifacts["summary"]["used_llm"] is True
-    assert artifacts["summary"]["transition_count"] == 1
-    assert artifacts["llm"]["response"]
-    assert "+!achieve_on(a, b)" in code
-    assert "\t!put_on_block(a, b)." in code
-    assert "+!put_on_block(X1, X2)" in code
-    assert "\tput_on_block(X1, X2);" in code
-    assert "_physical(" not in code
-    assert "+!transition_1" in code
-    assert any(item["label"] == "on(a, b)" for item in artifacts["transitions"])
-
-
-def test_negative_goal_generates_guard_plan():
-    _require_panda_toolchain()
-    domain = _domain()
-    spec = _globally_not_on_spec()
-    dfa_result = _dfa_result_for_labels("!on_a_b")
-    ltl_dict = {
-        "objects": spec.objects,
-        "formulas_string": [formula.to_string() for formula in spec.formulas],
-        "grounding_map": spec.grounding_map,
-    }
-
-    code, artifacts = PANDAPlannerGenerator(
-        domain,
-        spec.grounding_map,
-        **_live_stage3_kwargs(),
-    ).generate(ltl_dict, dfa_result)
-
-    assert artifacts["summary"]["transition_count"] >= 1
-    assert artifacts["summary"]["used_llm"] is True
-    assert "+!maintain_not_on(a, b)" in code
-    assert ": not on(a, b) <-" in code
+    with pytest.raises(ValueError, match="missing the top-level compound task 'achieve_on'"):
+        synthesizer._validate_library(library, domain)
