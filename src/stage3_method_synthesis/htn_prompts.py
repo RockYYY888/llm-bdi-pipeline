@@ -66,6 +66,13 @@ def build_htn_system_prompt() -> str:
         "- When a target is already satisfied, emit a zero-subtask method with a semantic "
         "noop/already_* strategy.\n"
         "- Keep methods shallow, deterministic, and non-redundant.\n"
+        "- Internally reason by explicit case partitioning before you emit JSON. For each target "
+        "task and helper task, think through at least these families of cases: "
+        "(a) already satisfied, "
+        "(b) directly achievable with current support conditions, "
+        "(c) blocked because a required support condition is missing and must be established first, "
+        "(d) recursively blocked because the support-establishing helper itself has multiple cases. "
+        "Do not output that reasoning; only output the final JSON.\n"
         "- Do not overfit to one witness plan or one canonical initial state.\n"
         "- Methods must stay reusable across multiple runtime situations, not just one example state.\n"
         "- For every target-bound task, include the important runtime branches the agent may face.\n"
@@ -84,6 +91,10 @@ def build_htn_system_prompt() -> str:
         "- For a total order [s1, s2, s3], write ordering as [[\"s1\", \"s2\"], [\"s2\", \"s3\"]].\n"
         "- For a single-step method, ordering may be [].\n"
         "- For zero-subtask methods, ordering must be [].\n"
+        "- Respect type discipline. If the domain says a position expects a block, vehicle, "
+        "room, or package, do not reuse a variable of the wrong role there.\n"
+        "- If two roles must stay distinct for the method to make sense, do not silently alias "
+        "them to the same variable. Use separate variables and explicit binding conditions.\n"
         "- Every step args list must use only parameters already introduced by the method.\n"
         "- Never introduce free variables in subtasks. Every upper-case placeholder used in "
         "subtask args, subtask literals, preconditions, or effects must already appear in the "
@@ -102,6 +113,7 @@ def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], schema_hi
         )
 
     predicate_lines = [f"- {predicate.to_signature()}" for predicate in domain.predicates]
+    type_lines = [f"- {type_name}" for type_name in domain.types]
     targets = "\n".join(f"- {item}" for item in target_literals)
     binding_hints = "\n".join(
         f'- {{"target_literal": "{literal}", "task_name": "<semantic_task_name>"}}'
@@ -203,6 +215,7 @@ Valid method fragments:
         "Generate a JSON HTN method library that will be compiled into valid AgentSpeak.\n"
         "The JSON must satisfy the syntax and naming contract below.\n\n"
         f"DOMAIN:\n{domain.name}\n\n"
+        f"DOMAIN TYPES:\n{chr(10).join(type_lines) if type_lines else '- object'}\n\n"
         f"PREDICATES:\n{chr(10).join(predicate_lines)}\n\n"
         f"RUNTIME PRIMITIVE ACTION ALIASES:\n{chr(10).join(action_lines)}\n\n"
         f"TARGET LITERALS:\n{targets}\n\n"
@@ -222,6 +235,10 @@ Valid method fragments:
         "method for its bound task. Do not return only a noop/already-satisfied method.\n"
         "- For every target-bound task, do not stop at one witness path. Include the key reusable "
         "branches needed by the agent across different runtime situations.\n"
+        "- Think in explicit case splits before returning. For each target-bound task, first "
+        "mentally enumerate: already-satisfied, directly-achievable, blocked-because-support-is-missing, "
+        "and recursively-blocked helper cases. Then emit methods that cover those reusable cases. "
+        "Do not print the reasoning.\n"
         "- Each method.task_name must reference an existing compound task.\n"
         "- Each primitive subtask.task_name must match one of the provided runtime primitive action aliases exactly.\n"
         "- If subtask.task_name is a runtime primitive action alias, then kind must be 'primitive'.\n"
@@ -236,6 +253,15 @@ Valid method fragments:
         "- Do not overfit methods to the default all-objects-on-table example state. The methods must "
         "remain reusable when an object is already held, already clear, already on another object, or "
         "already at the target relation.\n"
+        "- Use the declared HDDL types and typed action signatures exactly. Method parameters, helper "
+        "variables, and subtask arguments must respect the domain's type roles.\n"
+        "- Do not collapse two distinct semantic roles onto one variable unless the domain semantics "
+        "really allow that aliasing.\n"
+        "- If a decomposition needs two different objects, keep two distinct variables and bind them "
+        "explicitly; do not fake distinctness by reusing one variable name.\n"
+        "- If your method logic depends on two objects being different, encode that with safe symbolic "
+        "binding conditions that the downstream pipeline can represent. Do not rely on unsupported "
+        "equality or inequality syntax.\n"
         "- For every helper task that denotes a reusable stateful intention (for example hold_block, "
         "clear_top, remove_on, place_on, make_clear), include both:\n"
         "  (a) at least one constructive method, and\n"
@@ -285,4 +311,9 @@ Valid method fragments:
         "14. Did you avoid overfitting to one canonical initial state or one witness plan?\n"
         "15. Did you avoid every unbound free variable in subtasks by binding it in the task "
         "parameters or method.context first?\n"
+        "16. Did you explicitly cover the already-satisfied, direct, blocked, and recursive-helper "
+        "case families for each top-level target task?\n"
+        "17. Did every variable and subtask argument respect the domain's declared types?\n"
+        "18. Did you avoid unsupported equality/inequality constructs and instead use representable "
+        "binding conditions only?\n"
     )
