@@ -666,6 +666,8 @@ class LTL_BDI_Pipeline:
 
         blocked_signatures = set()
         for literal in method.context:
+            if literal.is_equality:
+                continue
             if literal.is_positive:
                 continue
             grounded_args = tuple(bind_symbol(arg) for arg in literal.args)
@@ -680,6 +682,8 @@ class LTL_BDI_Pipeline:
         seen_literal_signatures = set()
 
         def add_grounded_literal(literal):
+            if literal.is_equality:
+                return
             if not literal.is_positive:
                 return
             grounded_literal = HTNLiteral(
@@ -737,6 +741,8 @@ class LTL_BDI_Pipeline:
             grounded_positive_literals = []
             grounded_seen = set()
             for literal in step_preconditions:
+                if literal.is_equality:
+                    continue
                 if not literal.is_positive:
                     continue
                 grounded_literal = HTNLiteral(
@@ -782,6 +788,8 @@ class LTL_BDI_Pipeline:
         seen = set()
 
         for literal in literal_pool:
+            if literal.is_equality:
+                continue
             grounded_args = literal.args
             signature = (
                 f"{literal.predicate}({', '.join(grounded_args)})"
@@ -892,6 +900,8 @@ class LTL_BDI_Pipeline:
         seen = set()
 
         def add(literal):
+            if literal.is_equality:
+                return
             if not literal.is_positive:
                 return
             signature = literal.to_signature()
@@ -1014,6 +1024,20 @@ class LTL_BDI_Pipeline:
     def _parse_signature_text(signature):
         if not signature:
             return None
+        if " == " in signature:
+            left, right = signature.split(" == ", 1)
+            return {
+                "predicate": "=",
+                "args": (left.strip(), right.strip()),
+                "is_positive": True,
+            }
+        if " != " in signature:
+            left, right = signature.split(" != ", 1)
+            return {
+                "predicate": "=",
+                "args": (left.strip(), right.strip()),
+                "is_positive": False,
+            }
         is_positive = not signature.startswith("!")
         text = signature[1:] if not is_positive else signature
         if "(" not in text:

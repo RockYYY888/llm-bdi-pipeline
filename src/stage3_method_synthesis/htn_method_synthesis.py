@@ -655,6 +655,11 @@ class HTNMethodSynthesizer:
 		)
 
 		for literal in library.target_literals:
+			self._validate_literal_shape(
+				literal,
+				predicate_arities,
+				"target_literals",
+			)
 			if literal.is_positive:
 				continue
 			bound_task_name = binding_lookup[literal.to_signature()]
@@ -789,6 +794,34 @@ class HTNMethodSynthesizer:
 						f"Unknown subtask reference '{step.task_name}' in method "
 						f"'{method.method_name}'. Known tasks: {sorted(all_tasks)}",
 					)
+
+				if step.literal is not None:
+					self._validate_literal_shape(
+						step.literal,
+						predicate_arities,
+						f"subtask '{step.step_id}' literal in method '{method.method_name}'",
+					)
+				for index, literal in enumerate(step.preconditions, start=1):
+					self._validate_literal_shape(
+						literal,
+						predicate_arities,
+						f"precondition {index} of subtask '{step.step_id}' in method "
+						f"'{method.method_name}'",
+					)
+				for index, literal in enumerate(step.effects, start=1):
+					self._validate_literal_shape(
+						literal,
+						predicate_arities,
+						f"effect {index} of subtask '{step.step_id}' in method "
+						f"'{method.method_name}'",
+					)
+
+			for index, literal in enumerate(method.context, start=1):
+				self._validate_literal_shape(
+					literal,
+					predicate_arities,
+					f"context literal {index} of method '{method.method_name}'",
+				)
 
 			self._validate_method_variable_binding(method)
 			self._validate_method_variable_types(
@@ -1212,6 +1245,8 @@ class HTNMethodSynthesizer:
 		literal: HTNLiteral,
 		predicate_types: Dict[str, Tuple[str, ...]],
 	) -> None:
+		if literal.is_equality:
+			return
 		self._collect_argument_types(
 			variable_types,
 			literal.args,
@@ -1285,6 +1320,8 @@ class HTNMethodSynthesizer:
 		while changed:
 			changed = False
 			for literal in literals:
+				if literal.is_equality:
+					continue
 				literal_variables = [
 					arg
 					for arg in self._literal_variables(literal)
@@ -1509,12 +1546,33 @@ class HTNMethodSynthesizer:
 
 	@staticmethod
 	def _literal_signature(literal: HTNLiteral) -> str:
-		inner = (
-			f"{literal.predicate}({', '.join(literal.args)})"
-			if literal.args
-			else literal.predicate
-		)
-		return inner if literal.is_positive else f"!{inner}"
+		return literal.to_signature()
+
+	@staticmethod
+	def _validate_literal_shape(
+		literal: HTNLiteral,
+		predicate_arities: Dict[str, int],
+		location: str,
+	) -> None:
+		if literal.is_equality:
+			if len(literal.args) != 2:
+				raise ValueError(
+					f"Invalid equality literal '{literal.to_signature()}' in {location}. "
+					"Equality and disequality constraints must use exactly two arguments.",
+				)
+			return
+
+		expected_arity = predicate_arities.get(literal.predicate)
+		if expected_arity is None:
+			raise ValueError(
+				f"Unknown predicate '{literal.predicate}' in {location}. "
+				"Only declared domain predicates or '=' constraints are allowed.",
+			)
+		if len(literal.args) != expected_arity:
+			raise ValueError(
+				f"Predicate '{literal.predicate}' in {location} uses {len(literal.args)} "
+				f"arguments, but the domain arity is {expected_arity}.",
+			)
 
 	def _ensure_literals_are_bound(
 		self,

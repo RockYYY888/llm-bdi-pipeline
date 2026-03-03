@@ -275,6 +275,8 @@ class AgentSpeakRenderer:
         while changed:
             changed = False
             for literal in literals:
+                if getattr(literal, "predicate", None) == "=":
+                    continue
                 literal_variables = [
                     arg
                     for arg in self._literal_variables(literal)
@@ -596,6 +598,9 @@ class AgentSpeakRenderer:
 
     def _render_literal(self, literal: Any, variable_map: Dict[str, str]) -> str:
         mapped_args = self._map_args(literal.args, variable_map)
+        if getattr(literal, "predicate", None) == "=" and len(mapped_args) == 2:
+            operator = "==" if getattr(literal, "is_positive", True) else "\\=="
+            return f"{mapped_args[0]} {operator} {mapped_args[1]}"
         predicate = self._call(literal.predicate, mapped_args)
         if literal.is_positive:
             return predicate
@@ -709,6 +714,9 @@ class AgentSpeakRenderer:
         )
 
     def _literal_signature(self, literal: Any) -> str:
+        if getattr(literal, "predicate", None) == "=" and len(literal.args) == 2:
+            operator = "==" if getattr(literal, "is_positive", True) else "!="
+            return f"{literal.args[0]} {operator} {literal.args[1]}"
         inner = self._call(literal.predicate, tuple(literal.args))
         return inner if literal.is_positive else f"not {inner}"
 
@@ -730,14 +738,10 @@ class AgentSpeakRenderer:
             parameter: value
             for parameter, value in zip(parameters, args)
         }
-        parts = []
-        for literal in literals:
-            bound_args = tuple(bindings.get(item, item) for item in literal.args)
-            predicate = self._call(literal.predicate, bound_args)
-            if literal.is_positive:
-                parts.append(predicate)
-            else:
-                parts.append(f"not {predicate}")
+        parts = [
+            self._render_literal(literal, bindings)
+            for literal in literals
+        ]
         return " & ".join(parts) if parts else "true"
 
     @staticmethod

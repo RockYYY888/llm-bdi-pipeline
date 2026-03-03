@@ -329,7 +329,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Use the declared HDDL types and typed action signatures exactly." in user_prompt
 	assert "Do not collapse two distinct semantic roles onto one variable" in user_prompt
 	assert "introduce and bind the actual blocker/support object as a separate variable" in user_prompt
-	assert "Do not rely on unsupported equality or inequality syntax." in user_prompt
+	assert "Use is_positive=true for equality and is_positive=false for disequality." in user_prompt
 	assert "Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you." in user_prompt
 	assert "For every helper task that denotes a reusable stateful intention" in user_prompt
 	assert "Think twice before returning: first verify the JSON shape, then verify task coverage." in user_prompt
@@ -346,7 +346,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Did you avoid every unbound free variable in subtasks" in user_prompt
 	assert "Did you explicitly cover the already-satisfied, direct, blocked, and recursive-helper case families" in user_prompt
 	assert "Did every variable and subtask argument respect the domain's declared types?" in user_prompt
-	assert "Did you avoid unsupported equality/inequality constructs" in user_prompt
+	assert "Did every equality/disequality constraint use the supported literal form" in user_prompt
 	assert "Did you keep existing task parameters stable instead of renaming them" in user_prompt
 	assert "Did every constructive sibling method for the same task expose a distinguishable" in user_prompt
 	assert "Did you use stable upper-case type-based variable names" in user_prompt
@@ -1142,3 +1142,31 @@ def test_method_validation_rejects_conflicting_variable_types():
 
 	with pytest.raises(ValueError, match="conflicting inferred types"):
 		synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_accepts_supported_equality_constraints():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("keep_apart", ("BLOCK1", "BLOCK2"), False, ()),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_keep_apart_distinct",
+				task_name="keep_apart",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(
+					HTNLiteral("=", ("BLOCK1", "BLOCK2"), False, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)

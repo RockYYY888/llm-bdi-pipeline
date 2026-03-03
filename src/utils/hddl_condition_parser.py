@@ -1,7 +1,7 @@
 """
 Minimal HDDL condition parser shared by Stage 3 synthesis and Stage 5 rendering.
 
-The parser keeps only symbolic literals and ignores equality constraints.
+The parser keeps symbolic literals, including equality and disequality constraints.
 """
 
 from __future__ import annotations
@@ -133,7 +133,14 @@ class HDDLConditionParser:
             return tuple(items)
 
         if head == "=":
-            return ()
+            args = tuple(str(value) for value in node[1:])
+            return (
+                HDDLLiteralPattern(
+                    predicate="=",
+                    args=args,
+                    is_positive=not negated,
+                ),
+            )
 
         args = tuple(str(value) for value in node[1:])
         return (

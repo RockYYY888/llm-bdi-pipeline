@@ -207,7 +207,7 @@ def test_panda_plan_parser_extracts_converted_plan_steps():
 	assert steps[1].args == ("a", "b")
 
 
-def test_root_method_restriction_keeps_only_selected_sibling_for_root_task():
+def test_root_method_wrapper_forces_selected_root_method_without_removing_helpers():
 	planner = PANDAPlanner()
 	library = HTNMethodLibrary(
 		compound_tasks=[
@@ -244,14 +244,49 @@ def test_root_method_restriction_keeps_only_selected_sibling_for_root_task():
 		],
 	)
 
-	filtered = planner._restrict_library_to_root_method(library, library.methods[1])
+	wrapped, wrapper_task_name = planner._wrap_library_for_root_method(library, library.methods[1])
 
-	assert [method.method_name for method in filtered.methods if method.task_name == "hold_block"] == [
+	assert [method.method_name for method in wrapped.methods if method.task_name == "hold_block"] == [
+		"m_hold_block_noop",
 		"m_hold_block_from_table",
 	]
-	assert [method.method_name for method in filtered.methods if method.task_name == "clear_top"] == [
+	assert [method.method_name for method in wrapped.methods if method.task_name == "clear_top"] == [
 		"m_clear_top_noop",
 	]
+	assert wrapper_task_name.startswith("validate_m_hold_block_from_table")
+	wrapper_task = next(task for task in wrapped.compound_tasks if task.name == wrapper_task_name)
+	assert wrapper_task.parameters == ("BLOCK",)
+	assert [method.method_name for method in wrapped.methods if method.task_name == wrapper_task_name] == [
+		f"m_{wrapper_task_name}_entry",
+	]
+
+
+def test_panda_domain_export_renders_equality_constraints():
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=_domain(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("keep_apart", ("LEFT", "RIGHT"), False, ()),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m_keep_apart_distinct",
+					task_name="keep_apart",
+					parameters=("LEFT", "RIGHT"),
+					context=(
+						HTNLiteral("=", ("LEFT", "RIGHT"), False, None),
+					),
+				),
+			],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="blocksworld_transition_1",
+	)
+
+	assert ":precondition (and (not (= ?left ?right)))" in domain_hddl
 
 
 def test_domain_export_can_suppress_auto_generated_guard_for_root_task():

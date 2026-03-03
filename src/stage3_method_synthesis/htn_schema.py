@@ -24,7 +24,14 @@ class HTNLiteral:
     is_positive: bool = True
     source_symbol: Optional[str] = None
 
+    @property
+    def is_equality(self) -> bool:
+        return self.predicate == "="
+
     def to_signature(self) -> str:
+        if self.is_equality and len(self.args) == 2:
+            operator = "==" if self.is_positive else "!="
+            return f"{self.args[0]} {operator} {self.args[1]}"
         base = self.predicate
         if self.args:
             base = f"{base}({', '.join(self.args)})"
@@ -33,6 +40,9 @@ class HTNLiteral:
         return f"!{base}"
 
     def to_agentspeak(self) -> str:
+        if self.is_equality and len(self.args) == 2:
+            operator = "==" if self.is_positive else "\\=="
+            return f"{self.args[0]} {operator} {self.args[1]}"
         base = self.predicate
         if self.args:
             base = f"{base}({', '.join(self.args)})"

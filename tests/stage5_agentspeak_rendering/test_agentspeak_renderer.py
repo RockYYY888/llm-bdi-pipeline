@@ -308,3 +308,41 @@ def test_renderer_hoists_branch_discriminators_from_action_schema():
 	assert "\t!pick_up_from_table(BLOCK1)." in code
 	assert "+!hold_block(BLOCK1) : on(BLOCK1, BLOCK2) <-" in code
 	assert "\t!pick_up(BLOCK1, BLOCK2)." in code
+
+
+def test_renderer_emits_agentspeak_equality_and_disequality_constraints():
+	renderer = AgentSpeakRenderer()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("keep_apart", ("LEFT", "RIGHT"), False, ()),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_keep_apart_distinct",
+				task_name="keep_apart",
+				parameters=("LEFT", "RIGHT"),
+				context=(
+					HTNLiteral("=", ("LEFT", "RIGHT"), False, None),
+				),
+			),
+			HTNMethod(
+				method_name="m_keep_apart_same",
+				task_name="keep_apart",
+				parameters=("LEFT", "RIGHT"),
+				context=(
+					HTNLiteral("=", ("LEFT", "RIGHT"), True, None),
+				),
+			),
+		],
+	)
+
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a", "b"),
+		method_library=method_library,
+		plan_records=[],
+	)
+
+	assert "+!keep_apart(BLOCK1, BLOCK2) : BLOCK1 \\== BLOCK2 <-" in code
+	assert "+!keep_apart(BLOCK1, BLOCK2) : BLOCK1 == BLOCK2 <-" in code

@@ -19,6 +19,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
+	HTNTask,
 )
 from stage4_panda_planning.problem_builder import PANDAProblemBuilder
 from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
@@ -82,24 +83,25 @@ class PANDAPlanner:
 		work_dir = self._resolve_work_dir(transition_name)
 		work_dir.mkdir(parents=True, exist_ok=True)
 
-		export_library = (
-			self._restrict_library_to_root_method(method_library, root_method)
-			if root_method is not None
-			else method_library
-		)
-		suppress_guard_tasks = {root_method.task_name} if root_method is not None else None
+		export_library = method_library
+		planning_task_name = task_name
+		if root_method is not None:
+			export_library, planning_task_name = self._wrap_library_for_root_method(
+				method_library,
+				root_method,
+			)
 		domain_hddl = self._build_domain_hddl(
 			domain,
 			export_library,
 			domain_name,
-			suppress_guard_tasks=suppress_guard_tasks,
+			suppress_guard_tasks=None,
 		)
 		problem_hddl = self.problem_builder.build_problem_hddl(
 			domain=domain,
 			domain_name=domain_name,
 			objects=objects,
 			typed_objects=typed_objects,
-			task_name=task_name,
+			task_name=planning_task_name,
 			task_args=task_args_tuple,
 			initial_facts=initial_facts,
 		)
@@ -359,21 +361,51 @@ class PANDAPlanner:
 
 		return generated
 
-	def _restrict_library_to_root_method(
+	def _wrap_library_for_root_method(
 		self,
 		method_library: HTNMethodLibrary,
 		root_method: HTNMethod,
-	) -> HTNMethodLibrary:
-		return HTNMethodLibrary(
-			compound_tasks=list(method_library.compound_tasks),
-			primitive_tasks=list(method_library.primitive_tasks),
-			methods=[
-				method
-				for method in method_library.methods
-				if method.task_name != root_method.task_name or method.method_name == root_method.method_name
-			],
-			target_literals=list(method_library.target_literals),
-			target_task_bindings=list(method_library.target_task_bindings),
+	) -> Tuple[HTNMethodLibrary, str]:
+		task_lookup = {
+			task.name: task
+			for task in method_library.compound_tasks
+		}
+		root_task = task_lookup.get(root_method.task_name)
+		wrapper_task_name = f"validate_{root_method.method_name}"
+		existing_task_names = {
+			task.name
+			for task in method_library.compound_tasks + method_library.primitive_tasks
+		}
+		index = 2
+		while wrapper_task_name in existing_task_names:
+			wrapper_task_name = f"validate_{root_method.method_name}_{index}"
+			index += 1
+
+		wrapper_task = HTNTask(
+			name=wrapper_task_name,
+			parameters=tuple(root_task.parameters if root_task is not None else root_method.parameters),
+			is_primitive=False,
+			source_predicates=(),
+		)
+		wrapper_method = HTNMethod(
+			method_name=f"m_{wrapper_task_name}_entry",
+			task_name=wrapper_task_name,
+			parameters=tuple(root_method.parameters),
+			context=tuple(root_method.context),
+			subtasks=tuple(root_method.subtasks),
+			ordering=tuple(root_method.ordering),
+			origin="stage4_validation_wrapper",
+		)
+
+		return (
+			HTNMethodLibrary(
+				compound_tasks=[*list(method_library.compound_tasks), wrapper_task],
+				primitive_tasks=list(method_library.primitive_tasks),
+				methods=[*list(method_library.methods), wrapper_method],
+				target_literals=list(method_library.target_literals),
+				target_task_bindings=list(method_library.target_task_bindings),
+			),
+			wrapper_task_name,
 		)
 
 	def _guard_literal_for_task(
@@ -619,7 +651,12 @@ class PANDAPlanner:
 
 		rendered = []
 		for literal in literals:
-			base = f"({literal.predicate}{self._render_invocation_tokens(literal.args, variable_map)})"
+			if literal.is_equality and len(literal.args) == 2:
+				left = self._render_symbol_token(literal.args[0], variable_map)
+				right = self._render_symbol_token(literal.args[1], variable_map)
+				base = f"(= {left} {right})"
+			else:
+				base = f"({literal.predicate}{self._render_invocation_tokens(literal.args, variable_map)})"
 			if literal.is_positive:
 				rendered.append(base)
 			else:

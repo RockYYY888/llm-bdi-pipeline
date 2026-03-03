@@ -26,3 +26,5 @@
   and branch-specific method-validation initial-fact construction
 - [x] Milestone 13: Stage 3 target-guard completion, direct self-recursive sibling pruning,
   and full live revalidation for query_1 through query_6
+- [x] Milestone 14: Root-method validation wrapper fix, equality/disequality preservation,
+  and full live revalidation for query_1 through query_6
