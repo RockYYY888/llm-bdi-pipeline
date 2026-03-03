@@ -1,13 +1,5 @@
 """
-Main Entry Point - LTL-BDI Pipeline
-
-This is the main entry point for the LTL-BDI pipeline (DFA-AgentSpeak Generation).
-
-Usage:
-    python src/main.py "Stack block C on block B"
-    python src/main.py "Stack block C on block B" --mode dfa_agentspeak
-
-Note: FOND planning mode has been moved to src/legacy/fond/
+Main entry point for the LTLf -> DFA -> HTN AgentSpeak pipeline.
 """
 
 import sys
@@ -36,9 +28,8 @@ Examples:
   python src/main.py "Given blocks a, b, c on table, stack a on b on c"
 
 Note:
-  Only 'dfa_agentspeak' mode is supported (default)
-  FOND planning mode has been moved to src/legacy/fond/
-  See src/legacy/fond/README.md for restoration instructions
+  Only 'dfa_agentspeak' mode is supported.
+  The pipeline produces HTN-specialised AgentSpeak code in Stage 3.
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')

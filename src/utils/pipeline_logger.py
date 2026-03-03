@@ -228,7 +228,7 @@ class PipelineLogger:
             llm_prompt: LLM prompt dict (if using LLM method)
             llm_response: LLM response text (if using LLM method)
             method: Generation method, e.g. "htn"
-            states_explored: Legacy field kept for compatibility
+            states_explored: Compatibility field kept for the log schema
             transitions_generated: Number of transitions generated
             goal_plans_count: Number of goal achievement plans generated
             action_plans_count: Number of action plans generated
@@ -269,16 +269,14 @@ class PipelineLogger:
             self.current_record.stage3_status = "failed"
             self.current_record.stage3_error = str(error)
 
-        # Log backward planning statistics
-        if method == "backward_planning":
-            self.current_record.stage3_states_explored = states_explored
-            self.current_record.stage3_transitions_generated = transitions_generated
-            self.current_record.stage3_goal_plans_count = goal_plans_count
-            self.current_record.stage3_action_plans_count = action_plans_count
-            self.current_record.stage3_cache_hits = cache_hits
-            self.current_record.stage3_cache_misses = cache_misses
-            self.current_record.stage3_ground_actions_cached = ground_actions_cached
-            self.current_record.stage3_redundancy_eliminated_pct = redundancy_eliminated_pct
+        self.current_record.stage3_states_explored = states_explored
+        self.current_record.stage3_transitions_generated = transitions_generated
+        self.current_record.stage3_goal_plans_count = goal_plans_count
+        self.current_record.stage3_action_plans_count = action_plans_count
+        self.current_record.stage3_cache_hits = cache_hits
+        self.current_record.stage3_cache_misses = cache_misses
+        self.current_record.stage3_ground_actions_cached = ground_actions_cached
+        self.current_record.stage3_redundancy_eliminated_pct = redundancy_eliminated_pct
 
         # IMMEDIATELY save current state to files
         self._save_current_state()
@@ -484,8 +482,6 @@ class PipelineLogger:
                 f.write(f"Generator: LLM ({record.get('stage3_model', 'N/A')})\n")
             elif record.get('stage3_method') == 'htn':
                 f.write("Generator: HTN method synthesis + specialisation\n")
-            elif record.get('stage3_method') == 'backward_planning':
-                f.write("Generator: Backward Planning (legacy)\n")
 
             # LLM Prompt/Response for Stage 3
             if record.get('stage3_used_llm') and record.get('stage3_llm_prompt'):
@@ -505,27 +501,6 @@ class PipelineLogger:
                 f.write("LLM RESPONSE (Stage 3)\n")
                 f.write("~"*40 + "\n")
                 f.write(record['stage3_llm_response'])
-                f.write("\n")
-
-            # Backward Planning Statistics
-            if record.get('stage3_method') == 'backward_planning' and record.get('stage3_status') == 'success':
-                f.write("\n" + "~"*40 + "\n")
-                f.write("BACKWARD PLANNING STATISTICS\n")
-                f.write("~"*40 + "\n")
-                f.write(f"States Explored: {record.get('stage3_states_explored', 0):,}\n")
-                f.write(f"Transitions Generated: {record.get('stage3_transitions_generated', 0):,}\n")
-                f.write(f"Goal Plans: {record.get('stage3_goal_plans_count', 0)}\n")
-                f.write(f"Action Plans: {record.get('stage3_action_plans_count', 0)}\n")
-                f.write(f"\nOptimization Metrics:\n")
-                f.write(f"  Ground Actions Cached: {record.get('stage3_ground_actions_cached', 0)}\n")
-                f.write(f"  Goal Cache Hits: {record.get('stage3_cache_hits', 0)}\n")
-                f.write(f"  Goal Cache Misses: {record.get('stage3_cache_misses', 0)}\n")
-                total_goals = record.get('stage3_cache_hits', 0) + record.get('stage3_cache_misses', 0)
-                if total_goals > 0:
-                    hit_rate = record.get('stage3_cache_hits', 0) / total_goals * 100
-                    f.write(f"  Cache Hit Rate: {hit_rate:.1f}%\n")
-                f.write(f"  Code Redundancy Eliminated: {record.get('stage3_redundancy_eliminated_pct', 0):.1f}%\n")
-                f.write(f"\nCode Size: {record.get('stage3_code_size_chars', 0):,} characters\n")
                 f.write("\n")
 
             if record.get('stage3_method') == 'htn' and record.get('stage3_status') == 'success':

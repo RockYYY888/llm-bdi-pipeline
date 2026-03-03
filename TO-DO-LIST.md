@@ -2,12 +2,10 @@
 
 ## In Progress
 
-- Remove backward-planning legacy modules, stale scripts, and outdated Stage 3 tests.
-- Replace the old integration tests with concise HTN-focused coverage.
-- Update core documentation to match the new architecture.
+- Push the completed refactor branch to the remote repository.
 
 ## Milestones
 
 - [x] Milestone 1: New HTN Stage 3 core modules and pipeline integration
-- [ ] Milestone 2: Legacy Stage 3 removal and test suite replacement
-- [ ] Milestone 3: Documentation cleanup and final verification
+- [x] Milestone 2: Legacy Stage 3 removal and test suite replacement
+- [x] Milestone 3: Documentation cleanup and final verification

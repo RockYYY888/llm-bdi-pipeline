@@ -67,7 +67,7 @@ class LTL_BDI_Pipeline:
         if mode != "dfa_agentspeak":
             raise ValueError(
                 f"Unknown mode '{mode}'. Only 'dfa_agentspeak' is supported. "
-                "FOND planning has been moved to src/legacy/fond/"
+                "The pipeline currently supports the HTN-specialised AgentSpeak path only."
             )
 
         # Start logger (creates timestamped directory in logs/)
