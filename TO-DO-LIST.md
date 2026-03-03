@@ -2,7 +2,7 @@
 
 ## In Progress
 
-- Push the latest README and cleanup commit to the remote repository.
+- None.
 
 ## Milestones
 
