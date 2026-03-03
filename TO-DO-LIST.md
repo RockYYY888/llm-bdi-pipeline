@@ -12,3 +12,4 @@
 - [x] Milestone 3: Documentation cleanup and final verification
 - [x] Milestone 4: HDDL-only domain migration
 - [x] Milestone 5: PANDA toolchain setup, problem-builder extraction, and live acceptance
+- [x] Milestone 6: Stage 3 prompt contract tightening for naming and ordering

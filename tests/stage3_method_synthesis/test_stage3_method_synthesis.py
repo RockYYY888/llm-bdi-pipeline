@@ -18,6 +18,10 @@ from stage1_interpretation.ltlf_formula import (
     TemporalOperator,
 )
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
+from stage3_method_synthesis.htn_prompts import (
+    build_htn_system_prompt,
+    build_htn_user_prompt,
+)
 from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNTask
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
@@ -145,3 +149,24 @@ def test_method_synthesizer_requires_top_level_task_for_each_target_literal():
 
     with pytest.raises(ValueError, match="missing the top-level compound task 'achieve_on'"):
         synthesizer._validate_library(library, domain)
+
+
+def test_stage3_prompts_make_naming_and_ordering_rules_explicit():
+    system_prompt = build_htn_system_prompt()
+    user_prompt = build_htn_user_prompt(
+        _domain(),
+        ["on(a, b)", "!clear(a)"],
+        '{"compound_tasks": [], "methods": []}',
+    )
+
+    assert "Non-guard method names must follow exactly: {task_name}__via_{strategy}." in system_prompt
+    assert "Guard method names must follow exactly: {task_name}__guard." in system_prompt
+    assert "context is for method-level preconditions checked before decomposition." in system_prompt
+    assert "ordering must be a list of edges [from_step_id, to_step_id]." in system_prompt
+
+    assert "REQUIRED COMPOUND TASK NAMES:" in user_prompt
+    assert "REQUIRED compound task name for on(a, b): achieve_on" in user_prompt
+    assert "REQUIRED compound task name for !clear(a): maintain_not_clear" in user_prompt
+    assert "If a helper subtask corresponds to a positive predicate P, name it achieve_P." in user_prompt
+    assert "For every non-guard method, method_name must be exactly task_name + '__via_'" in user_prompt
+    assert "For every guard method, method_name must end exactly in '__guard'." in user_prompt
