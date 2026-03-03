@@ -263,12 +263,7 @@ class PipelineLogger:
             self.current_record.stage3_agentspeak = agentspeak_code
             self.current_record.stage3_code_size_chars = len(agentspeak_code)
 
-            # Save AgentSpeak code to .asl file
             if self.current_log_dir:
-                asl_filepath = self.current_log_dir / "generated_code.asl"
-                with open(asl_filepath, 'w') as f:
-                    f.write(agentspeak_code)
-
                 if artifacts:
                     method_library = artifacts.get("method_library")
                     if method_library is not None:
@@ -552,8 +547,6 @@ class PipelineLogger:
             if record.get('stage3_status') == 'success' and record.get('stage3_agentspeak'):
                 f.write("\n" + "~"*40 + "\n")
                 f.write("GENERATED AGENTSPEAK CODE (Stage 3)\n")
-                f.write("~"*40 + "\n")
-                f.write("NOTE: Complete AgentSpeak code saved to generated_code.asl\n")
                 f.write("~"*40 + "\n")
                 f.write(record['stage3_agentspeak'])
                 f.write("\n")

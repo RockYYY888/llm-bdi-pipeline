@@ -111,6 +111,8 @@ def test_generator_emits_specialised_transition_and_primitive_plans():
 
     assert artifacts["summary"]["method"] == "htn"
     assert "+!put_on_block(X1, X2)" in code
+    assert "\tput_on_block(X1, X2);" in code
+    assert "_physical(" not in code
     assert "+!transition_1" in code
     assert "+!achieve_on(a, b)" in code
     assert any(item["label"] == "on(a, b)" for item in artifacts["transitions"])

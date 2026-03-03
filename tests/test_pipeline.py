@@ -51,7 +51,6 @@ def test_blocksworld_example_pipeline_records_live_execution():
     grounding_map_path = log_dir / "grounding_map.json"
     dfa_original_path = log_dir / "dfa_original.dot"
     dfa_simplified_path = log_dir / "dfa_simplified.dot"
-    generated_code_path = log_dir / "generated_code.asl"
     agentspeak_path = log_dir / "agentspeak_generated.asl"
     method_library_path = log_dir / "htn_method_library.json"
     transitions_path = log_dir / "htn_transitions.json"
@@ -63,13 +62,14 @@ def test_blocksworld_example_pipeline_records_live_execution():
         grounding_map_path,
         dfa_original_path,
         dfa_simplified_path,
-        generated_code_path,
         agentspeak_path,
         method_library_path,
         transitions_path,
         dfa_json_path,
     ]:
         assert path.exists(), f"missing expected log artifact: {path.name}"
+
+    assert not (log_dir / "generated_code.asl").exists()
 
     execution = json.loads(execution_json_path.read_text())
     execution_txt = execution_txt_path.read_text()

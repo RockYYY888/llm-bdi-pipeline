@@ -64,7 +64,7 @@ class AgentSpeakCodeGenerator:
             args = tuple(f"X{index + 1}" for index, _ in enumerate(semantics.parameters))
             trigger = self._call(task_name, args)
             context = self._context_clause(semantics.preconditions, semantics.parameters, args)
-            body_lines = [f"{task_name}_physical({', '.join(args)})"]
+            body_lines = [f"{task_name}({', '.join(args)})"]
 
             bindings = {
                 parameter: value
