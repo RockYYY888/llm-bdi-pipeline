@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
@@ -172,7 +173,7 @@ class HTNMethodSynthesizer:
 			return []
 
 		dfa_dot = dfa_result.get("dfa_dot", "")
-		labels = re.findall(r'label="([^"]+)"', dfa_dot)
+		labels = self._extract_relevant_dfa_labels(dfa_dot)
 		seen: set[str] = set()
 		literals: List[HTNLiteral] = []
 
@@ -204,6 +205,111 @@ class HTNMethodSynthesizer:
 			literals.append(literal)
 
 		return literals
+
+	def _extract_relevant_dfa_labels(self, dfa_dot: str) -> List[str]:
+		"""Prefer labels on goal-progressing edges; fall back when progress is not encoded."""
+
+		all_labels = re.findall(r'label="([^"]+)"', dfa_dot)
+		progress_labels = self._extract_progressing_labels(dfa_dot)
+		if progress_labels:
+			return progress_labels
+
+		accepting_loop_labels = self._extract_accepting_loop_labels(dfa_dot)
+		if accepting_loop_labels:
+			return accepting_loop_labels
+
+		return all_labels
+
+	def _extract_progressing_labels(self, dfa_dot: str) -> List[str]:
+		graph = self._parse_dfa_graph(dfa_dot)
+		if not graph["edges"] or not graph["accepting"]:
+			return []
+
+		distances = self._distance_to_accepting(graph["edges"], graph["accepting"])
+		labels: List[str] = []
+		for source, target, label in graph["edges"]:
+			source_distance = distances.get(source)
+			target_distance = distances.get(target)
+			if source_distance is None or target_distance is None:
+				continue
+			if target_distance < source_distance:
+				labels.append(label)
+		return labels
+
+	def _extract_accepting_loop_labels(self, dfa_dot: str) -> List[str]:
+		graph = self._parse_dfa_graph(dfa_dot)
+		if not graph["edges"] or not graph["accepting"]:
+			return []
+
+		distances = self._distance_to_accepting(graph["edges"], graph["accepting"])
+		labels: List[str] = []
+		for source, target, label in graph["edges"]:
+			if distances.get(source) == 0 and distances.get(target) == 0:
+				labels.append(label)
+		return labels
+
+	def _parse_dfa_graph(self, dfa_dot: str) -> Dict[str, Any]:
+		accepting: set[str] = set()
+		edges: List[Tuple[str, str, str]] = []
+
+		for line in dfa_dot.splitlines():
+			stripped = line.strip()
+			if not stripped:
+				continue
+
+			multi_accepting = re.match(
+				r'node\s*\[\s*shape\s*=\s*doublecircle\s*\];\s*([^;]+);',
+				stripped,
+			)
+			if multi_accepting:
+				accepting.update(re.findall(r'[A-Za-z0-9_]+', multi_accepting.group(1)))
+				continue
+
+			single_accepting = re.match(
+				r'([A-Za-z0-9_]+)\s*\[\s*shape\s*=\s*doublecircle\s*\];',
+				stripped,
+			)
+			if single_accepting:
+				accepting.add(single_accepting.group(1))
+				continue
+
+			edge_match = re.match(
+				r'([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)\s*\[label="([^"]+)"\];',
+				stripped,
+			)
+			if edge_match:
+				source, target, label = edge_match.groups()
+				edges.append((source, target, label))
+
+		return {
+			"accepting": accepting,
+			"edges": edges,
+		}
+
+	def _distance_to_accepting(
+		self,
+		edges: List[Tuple[str, str, str]],
+		accepting: set[str],
+	) -> Dict[str, int]:
+		reverse_graph: Dict[str, List[str]] = {}
+		for source, target, _ in edges:
+			reverse_graph.setdefault(target, []).append(source)
+
+		distances: Dict[str, int] = {
+			state: 0
+			for state in accepting
+		}
+		queue: deque[str] = deque(accepting)
+
+		while queue:
+			state = queue.popleft()
+			for predecessor in reverse_graph.get(state, []):
+				if predecessor in distances:
+					continue
+				distances[predecessor] = distances[state] + 1
+				queue.append(predecessor)
+
+		return distances
 
 	def _build_primitive_tasks(self, domain: Any) -> List[HTNTask]:
 		actions = [self.parser.parse_action(action) for action in domain.actions]
@@ -260,10 +366,12 @@ class HTNMethodSynthesizer:
 			for step in method.subtasks:
 				preconditions = step.preconditions
 				effects = step.effects
+				action_name = step.action_name
 
 				if step.kind == "primitive":
 					action_schema = self._resolve_action_schema(step, action_schemas)
 					if action_schema is not None:
+						action_name = action_schema.name
 						preconditions = self._materialise_action_literals(
 							action_schema.preconditions,
 							action_schema.parameters,
@@ -274,6 +382,8 @@ class HTNMethodSynthesizer:
 							action_schema.parameters,
 							step.args,
 						)
+					elif step.action_name is not None:
+						action_name = step.action_name.replace("_", "-")
 
 				normalised_steps.append(
 					HTNMethodStep(
@@ -281,7 +391,7 @@ class HTNMethodSynthesizer:
 						task_name=step.task_name,
 						args=step.args,
 						kind=step.kind,
-						action_name=step.action_name,
+						action_name=action_name,
 						literal=step.literal,
 						preconditions=preconditions,
 						effects=effects,

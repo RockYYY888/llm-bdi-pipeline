@@ -96,6 +96,64 @@ def _dfa_result_for_labels(*labels: str) -> dict:
 	}
 
 
+def test_extract_target_literals_discards_non_progressing_transitions():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("clear_a", "clear", ["a"])
+	grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+	grounding_map.add_atom("on_b_c", "on", ["b", "c"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  node [shape = doublecircle]; 3;\n"
+			"  node [shape = circle]; 1 2 s1 s2;\n"
+			"  init [shape = plaintext, label = \"\"];\n"
+			"  init -> 1;\n"
+			"  1 -> 2 [label=\"!clear_a\"];\n"
+			"  1 -> s1 [label=\"clear_a\"];\n"
+			"  2 -> 2 [label=\"!clear_a\"];\n"
+			"  2 -> 2 [label=\"clear_a\"];\n"
+			"  3 -> 3 [label=\"!clear_a\"];\n"
+			"  3 -> 3 [label=\"clear_a\"];\n"
+			"  s1 -> 2 [label=\"!on_a_b\"];\n"
+			"  s1 -> s2 [label=\"on_a_b\"];\n"
+			"  s2 -> 2 [label=\"!on_b_c\"];\n"
+			"  s2 -> 3 [label=\"on_b_c\"];\n"
+			"}\n"
+		),
+	}
+
+	literals = synthesizer.extract_target_literals(grounding_map, dfa_result)
+
+	assert [literal.to_signature() for literal in literals] == [
+		"clear(a)",
+		"on(a, b)",
+		"on(b, c)",
+	]
+
+
+def test_extract_target_literals_keeps_accepting_loops_when_no_progress_edge_exists():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("clear_a", "clear", ["a"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  0 [shape = doublecircle];\n"
+			"  1 [shape = circle];\n"
+			"  0 -> 0 [label=\"clear_a\"];\n"
+			"  0 -> 1 [label=\"!clear_a\"];\n"
+			"  1 -> 1 [label=\"clear_a\"];\n"
+			"  1 -> 1 [label=\"!clear_a\"];\n"
+			"}\n"
+		),
+	}
+
+	literals = synthesizer.extract_target_literals(grounding_map, dfa_result)
+
+	assert [literal.to_signature() for literal in literals] == ["clear(a)"]
+
+
 def test_method_synthesizer_uses_live_llm_output():
 	domain = _domain()
 	spec = _eventually_on_spec()
@@ -224,6 +282,58 @@ def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising(
 
 	with pytest.raises(ValueError, match="Invalid task identifier 'place-on'"):
 		synthesizer._validate_library(normalised, domain)
+
+
+def test_normalise_llm_library_rewrites_primitive_action_name_to_source_hddl_name():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("hold_block", ("B",), False, ("holding",)),
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_hold_block_from_table",
+				task_name="hold_block",
+				parameters=("B",),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="clear_top",
+						args=("B",),
+						kind="compound",
+						action_name=None,
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up_from_table",
+						args=("B",),
+						kind="primitive",
+						action_name="pick_up_from_table",
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+	primitive_step = normalised.methods[0].subtasks[1]
+
+	assert primitive_step.task_name == "pick_up_from_table"
+	assert primitive_step.action_name == "pick-up-from-table"
 
 
 def test_method_validation_rejects_legacy_task_prefixes():
