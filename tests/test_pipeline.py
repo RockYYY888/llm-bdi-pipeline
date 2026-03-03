@@ -27,21 +27,51 @@ from utils.pipeline_logger import PipelineLogger
 
 BANNED_TASK_PREFIXES = ("achieve_", "maintain_not_", "ensure_", "goal_")
 
-QUERY_CASES: Dict[str, Dict[str, str]] = {
+QUERY_CASES: Dict[str, Dict[str, Any]] = {
 	"query_1": {
 		"instruction": "Using blocks a and b, arrange them so that a is on b.",
-		"required_target_literal": "on(a, b)",
+		"required_target_literals": ["on(a, b)"],
 		"description": "Positive reachability goal",
 	},
 	"query_2": {
 		"instruction": "Using blocks a and b, make sure a is not on b.",
-		"required_target_literal": "!on(a, b)",
+		"required_target_literals": ["!on(a, b)"],
 		"description": "Negative safety goal",
 	},
 	"query_3": {
 		"instruction": "Using blocks a and b, make sure a is not clear.",
-		"required_target_literal": "!clear(a)",
+		"required_target_literals": ["!clear(a)"],
 		"description": "Negative reachability goal",
+	},
+	"query_4": {
+		"instruction": (
+			"Using blocks a, b, and c, arrange them so that a is on b, "
+			"b is on c, and a is clear."
+		),
+		"required_target_literals": ["on(a, b)", "on(b, c)", "clear(a)"],
+		"description": "Three-goal stacking case",
+	},
+	"query_5": {
+		"instruction": (
+			"Using blocks a, b, c, d, and e, arrange them so that a is on b, "
+			"b is on c, c is on d, d is on e, and a is clear."
+		),
+		"required_target_literals": [
+			"on(a, b)",
+			"on(b, c)",
+			"on(c, d)",
+			"on(d, e)",
+			"clear(a)",
+		],
+		"description": "Five-goal tower case",
+	},
+	"query_6": {
+		"instruction": (
+			"Using blocks a, b, c, and d, make sure a is not on b, "
+			"c is on d, c is clear, and d is not clear."
+		),
+		"required_target_literals": ["!on(a, b)", "on(c, d)", "clear(c)", "!clear(d)"],
+		"description": "Mixed positive-negative combination case",
 	},
 }
 
@@ -120,10 +150,11 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 		bug_messages.append("Stage 3 produced no target_task_bindings")
 
 	target_literals = execution.get("stage3_metadata", {}).get("target_literals", [])
-	if case["required_target_literal"] not in target_literals:
-		bug_messages.append(
-			f"required target literal '{case['required_target_literal']}' not present in Stage 3 metadata",
-		)
+	for required_target_literal in case["required_target_literals"]:
+		if required_target_literal not in target_literals:
+			bug_messages.append(
+				f"required target literal '{required_target_literal}' not present in Stage 3 metadata",
+			)
 
 	stage5_code = execution.get("stage5_agentspeak") or ""
 	for binding in target_bindings:
