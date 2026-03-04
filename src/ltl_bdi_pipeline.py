@@ -256,6 +256,12 @@ class LTL_BDI_Pipeline:
             summary = {
                 "used_llm": synthesis_meta["used_llm"],
                 "llm_attempted": synthesis_meta["llm_prompt"] is not None,
+                "llm_finish_reason": synthesis_meta.get("llm_finish_reason"),
+                "llm_attempts": synthesis_meta.get("llm_attempts"),
+                "llm_response_time_seconds": synthesis_meta.get("llm_response_time_seconds"),
+                "llm_attempt_durations_seconds": synthesis_meta.get(
+                    "llm_attempt_durations_seconds",
+                ),
                 "target_literals": synthesis_meta["target_literals"],
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
@@ -369,6 +375,7 @@ class LTL_BDI_Pipeline:
                         "raw_source_state": transition_spec["raw_source_state"],
                         "raw_target_state": transition_spec["raw_target_state"],
                         "initial_state": transition_spec["initial_state"],
+                        "accepting_states": list(transition_spec.get("accepting_states", [])),
                         "label": label,
                         "target_literal": literal,
                         "objects": list(witness_objects),
@@ -384,6 +391,7 @@ class LTL_BDI_Pipeline:
                         "raw_source_state": transition_spec["raw_source_state"],
                         "raw_target_state": transition_spec["raw_target_state"],
                         "initial_state": transition_spec["initial_state"],
+                        "accepting_states": list(transition_spec.get("accepting_states", [])),
                         "label": label,
                         "target_literal": literal.to_dict(),
                         "objects": list(witness_objects),

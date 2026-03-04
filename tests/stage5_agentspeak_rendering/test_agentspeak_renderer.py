@@ -127,6 +127,7 @@ def test_renderer_emits_method_library_and_state_aware_wrappers():
 				"source_state": "q1",
 				"target_state": "q2",
 				"initial_state": "q1",
+				"accepting_states": ["q2"],
 				"label": "on(a, b)",
 				"plan": PANDAPlanResult(
 					task_name="place_on",
@@ -139,6 +140,7 @@ def test_renderer_emits_method_library_and_state_aware_wrappers():
 
 	assert "/* HTN Method Plans */" in code
 	assert "dfa_state(q1)." in code
+	assert "accepting_state(q2)." in code
 	assert 'dfa_edge_label(dfa_step_q1_q2_on_a_b, "on(a, b)").' in code
 	assert "+!place_on(BLOCK1, BLOCK2) : on(BLOCK1, BLOCK2) <-" in code
 	assert "+!place_on(BLOCK1, BLOCK2) : clear(BLOCK2) <-" in code
@@ -150,6 +152,10 @@ def test_renderer_emits_method_library_and_state_aware_wrappers():
 	assert "\t!place_on(a, b);" in code
 	assert "\t-dfa_state(q1);" in code
 	assert "\t+dfa_state(q2)." in code
+	assert "+!run_dfa : dfa_state(q1) <-" in code
+	assert "\t!dfa_step_q1_q2_on_a_b;" in code
+	assert "\t!run_dfa." in code
+	assert "+!run_dfa : dfa_state(q2) & accepting_state(q2) <-" in code
 	assert "+!put_on_block(BLOCK1, BLOCK2) :" in code
 
 
@@ -165,6 +171,7 @@ def test_renderer_accepts_zero_step_wrappers_when_stage4_returns_no_witness_step
 				"source_state": "q2",
 				"target_state": "q2",
 				"initial_state": "q2",
+				"accepting_states": ["q2"],
 				"label": "!on(a, b)",
 				"plan": PANDAPlanResult(
 					task_name="keep_apart",
@@ -178,6 +185,11 @@ def test_renderer_accepts_zero_step_wrappers_when_stage4_returns_no_witness_step
 
 	assert "/* HTN Method Plans */" in code
 	assert "+!dfa_step_q2_q2_not_on_a_b : dfa_state(q2) <-" in code
+	assert "\t!keep_apart(a, b)." in code
+	assert "\t-dfa_state(q2);" not in code
+	assert "\t+dfa_state(q2)." not in code
+	assert "+!run_dfa : dfa_state(q2) & accepting_state(q2) <-" in code
+	assert "+!run_dfa : dfa_state(q2) <-" not in code
 
 
 def test_renderer_hoists_binding_preconditions_into_method_context():

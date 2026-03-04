@@ -2,6 +2,7 @@
 Focused tests for Stage 3 HTN method synthesis.
 """
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -316,6 +317,10 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Constructive sibling methods for the same task must be semantically distinguishable" in system_prompt
 	assert "A negative literal must bind to a task whose methods remove, prevent, or keep the predicate false." in system_prompt
 	assert "Do not invent an extra sibling method whose only difference is that it performs extra prerequisite helper steps" in system_prompt
+	assert "Never reveal chain-of-thought, scratch work, analysis, or self-check text." in system_prompt
+	assert "Do not emit duplicate target_task_bindings entries, duplicate compound task " in system_prompt
+	assert "Sibling methods for the same task may exist and are expected" in system_prompt
+	assert "same sibling branch body under different method names for the same task" in system_prompt
 
 	assert "DOMAIN TYPES:" in user_prompt
 	assert "REQUIRED target_task_bindings ENTRIES:" in user_prompt
@@ -333,6 +338,9 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you." in user_prompt
 	assert "For every helper task that denotes a reusable stateful intention" in user_prompt
 	assert "Think twice before returning: first verify the JSON shape, then verify task coverage." in user_prompt
+	assert "Never reveal chain-of-thought, hidden reasoning, self-critique, or analysis text." in user_prompt
+	assert "Do not duplicate target_task_bindings entries or compound task declarations." in user_prompt
+	assert "Multiple methods for the same task are normal when they express different sibling " in user_prompt
 	assert "Do not invent free variables such as TOP, SUPPORT, X, or Y" in user_prompt
 	assert "If you introduce an extra local variable in method.parameters" in user_prompt
 	assert "Do not rename an existing task parameter to a fresh variable." in user_prompt
@@ -352,6 +360,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Did you use stable upper-case type-based variable names" in user_prompt
 	assert "Did every target_task_binding use a task whose semantics match the target literal's polarity" in user_prompt
 	assert "Did you avoid adding redundant clear_first/prepare_first siblings" in user_prompt
+	assert "Did you avoid printing any chain-of-thought, analysis, or self-check prose" in user_prompt
+	assert "Did you avoid duplicate binding entries, duplicate compound task declarations, and " in user_prompt
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
@@ -1179,6 +1189,124 @@ def test_parse_llm_library_rejects_truncated_json_with_clear_error():
 		synthesizer._parse_llm_library(
 			'{"target_task_bindings": [], "compound_tasks": [',
 		)
+
+
+def test_validate_library_rejects_semantically_duplicate_methods():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_place_on_stack",
+				task_name="place_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("holding", ("BLOCK1",), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="put_on_block",
+						args=("BLOCK1", "BLOCK2"),
+						kind="primitive",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_place_on_duplicate_stack",
+				task_name="place_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("holding", ("BLOCK1",), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="put_on_block",
+						args=("BLOCK1", "BLOCK2"),
+						kind="primitive",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="semantically duplicate"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_request_complete_llm_library_retries_until_full_json():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer(max_attempts=2)
+	prompt = {"system": "system", "user": "user"}
+	metadata = {"llm_attempts": 0}
+	valid_payload = json.dumps(
+		{
+			"compound_tasks": [
+				{
+					"name": "place_on",
+					"parameters": ["BLOCK1", "BLOCK2"],
+					"is_primitive": False,
+					"source_predicates": ["on"],
+				},
+			],
+			"methods": [
+				{
+					"method_name": "m_place_on_noop",
+					"task_name": "place_on",
+					"parameters": ["BLOCK1", "BLOCK2"],
+					"context": [
+						{
+							"predicate": "on",
+							"args": ["BLOCK1", "BLOCK2"],
+							"is_positive": True,
+						},
+					],
+					"subtasks": [],
+					"ordering": [],
+					"origin": "llm",
+				},
+			],
+			"target_task_bindings": [
+				{"target_literal": "on(a, b)", "task_name": "place_on"},
+			],
+		},
+	)
+	responses = iter(
+		[
+			('{"compound_tasks": [', "length"),
+			(valid_payload, "stop"),
+		],
+	)
+
+	def fake_call_llm(
+		prompt_payload: dict,
+		*,
+		retry_instruction: str | None = None,
+		max_tokens: int | None = None,
+	):
+		return next(responses)
+
+	synthesizer._call_llm = fake_call_llm  # type: ignore[method-assign]
+
+	library, response_text, finish_reason = synthesizer._request_complete_llm_library(
+		prompt,
+		domain,
+		metadata,
+	)
+
+	assert library.compound_tasks
+	assert response_text == valid_payload
+	assert finish_reason == "stop"
+	assert metadata["llm_attempts"] == 2
+	assert len(metadata["llm_attempt_durations_seconds"]) == 2
+	assert metadata["llm_response_time_seconds"] >= 0
 
 
 def test_negative_target_binding_accepts_helper_mediated_removal():

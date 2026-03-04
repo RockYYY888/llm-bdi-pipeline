@@ -30,6 +30,7 @@ class AgentSpeakRenderer:
         lines.extend(self._render_primitive_wrappers(domain))
         lines.extend(self._render_method_plans(domain, method_library))
         lines.extend(self._render_transition_plans(plan_records))
+        lines.extend(self._render_control_plans(plan_records))
         return "\n".join(lines).strip() + "\n"
 
     def _render_header(
@@ -50,6 +51,15 @@ class AgentSpeakRenderer:
             initial_state = plan_records[0].get("initial_state")
             if initial_state:
                 lines.append(f"dfa_state({initial_state}).")
+            accepting_states = sorted(
+                {
+                    state
+                    for record in plan_records
+                    for state in record.get("accepting_states", [])
+                },
+            )
+            for state in accepting_states:
+                lines.append(f"accepting_state({state}).")
 
         for record in plan_records:
             lines.append(
@@ -149,16 +159,59 @@ class AgentSpeakRenderer:
             plan: PANDAPlanResult = record["plan"]
             source_state = record["source_state"]
             target_state = record["target_state"]
-            body = [
-                f"!{self._call(plan.task_name, plan.task_args)}",
-                f"-{self._call('dfa_state', (source_state,))}",
-                f"+{self._call('dfa_state', (target_state,))}",
-            ]
+            body = [f"!{self._call(plan.task_name, plan.task_args)}"]
+            if source_state != target_state:
+                body.extend(
+                    [
+                        f"-{self._call('dfa_state', (source_state,))}",
+                        f"+{self._call('dfa_state', (target_state,))}",
+                    ],
+                )
             lines.append(
                 f"+!{record['transition_name']} : {self._call('dfa_state', (source_state,))} <-"
             )
             lines.extend(self._indent_body(body))
             lines.append("")
+
+        return lines
+
+    def _render_control_plans(self, plan_records: Sequence[Dict[str, Any]]) -> List[str]:
+        lines = ["/* DFA Control Plans */"]
+        transitions_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        accepting_states = {
+            state
+            for record in plan_records
+            for state in record.get("accepting_states", [])
+        }
+
+        for record in plan_records:
+            transitions_by_source[record["source_state"]].append(record)
+
+        for state in sorted(accepting_states):
+            lines.append(
+                f"+!run_dfa : {self._call('dfa_state', (state,))} & "
+                f"{self._call('accepting_state', (state,))} <-"
+            )
+            lines.extend(self._indent_body(["true"]))
+            lines.append("")
+
+        for source_state in sorted(transitions_by_source):
+            if source_state in accepting_states:
+                continue
+            state_records = transitions_by_source[source_state]
+            for record in state_records:
+                lines.append(
+                    f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
+                )
+                lines.extend(
+                    self._indent_body(
+                        [
+                            f"!{record['transition_name']}",
+                            "!run_dfa",
+                        ],
+                    ),
+                )
+                lines.append("")
 
         return lines
 

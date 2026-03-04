@@ -12,6 +12,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
@@ -20,6 +21,7 @@ _src_dir = str(Path(__file__).parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
+import ltl_bdi_pipeline as pipeline_module
 from ltl_bdi_pipeline import LTL_BDI_Pipeline
 from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
@@ -275,6 +277,68 @@ def test_query_relevant_task_names_starts_from_target_bindings_not_only_witnesse
 	relevant = LTL_BDI_Pipeline._query_relevant_task_names(method_library, plan_records)
 
 	assert relevant == ["hidden_helper", "top_goal"]
+
+
+def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",))],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_place_on_noop",
+				task_name="place_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),),
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
+	)
+
+	class FakeSynthesizer:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def synthesize(self, domain, grounding_map, dfa_result):
+			return method_library, {
+				"used_llm": True,
+				"model": "deepseek-chat",
+				"target_literals": ["on(a, b)"],
+				"compound_tasks": 1,
+				"primitive_tasks": 0,
+				"methods": 1,
+				"llm_prompt": {"system": "SYSTEM", "user": "USER"},
+				"llm_response": '{"ok": true}',
+				"llm_finish_reason": "stop",
+				"llm_attempts": 2,
+				"llm_response_time_seconds": 3.21,
+				"llm_attempt_durations_seconds": [1.0, 2.21],
+			}
+
+		def extract_progressing_transitions(self, grounding_map, dfa_result):
+			return []
+
+	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
+
+	pipeline = LTL_BDI_Pipeline()
+	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path))
+	pipeline.logger.start_pipeline(
+		"demo instruction",
+		mode="dfa_agentspeak",
+		domain_file=pipeline.domain_file,
+		output_dir=str(tmp_path),
+	)
+	pipeline.output_dir = pipeline.logger.current_log_dir
+
+	_, stage3_data = pipeline._stage3_method_synthesis(
+		SimpleNamespace(grounding_map=None),
+		{"dfa_dot": 'digraph { 0 -> 1 [label="on_a_b"]; }'},
+	)
+
+	assert stage3_data is not None
+	assert stage3_data["summary"]["llm_attempts"] == 2
+	assert stage3_data["summary"]["llm_response_time_seconds"] == 3.21
+	assert stage3_data["summary"]["llm_attempt_durations_seconds"] == [1.0, 2.21]
 
 
 def _run_query_case(query_id: str) -> Dict[str, Any]:

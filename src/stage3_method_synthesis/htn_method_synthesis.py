@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -57,12 +58,14 @@ class HTNMethodSynthesizer:
 		base_url: Optional[str] = None,
 		timeout: float = 60.0,
 		max_tokens: int = 8192,
+		max_attempts: int = 3,
 	) -> None:
 		self.api_key = api_key
 		self.model = model or "deepseek-chat"
 		self.base_url = base_url
 		self.timeout = timeout
 		self.max_tokens = max_tokens
+		self.max_attempts = max(1, max_attempts)
 		self.parser = HDDLConditionParser()
 		self.client = None
 
@@ -98,6 +101,7 @@ class HTNMethodSynthesizer:
 			"llm_prompt": None,
 			"llm_response": None,
 			"llm_finish_reason": None,
+			"llm_attempts": 0,
 			"pruned_constructive_siblings": 0,
 			"generated_target_guard_methods": 0,
 		}
@@ -122,29 +126,14 @@ class HTNMethodSynthesizer:
 		}
 		metadata["llm_prompt"] = prompt
 
-		try:
-			response_text, finish_reason = self._call_llm(prompt)
-		except Exception as exc:
-			raise self._build_synthesis_error(
-				metadata,
-				"llm_call",
-				f"LLM request failed: {exc}",
-			) from exc
+		llm_library, response_text, finish_reason = self._request_complete_llm_library(
+			prompt,
+			domain,
+			metadata,
+		)
 
 		metadata["llm_response"] = response_text
 		metadata["llm_finish_reason"] = finish_reason
-
-		try:
-			llm_library = self._normalise_llm_library(
-				self._parse_llm_library(response_text),
-				domain,
-			)
-		except Exception as exc:
-			raise self._build_synthesis_error(
-				metadata,
-				"response_parse",
-				f"LLM response could not be parsed as a valid HTN library: {exc}",
-			) from exc
 
 		llm_only_library = HTNMethodLibrary(
 			compound_tasks=list(llm_library.compound_tasks),
@@ -214,6 +203,11 @@ class HTNMethodSynthesizer:
 		graph = self._parse_dfa_graph(dfa_dot)
 		selected_edges = self._select_relevant_edges(graph)
 		state_aliases = self._build_state_aliases(graph, selected_edges)
+		accepting_state_aliases = sorted(
+			state_aliases[state]
+			for state in graph.get("accepting", set())
+			if state in state_aliases
+		)
 		seen_edges: set[Tuple[str, str, str]] = set()
 		transition_specs: List[Dict[str, Any]] = []
 
@@ -245,6 +239,7 @@ class HTNMethodSynthesizer:
 					"raw_source_state": source,
 					"raw_target_state": target,
 					"initial_state": state_aliases.get(graph.get("init_state")) if graph.get("init_state") else None,
+					"accepting_states": accepting_state_aliases,
 				},
 			)
 
@@ -444,25 +439,122 @@ class HTNMethodSynthesizer:
 			for action in actions
 		]
 
-	def _call_llm(self, prompt: Dict[str, str]) -> Tuple[str, Optional[str]]:
+	def _request_complete_llm_library(
+		self,
+		prompt: Dict[str, str],
+		domain: Any,
+		metadata: Dict[str, Any],
+	) -> Tuple[HTNMethodLibrary, str, Optional[str]]:
+		last_error: Optional[Exception] = None
+		attempt_durations: List[float] = []
+		total_start = time.monotonic()
+
+		for attempt in range(1, self.max_attempts + 1):
+			metadata["llm_attempts"] = attempt
+			retry_instruction = None
+			if attempt > 1:
+				retry_instruction = (
+					"Your previous response was incomplete. Return the entire JSON object "
+					"again from the beginning. Do not summarize, do not omit any fields, "
+					"and do not stop until every brace and bracket is closed."
+				)
+			attempt_start = time.monotonic()
+			try:
+				response_text, finish_reason = self._call_llm(
+					prompt,
+					retry_instruction=retry_instruction,
+					max_tokens=self.max_tokens,
+				)
+			except Exception as exc:
+				attempt_durations.append(time.monotonic() - attempt_start)
+				metadata["llm_attempt_durations_seconds"] = [
+					round(duration, 3) for duration in attempt_durations
+				]
+				metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
+				last_error = exc
+				if attempt == self.max_attempts:
+					raise self._build_synthesis_error(
+						metadata,
+						"llm_call",
+						f"LLM request failed after {attempt} attempts: {exc}",
+					) from exc
+				continue
+
+			attempt_durations.append(time.monotonic() - attempt_start)
+			metadata["llm_attempt_durations_seconds"] = [
+				round(duration, 3) for duration in attempt_durations
+			]
+			metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
+			metadata["llm_response"] = response_text
+			metadata["llm_finish_reason"] = finish_reason
+
+			if finish_reason == "length":
+				last_error = ValueError(
+					"LLM response was truncated before completion (finish_reason=length).",
+				)
+				if attempt < self.max_attempts:
+					continue
+				raise self._build_synthesis_error(
+					metadata,
+					"response_parse",
+					(
+						"LLM response was truncated before completion "
+						f"after {attempt} attempts (finish_reason=length)."
+					),
+				)
+
+			try:
+				parsed_library = self._parse_llm_library(response_text)
+			except Exception as exc:
+				last_error = exc
+				if self._is_retryable_incomplete_response(exc) and attempt < self.max_attempts:
+					continue
+				raise self._build_synthesis_error(
+					metadata,
+					"response_parse",
+					f"LLM response could not be parsed as a valid HTN library: {exc}",
+				) from exc
+
+			return self._normalise_llm_library(parsed_library, domain), response_text, finish_reason
+
+		if last_error is not None:
+			raise self._build_synthesis_error(
+				metadata,
+				"response_parse",
+				(
+					"LLM response could not be completed after "
+					f"{self.max_attempts} attempts: {last_error}"
+				),
+			)
+		raise self._build_synthesis_error(
+			metadata,
+			"response_parse",
+			"LLM response could not be completed after exhausting the retry budget.",
+		)
+
+	def _call_llm(
+		self,
+		prompt: Dict[str, str],
+		*,
+		retry_instruction: Optional[str] = None,
+		max_tokens: Optional[int] = None,
+	) -> Tuple[str, Optional[str]]:
+		user_content = prompt["user"]
+		if retry_instruction:
+			user_content = f"{user_content}\n\nRETRY INSTRUCTION:\n{retry_instruction}"
 		response = self.client.chat.completions.create(
 			model=self.model,
 			messages=[
 				{"role": "system", "content": prompt["system"]},
-				{"role": "user", "content": prompt["user"]},
+				{"role": "user", "content": user_content},
 			],
 			temperature=0.0,
-			max_tokens=self.max_tokens,
+			max_tokens=max_tokens or self.max_tokens,
 			timeout=self.timeout,
 		)
 		choice = response.choices[0]
 		finish_reason = getattr(choice, "finish_reason", None)
 		content = (choice.message.content or "").strip()
-		if finish_reason == "length":
-			raise ValueError(
-				"LLM response was truncated before completion (finish_reason=length). "
-				"The HTN library was not fully returned.",
-			)
 		return content, finish_reason
 
 	def _parse_llm_library(self, response_text: str) -> HTNMethodLibrary:
@@ -488,6 +580,38 @@ class HTNMethodSynthesizer:
 		if open_square > close_square:
 			return True
 		return False
+
+	@staticmethod
+	def _is_retryable_incomplete_response(exc: Exception) -> bool:
+		message = str(exc).lower()
+		return (
+			"truncated" in message
+			or "unterminated" in message
+			or "expecting value" in message
+			or "expecting ',' delimiter" in message
+		)
+
+	@staticmethod
+	def _method_step_semantic_signature(step: HTNMethodStep) -> Tuple[Any, ...]:
+		return (
+			step.step_id,
+			step.task_name,
+			step.args,
+			step.kind,
+			step.action_name,
+			step.literal.to_signature() if step.literal else None,
+			tuple(literal.to_signature() for literal in step.preconditions),
+			tuple(literal.to_signature() for literal in step.effects),
+		)
+
+	def _method_semantic_signature(self, method: HTNMethod) -> Tuple[Any, ...]:
+		return (
+			method.task_name,
+			method.parameters,
+			tuple(literal.to_signature() for literal in method.context),
+			tuple(self._method_step_semantic_signature(step) for step in method.subtasks),
+			method.ordering,
+		)
 
 	def _normalise_llm_library(
 		self,
@@ -601,6 +725,29 @@ class HTNMethodSynthesizer:
 		return tuple(ordered_parameters)
 
 	def _validate_library(self, library: HTNMethodLibrary, domain: Any) -> None:
+		compound_task_names = [task.name for task in library.compound_tasks]
+		if len(compound_task_names) != len(set(compound_task_names)):
+			raise ValueError("HTN library contains duplicate compound task declarations")
+
+		primitive_task_names = [task.name for task in library.primitive_tasks]
+		if len(primitive_task_names) != len(set(primitive_task_names)):
+			raise ValueError("HTN library contains duplicate primitive task declarations")
+
+		method_names = [method.method_name for method in library.methods]
+		if len(method_names) != len(set(method_names)):
+			raise ValueError("HTN library contains duplicate method identifiers")
+
+		semantic_signatures: Dict[Tuple[Any, ...], str] = {}
+		for method in library.methods:
+			signature = self._method_semantic_signature(method)
+			existing_method = semantic_signatures.get(signature)
+			if existing_method is not None:
+				raise ValueError(
+					f"Methods '{existing_method}' and '{method.method_name}' are semantically "
+					"duplicate. Do not emit repeated method bodies under different names.",
+				)
+			semantic_signatures[signature] = method.method_name
+
 		primitive_names = {self._sanitize_name(action.name) for action in domain.actions}
 		compound_names = {task.name for task in library.compound_tasks}
 		all_tasks = compound_names | {task.name for task in library.primitive_tasks}
@@ -1639,7 +1786,12 @@ class HTNMethodSynthesizer:
 
 		local_bindings: Dict[str, str] = {}
 		for raw_candidate_arg, expected_arg in zip(candidate.args, expected.args):
+			is_bound_from_parent = raw_candidate_arg in parameter_bindings
 			candidate_arg = parameter_bindings.get(raw_candidate_arg, raw_candidate_arg)
+			if is_bound_from_parent:
+				if candidate_arg != expected_arg:
+					return False
+				continue
 			if cls._looks_like_variable(candidate_arg):
 				bound_value = local_bindings.get(candidate_arg)
 				if bound_value is None:

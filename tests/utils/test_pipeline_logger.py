@@ -53,6 +53,8 @@ def test_stage3_success_summary_in_execution_json_is_derived_from_method_library
         metadata={
             "used_llm": True,
             "llm_attempted": True,
+            "llm_response_time_seconds": 4.321,
+            "llm_attempt_durations_seconds": [1.111, 3.21],
         },
     )
     logger.end_pipeline(success=True)
@@ -82,6 +84,8 @@ def test_stage3_success_summary_in_execution_json_is_derived_from_method_library
     }
     assert execution["stage3_metadata"]["used_llm"] is True
     assert execution["stage3_metadata"]["llm_attempted"] is True
+    assert execution["stage3_metadata"]["llm_response_time_seconds"] == 4.321
+    assert execution["stage3_metadata"]["llm_attempt_durations_seconds"] == [1.111, 3.21]
 
 
 def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
