@@ -317,12 +317,16 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Constructive sibling methods for the same task must be semantically distinguishable" in system_prompt
 	assert "A negative literal must bind to a task whose methods remove, prevent, or keep the predicate false." in system_prompt
 	assert "Do not invent an extra sibling method whose only difference is that it performs extra prerequisite helper steps" in system_prompt
+	assert "If a primitive action precondition has disjunctive applicability (via 'or' or 'imply')" in system_prompt
+	assert "Treat implication exactly as: imply(A, B) == (not A) or B" in system_prompt
 	assert "Never reveal chain-of-thought, scratch work, analysis, or self-check text." in system_prompt
 	assert "Do not emit duplicate target_task_bindings entries, duplicate compound task " in system_prompt
 	assert "Sibling methods for the same task may exist and are expected" in system_prompt
 	assert "same sibling branch body under different method names for the same task" in system_prompt
 
 	assert "DOMAIN TYPES:" in user_prompt
+	assert "ACTION PRECONDITION BRANCH HINTS (DNF):" in user_prompt
+	assert "- none" in user_prompt
 	assert "REQUIRED target_task_bindings ENTRIES:" in user_prompt
 	assert '{"target_literal": "on(a, b)", "task_name": "<semantic_task_name>"}' in user_prompt
 	assert "Think in explicit case splits before returning." in user_prompt
@@ -341,6 +345,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Never reveal chain-of-thought, hidden reasoning, self-critique, or analysis text." in user_prompt
 	assert "Do not duplicate target_task_bindings entries or compound task declarations." in user_prompt
 	assert "Multiple methods for the same task are normal when they express different sibling " in user_prompt
+	assert "If an action precondition has disjunctive alternatives (or/imply lowered to DNF)" in user_prompt
+	assert "Treat implication preconditions as disjunctions: imply(A, B) == not A or B." in user_prompt
 	assert "Do not invent free variables such as TOP, SUPPORT, X, or Y" in user_prompt
 	assert "If you introduce an extra local variable in method.parameters" in user_prompt
 	assert "Do not rename an existing task parameter to a fresh variable." in user_prompt
@@ -349,6 +355,11 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Never bind a negative literal to a task whose constructive branch makes the positive relation true." in user_prompt
 	assert "INVALID target_task_bindings entry:" in user_prompt
 	assert "Why invalid: link_nodes constructively makes linked(...) true" in user_prompt
+	assert "Example 4: OR precondition must become explicit sibling branches" in user_prompt
+	assert "INVALID pattern: one generic method with empty context that hides both OR branches." in user_prompt
+	assert "Example 5: IMPLY precondition must be lowered to (not A) OR B before branching" in user_prompt
+	assert "Interpretation rule: imply(clear(BLOCK), holding(BLOCK)) == not clear(BLOCK) OR holding(BLOCK)" in user_prompt
+	assert "INVALID pattern: treating imply(A, B) as if both A and B were jointly required in one context." in user_prompt
 	assert "Do not create a generic clear_first or prepare_first sibling" in user_prompt
 	assert "Invalid pattern: one sibling says acquire, another says stack" in user_prompt
 	assert "Did you avoid every unbound free variable in subtasks" in user_prompt
@@ -362,6 +373,50 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Did you avoid adding redundant clear_first/prepare_first siblings" in user_prompt
 	assert "Did you avoid printing any chain-of-thought, analysis, or self-check prose" in user_prompt
 	assert "Did you avoid duplicate binding entries, duplicate compound task declarations, and " in user_prompt
+	assert "For every disjunctive action precondition (including imply lowered to not/or)" in user_prompt
+
+
+def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
+	domain = type(
+		"DomainStub",
+		(),
+		{
+			"name": "branch_domain",
+			"types": ["object"],
+			"predicates": [],
+			"actions": [
+				type(
+					"ActionStub",
+					(),
+					{
+						"name": "probe",
+						"parameters": ["?x - object"],
+						"preconditions": "(or (clear ?x) (holding ?x))",
+						"effects": "(and (checked ?x))",
+					},
+				)(),
+				type(
+					"ActionStub",
+					(),
+					{
+						"name": "seal_if_clear",
+						"parameters": ["?x - object"],
+						"preconditions": "(imply (clear ?x) (holding ?x))",
+						"effects": "(and (sealed ?x))",
+					},
+				)(),
+			],
+		},
+	)()
+
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["checked(a)"],
+		'{"target_task_bindings": [], "compound_tasks": [], "methods": []}',
+	)
+
+	assert "probe applicability branches: [clear(?x)] OR [holding(?x)]" in user_prompt
+	assert "seal_if_clear applicability branches: [not clear(?x)] OR [holding(?x)]" in user_prompt
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
@@ -644,7 +699,7 @@ def test_negative_target_binding_must_match_negative_semantics():
 		synthesizer._validate_library(library, domain)
 
 
-def test_synthesize_injects_strong_negation_mode_and_tilde_signature(monkeypatch):
+def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	synthesizer.client = object()
@@ -720,11 +775,12 @@ def test_synthesize_injects_strong_negation_mode_and_tilde_signature(monkeypatch
 		query_text="Keep on(a,b) explicitly false.",
 	)
 
-	assert library.target_literals[0].negation_mode == "strong"
-	assert library.target_literals[0].to_signature() == "~on(a, b)"
-	assert metadata["target_literals"] == ["~on(a, b)"]
-	assert metadata["negation_resolution"]["mode_by_predicate"] == {"on/2": "strong"}
-	assert library.target_task_bindings[0].target_literal == "~on(a, b)"
+	assert library.target_literals[0].negation_mode == "naf"
+	assert library.target_literals[0].to_signature() == "!on(a, b)"
+	assert metadata["target_literals"] == ["!on(a, b)"]
+	assert metadata["negation_resolution"]["mode_by_predicate"] == {"on/2": "naf"}
+	assert metadata["negation_resolution"]["policy"] == "all_naf"
+	assert library.target_task_bindings[0].target_literal == "!on(a, b)"
 
 
 def test_method_validation_rejects_unbound_free_variables_in_subtasks():

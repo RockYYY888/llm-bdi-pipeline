@@ -1750,12 +1750,7 @@ class LTL_BDI_Pipeline:
                 method_library,
                 seed_facts,
             )
-            negation_mode_lookup = {
-                f"{literal.predicate}/{len(literal.args)}": literal.negation_mode
-                for literal in method_library.target_literals
-                if not literal.is_positive and not literal.is_equality
-            }
-            action_schemas = self._stage6_action_schemas(negation_mode_lookup)
+            action_schemas = self._stage6_action_schemas()
             result = runner.validate(
                 agentspeak_code=asl_code,
                 target_literals=method_library.target_literals,
@@ -1780,7 +1775,6 @@ class LTL_BDI_Pipeline:
                 "resolved_object_types": stage6_object_types,
                 "action_schema_count": len(action_schemas),
                 "environment_adapter": result.environment_adapter,
-                "negation_mode_lookup": negation_mode_lookup,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(
@@ -1866,8 +1860,7 @@ class LTL_BDI_Pipeline:
 
         return tuple(facts), ",".join(source_steps)
 
-    def _stage6_action_schemas(self, negation_mode_lookup=None):
-        negation_mode_lookup = dict(negation_mode_lookup or {})
+    def _stage6_action_schemas(self):
         parser = HDDLConditionParser()
         schemas = []
         for action in self.domain.actions:
@@ -1881,22 +1874,25 @@ class LTL_BDI_Pipeline:
                             "predicate": literal.predicate,
                             "args": list(literal.args),
                             "is_positive": literal.is_positive,
-                            "negation_mode": negation_mode_lookup.get(
-                                f"{literal.predicate}/{len(literal.args)}",
-                                "naf",
-                            ),
                         }
                         for literal in parsed.preconditions
+                    ],
+                    "precondition_clauses": [
+                        [
+                            {
+                                "predicate": literal.predicate,
+                                "args": list(literal.args),
+                                "is_positive": literal.is_positive,
+                            }
+                            for literal in clause
+                        ]
+                        for clause in parsed.precondition_clauses
                     ],
                     "effects": [
                         {
                             "predicate": literal.predicate,
                             "args": list(literal.args),
                             "is_positive": literal.is_positive,
-                            "negation_mode": negation_mode_lookup.get(
-                                f"{literal.predicate}/{len(literal.args)}",
-                                "naf",
-                            ),
                         }
                         for literal in parsed.effects
                     ],

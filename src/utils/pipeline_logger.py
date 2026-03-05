@@ -271,12 +271,9 @@ class PipelineLogger:
 		predicate = item.get("predicate", "")
 		args = item.get("args", [])
 		is_positive = bool(item.get("is_positive", True))
-		negation_mode = item.get("negation_mode", "naf")
 		inner = f"{predicate}({', '.join(args)})" if args else predicate
 		if is_positive:
 			return inner
-		if negation_mode == "strong":
-			return f"~{inner}"
 		return f"!{inner}"
 
 	def log_stage4_panda_planning(

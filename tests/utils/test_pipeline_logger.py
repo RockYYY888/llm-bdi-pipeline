@@ -134,7 +134,7 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
     assert "Error: HTN synthesis failed during response_parse: invalid payload" in execution_txt
 
 
-def test_stage3_summary_uses_tilde_signature_for_strong_negative_literals(tmp_path):
+def test_stage3_summary_uses_bang_signature_for_negative_literals(tmp_path):
     logger = PipelineLogger(logs_dir=str(tmp_path))
     logger.start_pipeline(
         "demo instruction",
@@ -156,22 +156,22 @@ def test_stage3_summary_uses_tilde_signature_for_strong_negative_literals(tmp_pa
                 "predicate": "clear",
                 "args": ["a"],
                 "is_positive": False,
-                "negation_mode": "strong",
+                "negation_mode": "naf",
                 "source_symbol": "clear_a",
             },
         ],
         "target_task_bindings": [
-            {"target_literal": "~clear(a)", "task_name": "keep_not_clear"},
+            {"target_literal": "!clear(a)", "task_name": "keep_not_clear"},
         ],
     }
 
     logger.log_stage3_method_synthesis(
         method_library,
         "Success",
-        metadata={"negation_resolution": {"mode_by_predicate": {"clear/1": "strong"}}},
+        metadata={"negation_resolution": {"mode_by_predicate": {"clear/1": "naf"}}},
     )
     logger.end_pipeline(success=True)
 
     execution = json.loads((logger.current_log_dir / "execution.json").read_text())
-    assert execution["stage3_metadata"]["target_literals"] == ["~clear(a)"]
-    assert execution["negation_resolution"]["mode_by_predicate"] == {"clear/1": "strong"}
+    assert execution["stage3_metadata"]["target_literals"] == ["!clear(a)"]
+    assert execution["negation_resolution"]["mode_by_predicate"] == {"clear/1": "naf"}

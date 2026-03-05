@@ -764,8 +764,6 @@ class HTNMethodSynthesizer:
 			alternate_lookup[signature] = signature
 			if signature.startswith("!"):
 				alternate_lookup[f"~{signature[1:]}"] = signature
-			elif signature.startswith("~"):
-				alternate_lookup[f"!{signature[1:]}"] = signature
 
 		bindings = [
 			HTNTargetTaskBinding(
@@ -1134,7 +1132,6 @@ class HTNMethodSynthesizer:
 				predicate=literal.predicate,
 				args=tuple(task.parameters),
 				is_positive=literal.is_positive,
-				negation_mode=literal.negation_mode,
 				source_symbol=None,
 			)
 			bound_methods = [
@@ -1314,7 +1311,6 @@ class HTNMethodSynthesizer:
 				predicate=literal.predicate,
 				args=tuple(task.parameters),
 				is_positive=literal.is_positive,
-				negation_mode=literal.negation_mode,
 				source_symbol=None,
 			)
 			bound_methods = methods_by_task.get(task_name, [])
@@ -1416,7 +1412,6 @@ class HTNMethodSynthesizer:
 				predicate=pattern.predicate,
 				args=tuple(bindings.get(arg, arg) for arg in pattern.args),
 				is_positive=pattern.is_positive,
-				negation_mode=getattr(pattern, "negation_mode", "naf"),
 				source_symbol=None,
 			)
 			for pattern in patterns

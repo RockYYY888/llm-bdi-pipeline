@@ -15,9 +15,8 @@ def _serialise_literal_list(values: Iterable["HTNLiteral"]) -> List[Dict[str, An
     return [value.to_dict() for value in values]
 
 
-def _normalise_negation_mode(raw_value: Any) -> Literal["naf", "strong"]:
-    if raw_value == "strong":
-        return "strong"
+def _normalise_negation_mode(raw_value: Any) -> str:
+    _ = raw_value
     return "naf"
 
 
@@ -29,7 +28,7 @@ class HTNLiteral:
     args: Tuple[str, ...] = ()
     is_positive: bool = True
     source_symbol: Optional[str] = None
-    negation_mode: Literal["naf", "strong"] = "naf"
+    negation_mode: str = "naf"
 
     @property
     def is_equality(self) -> bool:
@@ -44,8 +43,6 @@ class HTNLiteral:
             base = f"{base}({', '.join(self.args)})"
         if self.is_positive:
             return base
-        if self.negation_mode == "strong":
-            return f"~{base}"
         return f"!{base}"
 
     def to_agentspeak(self) -> str:
@@ -57,8 +54,6 @@ class HTNLiteral:
             base = f"{base}({', '.join(self.args)})"
         if self.is_positive:
             return base
-        if self.negation_mode == "strong":
-            return f"~{base}"
         return f"not {base}"
 
     def with_args(self, args: Iterable[str]) -> "HTNLiteral":
@@ -75,7 +70,7 @@ class HTNLiteral:
             "predicate": self.predicate,
             "args": list(self.args),
             "is_positive": self.is_positive,
-            "negation_mode": self.negation_mode,
+            "negation_mode": "naf",
             "source_symbol": self.source_symbol,
         }
 

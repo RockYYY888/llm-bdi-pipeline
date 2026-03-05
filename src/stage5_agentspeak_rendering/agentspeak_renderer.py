@@ -25,14 +25,9 @@ class AgentSpeakRenderer:
         method_library: HTNMethodLibrary,
         plan_records: Sequence[Dict[str, Any]],
     ) -> str:
-        negation_mode_lookup = {
-            f"{literal.predicate}/{len(literal.args)}": literal.negation_mode
-            for literal in method_library.target_literals
-            if not literal.is_positive and not literal.is_equality
-        }
         lines: List[str] = []
         lines.extend(self._render_header(domain, objects, plan_records))
-        lines.extend(self._render_primitive_wrappers(domain, negation_mode_lookup))
+        lines.extend(self._render_primitive_wrappers(domain))
         lines.extend(self._render_method_plans(domain, method_library))
         lines.extend(self._render_transition_plans(plan_records))
         lines.extend(self._render_control_plans(plan_records))
@@ -77,7 +72,6 @@ class AgentSpeakRenderer:
     def _render_primitive_wrappers(
         self,
         domain: Any,
-        negation_mode_lookup: Dict[str, str],
     ) -> List[str]:
         lines = ["/* Primitive Action Plans */"]
 
@@ -93,11 +87,11 @@ class AgentSpeakRenderer:
                 type_counts[type_name] += 1
             args = self._canonical_param_names(parameter_types, dict(type_counts))
             trigger = self._call(task_name, args)
-            preconditions = tuple(
-                self._literal_with_mode(literal, negation_mode_lookup)
-                for literal in semantics.preconditions
+            context = self._context_from_precondition_clauses(
+                tuple(semantics.precondition_clauses),
+                semantics.parameters,
+                args,
             )
-            context = self._context_clause(preconditions, semantics.parameters, args)
             body_lines = [f"{task_name}({', '.join(args)})"]
 
             bindings = {
@@ -106,17 +100,12 @@ class AgentSpeakRenderer:
             }
             for effect in semantics.effects:
                 bound_args = tuple(bindings.get(item, item) for item in effect.args)
-                effect_literal = self._literal_with_mode(effect, negation_mode_lookup)
+                effect_literal = effect
                 atom = self._call(effect_literal.predicate, bound_args)
-                strong_atom = self._strong_call(effect_literal.predicate, bound_args)
                 if effect_literal.is_positive:
                     body_lines.append(f"+{atom}")
-                    if effect_literal.negation_mode == "strong":
-                        body_lines.append(f"-{strong_atom}")
                 else:
                     body_lines.append(f"-{atom}")
-                    if effect_literal.negation_mode == "strong":
-                        body_lines.append(f"+{strong_atom}")
 
             lines.append(f"+!{trigger} : {context} <-")
             lines.extend(self._indent_body(body_lines))
@@ -671,29 +660,6 @@ class AgentSpeakRenderer:
     def _map_args(self, args: Sequence[str], variable_map: Dict[str, str]) -> Tuple[str, ...]:
         return tuple(variable_map.get(arg, arg) for arg in args)
 
-    @staticmethod
-    def _literal_with_mode(literal: Any, negation_mode_lookup: Dict[str, str]) -> Any:
-        predicate = getattr(literal, "predicate", "")
-        args = tuple(getattr(literal, "args", ()))
-        key = f"{predicate}/{len(args)}"
-        mode = negation_mode_lookup.get(key, getattr(literal, "negation_mode", "naf"))
-        return type(
-            "LiteralProxy",
-            (),
-            {
-                "predicate": predicate,
-                "args": args,
-                "is_positive": getattr(literal, "is_positive", True),
-                "negation_mode": mode,
-            },
-        )()
-
-    @staticmethod
-    def _strong_call(name: str, args: Sequence[str]) -> str:
-        if not args:
-            return f"~{name}"
-        return f"~{name}({', '.join(args)})"
-
     def _render_literal(self, literal: Any, variable_map: Dict[str, str]) -> str:
         mapped_args = self._map_args(literal.args, variable_map)
         if getattr(literal, "predicate", None) == "=" and len(mapped_args) == 2:
@@ -702,8 +668,6 @@ class AgentSpeakRenderer:
         predicate = self._call(literal.predicate, mapped_args)
         if literal.is_positive:
             return predicate
-        if getattr(literal, "negation_mode", "naf") == "strong":
-            return self._strong_call(literal.predicate, mapped_args)
         return f"not {predicate}"
 
     def _step_precondition_literals(
@@ -808,7 +772,6 @@ class AgentSpeakRenderer:
                     "predicate": pattern.predicate,
                     "args": tuple(bindings.get(arg, arg) for arg in pattern.args),
                     "is_positive": pattern.is_positive,
-                    "negation_mode": getattr(pattern, "negation_mode", "naf"),
                 },
             )()
             for pattern in patterns
@@ -821,8 +784,6 @@ class AgentSpeakRenderer:
         inner = self._call(literal.predicate, tuple(literal.args))
         if literal.is_positive:
             return inner
-        if getattr(literal, "negation_mode", "naf") == "strong":
-            return f"~{inner}"
         return f"not {inner}"
 
     @staticmethod
@@ -833,9 +794,9 @@ class AgentSpeakRenderer:
     def _looks_like_variable(symbol: str) -> bool:
         return bool(symbol) and symbol[0].isupper()
 
-    def _context_clause(
+    def _context_from_precondition_clauses(
         self,
-        literals: Iterable[Any],
+        clauses: Sequence[Sequence[Any]],
         parameters: Sequence[str],
         args: Sequence[str],
     ) -> str:
@@ -843,11 +804,24 @@ class AgentSpeakRenderer:
             parameter: value
             for parameter, value in zip(parameters, args)
         }
-        parts = [
-            self._render_literal(literal, bindings)
-            for literal in literals
-        ]
-        return " & ".join(parts) if parts else "true"
+        if not clauses:
+            return "__hddl_unsat_condition__"
+
+        rendered_clauses: List[str] = []
+        for clause in clauses:
+            parts = [
+                self._render_literal(literal, bindings)
+                for literal in clause
+            ]
+            rendered_clauses.append(" & ".join(parts) if parts else "true")
+
+        if len(rendered_clauses) == 1:
+            return rendered_clauses[0]
+
+        return " | ".join(
+            f"({item})" if " & " in item else item
+            for item in rendered_clauses
+        )
 
     @staticmethod
     def _call(name: str, args: Sequence[str]) -> str:

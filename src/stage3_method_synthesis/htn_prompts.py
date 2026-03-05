@@ -6,9 +6,25 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from utils.hddl_condition_parser import HDDLConditionParser
+
 
 def _sanitize_name(name: str) -> str:
     return name.replace("-", "_")
+
+
+def _literal_pattern_signature(literal: Any) -> str:
+    atom = (
+        literal.predicate
+        if not literal.args
+        else f"{literal.predicate}({', '.join(literal.args)})"
+    )
+    return atom if literal.is_positive else f"not {atom}"
+
+
+def _clause_signature(clause: Iterable[Any]) -> str:
+    parts = [_literal_pattern_signature(item) for item in clause]
+    return " & ".join(parts) if parts else "true"
 
 
 def build_htn_system_prompt() -> str:
@@ -69,6 +85,10 @@ def build_htn_system_prompt() -> str:
         "- If a compound subtask mentions helper task X, X must appear in compound_tasks.\n"
         "- If a compound subtask mentions helper task X, at least one method must have task_name X.\n"
         "- Never reference an undefined helper task. If you cannot define it, inline primitive steps instead.\n"
+        "- If a primitive action precondition has disjunctive applicability (via 'or' or 'imply'), "
+        "explicitly model those alternatives as distinguishable sibling branches.\n"
+        "- Treat implication exactly as: imply(A, B) == (not A) or B when reasoning about branch coverage.\n"
+        "- Do not leave disjunctive applicability implicit in one generic branch with missing context.\n"
         "- For helper tasks, keep the same semantic naming style: clear_top, move_support, "
         "free_hand, load_parcel.\n"
         "- Do not dump raw logical conditions into task names.\n"
@@ -132,17 +152,37 @@ def build_htn_system_prompt() -> str:
 
 
 def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], schema_hint: str) -> str:
+    parser = HDDLConditionParser()
     action_lines = []
+    action_branch_hint_lines = []
     for action in domain.actions:
         params = ", ".join(action.parameters) if action.parameters else "none"
         action_lines.append(
             f"- runtime task: {_sanitize_name(action.name)} | source action: {action.name}"
             f"({params}) | pre: {action.preconditions} | eff: {action.effects}"
         )
+        try:
+            parsed_action = parser.parse_action(action)
+        except Exception:
+            continue
+        if len(parsed_action.precondition_clauses) <= 1:
+            continue
+        clauses = " OR ".join(
+            f"[{_clause_signature(clause)}]"
+            for clause in parsed_action.precondition_clauses
+        )
+        action_branch_hint_lines.append(
+            f"- {_sanitize_name(action.name)} applicability branches: {clauses}"
+        )
 
     predicate_lines = [f"- {predicate.to_signature()}" for predicate in domain.predicates]
     type_lines = [f"- {type_name}" for type_name in domain.types]
     targets = "\n".join(f"- {item}" for item in target_literals)
+    branch_hints = (
+        "\n".join(action_branch_hint_lines)
+        if action_branch_hint_lines
+        else "- none"
+    )
     binding_hints = "\n".join(
         f'- {{"target_literal": "{literal}", "task_name": "<semantic_task_name>"}}'
         for literal in target_literals
@@ -238,6 +278,107 @@ VALID target_task_bindings entry:
 {"target_literal": "!linked(node1, node2)", "task_name": "unlink_nodes"}
 Rule: if the literal is negated, the task name and its constructive methods must semantically
 remove, undo, block, or keep false that same relation.
+
+Example 4: OR precondition must become explicit sibling branches
+Action branch hint:
+- inspect_block applicability branches: [clear(BLOCK)] OR [holding(BLOCK)]
+Valid method fragments for task prepare_inspection:
+{
+  "method_name": "m_prepare_inspection_from_clear",
+  "task_name": "prepare_inspection",
+  "parameters": ["BLOCK"],
+  "context": [
+    {"predicate": "clear", "args": ["BLOCK"], "is_positive": true, "source_symbol": null}
+  ],
+  "subtasks": [
+    {
+      "step_id": "s1",
+      "task_name": "inspect_block",
+      "args": ["BLOCK"],
+      "kind": "primitive",
+      "action_name": "inspect-block",
+      "literal": null,
+      "preconditions": [],
+      "effects": []
+    }
+  ],
+  "ordering": [],
+  "origin": "llm"
+}
+{
+  "method_name": "m_prepare_inspection_from_holding",
+  "task_name": "prepare_inspection",
+  "parameters": ["BLOCK"],
+  "context": [
+    {"predicate": "holding", "args": ["BLOCK"], "is_positive": true, "source_symbol": null}
+  ],
+  "subtasks": [
+    {
+      "step_id": "s1",
+      "task_name": "inspect_block",
+      "args": ["BLOCK"],
+      "kind": "primitive",
+      "action_name": "inspect-block",
+      "literal": null,
+      "preconditions": [],
+      "effects": []
+    }
+  ],
+  "ordering": [],
+  "origin": "llm"
+}
+INVALID pattern: one generic method with empty context that hides both OR branches.
+
+Example 5: IMPLY precondition must be lowered to (not A) OR B before branching
+Action branch hint:
+- seal_if_clear applicability branches: [not clear(BLOCK)] OR [holding(BLOCK)]
+Interpretation rule: imply(clear(BLOCK), holding(BLOCK)) == not clear(BLOCK) OR holding(BLOCK)
+Valid method fragments for task make_sealable:
+{
+  "method_name": "m_make_sealable_not_clear",
+  "task_name": "make_sealable",
+  "parameters": ["BLOCK"],
+  "context": [
+    {"predicate": "clear", "args": ["BLOCK"], "is_positive": false, "source_symbol": null}
+  ],
+  "subtasks": [
+    {
+      "step_id": "s1",
+      "task_name": "seal_if_clear",
+      "args": ["BLOCK"],
+      "kind": "primitive",
+      "action_name": "seal-if-clear",
+      "literal": null,
+      "preconditions": [],
+      "effects": []
+    }
+  ],
+  "ordering": [],
+  "origin": "llm"
+}
+{
+  "method_name": "m_make_sealable_holding",
+  "task_name": "make_sealable",
+  "parameters": ["BLOCK"],
+  "context": [
+    {"predicate": "holding", "args": ["BLOCK"], "is_positive": true, "source_symbol": null}
+  ],
+  "subtasks": [
+    {
+      "step_id": "s1",
+      "task_name": "seal_if_clear",
+      "args": ["BLOCK"],
+      "kind": "primitive",
+      "action_name": "seal-if-clear",
+      "literal": null,
+      "preconditions": [],
+      "effects": []
+    }
+  ],
+  "ordering": [],
+  "origin": "llm"
+}
+INVALID pattern: treating imply(A, B) as if both A and B were jointly required in one context.
 """.strip()
 
     return (
@@ -248,6 +389,7 @@ remove, undo, block, or keep false that same relation.
         f"DOMAIN TYPES:\n{chr(10).join(type_lines) if type_lines else '- object'}\n\n"
         f"PREDICATES:\n{chr(10).join(predicate_lines)}\n\n"
         f"RUNTIME PRIMITIVE ACTION ALIASES:\n{chr(10).join(action_lines)}\n\n"
+        f"ACTION PRECONDITION BRANCH HINTS (DNF):\n{branch_hints}\n\n"
         f"TARGET LITERALS:\n{targets}\n\n"
         f"REQUIRED target_task_bindings ENTRIES:\n{binding_hints}\n\n"
         "TOP-LEVEL JSON SHAPE:\n"
@@ -267,6 +409,9 @@ remove, undo, block, or keep false that same relation.
         "- Multiple methods for the same task are normal when they express different sibling "
         "branches, but do not emit semantically identical sibling branch bodies for one task. "
         "Each reusable branch should appear once.\n"
+        "- If an action precondition has disjunctive alternatives (or/imply lowered to DNF), "
+        "cover those alternatives with explicit, distinguishable sibling method branches.\n"
+        "- Treat implication preconditions as disjunctions: imply(A, B) == not A or B.\n"
         "- For every negative target literal, include at least one constructive (non-zero-subtask) "
         "method for its bound task. Do not return only a noop/already-satisfied method.\n"
         "- For every negative target literal, bind it to a task that semantically makes the negated "
@@ -390,4 +535,6 @@ remove, undo, block, or keep false that same relation.
         "return only one complete JSON object?\n"
         "25. Did you avoid duplicate binding entries, duplicate compound task declarations, and "
         "semantically duplicate sibling branch bodies for the same task?\n"
+        "26. For every disjunctive action precondition (including imply lowered to not/or), did you "
+        "emit explicit distinguishable sibling branches instead of one ambiguous generic branch?\n"
     )

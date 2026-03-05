@@ -360,7 +360,7 @@ def test_renderer_emits_agentspeak_equality_and_disequality_constraints():
 	assert "+!keep_apart(BLOCK1, BLOCK2) : BLOCK1 == BLOCK2 <-" in code
 
 
-def test_renderer_renders_naf_and_strong_negation_in_contexts():
+def test_renderer_renders_all_negative_contexts_as_naf():
 	renderer = AgentSpeakRenderer()
 	method_library = HTNMethodLibrary(
 		compound_tasks=[
@@ -376,22 +376,22 @@ def test_renderer_renders_naf_and_strong_negation_in_contexts():
 					HTNLiteral("clear", ("B",), False, None, "naf"),
 				),
 			),
-			HTNMethod(
-				method_name="m_check_clear_strong",
-				task_name="check_clear",
-				parameters=("B",),
-				context=(
-					HTNLiteral("clear", ("B",), False, None, "strong"),
+				HTNMethod(
+					method_name="m_check_clear_strong",
+					task_name="check_clear",
+					parameters=("B",),
+					context=(
+						HTNLiteral("clear", ("B",), False, None, "strong"),
+					),
 				),
-			),
-		],
-		target_literals=[
-			HTNLiteral("clear", ("a",), False, None, "strong"),
-		],
-		target_task_bindings=[
-			HTNTargetTaskBinding("~clear(a)", "check_clear"),
-		],
-	)
+			],
+			target_literals=[
+				HTNLiteral("clear", ("a",), False, None, "strong"),
+			],
+			target_task_bindings=[
+				HTNTargetTaskBinding("!clear(a)", "check_clear"),
+			],
+		)
 
 	code = renderer.generate(
 		domain=_domain(),
@@ -401,10 +401,10 @@ def test_renderer_renders_naf_and_strong_negation_in_contexts():
 	)
 
 	assert "+!check_clear(BLOCK) : not clear(BLOCK) <-" in code
-	assert "+!check_clear(BLOCK) : ~clear(BLOCK) <-" in code
+	assert "~clear(BLOCK)" not in code
 
 
-def test_renderer_emits_strong_negation_effect_updates_for_strong_predicates():
+def test_renderer_does_not_emit_tilde_effect_updates():
 	renderer = AgentSpeakRenderer()
 	method_library = HTNMethodLibrary(
 		target_literals=[
@@ -419,5 +419,70 @@ def test_renderer_emits_strong_negation_effect_updates_for_strong_predicates():
 		plan_records=[],
 	)
 
-	assert "\t+~clear(BLOCK2)." in code
-	assert "\t-~clear(BLOCK);" in code
+	assert "~clear(" not in code
+
+
+def test_renderer_supports_or_in_primitive_precondition_context():
+	renderer = AgentSpeakRenderer()
+	action = type(
+		"ActionStub",
+		(),
+		{
+			"name": "probe",
+			"parameters": ["?x - object"],
+			"preconditions": "(or (clear ?x) (holding ?x))",
+			"effects": "(and (checked ?x))",
+		},
+	)()
+	domain = type(
+		"DomainStub",
+		(),
+		{
+			"name": "demo",
+			"actions": [action],
+			"predicates": [],
+			"types": ["object"],
+		},
+	)()
+
+	code = renderer.generate(
+		domain=domain,
+		objects=("a",),
+		method_library=HTNMethodLibrary(),
+		plan_records=[],
+	)
+
+	assert "+!probe(OBJECT) : clear(OBJECT) | holding(OBJECT) <-" in code
+
+
+def test_renderer_supports_imply_in_primitive_precondition_context():
+	renderer = AgentSpeakRenderer()
+	action = type(
+		"ActionStub",
+		(),
+		{
+			"name": "seal_if_clear",
+			"parameters": ["?x - object"],
+			"preconditions": "(imply (clear ?x) (holding ?x))",
+			"effects": "(and (sealed ?x))",
+		},
+	)()
+	domain = type(
+		"DomainStub",
+		(),
+		{
+			"name": "demo",
+			"actions": [action],
+			"predicates": [],
+			"types": ["object"],
+		},
+	)()
+
+	code = renderer.generate(
+		domain=domain,
+		objects=("a",),
+		method_library=HTNMethodLibrary(),
+		plan_records=[],
+	)
+
+	assert "+!seal_if_clear(OBJECT) : not clear(OBJECT) | holding(OBJECT) <-" in code

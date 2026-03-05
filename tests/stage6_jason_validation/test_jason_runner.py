@@ -24,6 +24,12 @@ def _sample_action_schemas():
 				{"predicate": "clear", "args": ["?x"], "is_positive": True},
 				{"predicate": "on", "args": ["?x", "?y"], "is_positive": True},
 			],
+			"precondition_clauses": [
+				[
+					{"predicate": "clear", "args": ["?x"], "is_positive": True},
+					{"predicate": "on", "args": ["?x", "?y"], "is_positive": True},
+				],
+			],
 			"effects": [
 				{"predicate": "holding", "args": ["?x"], "is_positive": True},
 				{"predicate": "on", "args": ["?x", "?y"], "is_positive": False},
@@ -57,7 +63,7 @@ def test_runner_asl_includes_accepting_and_target_validation_without_manual_seed
 	assert "+on(a" not in asl
 
 
-def test_runner_asl_renders_strong_negation_targets_with_tilde():
+def test_runner_asl_forces_negative_targets_to_naf_notation():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(
 		"domain(test).",
@@ -72,7 +78,8 @@ def test_runner_asl_renders_strong_negation_targets_with_tilde():
 		],
 	)
 
-	assert "+!stage6_verify_targets : ~clear(b) <-" in asl
+	assert "+!stage6_verify_targets : not clear(b) <-" in asl
+	assert "~clear(b)" not in asl
 
 
 def test_rewrite_primitive_wrappers_keeps_only_external_action_call():
@@ -293,7 +300,7 @@ def test_validate_timeout_is_reported(monkeypatch, tmp_path):
 	assert (tmp_path / "jason_validation.json").exists()
 
 
-def test_environment_java_source_uses_strong_negation_for_strong_predicates():
+def test_environment_java_source_uses_single_world_set_for_negative_semantics():
 	runner = JasonRunner()
 	java_source = runner._build_environment_java_source(
 		action_schemas=[
@@ -305,15 +312,22 @@ def test_environment_java_source_uses_strong_negation_for_strong_predicates():
 						"predicate": "clear",
 						"args": ["?x"],
 						"is_positive": False,
-						"negation_mode": "strong",
 					},
+				],
+				"precondition_clauses": [
+					[
+						{
+							"predicate": "clear",
+							"args": ["?x"],
+							"is_positive": False,
+						},
+					],
 				],
 				"effects": [
 					{
 						"predicate": "clear",
 						"args": ["?x"],
 						"is_positive": False,
-						"negation_mode": "strong",
 					},
 				],
 			},
@@ -321,18 +335,52 @@ def test_environment_java_source_uses_strong_negation_for_strong_predicates():
 		seed_facts=["(not (clear a))"],
 		target_literals=[
 			HTNLiteral(
-				predicate="clear",
-				args=("a",),
-				is_positive=False,
-				source_symbol=None,
-				negation_mode="strong",
-			),
-		],
+					predicate="clear",
+					args=("a",),
+					is_positive=False,
+					source_symbol=None,
+					negation_mode="strong",
+				),
+			],
 	)
 
-	assert 'new Pattern("clear", false, "strong"' in java_source
-	assert 'strongNegatives.add("clear(a)")' in java_source
-	assert "else if (pattern.isStrongNegation())" in java_source
-	assert "holds = strongNegatives.contains(grounded);" in java_source
-	assert "strongNegatives.add(grounded);" in java_source
-	assert 'addPercept(Literal.parseLiteral("~" + atom));' in java_source
+	assert 'new Pattern("clear", false, new String[]{"?x"})' in java_source
+	assert "Pattern[][] preconditionClauses" in java_source
+	assert "for (Pattern[] clause : preconditionClauses)" in java_source
+	assert "private final Set<String> strongNegatives" not in java_source
+	assert "holds = !world.contains(grounded);" in java_source
+	assert "strongNegatives" not in java_source
+
+
+def test_environment_java_source_supports_disjunctive_precondition_clauses():
+	runner = JasonRunner()
+	java_source = runner._build_environment_java_source(
+		action_schemas=[
+			{
+				"functor": "probe",
+				"parameters": ["?x"],
+				"precondition_clauses": [
+					[
+						{
+							"predicate": "clear",
+							"args": ["?x"],
+							"is_positive": True,
+						},
+					],
+					[
+						{
+							"predicate": "holding",
+							"args": ["?x"],
+							"is_positive": True,
+						},
+					],
+				],
+				"effects": [],
+			},
+		],
+		seed_facts=[],
+		target_literals=[],
+	)
+
+	assert 'new Pattern[][]{new Pattern[]{new Pattern("clear", true, new String[]{"?x"})}, ' in java_source
+	assert 'new Pattern[]{new Pattern("holding", true, new String[]{"?x"})}}' in java_source

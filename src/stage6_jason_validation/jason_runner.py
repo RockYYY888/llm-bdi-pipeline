@@ -359,21 +359,10 @@ class JasonRunner:
 		seed_facts: Sequence[str],
 		target_literals: Sequence[HTNLiteral],
 	) -> str:
-		strong_predicate_keys = self._strong_negation_predicate_keys(
-			action_schemas=action_schemas,
-			target_literals=target_literals,
-		)
+		_ = target_literals
 		seed_atoms = [
 			atom
 			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
-			if atom is not None
-		]
-		seed_strong_negatives = [
-			atom
-			for atom in (
-				self._hddl_fact_to_negative_atom(fact, strong_predicate_keys)
-				for fact in seed_facts
-			)
 			if atom is not None
 		]
 
@@ -384,19 +373,24 @@ class JasonRunner:
 				continue
 			parameters = [str(item) for item in (schema.get("parameters") or [])]
 			preconditions = list(schema.get("preconditions") or [])
+			precondition_clauses = list(schema.get("precondition_clauses") or [])
+			if not precondition_clauses:
+				precondition_clauses = [preconditions] if preconditions else [[]]
 			effects = list(schema.get("effects") or [])
 			action_blocks.append(
 				"""
 		register(new ActionSchema(
 			{functor},
 			new String[]{{{parameters}}},
-			new Pattern[]{{{preconditions}}},
+			{precondition_clauses},
 			new Pattern[]{{{effects}}}
 		));
 		""".strip().format(
 					functor=self._java_quote(functor),
 					parameters=", ".join(self._java_quote(item) for item in parameters),
-					preconditions=", ".join(self._render_pattern_java(item) for item in preconditions),
+					precondition_clauses=self._render_precondition_clauses_java(
+						precondition_clauses,
+					),
 					effects=", ".join(self._render_pattern_java(item) for item in effects),
 				),
 			)
@@ -404,10 +398,6 @@ class JasonRunner:
 		seed_lines = "\n".join(
 			f"\t\tworld.add({self._java_quote(atom)});"
 			for atom in seed_atoms
-		)
-		seed_strong_negative_lines = "\n".join(
-			f"\t\tstrongNegatives.add({self._java_quote(atom)});"
-			for atom in seed_strong_negatives
 		)
 		action_lines = "\n\t\t".join(action_blocks)
 		if not action_lines:
@@ -429,37 +419,35 @@ public class {self.environment_class_name} extends Environment {{
 	private static final class Pattern {{
 		final String predicate;
 		final boolean positive;
-		final String negationMode;
 		final String[] args;
 
-		Pattern(String predicate, boolean positive, String negationMode, String[] args) {{
+		Pattern(String predicate, boolean positive, String[] args) {{
 			this.predicate = predicate;
 			this.positive = positive;
-			this.negationMode = negationMode == null ? "naf" : negationMode;
 			this.args = args;
-		}}
-
-		boolean isStrongNegation() {{
-			return "strong".equals(negationMode);
 		}}
 	}}
 
 	private static final class ActionSchema {{
 		final String name;
 		final String[] parameters;
-		final Pattern[] preconditions;
+		final Pattern[][] preconditionClauses;
 		final Pattern[] effects;
 
-		ActionSchema(String name, String[] parameters, Pattern[] preconditions, Pattern[] effects) {{
+		ActionSchema(
+			String name,
+			String[] parameters,
+			Pattern[][] preconditionClauses,
+			Pattern[] effects
+		) {{
 			this.name = name;
 			this.parameters = parameters;
-			this.preconditions = preconditions;
+			this.preconditionClauses = preconditionClauses;
 			this.effects = effects;
 		}}
 	}}
 
 	private final Set<String> world = new LinkedHashSet<>();
-	private final Set<String> strongNegatives = new LinkedHashSet<>();
 	private final Map<String, ActionSchema> actions = new HashMap<>();
 
 	@Override
@@ -493,7 +481,7 @@ public class {self.environment_class_name} extends Environment {{
 			}}
 		}}
 
-		if (!checkPreconditions(schema.preconditions, bindings)) {{
+		if (!checkPreconditions(schema.preconditionClauses, bindings)) {{
 			System.out.println("stage6 env action failed " + action + " reason=precondition");
 			return false;
 		}}
@@ -506,15 +494,7 @@ public class {self.environment_class_name} extends Environment {{
 
 	private void seedInitialFacts() {{
 		world.clear();
-		strongNegatives.clear();
 {seed_lines if seed_lines else ""}
-{seed_strong_negative_lines if seed_strong_negative_lines else ""}
-		for (String atom : world) {{
-			strongNegatives.remove(atom);
-		}}
-		for (String atom : strongNegatives) {{
-			world.remove(atom);
-		}}
 	}}
 
 	private void loadActions() {{
@@ -526,7 +506,19 @@ public class {self.environment_class_name} extends Environment {{
 		actions.put(schema.name, schema);
 	}}
 
-	private boolean checkPreconditions(Pattern[] preconditions, Map<String, String> bindings) {{
+	private boolean checkPreconditions(Pattern[][] preconditionClauses, Map<String, String> bindings) {{
+		if (preconditionClauses.length == 0) {{
+			return true;
+		}}
+		for (Pattern[] clause : preconditionClauses) {{
+			if (checkPreconditionClause(clause, bindings)) {{
+				return true;
+			}}
+		}}
+		return false;
+	}}
+
+	private boolean checkPreconditionClause(Pattern[] preconditions, Map<String, String> bindings) {{
 		for (Pattern pattern : preconditions) {{
 			if ("=".equals(pattern.predicate) && pattern.args.length == 2) {{
 				String left = resolveToken(pattern.args[0], bindings);
@@ -542,8 +534,6 @@ public class {self.environment_class_name} extends Environment {{
 			boolean holds;
 			if (pattern.positive) {{
 				holds = world.contains(grounded);
-			}} else if (pattern.isStrongNegation()) {{
-				holds = strongNegatives.contains(grounded);
 			}} else {{
 				holds = !world.contains(grounded);
 			}}
@@ -562,14 +552,8 @@ public class {self.environment_class_name} extends Environment {{
 			String grounded = ground(pattern.predicate, pattern.args, bindings);
 			if (pattern.positive) {{
 				world.add(grounded);
-				if (pattern.isStrongNegation()) {{
-					strongNegatives.remove(grounded);
-				}}
 			}} else {{
 				world.remove(grounded);
-				if (pattern.isStrongNegation()) {{
-					strongNegatives.add(grounded);
-				}}
 			}}
 		}}
 	}}
@@ -615,9 +599,6 @@ public class {self.environment_class_name} extends Environment {{
 		clearPercepts();
 		for (String atom : world) {{
 			addPercept(Literal.parseLiteral(atom));
-		}}
-		for (String atom : strongNegatives) {{
-			addPercept(Literal.parseLiteral("~" + atom));
 		}}
 		informAgsEnvironmentChanged();
 	}}
@@ -675,13 +656,23 @@ public class {self.environment_class_name} extends Environment {{
 		predicate = str(payload.get("predicate", ""))
 		args = [str(item) for item in (payload.get("args") or [])]
 		is_positive = bool(payload.get("is_positive", True))
-		negation_mode = str(payload.get("negation_mode", "naf"))
 		args_expr = ", ".join(self._java_quote(item) for item in args)
 		return (
 			f"new Pattern({self._java_quote(predicate)}, "
-			f"{str(is_positive).lower()}, {self._java_quote(negation_mode)}, "
-			f"new String[]{{{args_expr}}})"
+			f"{str(is_positive).lower()}, new String[]{{{args_expr}}})"
 		)
+
+	def _render_precondition_clauses_java(
+		self,
+		clauses: Sequence[Sequence[Dict[str, Any]]],
+	) -> str:
+		if not clauses:
+			return "new Pattern[][]{}"
+		rendered_clauses = []
+		for clause in clauses:
+			rendered_patterns = ", ".join(self._render_pattern_java(item) for item in clause)
+			rendered_clauses.append(f"new Pattern[]{{{rendered_patterns}}}")
+		return f"new Pattern[][]{{{', '.join(rendered_clauses)}}}"
 
 	def _target_context_expression(self, target_literals: Sequence[HTNLiteral]) -> str:
 		rendered_literals = [
@@ -705,33 +696,7 @@ public class {self.environment_class_name} extends Environment {{
 		)
 		if literal.is_positive:
 			return atom
-		if literal.negation_mode == "strong":
-			return f"~{atom}"
 		return f"not {atom}"
-
-	@staticmethod
-	def _strong_negation_predicate_keys(
-		*,
-		action_schemas: Sequence[Dict[str, Any]],
-		target_literals: Sequence[HTNLiteral],
-	) -> set[str]:
-		keys: set[str] = set()
-		for literal in target_literals:
-			if literal.is_positive or literal.is_equality:
-				continue
-			if literal.negation_mode != "strong":
-				continue
-			keys.add(f"{literal.predicate}/{len(literal.args)}")
-		for schema in action_schemas:
-			for group_name in ("preconditions", "effects"):
-				for literal in schema.get(group_name, []) or []:
-					predicate = str(literal.get("predicate", ""))
-					if predicate == "=":
-						continue
-					arity = len(literal.get("args") or [])
-					if literal.get("negation_mode") == "strong":
-						keys.add(f"{predicate}/{arity}")
-		return keys
 
 	def _resolve_log_config(self) -> Path:
 		log_conf = (
@@ -993,34 +958,6 @@ public class {self.environment_class_name} extends Environment {{
 			return None
 		predicate, args = tokens[0], tokens[1:]
 		if predicate == "=":
-			return None
-		if not args:
-			return predicate
-		return f"{predicate}({','.join(args)})"
-
-	@staticmethod
-	def _hddl_fact_to_negative_atom(
-		fact: str,
-		strong_predicate_keys: set[str],
-	) -> Optional[str]:
-		text = (fact or "").strip()
-		if not text.startswith("(") or not text.endswith(")"):
-			return None
-		inner = text[1:-1].strip()
-		if not inner.startswith("not "):
-			return None
-		negated = inner[4:].strip()
-		if not negated.startswith("(") or not negated.endswith(")"):
-			return None
-		neg_inner = negated[1:-1].strip()
-		tokens = neg_inner.split()
-		if not tokens:
-			return None
-		predicate, args = tokens[0], tokens[1:]
-		if predicate == "=":
-			return None
-		key = f"{predicate}/{len(args)}"
-		if key not in strong_predicate_keys:
 			return None
 		if not args:
 			return predicate

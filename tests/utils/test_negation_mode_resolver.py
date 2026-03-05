@@ -1,4 +1,4 @@
-"""Tests for negative literal mode resolution (NAF vs strong negation)."""
+"""Tests for all-NAF negative literal mode resolution."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _action(name: str, preconditions: str, effects: str):
 	)
 
 
-def test_query_strong_hint_resolves_negative_literal_to_strong_mode():
+def test_policy_forces_all_negative_literals_to_naf_even_with_query_hints():
 	domain = SimpleNamespace(
 		predicates=[_predicate("on", 2)],
 		actions=[_action("noop", "(and)", "(and)")],
@@ -46,11 +46,11 @@ def test_query_strong_hint_resolves_negative_literal_to_strong_mode():
 	entry = resolution.entries[0]
 	assert entry.predicate == "on"
 	assert entry.arity == 2
-	assert entry.mode == "strong"
-	assert any("query_hint" in evidence for evidence in entry.evidence)
+	assert entry.mode == "naf"
+	assert entry.evidence == ("policy: all negative predicates use NAF",)
 
 
-def test_complement_predicate_and_effect_coupling_resolve_to_strong_mode():
+def test_policy_forces_all_negative_literals_to_naf_even_with_complements():
 	domain = SimpleNamespace(
 		predicates=[
 			_predicate("door_open", 1),
@@ -77,12 +77,11 @@ def test_complement_predicate_and_effect_coupling_resolve_to_strong_mode():
 	)
 
 	entry = resolution.entries[0]
-	assert entry.mode == "strong"
-	assert any("complement_predicate" in evidence for evidence in entry.evidence)
-	assert any("action_effect_coupling" in evidence for evidence in entry.evidence)
+	assert entry.mode == "naf"
+	assert entry.evidence == ("policy: all negative predicates use NAF",)
 
 
-def test_missing_evidence_defaults_to_naf_mode():
+def test_policy_keeps_default_naf_mode():
 	domain = SimpleNamespace(
 		predicates=[_predicate("clear", 1)],
 		actions=[
@@ -102,4 +101,5 @@ def test_missing_evidence_defaults_to_naf_mode():
 
 	entry = resolution.entries[0]
 	assert entry.mode == "naf"
-	assert entry.evidence == ("default_fallback: no strong-negation evidence found",)
+	assert entry.evidence == ("policy: all negative predicates use NAF",)
+	assert resolution.to_dict()["policy"] == "all_naf"

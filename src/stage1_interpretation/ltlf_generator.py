@@ -11,7 +11,6 @@ import json
 
 from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
 from .grounding_map import GroundingMap, create_propositional_symbol
-from utils.negation_mode_resolver import extract_query_strong_negation_markers
 
 
 class NLToLTLfGenerator:
@@ -154,7 +153,7 @@ class NLToLTLfGenerator:
         spec.initial_state = []
         spec.source_instruction = nl_instruction
         spec.negation_hints = {
-            "strong_negation_markers": extract_query_strong_negation_markers(nl_instruction),
+            "policy": "all_naf",
         }
 
         # Helper function to recursively build formula structures
