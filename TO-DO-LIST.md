@@ -6,6 +6,7 @@
 - Keep negation semantics unified to all-NAF (`not`) across Stage 3/5/6.
 - Keep HDDL parsing on the sound subset only (`and/or/not/imply`; fail-fast on unsupported constructs).
 - Expand live coverage beyond blocksworld with official MarsRover HDDL queries and track failures.
+- Keep an explicit, code-faithful assumptions boundary document in sync with README.
 
 ## Milestones
 
@@ -31,3 +32,4 @@
   and Stage 3 truncation-safe live synthesis
 - [x] Milestone 16: Stage 6 symbolic-environment hardening, `not/~` end-to-end support,
   negation-mode auto-resolution diagnostics, and HDDL unsupported-construct fail-fast
+- [x] Milestone 17: Publish Stage 1-6 assumption boundary document and link it from README

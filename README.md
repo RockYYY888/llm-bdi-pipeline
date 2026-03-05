@@ -67,6 +67,17 @@ The only actively maintained planning domain in this repository is **blocksworld
 - Stage 6 requires Java 17-23 and a Jason CLI build from
   `src/stage6_jason_validation/jason_src`.
 
+## Assumptions and Validation Boundary
+
+The Stage 1-6 pipeline is general under an explicit set of runtime, HDDL
+subset, typing, and semantic assumptions. The full, code-faithful assumption
+list is maintained in:
+
+- `PIPELINE_ASSUMPTIONS.md`
+
+Read this before claiming domain-level generality or interpreting validation
+results as global proofs.
+
 ## Repository Layout
 
 ```text
