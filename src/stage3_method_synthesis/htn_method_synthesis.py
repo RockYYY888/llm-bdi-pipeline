@@ -118,6 +118,7 @@ class HTNMethodSynthesizer:
 			"llm_response": None,
 			"llm_finish_reason": None,
 			"llm_attempts": 0,
+			"llm_generation_attempts": 0,
 			"pruned_constructive_siblings": 0,
 			"generated_target_guard_methods": 0,
 		}
@@ -142,44 +143,65 @@ class HTNMethodSynthesizer:
 		}
 		metadata["llm_prompt"] = prompt
 
-		llm_library, response_text, finish_reason = self._request_complete_llm_library(
-			prompt,
-			domain,
-			metadata,
-		)
+		retry_feedback: Optional[str] = None
+		last_validation_error: Optional[Exception] = None
+		llm_only_library: Optional[HTNMethodLibrary] = None
+		for generation_attempt in range(1, self.max_attempts + 1):
+			metadata["llm_generation_attempts"] = generation_attempt
+			llm_library, response_text, finish_reason = self._request_complete_llm_library(
+				prompt,
+				domain,
+				metadata,
+				repair_instruction=retry_feedback,
+			)
 
-		metadata["llm_response"] = response_text
-		metadata["llm_finish_reason"] = finish_reason
+			metadata["llm_response"] = response_text
+			metadata["llm_finish_reason"] = finish_reason
 
-		llm_only_library = HTNMethodLibrary(
-			compound_tasks=list(llm_library.compound_tasks),
-			primitive_tasks=primitive_tasks,
-			methods=list(llm_library.methods),
-			target_literals=list(target_literals),
-			target_task_bindings=list(llm_library.target_task_bindings),
-		)
-		llm_only_library = self._apply_negation_resolution_to_library(
-			llm_only_library,
-			negation_resolution,
-		)
-		llm_only_library = self._normalise_target_binding_signatures(llm_only_library)
-		llm_only_library, pruned_count = self._prune_redundant_constructive_siblings(
-			llm_only_library,
-			domain,
-		)
-		metadata["pruned_constructive_siblings"] = pruned_count
-		llm_only_library, generated_guard_count = self._complete_missing_target_guard_methods(
-			llm_only_library,
-		)
-		metadata["generated_target_guard_methods"] = generated_guard_count
-		try:
-			self._validate_library(llm_only_library, domain)
-		except Exception as exc:
+			candidate_library = HTNMethodLibrary(
+				compound_tasks=list(llm_library.compound_tasks),
+				primitive_tasks=primitive_tasks,
+				methods=list(llm_library.methods),
+				target_literals=list(target_literals),
+				target_task_bindings=list(llm_library.target_task_bindings),
+			)
+			candidate_library = self._apply_negation_resolution_to_library(
+				candidate_library,
+				negation_resolution,
+			)
+			candidate_library = self._normalise_target_binding_signatures(candidate_library)
+			candidate_library, pruned_count = self._prune_redundant_constructive_siblings(
+				candidate_library,
+				domain,
+			)
+			metadata["pruned_constructive_siblings"] = pruned_count
+			candidate_library, generated_guard_count = self._complete_missing_target_guard_methods(
+				candidate_library,
+			)
+			metadata["generated_target_guard_methods"] = generated_guard_count
+			try:
+				self._validate_library(candidate_library, domain)
+			except Exception as exc:
+				last_validation_error = exc
+				if generation_attempt >= self.max_attempts:
+					break
+				retry_feedback = (
+					"Your previous JSON failed strict validation. "
+					"Regenerate the full JSON object and fix this exact error: "
+					f"{str(exc)[:1200]}"
+				)
+				continue
+			llm_only_library = candidate_library
+			last_validation_error = None
+			break
+
+		if llm_only_library is None:
 			raise self._build_synthesis_error(
 				metadata,
 				"library_validation",
-				f"LLM HTN library failed validation: {exc}",
-			) from exc
+				"LLM HTN library failed validation: "
+				f"{last_validation_error}",
+			)
 
 		metadata["used_llm"] = True
 		metadata["compound_tasks"] = len(llm_only_library.compound_tasks)
@@ -465,6 +487,7 @@ class HTNMethodSynthesizer:
 		prompt: Dict[str, str],
 		domain: Any,
 		metadata: Dict[str, Any],
+		repair_instruction: Optional[str] = None,
 	) -> Tuple[HTNMethodLibrary, str, Optional[str]]:
 		last_error: Optional[Exception] = None
 		attempt_durations: List[float] = []
@@ -472,13 +495,16 @@ class HTNMethodSynthesizer:
 
 		for attempt in range(1, self.max_attempts + 1):
 			metadata["llm_attempts"] = attempt
-			retry_instruction = None
+			retry_instructions: List[str] = []
+			if repair_instruction:
+				retry_instructions.append(repair_instruction)
 			if attempt > 1:
-				retry_instruction = (
+				retry_instructions.append(
 					"Your previous response was incomplete. Return the entire JSON object "
 					"again from the beginning. Do not summarize, do not omit any fields, "
 					"and do not stop until every brace and bracket is closed."
 				)
+			retry_instruction = "\n\n".join(retry_instructions) if retry_instructions else None
 			attempt_start = time.monotonic()
 			try:
 				response_text, finish_reason = self._call_llm(
@@ -640,15 +666,26 @@ class HTNMethodSynthesizer:
 		domain: Any,
 	) -> HTNMethodLibrary:
 		action_schemas = self._action_schema_map(domain)
+		predicate_arity = {
+			predicate.name: len(predicate.parameters)
+			for predicate in getattr(domain, "predicates", [])
+		}
 		compound_tasks = [
 			HTNTask(
 				name=task.name,
 				parameters=task.parameters,
 				is_primitive=task.is_primitive,
-				source_predicates=task.source_predicates,
+				source_predicates=tuple(
+					predicate_name
+					for predicate_name in task.source_predicates
+					if predicate_name in predicate_arity
+					and predicate_arity[predicate_name] == len(task.parameters)
+				),
 			)
 			for task in library.compound_tasks
 		]
+		compound_task_names = {task.name for task in compound_tasks}
+		primitive_task_names = {self._sanitize_name(action.name) for action in domain.actions}
 
 		methods = []
 		for method in library.methods:
@@ -657,11 +694,18 @@ class HTNMethodSynthesizer:
 				preconditions = step.preconditions
 				effects = step.effects
 				action_name = step.action_name
+				task_name = step.task_name
+				kind = self._coerce_step_kind(
+					step,
+					primitive_task_names=primitive_task_names,
+					compound_task_names=compound_task_names,
+				)
 
-				if step.kind == "primitive":
+				if kind == "primitive":
 					action_schema = self._resolve_action_schema(step, action_schemas)
 					if action_schema is not None:
 						action_name = action_schema.name
+						task_name = self._sanitize_name(action_schema.name)
 						preconditions = self._materialise_action_literals(
 							action_schema.preconditions,
 							action_schema.parameters,
@@ -674,13 +718,14 @@ class HTNMethodSynthesizer:
 						)
 					elif step.action_name is not None:
 						action_name = step.action_name.replace("_", "-")
+						task_name = self._sanitize_name(step.action_name)
 
 				normalised_steps.append(
 					HTNMethodStep(
 						step_id=step.step_id,
-						task_name=step.task_name,
+						task_name=task_name,
 						args=step.args,
-						kind=step.kind,
+						kind=kind,
 						action_name=action_name,
 						literal=step.literal,
 						preconditions=preconditions,
@@ -711,6 +756,24 @@ class HTNMethodSynthesizer:
 			target_literals=list(library.target_literals),
 			target_task_bindings=list(library.target_task_bindings),
 		)
+
+	def _coerce_step_kind(
+		self,
+		step: HTNMethodStep,
+		*,
+		primitive_task_names: set[str],
+		compound_task_names: set[str],
+	) -> str:
+		"""Repair obvious `subtask.kind` mismatches from the LLM output."""
+		if step.task_name in compound_task_names:
+			return "compound"
+		if step.task_name in primitive_task_names:
+			return "primitive"
+		if step.action_name:
+			alias = self._sanitize_name(step.action_name)
+			if alias in primitive_task_names and alias not in compound_task_names:
+				return "primitive"
+		return step.kind
 
 	def _apply_negation_resolution_to_library(
 		self,
@@ -867,6 +930,23 @@ class HTNMethodSynthesizer:
 				raise ValueError(
 					f"Invalid task identifier '{task.name}'. "
 					"Task names must match [a-z][a-z0-9_]* for AgentSpeak compatibility.",
+				)
+
+		for task in library.compound_tasks:
+			for predicate_name in task.source_predicates:
+				if predicate_name not in predicate_arities:
+					raise ValueError(
+						f"Task '{task.name}' references unknown source predicate "
+						f"'{predicate_name}'. Known predicates: {sorted(predicate_arities)}",
+					)
+			if len(task.source_predicates) != 1:
+				continue
+			predicate_name = task.source_predicates[0]
+			predicate_arity = predicate_arities[predicate_name]
+			if predicate_arity != len(task.parameters):
+				raise ValueError(
+					f"Task '{task.name}' source predicate '{predicate_name}' arity mismatch: "
+					f"task has {len(task.parameters)} args, predicate has {predicate_arity}.",
 				)
 
 		for task in library.compound_tasks:
@@ -1089,7 +1169,7 @@ class HTNMethodSynthesizer:
 					f"context literal {index} of method '{method.method_name}'",
 				)
 
-			self._validate_method_variable_binding(method)
+			self._validate_method_variable_binding(method, task_lookup)
 			self._validate_method_variable_types(
 				method,
 				task_lookup,
@@ -1427,8 +1507,16 @@ class HTNMethodSynthesizer:
 			return "OBJECT"
 		return parameter.split("-", 1)[1].strip().upper()
 
-	def _validate_method_variable_binding(self, method: HTNMethod) -> None:
-		bound_variables = set(method.parameters)
+	def _validate_method_variable_binding(
+		self,
+		method: HTNMethod,
+		task_lookup: Dict[str, HTNTask],
+	) -> None:
+		task_schema = task_lookup.get(method.task_name)
+		if task_schema is None:
+			bound_variables = set(method.parameters)
+		else:
+			bound_variables = set(method.parameters[: len(task_schema.parameters)])
 		ordered_steps = self._ordered_method_steps(method)
 		bound_variables = self._extend_bound_variables_from_literals(
 			bound_variables,
@@ -1471,38 +1559,48 @@ class HTNMethodSynthesizer:
 		action_types: Dict[str, Tuple[str, ...]],
 		predicate_types: Dict[str, Tuple[str, ...]],
 	) -> None:
-		variable_types: Dict[str, set[str]] = {}
+		symbol_types: Dict[str, set[str]] = {}
 		task_schema = task_lookup.get(method.task_name)
 		if task_schema and len(task_schema.source_predicates) == 1:
 			predicate_signature = predicate_types.get(task_schema.source_predicates[0], ())
 			for index, parameter in enumerate(task_schema.parameters):
 				if index < len(predicate_signature):
-					variable_types.setdefault(parameter, set()).add(predicate_signature[index])
+					symbol_types.setdefault(parameter, set()).add(predicate_signature[index])
 
 		for literal in method.context:
-			self._collect_literal_types(variable_types, literal, predicate_types)
+			self._collect_literal_types(symbol_types, literal, predicate_types)
 
 		for step in method.subtasks:
 			if step.kind == "primitive":
 				action_signature = action_types.get(step.action_name or "")
 				if not action_signature:
 					action_signature = action_types.get(step.task_name, ())
-				self._collect_argument_types(variable_types, step.args, action_signature)
+				self._collect_argument_types(symbol_types, step.args, action_signature)
 			elif step.kind == "compound":
 				step_task = task_lookup.get(step.task_name)
 				if step_task and len(step_task.source_predicates) == 1:
 					predicate_signature = predicate_types.get(step_task.source_predicates[0], ())
-					self._collect_argument_types(variable_types, step.args, predicate_signature)
+					self._collect_argument_types(symbol_types, step.args, predicate_signature)
 
 			for literal in (step.literal, *step.preconditions, *step.effects):
 				if literal is None:
 					continue
-				self._collect_literal_types(variable_types, literal, predicate_types)
+				self._collect_literal_types(symbol_types, literal, predicate_types)
 
-		for variable, candidates in variable_types.items():
+		for parameter in method.parameters:
+			if parameter not in symbol_types:
+				raise ValueError(
+					f"Method '{method.method_name}' variable '{parameter}' has no type evidence.",
+				)
+
+		for symbol, candidates in symbol_types.items():
+			if not candidates:
+				raise ValueError(
+					f"Method '{method.method_name}' symbol '{symbol}' has no type evidence.",
+				)
 			if len(candidates) > 1:
 				raise ValueError(
-					f"Method '{method.method_name}' uses variable '{variable}' with "
+					f"Method '{method.method_name}' uses symbol '{symbol}' with "
 					f"conflicting inferred types {sorted(candidates)}.",
 				)
 
@@ -1527,8 +1625,6 @@ class HTNMethodSynthesizer:
 		signature: Tuple[str, ...],
 	) -> None:
 		for index, arg in enumerate(args):
-			if not self._looks_like_variable(arg):
-				continue
 			if index >= len(signature):
 				continue
 			variable_types.setdefault(arg, set()).add(signature[index])

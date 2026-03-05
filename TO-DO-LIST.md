@@ -3,8 +3,9 @@
 ## Current Focus
 
 - Keep the default Stage 1-6 path green with real Jason runtime validation.
-- Keep negation semantics explicit and traceable (`not` vs `~`) across Stage 3/5/6.
-- Keep HDDL parsing on the sound subset only (fail-fast on unsupported constructs).
+- Keep negation semantics unified to all-NAF (`not`) across Stage 3/5/6.
+- Keep HDDL parsing on the sound subset only (`and/or/not/imply`; fail-fast on unsupported constructs).
+- Expand live coverage beyond blocksworld with official MarsRover HDDL queries and track failures.
 
 ## Milestones
 

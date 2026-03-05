@@ -584,8 +584,7 @@ class LTL_BDI_Pipeline:
 
         return sorted(task_names)
 
-    @staticmethod
-    def _representative_task_args(task_name, method_library, objects, plan_records):
+    def _representative_task_args(self, task_name, method_library, objects, plan_records):
         for record in plan_records:
             plan = record["plan"]
             if plan.task_name == task_name and plan.task_args:
@@ -602,6 +601,13 @@ class LTL_BDI_Pipeline:
         arity = len(task_schema.parameters) if task_schema else 0
         if arity == 0:
             return ()
+
+        signature = self._task_type_signature(task_name, method_library)
+        if signature and len(signature) == arity:
+            return tuple(
+                f"witness_{type_name}_{index + 1}"
+                for index, type_name in enumerate(signature)
+            )
 
         source_objects = list(objects)
         if not source_objects:
@@ -1159,34 +1165,36 @@ class LTL_BDI_Pipeline:
             parameter: arg
             for parameter, arg in zip(method.parameters, task_args)
         }
-        object_pool = object_pool if object_pool is not None else list(dict.fromkeys(objects or task_args))
+        object_pool = object_pool if object_pool is not None else list(dict.fromkeys(task_args or objects))
         if not object_pool:
             object_pool = list(task_args)
-        if object_types is None:
-            inferred_candidates = self._task_argument_type_candidates(
-                method.task_name,
-                task_args,
-                method_library,
-            )
-            object_types = {}
-            for obj in object_pool:
-                object_types[obj] = self._resolve_symbol_type(
-                    symbol=obj,
-                    candidate_types=inferred_candidates.get(obj, set()),
-                    scope=f"Stage 4 method '{method.method_name}' object typing",
-                )
-        else:
-            missing_objects = [
-                obj
-                for obj in object_pool
-                if obj not in object_types
-            ]
-            if missing_objects:
-                raise TypeResolutionError(
-                    f"Stage 4 method '{method.method_name}' is missing resolved object "
-                    f"types for {sorted(missing_objects)}.",
-                )
         method_variable_types = self._method_variable_type_hints(method, method_library)
+        inferred_candidates = self._task_argument_type_candidates(
+            method.task_name,
+            task_args,
+            method_library,
+        )
+        if object_types is None:
+            object_types = {}
+        required_bound_objects = set(bindings.values())
+        for obj in required_bound_objects:
+            if obj not in object_pool:
+                object_pool.append(obj)
+            if obj in object_types:
+                continue
+            expected_candidates = {
+                method_variable_types[parameter]
+                for parameter, bound_object in bindings.items()
+                if bound_object == obj and parameter in method_variable_types
+            }
+            if len(expected_candidates) == 1:
+                object_types[obj] = next(iter(expected_candidates))
+                continue
+            object_types[obj] = self._resolve_symbol_type(
+                symbol=obj,
+                candidate_types=inferred_candidates.get(obj, set()),
+                scope=f"Stage 4 method '{method.method_name}' object typing",
+            )
 
         for parameter, bound_object in bindings.items():
             expected_type = method_variable_types.get(parameter)
@@ -1194,10 +1202,12 @@ class LTL_BDI_Pipeline:
                 continue
             actual_type = object_types.get(bound_object)
             if actual_type is None:
-                raise TypeResolutionError(
-                    f"Stage 4 method '{method.method_name}' missing type for bound object "
-                    f"'{bound_object}' (parameter '{parameter}').",
+                actual_type = self._resolve_symbol_type(
+                    symbol=bound_object,
+                    candidate_types=inferred_candidates.get(bound_object, set()),
+                    scope=f"Stage 4 method '{method.method_name}' object typing",
                 )
+                object_types[bound_object] = actual_type
             if not self._is_subtype(actual_type, expected_type):
                 raise TypeResolutionError(
                     f"Stage 4 method '{method.method_name}' binds parameter '{parameter}' "
@@ -1902,10 +1912,13 @@ class LTL_BDI_Pipeline:
 
     def _stage6_object_types(self, objects, method_library, seed_facts):
         candidates: Dict[str, Set[str]] = defaultdict(set)
+        required_objects: Set[str] = set()
         self._merge_type_candidates(
             candidates,
             self._target_literal_type_candidates(method_library.target_literals),
         )
+        for literal in method_library.target_literals:
+            required_objects.update(literal.args)
         for binding in method_library.target_task_bindings:
             target_literal = next(
                 (
@@ -1931,6 +1944,7 @@ class LTL_BDI_Pipeline:
             if parsed is None:
                 continue
             predicate, args = parsed
+            required_objects.update(args)
             signature = self.predicate_type_map.get(predicate)
             if signature is None:
                 continue
@@ -1945,6 +1959,8 @@ class LTL_BDI_Pipeline:
 
         resolved = {}
         for obj in objects:
+            if obj not in required_objects:
+                continue
             resolved[obj] = self._resolve_symbol_type(
                 symbol=obj,
                 candidate_types=candidates.get(obj, set()),

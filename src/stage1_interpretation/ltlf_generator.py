@@ -149,7 +149,7 @@ class NLToLTLfGenerator:
 
         # Build LTL specification
         spec = LTLSpecification()
-        spec.objects = result["objects"]
+        spec.objects = list(result.get("objects", []))
         spec.initial_state = []
         spec.source_instruction = nl_instruction
         spec.negation_hints = {
@@ -505,6 +505,12 @@ class NLToLTLfGenerator:
 
                 spec.add_formula(outer_formula)
 
+        spec.objects = self._augment_objects_from_formulas_and_atoms(
+            spec.objects,
+            spec.formulas,
+            result.get("atoms"),
+        )
+
         # Create grounding map - use LLM-provided atoms if available, otherwise extract
         if "atoms" in result and result["atoms"]:
             spec.grounding_map = self._create_grounding_map_from_atoms(result["atoms"], spec)
@@ -512,6 +518,53 @@ class NLToLTLfGenerator:
             spec.grounding_map = self._create_grounding_map(spec)
 
         return (spec, prompt_dict, result_text)
+
+    def _augment_objects_from_formulas_and_atoms(
+        self,
+        objects: list,
+        formulas: list[LTLFormula],
+        atoms_list: list | None,
+    ) -> list:
+        """
+        Ensure `spec.objects` includes every constant used in formulas/atoms.
+
+        Stage 1 LLM outputs can miss object declarations while still referencing
+        those constants inside formulas. Downstream typing relies on a complete
+        object universe, so we merge all observed constants deterministically.
+        """
+        merged = list(objects or [])
+        seen = {item for item in merged if isinstance(item, str)}
+
+        def add_object(value: object) -> None:
+            if not isinstance(value, str):
+                return
+            token = value.strip()
+            if not token or token.startswith("?"):
+                return
+            if token in seen:
+                return
+            seen.add(token)
+            merged.append(token)
+
+        for atom_dict in atoms_list or []:
+            for arg in atom_dict.get("args", []) or []:
+                add_object(arg)
+
+        def walk_formula(formula: LTLFormula) -> None:
+            if formula.predicate and isinstance(formula.predicate, dict):
+                special_keys = {"type", "formulas", "left_formula", "right_formula", "formula", "operator"}
+                if all(key not in special_keys for key in formula.predicate.keys()):
+                    for args in formula.predicate.values():
+                        if isinstance(args, list):
+                            for arg in args:
+                                add_object(arg)
+            for sub_formula in formula.sub_formulas:
+                walk_formula(sub_formula)
+
+        for formula in formulas:
+            walk_formula(formula)
+
+        return merged
 
     def _create_grounding_map(self, spec: LTLSpecification) -> GroundingMap:
         """

@@ -161,6 +161,34 @@ def test_panda_domain_export_uses_llm_method_library():
 	assert ":precondition (and (on ?b1 ?b2))" in domain_hddl
 
 
+def test_panda_domain_export_defaults_task_parameter_type_to_object():
+	domain_path = (
+		Path(__file__).parent.parent.parent
+		/ "src"
+		/ "domains"
+		/ "marsrover"
+		/ "domain.hddl"
+	)
+	rover_domain = HDDLParser.parse_domain(str(domain_path))
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=rover_domain,
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("navigate_to", ("ROVER", "FROM", "TO"), False, ()),
+			],
+			primitive_tasks=[],
+			methods=[],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="rover_transition_1",
+	)
+
+	assert "(:task navigate_to" in domain_hddl
+	assert ":parameters (?rover - object ?from - object ?to - object)" in domain_hddl
+
+
 def test_panda_domain_export_adds_positive_guard_for_non_target_helper():
 	planner = PANDAPlanner()
 	domain_hddl = planner._build_domain_hddl(

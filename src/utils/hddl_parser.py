@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 
 @dataclass
@@ -100,6 +100,35 @@ class HDDLSubtask:
 
 
 @dataclass
+class HDDLFact:
+    """Represents one grounded fact in a problem file."""
+
+    predicate: str
+    args: List[str]
+    is_positive: bool = True
+
+    def to_signature(self) -> str:
+        if not self.args:
+            atom = self.predicate
+        else:
+            atom = f"{self.predicate}({', '.join(self.args)})"
+        return atom if self.is_positive else f"not {atom}"
+
+
+@dataclass
+class HDDLTaskInvocation:
+    """Represents one task call in a problem HTN network."""
+
+    task_name: str
+    args: List[str]
+
+    def to_signature(self) -> str:
+        if not self.args:
+            return self.task_name
+        return f"{self.task_name}({', '.join(self.args)})"
+
+
+@dataclass
 class HDDLMethod:
     """Represents an HDDL method."""
 
@@ -135,6 +164,19 @@ class HDDLDomain:
     def get_task_signatures(self) -> List[str]:
         """Get all task signatures in format: place_on(X, Y)."""
         return [task.to_signature() for task in self.tasks]
+
+
+@dataclass
+class HDDLProblem:
+    """Parsed HDDL problem information."""
+
+    name: str
+    domain_name: str
+    objects: List[str]
+    object_types: Dict[str, str]
+    init_facts: List[HDDLFact]
+    htn_tasks: List[HDDLTaskInvocation]
+    goal_facts: List[HDDLFact]
 
 
 class HDDLParser:
@@ -175,6 +217,40 @@ class HDDLParser:
         )
 
     @staticmethod
+    def parse_problem(file_path: str) -> HDDLProblem:
+        """
+        Parse an HDDL problem file.
+
+        Args:
+            file_path: Path to `problem.hddl`.
+
+        Returns:
+            HDDLProblem with parsed objects, init, HTN tasks, and optional goal facts.
+        """
+        content = Path(file_path).read_text()
+        content = re.sub(r";.*$", "", content, flags=re.MULTILINE)
+
+        problem_name_match = re.search(r"\(define\s+\(problem\s+([^\s)]+)\)", content)
+        problem_name = problem_name_match.group(1) if problem_name_match else "unknown_problem"
+        domain_name_match = re.search(r"\(:domain\s+([^\s)]+)\)", content)
+        domain_name = domain_name_match.group(1) if domain_name_match else "unknown_domain"
+
+        objects, object_types = HDDLParser._extract_problem_objects(content)
+        init_facts = HDDLParser._extract_problem_init_facts(content)
+        htn_tasks = HDDLParser._extract_problem_htn_tasks(content)
+        goal_facts = HDDLParser._extract_problem_goal_facts(content)
+
+        return HDDLProblem(
+            name=problem_name,
+            domain_name=domain_name,
+            objects=objects,
+            object_types=object_types,
+            init_facts=init_facts,
+            htn_tasks=htn_tasks,
+            goal_facts=goal_facts,
+        )
+
+    @staticmethod
     def _extract_simple_list_block(content: str, keyword: str) -> List[str]:
         block = HDDLParser._extract_single_block(content, keyword)
         if block is None:
@@ -185,6 +261,107 @@ class HDDLParser:
             return []
 
         return [token.strip() for token in match.group(1).split() if token.strip()]
+
+    @staticmethod
+    def _extract_problem_objects(content: str) -> Tuple[List[str], Dict[str, str]]:
+        block = HDDLParser._extract_single_block(content, "objects")
+        if block is None:
+            return [], {}
+
+        inner = block[len("(:objects"): -1].strip()
+        raw_params = HDDLParser._parse_parameters(inner)
+        objects: List[str] = []
+        object_types: Dict[str, str] = {}
+        for item in raw_params:
+            if " - " in item:
+                object_name, type_name = item.split(" - ", 1)
+                object_name = object_name.strip()
+                type_name = type_name.strip() or "object"
+            else:
+                object_name = item.strip()
+                type_name = "object"
+            if not object_name:
+                continue
+            objects.append(object_name)
+            object_types[object_name] = type_name
+        return objects, object_types
+
+    @staticmethod
+    def _extract_problem_init_facts(content: str) -> List[HDDLFact]:
+        block = HDDLParser._extract_single_block(content, "init")
+        if block is None:
+            return []
+        tree = _SimpleSExpressionParser.parse_expression(block)
+        if not isinstance(tree, list) or not tree or tree[0] != ":init":
+            return []
+        facts: List[HDDLFact] = []
+        for item in tree[1:]:
+            fact = HDDLParser._sexpr_to_fact(item)
+            if fact is not None:
+                facts.append(fact)
+        return facts
+
+    @staticmethod
+    def _extract_problem_goal_facts(content: str) -> List[HDDLFact]:
+        block = HDDLParser._extract_single_block(content, "goal")
+        if block is None:
+            return []
+        goal_expr = HDDLParser._extract_expression_after_keyword(block, ":goal")
+        if goal_expr is None:
+            return []
+        tree = _SimpleSExpressionParser.parse_expression(goal_expr)
+        if isinstance(tree, list) and tree and tree[0] == "and":
+            items = tree[1:]
+        else:
+            items = [tree]
+        facts: List[HDDLFact] = []
+        for item in items:
+            fact = HDDLParser._sexpr_to_fact(item)
+            if fact is not None:
+                facts.append(fact)
+        return facts
+
+    @staticmethod
+    def _extract_problem_htn_tasks(content: str) -> List[HDDLTaskInvocation]:
+        block = HDDLParser._extract_single_block(content, "htn")
+        if block is None:
+            return []
+        tasks_expr = HDDLParser._extract_expression_after_keyword(block, ":tasks")
+        if tasks_expr is None:
+            return []
+
+        tree = _SimpleSExpressionParser.parse_expression(tasks_expr)
+        items = tree[1:] if isinstance(tree, list) and tree and tree[0] == "and" else [tree]
+        task_invocations: List[HDDLTaskInvocation] = []
+        for item in items:
+            if not isinstance(item, list) or not item:
+                continue
+            task_invocations.append(
+                HDDLTaskInvocation(
+                    task_name=str(item[0]),
+                    args=[str(value) for value in item[1:]],
+                )
+            )
+        return task_invocations
+
+    @staticmethod
+    def _sexpr_to_fact(item: object) -> Optional[HDDLFact]:
+        if not isinstance(item, list) or not item:
+            return None
+        if item[0] == "not" and len(item) == 2 and isinstance(item[1], list):
+            atom = item[1]
+            if not atom:
+                return None
+            return HDDLFact(
+                predicate=str(atom[0]),
+                args=[str(value) for value in atom[1:]],
+                is_positive=False,
+            )
+        return HDDLFact(
+            predicate=str(item[0]),
+            args=[str(value) for value in item[1:]],
+            is_positive=True,
+        )
 
     @staticmethod
     def _extract_predicates(content: str) -> List[HDDLPredicate]:

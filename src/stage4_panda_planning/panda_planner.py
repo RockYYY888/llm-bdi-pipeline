@@ -638,7 +638,9 @@ class PANDAPlanner:
 		parameters: Sequence[str],
 		domain_types: Sequence[str],
 	) -> str:
-		default_type = domain_types[0] if domain_types else "object"
+		default_type = "object"
+		if "object" not in domain_types:
+			default_type = domain_types[0] if domain_types else "object"
 		return " ".join(f"{self._render_variable(parameter)} - {default_type}" for parameter in parameters)
 
 	def _render_literal_conjunction(

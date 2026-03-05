@@ -47,6 +47,17 @@ def _domain():
 	return HDDLParser.parse_domain(str(domain_path))
 
 
+def _marsrover_domain():
+	domain_path = (
+		Path(__file__).parent.parent.parent
+		/ "src"
+		/ "domains"
+		/ "marsrover"
+		/ "domain.hddl"
+	)
+	return HDDLParser.parse_domain(str(domain_path))
+
+
 def _live_stage3_kwargs() -> dict:
 	config = get_config()
 	if not config.validate():
@@ -239,6 +250,115 @@ def test_method_synthesizer_requires_target_task_binding_for_each_target_literal
 	)
 
 	with pytest.raises(ValueError, match="missing a target_task_binding"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_normalise_library_repairs_subtask_kind_by_declared_task_sets():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("communicate_rock_data", ("P",), False, ("communicated_rock_data",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_communicate_rock_data_direct",
+				task_name="communicate_rock_data",
+				parameters=("P",),
+				context=(HTNLiteral("have_rock_analysis", ("ROVER", "P"), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="communicate_rock_data",
+						args=("ROVER", "L", "P", "X", "Y"),
+						kind="primitive",
+						action_name="communicate_rock_data",
+						literal=HTNLiteral("communicated_rock_data", ("P",), True, None),
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("communicated_rock_data", ("waypoint2",), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding("communicated_rock_data(waypoint2)", "communicate_rock_data"),
+		],
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+
+	[method] = normalised.methods
+	[step] = method.subtasks
+	assert step.kind == "compound"
+	assert step.task_name == "communicate_rock_data"
+
+
+def test_validate_library_rejects_constant_symbol_type_conflicts():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("communicate_image", ("OBJECTIVE", "MODE"), False, ("communicated_image_data",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_communicate_image_noop",
+				task_name="communicate_image",
+				parameters=("OBJECTIVE", "MODE"),
+				context=(
+					HTNLiteral("communicated_image_data", ("objective0", "low_res"), True, None),
+					HTNLiteral("at_lander", ("objective0", "waypoint0"), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("communicated_image_data", ("objective0", "low_res"), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding(
+				"communicated_image_data(objective0, low_res)",
+				"communicate_image",
+			),
+		],
+	)
+
+	with pytest.raises(ValueError, match="objective0"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_rejects_task_source_predicate_arity_mismatch():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("navigate_rover", ("ROVER", "FROM_WP", "TO_WP"), False, ("at",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_navigate_rover_direct",
+				task_name="navigate_rover",
+				parameters=("ROVER", "FROM_WP", "TO_WP"),
+				context=(
+					HTNLiteral("at", ("ROVER", "FROM_WP"), True, None),
+					HTNLiteral("can_traverse", ("ROVER", "FROM_WP", "TO_WP"), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("at", ("rover0", "waypoint5"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("at(rover0, waypoint5)", "navigate_rover")],
+	)
+
+	with pytest.raises(ValueError, match="arity mismatch"):
 		synthesizer._validate_library(library, domain)
 
 
@@ -759,7 +879,12 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 		],
 	)
 
-	def _fake_request_complete_llm_library(prompt, domain_obj, metadata):
+	def _fake_request_complete_llm_library(
+		prompt,
+		domain_obj,
+		metadata,
+		repair_instruction=None,
+	):
 		return llm_library, '{"ok": true}', "stop"
 
 	monkeypatch.setattr(
@@ -1298,7 +1423,7 @@ def test_method_validation_accepts_supported_equality_constraints():
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask("keep_apart", ("BLOCK1", "BLOCK2"), False, ()),
+			HTNTask("keep_apart", ("BLOCK1", "BLOCK2"), False, ("on",)),
 		],
 		primitive_tasks=synthesizer._build_primitive_tasks(domain),
 		methods=[
