@@ -18,6 +18,10 @@ from utils.hddl_condition_parser import HDDLConditionParser
 from utils.pipeline_logger import PipelineLogger
 
 
+class TypeResolutionError(RuntimeError):
+    """Raised when object/variable type inference is ambiguous or inconsistent."""
+
+
 class LTL_BDI_Pipeline:
     """
     LTL-BDI pipeline implementing Stages 1-5 (dfa_agentspeak mode)
@@ -56,6 +60,8 @@ class LTL_BDI_Pipeline:
         self.domain = HDDLParser.parse_domain(domain_file)
         self.domain_actions = self.domain.get_action_names()
         self.domain_predicates = self.domain.get_predicate_signatures()
+        self.type_parent_map = self._build_type_parent_map()
+        self.domain_type_names = set(self.type_parent_map.keys())
         self.predicate_type_map = self._predicate_type_map()
         self.action_type_map = self._action_type_map()
         self.task_type_map = self._task_type_map()
@@ -271,6 +277,7 @@ class LTL_BDI_Pipeline:
                 grounding_map=grounding_map,
                 dfa_result=dfa_result,
             )
+            self._validate_method_library_typing(method_library)
             summary = {
                 "used_llm": synthesis_meta["used_llm"],
                 "llm_attempted": synthesis_meta["llm_prompt"] is not None,
@@ -611,7 +618,6 @@ class LTL_BDI_Pipeline:
         task_args,
         objects,
     ):
-        default_type = self._default_object_type()
         object_pool = list(dict.fromkeys(task_args or objects))
         type_candidates: Dict[str, Set[str]] = defaultdict(set)
         self._merge_type_candidates(
@@ -626,27 +632,93 @@ class LTL_BDI_Pipeline:
                 method_library,
             ),
         )
-        object_types = {
-            obj: self._resolve_type_candidate(
-                type_candidates.get(obj, set()),
-                default_type,
+        object_types = {}
+        for obj in object_pool:
+            object_types[obj] = self._resolve_symbol_type(
+                symbol=obj,
+                candidate_types=type_candidates.get(obj, set()),
+                scope=f"Stage 4 task '{task_name}' object typing",
             )
-            for obj in object_pool
-        }
 
         return object_pool, object_types
 
     def _typed_object_entries(self, object_pool, object_types):
-        default_type = self._default_object_type()
-        return tuple(
-            (obj, object_types.get(obj, default_type))
+        missing = [
+            obj
             for obj in object_pool
-        )
+            if obj not in object_types
+        ]
+        if missing:
+            raise TypeResolutionError(
+                "Missing resolved object types for Stage 4 problem export: "
+                + ", ".join(sorted(missing)),
+            )
+        return tuple((obj, object_types[obj]) for obj in object_pool)
 
-    def _default_object_type(self):
-        if getattr(self.domain, "types", None):
-            return self.domain.types[0]
-        return "object"
+    def _build_type_parent_map(self) -> Dict[str, Optional[str]]:
+        tokens = [
+            token.strip()
+            for token in (getattr(self.domain, "types", []) or [])
+            if token and token.strip()
+        ]
+        if not tokens:
+            return {"object": None}
+
+        parent_map: Dict[str, Optional[str]] = {}
+        pending_children: List[str] = []
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "-":
+                if not pending_children or index + 1 >= len(tokens):
+                    raise ValueError(
+                        "Malformed HDDL :types declaration (dangling '-').",
+                    )
+                parent_type = tokens[index + 1]
+                for child_type in pending_children:
+                    previous = parent_map.get(child_type)
+                    if previous is not None and previous != parent_type:
+                        raise ValueError(
+                            f"Type '{child_type}' has conflicting parents "
+                            f"('{previous}' vs '{parent_type}').",
+                        )
+                    parent_map[child_type] = parent_type
+                pending_children = []
+                index += 2
+                continue
+
+            pending_children.append(token)
+            index += 1
+
+        for child_type in pending_children:
+            parent_map.setdefault(child_type, "object")
+
+        parent_map["object"] = None
+        changed = True
+        while changed:
+            changed = False
+            for parent_type in list(parent_map.values()):
+                if parent_type is None or parent_type in parent_map:
+                    continue
+                parent_map[parent_type] = "object" if parent_type != "object" else None
+                changed = True
+
+        for type_name in list(parent_map.keys()):
+            if type_name == "object":
+                parent_map[type_name] = None
+                continue
+            if parent_map[type_name] == type_name:
+                raise ValueError(f"Type '{type_name}' cannot inherit from itself.")
+
+            seen = {type_name}
+            cursor = parent_map[type_name]
+            while cursor is not None:
+                if cursor in seen:
+                    raise ValueError(f"Cyclic type hierarchy detected at '{type_name}'.")
+                seen.add(cursor)
+                cursor = parent_map.get(cursor)
+
+        return parent_map
 
     @staticmethod
     def _sanitize_name(name: str) -> str:
@@ -657,16 +729,28 @@ class LTL_BDI_Pipeline:
         return bool(symbol) and symbol[0].isupper()
 
     @staticmethod
-    def _parameter_type(parameter: str) -> Optional[str]:
+    def _parameter_type(parameter: str) -> str:
         if "-" not in parameter:
-            return None
-        return parameter.split("-", 1)[1].strip()
+            return "object"
+        type_name = parameter.split("-", 1)[1].strip()
+        return type_name or "object"
+
+    def _require_known_type(self, type_name: str, source: str) -> str:
+        if type_name in self.domain_type_names:
+            return type_name
+        raise TypeResolutionError(
+            f"{source} references unknown type '{type_name}'. "
+            f"Known types: {sorted(self.domain_type_names)}",
+        )
 
     def _predicate_type_map(self) -> Dict[str, Tuple[str, ...]]:
         mapping: Dict[str, Tuple[str, ...]] = {}
         for predicate in getattr(self.domain, "predicates", []):
             mapping[predicate.name] = tuple(
-                self._parameter_type(parameter) or self._default_object_type()
+                self._require_known_type(
+                    self._parameter_type(parameter),
+                    f"Predicate '{predicate.name}'",
+                )
                 for parameter in predicate.parameters
             )
         return mapping
@@ -675,7 +759,10 @@ class LTL_BDI_Pipeline:
         mapping: Dict[str, Tuple[str, ...]] = {}
         for action in getattr(self.domain, "actions", []):
             type_signature = tuple(
-                self._parameter_type(parameter) or self._default_object_type()
+                self._require_known_type(
+                    self._parameter_type(parameter),
+                    f"Action '{action.name}'",
+                )
                 for parameter in action.parameters
             )
             mapping[action.name] = type_signature
@@ -686,7 +773,10 @@ class LTL_BDI_Pipeline:
         mapping: Dict[str, Tuple[str, ...]] = {}
         for task in getattr(self.domain, "tasks", []):
             mapping[task.name] = tuple(
-                self._parameter_type(parameter) or self._default_object_type()
+                self._require_known_type(
+                    self._parameter_type(parameter),
+                    f"Task '{task.name}'",
+                )
                 for parameter in task.parameters
             )
         return mapping
@@ -713,29 +803,126 @@ class LTL_BDI_Pipeline:
             return
         candidates.setdefault(symbol, set()).add(type_name)
 
-    @staticmethod
-    def _resolve_type_candidate(
+    def _is_subtype(self, candidate_type: str, expected_type: str) -> bool:
+        if candidate_type == expected_type:
+            return True
+        if candidate_type not in self.type_parent_map or expected_type not in self.type_parent_map:
+            return False
+        cursor = self.type_parent_map.get(candidate_type)
+        visited = {candidate_type}
+        while cursor is not None and cursor not in visited:
+            if cursor == expected_type:
+                return True
+            visited.add(cursor)
+            cursor = self.type_parent_map.get(cursor)
+        return False
+
+    def _resolve_symbol_type(
+        self,
+        *,
+        symbol: str,
         candidate_types: Set[str],
-        default_type: str,
+        scope: str,
     ) -> str:
         if not candidate_types:
-            return default_type
-        if len(candidate_types) == 1:
-            return next(iter(candidate_types))
-        if default_type in candidate_types:
-            return default_type
-        return sorted(candidate_types)[0]
+            raise TypeResolutionError(
+                f"{scope}: symbol '{symbol}' has no type evidence.",
+            )
+
+        unknown_types = sorted(
+            type_name
+            for type_name in candidate_types
+            if type_name not in self.domain_type_names
+        )
+        if unknown_types:
+            raise TypeResolutionError(
+                f"{scope}: symbol '{symbol}' references unknown types {unknown_types}.",
+            )
+
+        feasible = sorted(
+            type_name
+            for type_name in self.domain_type_names
+            if all(self._is_subtype(type_name, required) for required in candidate_types)
+        )
+        if not feasible:
+            raise TypeResolutionError(
+                f"{scope}: symbol '{symbol}' has conflicting type constraints "
+                f"{sorted(candidate_types)}.",
+            )
+
+        most_specific = sorted(
+            type_name
+            for type_name in feasible
+            if not any(
+                other != type_name and self._is_subtype(other, type_name)
+                for other in feasible
+            )
+        )
+        if len(most_specific) != 1:
+            raise TypeResolutionError(
+                f"{scope}: symbol '{symbol}' is ambiguous under constraints "
+                f"{sorted(candidate_types)}; candidate leaf types={most_specific}.",
+            )
+        return most_specific[0]
+
+    def _task_type_signature(self, task_name: str, method_library=None) -> Tuple[str, ...]:
+        signature = self.task_type_map.get(task_name)
+        if signature is not None:
+            return signature
+        if method_library is None:
+            return ()
+
+        task_schema = method_library.task_for_name(task_name)
+        if task_schema is None or len(task_schema.source_predicates) != 1:
+            return ()
+
+        predicate_name = task_schema.source_predicates[0]
+        predicate_signature = self.predicate_type_map.get(predicate_name, ())
+        if not predicate_signature:
+            return ()
+        if len(predicate_signature) != len(task_schema.parameters):
+            raise TypeResolutionError(
+                f"Task '{task_name}' source predicate '{predicate_name}' arity mismatch: "
+                f"task has {len(task_schema.parameters)} args, predicate has "
+                f"{len(predicate_signature)}.",
+            )
+        return predicate_signature
+
+    def _collect_argument_signature_constraints(
+        self,
+        *,
+        candidates: Dict[str, Set[str]],
+        args: Sequence[str],
+        signature: Sequence[str],
+        scope: str,
+    ) -> None:
+        if not signature:
+            return
+        if len(args) != len(signature):
+            raise TypeResolutionError(
+                f"{scope}: arity mismatch (args={len(args)}, signature={len(signature)}).",
+            )
+        for index, arg in enumerate(args):
+            self._add_type_candidate(candidates, arg, signature[index])
 
     def _literal_type_candidates(
         self,
         literal: HTNLiteral,
     ) -> Dict[str, Set[str]]:
+        if literal.is_equality:
+            return {}
         candidates: Dict[str, Set[str]] = defaultdict(set)
-        predicate_types = self.predicate_type_map.get(literal.predicate, ())
-        for index, arg in enumerate(literal.args):
-            if index >= len(predicate_types):
-                continue
-            self._add_type_candidate(candidates, arg, predicate_types[index])
+        predicate_types = self.predicate_type_map.get(literal.predicate)
+        if predicate_types is None:
+            raise TypeResolutionError(
+                f"Unknown predicate '{literal.predicate}' in literal '{literal.to_signature()}'.",
+            )
+        self._collect_argument_signature_constraints(
+            candidates=candidates,
+            args=literal.args,
+            signature=predicate_types,
+            scope=f"Literal '{literal.to_signature()}' typing",
+        )
         return candidates
 
     def _target_literal_type_candidates(
@@ -750,8 +937,31 @@ class LTL_BDI_Pipeline:
     def _method_variable_type_hints(
         self,
         method,
+        method_library,
     ) -> Dict[str, str]:
         candidates: Dict[str, Set[str]] = defaultdict(set)
+        task_signature = self._task_type_signature(method.task_name, method_library)
+        task_schema = method_library.task_for_name(method.task_name)
+        task_binding_args: List[str] = []
+        if task_schema is not None and task_schema.parameters:
+            for index, task_parameter in enumerate(task_schema.parameters):
+                if task_parameter in method.parameters:
+                    task_binding_args.append(task_parameter)
+                elif index < len(method.parameters):
+                    task_binding_args.append(method.parameters[index])
+                else:
+                    raise TypeResolutionError(
+                        f"Method '{method.method_name}' is missing parameter mapping for "
+                        f"task argument '{task_parameter}'.",
+                    )
+        else:
+            task_binding_args = list(method.parameters[:len(task_signature)])
+        self._collect_argument_signature_constraints(
+            candidates=candidates,
+            args=tuple(task_binding_args),
+            signature=task_signature,
+            scope=f"Method '{method.method_name}' task parameter typing",
+        )
 
         def collect_literal(literal: Optional[HTNLiteral]) -> None:
             if literal is None or literal.is_equality:
@@ -768,6 +978,21 @@ class LTL_BDI_Pipeline:
                 collect_literal(literal)
             for literal in step.effects:
                 collect_literal(literal)
+            if step.kind == "compound":
+                step_signature = self._task_type_signature(step.task_name, method_library)
+                if not step_signature:
+                    continue
+                self._collect_argument_signature_constraints(
+                    candidates=candidates,
+                    args=step.args,
+                    signature=step_signature,
+                    scope=(
+                        f"Method '{method.method_name}' compound step "
+                        f"'{step.step_id}:{step.task_name}' typing"
+                    ),
+                )
+                continue
+
             if step.kind != "primitive":
                 continue
 
@@ -777,17 +1002,56 @@ class LTL_BDI_Pipeline:
             if action_types is None and step.action_name:
                 action_types = self.action_type_map.get(self._sanitize_name(step.action_name))
             if action_types is None:
-                continue
-            for index, arg in enumerate(step.args):
-                if index >= len(action_types):
-                    continue
-                self._add_type_candidate(candidates, arg, action_types[index])
+                raise TypeResolutionError(
+                    f"Method '{method.method_name}' references primitive step "
+                    f"'{step.step_id}:{step.task_name}' without known action signature.",
+                )
+            self._collect_argument_signature_constraints(
+                candidates=candidates,
+                args=step.args,
+                signature=action_types,
+                scope=(
+                    f"Method '{method.method_name}' primitive step "
+                    f"'{step.step_id}:{step.task_name}' typing"
+                ),
+            )
 
-        default_type = self._default_object_type()
+        variable_symbols: Set[str] = set()
+        for token in method.parameters:
+            if self._is_variable_symbol(token):
+                variable_symbols.add(token)
+        for literal in method.context:
+            variable_symbols.update(
+                arg
+                for arg in literal.args
+                if self._is_variable_symbol(arg)
+            )
+        for step in method.subtasks:
+            variable_symbols.update(
+                arg
+                for arg in step.args
+                if self._is_variable_symbol(arg)
+            )
+            if step.literal:
+                variable_symbols.update(
+                    arg
+                    for arg in step.literal.args
+                    if self._is_variable_symbol(arg)
+                )
+            for literal in (*step.preconditions, *step.effects):
+                variable_symbols.update(
+                    arg
+                    for arg in literal.args
+                    if self._is_variable_symbol(arg)
+                )
+
         return {
-            symbol: self._resolve_type_candidate(type_names, default_type)
-            for symbol, type_names in candidates.items()
-            if self._is_variable_symbol(symbol)
+            symbol: self._resolve_symbol_type(
+                symbol=symbol,
+                candidate_types=candidates.get(symbol, set()),
+                scope=f"Stage 3 method '{method.method_name}' variable typing",
+            )
+            for symbol in sorted(variable_symbols)
         }
 
     def _task_argument_type_candidates(
@@ -797,12 +1061,14 @@ class LTL_BDI_Pipeline:
         method_library,
     ) -> Dict[str, Set[str]]:
         candidates: Dict[str, Set[str]] = defaultdict(set)
-        default_type = self._default_object_type()
 
-        domain_task_types = self.task_type_map.get(task_name, ())
-        for index, arg in enumerate(task_args):
-            if index < len(domain_task_types):
-                self._add_type_candidate(candidates, arg, domain_task_types[index])
+        task_signature = self._task_type_signature(task_name, method_library)
+        self._collect_argument_signature_constraints(
+            candidates=candidates,
+            args=task_args,
+            signature=task_signature,
+            scope=f"Task '{task_name}' argument typing",
+        )
 
         for binding in method_library.target_task_bindings:
             if binding.task_name != task_name:
@@ -823,7 +1089,7 @@ class LTL_BDI_Pipeline:
             )
 
         for method in method_library.methods_for_task(task_name):
-            variable_types = self._method_variable_type_hints(method)
+            variable_types = self._method_variable_type_hints(method, method_library)
             for parameter, arg in zip(method.parameters, task_args):
                 self._add_type_candidate(candidates, arg, variable_types.get(parameter))
             for literal in method.context:
@@ -833,20 +1099,44 @@ class LTL_BDI_Pipeline:
                         continue
                     self._merge_type_candidates(candidates, {symbol: type_names})
 
-        for arg in task_args:
-            if arg not in candidates:
-                self._add_type_candidate(candidates, arg, default_type)
-
         return candidates
 
-    def _infer_type_from_symbol(self, symbol):
-        if not symbol:
-            return self._default_object_type()
-        base = symbol.rstrip("0123456789").lower()
-        domain_types = set(getattr(self.domain, "types", []) or [])
-        if base in domain_types:
-            return base
-        return self._default_object_type()
+    def _validate_method_library_typing(self, method_library) -> None:
+        for literal in method_library.target_literals:
+            self._literal_type_candidates(literal)
+
+        for binding in method_library.target_task_bindings:
+            task_name = binding.task_name
+            target_literal = next(
+                (
+                    literal
+                    for literal in method_library.target_literals
+                    if literal.to_signature() == binding.target_literal
+                ),
+                None,
+            )
+            if target_literal is None:
+                raise TypeResolutionError(
+                    f"Stage 3 binding references missing target literal "
+                    f"'{binding.target_literal}'.",
+                )
+            candidates = self._task_argument_type_candidates(
+                task_name,
+                target_literal.args,
+                method_library,
+            )
+            for arg in target_literal.args:
+                self._resolve_symbol_type(
+                    symbol=arg,
+                    candidate_types=candidates.get(arg, set()),
+                    scope=(
+                        "Stage 3 target-task binding typing "
+                        f"('{binding.target_literal}' -> '{task_name}')"
+                    ),
+                )
+
+        for method in method_library.methods:
+            self._method_variable_type_hints(method, method_library)
 
     def _method_validation_initial_facts(
         self,
@@ -869,11 +1159,48 @@ class LTL_BDI_Pipeline:
         object_pool = object_pool if object_pool is not None else list(dict.fromkeys(objects or task_args))
         if not object_pool:
             object_pool = list(task_args)
-        object_types = object_types if object_types is not None else {
-            obj: self._default_object_type()
-            for obj in object_pool
-        }
-        method_variable_types = self._method_variable_type_hints(method)
+        if object_types is None:
+            inferred_candidates = self._task_argument_type_candidates(
+                method.task_name,
+                task_args,
+                method_library,
+            )
+            object_types = {}
+            for obj in object_pool:
+                object_types[obj] = self._resolve_symbol_type(
+                    symbol=obj,
+                    candidate_types=inferred_candidates.get(obj, set()),
+                    scope=f"Stage 4 method '{method.method_name}' object typing",
+                )
+        else:
+            missing_objects = [
+                obj
+                for obj in object_pool
+                if obj not in object_types
+            ]
+            if missing_objects:
+                raise TypeResolutionError(
+                    f"Stage 4 method '{method.method_name}' is missing resolved object "
+                    f"types for {sorted(missing_objects)}.",
+                )
+        method_variable_types = self._method_variable_type_hints(method, method_library)
+
+        for parameter, bound_object in bindings.items():
+            expected_type = method_variable_types.get(parameter)
+            if expected_type is None:
+                continue
+            actual_type = object_types.get(bound_object)
+            if actual_type is None:
+                raise TypeResolutionError(
+                    f"Stage 4 method '{method.method_name}' missing type for bound object "
+                    f"'{bound_object}' (parameter '{parameter}').",
+                )
+            if not self._is_subtype(actual_type, expected_type):
+                raise TypeResolutionError(
+                    f"Stage 4 method '{method.method_name}' binds parameter '{parameter}' "
+                    f"(expected {expected_type}) to object '{bound_object}' of type "
+                    f"{actual_type}.",
+                )
 
         def bind_symbol(symbol):
             if not symbol:
@@ -881,19 +1208,30 @@ class LTL_BDI_Pipeline:
             if symbol[0].islower():
                 return symbol
             if symbol not in bindings:
+                expected_type = method_variable_types.get(symbol)
+                if expected_type is None:
+                    raise TypeResolutionError(
+                        f"Stage 4 method '{method.method_name}' cannot type variable "
+                        f"'{symbol}' while constructing witness initial facts.",
+                    )
                 for candidate in object_pool:
-                    if candidate not in bindings.values():
-                        bindings[symbol] = candidate
-                        break
+                    if candidate in bindings.values():
+                        continue
+                    candidate_type = object_types.get(candidate)
+                    if candidate_type is None:
+                        continue
+                    if not self._is_subtype(candidate_type, expected_type):
+                        continue
+                    bindings[symbol] = candidate
+                    break
                 else:
-                    candidate_type = method_variable_types.get(symbol) or self._infer_type_from_symbol(symbol)
                     index = 1
-                    candidate = f"witness_{candidate_type}_{index}"
+                    candidate = f"witness_{expected_type}_{index}"
                     while candidate in object_pool:
                         index += 1
-                        candidate = f"witness_{candidate_type}_{index}"
+                        candidate = f"witness_{expected_type}_{index}"
                     object_pool.append(candidate)
-                    object_types[candidate] = candidate_type
+                    object_types[candidate] = expected_type
                     bindings[symbol] = candidate
             return bindings[symbol]
 
@@ -1095,7 +1433,10 @@ class LTL_BDI_Pipeline:
                 parameter: arg
                 for parameter, arg in zip(child_method.parameters, grounded_args)
             }
-            child_variable_types = self._method_variable_type_hints(child_method)
+            child_variable_types = self._method_variable_type_hints(
+                child_method,
+                method_library,
+            )
             grounded_literals = []
             grounded_seen = set()
             promoted_literals = self._promoted_child_context_literals(
@@ -1232,19 +1573,30 @@ class LTL_BDI_Pipeline:
                 grounded_args.append(token)
                 continue
             if token not in local_bindings:
+                expected_type = variable_type_hints.get(token)
+                if expected_type is None:
+                    raise TypeResolutionError(
+                        f"Stage 4 child witness typing cannot resolve variable '{token}' "
+                        f"for literal '{literal.to_signature()}'.",
+                    )
                 candidate = next(
-                    (obj for obj in object_pool if obj not in used_values),
+                    (
+                        obj
+                        for obj in object_pool
+                        if obj not in used_values
+                        and obj in object_types
+                        and self._is_subtype(object_types[obj], expected_type)
+                    ),
                     None,
                 )
                 if candidate is None:
-                    candidate_type = variable_type_hints.get(token) or self._infer_type_from_symbol(token)
                     index = 1
-                    candidate = f"witness_{candidate_type}_{index}"
+                    candidate = f"witness_{expected_type}_{index}"
                     while candidate in object_pool:
                         index += 1
-                        candidate = f"witness_{candidate_type}_{index}"
+                        candidate = f"witness_{expected_type}_{index}"
                     object_pool.append(candidate)
-                    object_types[candidate] = candidate_type
+                    object_types[candidate] = expected_type
                 local_bindings[token] = candidate
                 used_values.add(candidate)
             grounded_args.append(local_bindings[token])
@@ -1390,9 +1742,16 @@ class LTL_BDI_Pipeline:
                 plan_records,
                 method_library.target_literals,
             )
+            stage6_object_types = self._stage6_object_types(
+                ltl_spec.objects,
+                method_library,
+                seed_facts,
+            )
+            action_schemas = self._stage6_action_schemas()
             result = runner.validate(
                 agentspeak_code=asl_code,
                 target_literals=method_library.target_literals,
+                action_schemas=action_schemas,
                 seed_facts=seed_facts,
                 domain_name=self.domain.name,
                 output_dir=self.output_dir,
@@ -1402,6 +1761,7 @@ class LTL_BDI_Pipeline:
                 "status": result.status,
                 "java_path": result.java_path,
                 "java_version": result.java_version,
+                "javac_path": result.javac_path,
                 "jason_jar": result.jason_jar,
                 "exit_code": result.exit_code,
                 "timed_out": result.timed_out,
@@ -1409,6 +1769,9 @@ class LTL_BDI_Pipeline:
                 "target_literal_count": len(method_library.target_literals),
                 "seed_fact_count": len(seed_facts),
                 "seed_transition": seed_transition,
+                "resolved_object_types": stage6_object_types,
+                "action_schema_count": len(action_schemas),
+                "environment_adapter": result.environment_adapter,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(
@@ -1493,6 +1856,87 @@ class LTL_BDI_Pipeline:
                 facts.append(fact)
 
         return tuple(facts), ",".join(source_steps)
+
+    def _stage6_action_schemas(self):
+        parser = HDDLConditionParser()
+        schemas = []
+        for action in self.domain.actions:
+            parsed = parser.parse_action(action)
+            schemas.append(
+                {
+                    "functor": self._sanitize_name(action.name),
+                    "parameters": list(parsed.parameters),
+                    "preconditions": [
+                        {
+                            "predicate": literal.predicate,
+                            "args": list(literal.args),
+                            "is_positive": literal.is_positive,
+                        }
+                        for literal in parsed.preconditions
+                    ],
+                    "effects": [
+                        {
+                            "predicate": literal.predicate,
+                            "args": list(literal.args),
+                            "is_positive": literal.is_positive,
+                        }
+                        for literal in parsed.effects
+                    ],
+                }
+            )
+        return schemas
+
+    def _stage6_object_types(self, objects, method_library, seed_facts):
+        candidates: Dict[str, Set[str]] = defaultdict(set)
+        self._merge_type_candidates(
+            candidates,
+            self._target_literal_type_candidates(method_library.target_literals),
+        )
+        for binding in method_library.target_task_bindings:
+            target_literal = next(
+                (
+                    literal
+                    for literal in method_library.target_literals
+                    if literal.to_signature() == binding.target_literal
+                ),
+                None,
+            )
+            if target_literal is None:
+                continue
+            self._merge_type_candidates(
+                candidates,
+                self._task_argument_type_candidates(
+                    binding.task_name,
+                    target_literal.args,
+                    method_library,
+                ),
+            )
+
+        for fact in seed_facts:
+            parsed = self._parse_positive_hddl_fact(fact)
+            if parsed is None:
+                continue
+            predicate, args = parsed
+            signature = self.predicate_type_map.get(predicate)
+            if signature is None:
+                continue
+            temp_candidates: Dict[str, Set[str]] = defaultdict(set)
+            self._collect_argument_signature_constraints(
+                candidates=temp_candidates,
+                args=args,
+                signature=signature,
+                scope=f"Stage 6 seed fact '{fact}' typing",
+            )
+            self._merge_type_candidates(candidates, temp_candidates)
+
+        resolved = {}
+        for obj in objects:
+            resolved[obj] = self._resolve_symbol_type(
+                symbol=obj,
+                candidate_types=candidates.get(obj, set()),
+                scope="Stage 6 object typing",
+            )
+        return resolved
 
     @staticmethod
     def _parse_positive_hddl_fact(fact: str):

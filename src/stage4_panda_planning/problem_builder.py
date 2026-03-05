@@ -78,6 +78,11 @@ class PANDAProblemBuilder:
 		default_type: str,
 	) -> List[Tuple[str, str]]:
 		if not typed_objects:
+			if default_type == "__ambiguous__":
+				raise ValueError(
+					"Typed objects are required for PANDA problem export in multi-type domains. "
+					"Stage 4 must provide explicit object->type assignments.",
+				)
 			return [(name, default_type) for name in object_names]
 
 		type_lookup = {
@@ -86,14 +91,27 @@ class PANDAProblemBuilder:
 		}
 		entries: List[Tuple[str, str]] = []
 		for name in object_names:
-			entries.append((name, type_lookup.get(name, default_type)))
+			if name not in type_lookup:
+				raise ValueError(
+					f"Missing explicit type assignment for object '{name}' in PANDA export.",
+				)
+			entries.append((name, type_lookup[name]))
 		return entries
 
 	def _resolve_object_type(self, domain: Any) -> str:
 		if self.config.object_type:
 			return self.config.object_type
-		if getattr(domain, "types", None):
-			return domain.types[0]
+		raw_types = list(getattr(domain, "types", None) or [])
+		normalized_types = [
+			token.strip()
+			for token in raw_types
+			if token and token.strip() and token.strip() != "-"
+		]
+		unique_types = list(dict.fromkeys(normalized_types))
+		if len(unique_types) == 1:
+			return unique_types[0]
+		if len(unique_types) > 1:
+			return "__ambiguous__"
 		return "object"
 
 	def _build_initial_facts(

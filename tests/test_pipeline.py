@@ -23,7 +23,7 @@ if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
 import ltl_bdi_pipeline as pipeline_module
-from ltl_bdi_pipeline import LTL_BDI_Pipeline
+from ltl_bdi_pipeline import LTL_BDI_Pipeline, TypeResolutionError
 from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
@@ -438,6 +438,95 @@ def test_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path)
 	assert object_types["r1"] == "robot"
 	assert object_types["pkg1"] == "package"
 	assert object_types["loc2"] == "location"
+
+
+def test_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
+	domain_file = tmp_path / "domain_vehicle.hddl"
+	domain_file.write_text(
+		"""
+(define (domain vehicle_world)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types car truck - vehicle vehicle location)
+  (:predicates
+    (at ?v - vehicle ?l - location)
+  )
+  (:task reach
+    :parameters (?v - vehicle ?l - location)
+  )
+  (:action noop
+    :parameters (?v - vehicle ?l - location)
+    :precondition (and (at ?v ?l))
+    :effect (and (at ?v ?l))
+  )
+)
+		""".strip(),
+	)
+	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("reach", ("VEHICLE", "LOCATION"), False, ("at",))],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_reach_noop",
+				task_name="reach",
+				parameters=("VEHICLE", "LOCATION"),
+				context=(HTNLiteral("at", ("VEHICLE", "LOCATION"), True, None),),
+			),
+		],
+		target_literals=[HTNLiteral("at", ("v1", "l1"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("at(v1, l1)", "reach")],
+	)
+
+	with pytest.raises(TypeResolutionError, match="ambiguous"):
+		pipeline._seed_validation_scope(
+			"reach",
+			method_library,
+			("v1", "l1"),
+			("v1", "l1"),
+		)
+
+
+def test_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
+	domain_file = tmp_path / "domain_typed.hddl"
+	domain_file.write_text(
+		"""
+(define (domain typed_world)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types block location)
+  (:predicates
+    (at ?b - block ?l - location)
+  )
+  (:task move
+    :parameters (?b - block ?l - location)
+  )
+  (:action noop
+    :parameters (?b - block ?l - location)
+    :precondition (and (at ?b ?l))
+    :effect (and (at ?b ?l))
+  )
+)
+		""".strip(),
+	)
+	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("move", ("BLOCK", "LOCATION"), False, ("at",))],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_move_bad",
+				task_name="move",
+				parameters=("BLOCK", "LOCATION", "UNBOUND"),
+				context=(HTNLiteral("=", ("UNBOUND", "BLOCK"), True, None),),
+				subtasks=(),
+				ordering=(),
+			),
+		],
+		target_literals=[HTNLiteral("at", ("b1", "l1"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("at(b1, l1)", "move")],
+	)
+
+	with pytest.raises(TypeResolutionError, match="UNBOUND"):
+		pipeline._validate_method_library_typing(method_library)
 
 
 def _run_query_case(query_id: str) -> Dict[str, Any]:

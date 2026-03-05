@@ -15,37 +15,32 @@ from stage3_method_synthesis.htn_schema import HTNLiteral
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
 
 
-def test_seed_beliefs_only_keeps_positive_non_equality_literals():
+def _sample_action_schemas():
+	return [
+		{
+			"functor": "pick_up",
+			"parameters": ["?x", "?y"],
+			"preconditions": [
+				{"predicate": "clear", "args": ["?x"], "is_positive": True},
+				{"predicate": "on", "args": ["?x", "?y"], "is_positive": True},
+			],
+			"effects": [
+				{"predicate": "holding", "args": ["?x"], "is_positive": True},
+				{"predicate": "on", "args": ["?x", "?y"], "is_positive": False},
+			],
+		},
+	]
+
+
+def test_hddl_fact_to_atom_ignores_negative_and_equality():
 	runner = JasonRunner()
-	target_literals = [
-		HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
-		HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
-		HTNLiteral(predicate="clear", args=("a",), is_positive=False, source_symbol=None),
-		HTNLiteral(predicate="=", args=("a", "b"), is_positive=True, source_symbol=None),
-	]
-
-	assert runner._seed_beliefs_from_literals(target_literals) == ["on(a, b)"]
+	assert runner._hddl_fact_to_atom("(on a b)") == "on(a,b)"
+	assert runner._hddl_fact_to_atom("(handempty)") == "handempty"
+	assert runner._hddl_fact_to_atom("(not (on a b))") is None
+	assert runner._hddl_fact_to_atom("(= a b)") is None
 
 
-def test_seed_beliefs_from_hddl_facts_ignores_not_and_equality():
-	runner = JasonRunner()
-	facts = [
-		"(on a b)",
-		"(clear a)",
-		"(not (clear b))",
-		"(= a b)",
-		"(handempty)",
-		"(on a b)",
-	]
-
-	assert runner._seed_beliefs_from_hddl_facts(facts) == [
-		"on(a, b)",
-		"clear(a)",
-		"handempty",
-	]
-
-
-def test_runner_asl_includes_accepting_and_target_validation():
+def test_runner_asl_includes_accepting_and_target_validation_without_manual_seeding():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(
 		"domain(test).",
@@ -53,13 +48,32 @@ def test_runner_asl_includes_accepting_and_target_validation():
 			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
 			HTNLiteral(predicate="clear", args=("b",), is_positive=False, source_symbol=None),
 		],
-		(),
 	)
 
 	assert "+!stage6_verify_targets : on(a, b) & not clear(b) <-" in asl
 	assert "?dfa_state(FINAL_STATE)" in asl
 	assert "?accepting_state(FINAL_STATE)" in asl
 	assert "!stage6_verify_targets" in asl
+	assert "+on(a" not in asl
+
+
+def test_rewrite_primitive_wrappers_keeps_only_external_action_call():
+	runner = JasonRunner()
+	code = """
+/* Primitive Action Plans */
++!pick_up(BLOCK1, BLOCK2) : handempty <-
+\tpick_up(BLOCK1, BLOCK2);
+\t-on(BLOCK1, BLOCK2);
+\t+holding(BLOCK1).
+
+/* HTN Method Plans */
++!demo : true <-
+\ttrue.
+""".strip()
+	rewritten = runner._rewrite_primitive_wrappers_for_environment(code)
+	assert "\tpick_up(BLOCK1, BLOCK2)." in rewritten
+	assert "\t-on(BLOCK1, BLOCK2);" not in rewritten
+	assert "\t+holding(BLOCK1)." not in rewritten
 
 
 def test_select_java_prefers_highest_supported_version(monkeypatch):
@@ -126,8 +140,74 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 	log_conf.write_text("log")
 
 	monkeypatch.setattr(runner, "_select_java_binary", lambda: ("/java23", 23))
+	monkeypatch.setattr(runner, "_select_javac_binary", lambda java_bin: "/javac23")
 	monkeypatch.setattr(runner, "_ensure_jason_jar", lambda java_bin: jar_file)
 	monkeypatch.setattr(runner, "_resolve_log_config", lambda: log_conf)
+	monkeypatch.setattr(
+		runner,
+		"_compile_environment_java",
+		lambda **kwargs: (tmp_path / "Stage6PipelineEnvironment.class").write_text("class"),
+	)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda *args, **kwargs: subprocess.CompletedProcess(
+			args=args[0],
+			returncode=0,
+			stdout=(
+				"stage6 env ready\n"
+				"stage6 env action success pick_up(a,b)\n"
+				"stage6 exec start\n"
+				"stage6 exec success\n"
+			),
+			stderr="",
+		),
+	)
+
+	result = runner.validate(
+		agentspeak_code="domain(test).\n/* Primitive Action Plans */\n+!pick_up(B1,B2):true<-\n\tpick_up(B1,B2);\n\t+holding(B1).\n\n/* HTN Method Plans */",
+		target_literals=[
+			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
+		],
+		action_schemas=_sample_action_schemas(),
+		seed_facts=("(clear a)", "(on a b)"),
+		domain_name="blocksworld",
+		output_dir=tmp_path,
+	)
+
+	assert result.status == "success"
+	assert result.environment_adapter["success"] is True
+	assert (tmp_path / "jason_runner_agent.asl").exists()
+	assert (tmp_path / "jason_runner.mas2j").exists()
+	assert (tmp_path / "Stage6PipelineEnvironment.java").exists()
+	assert (tmp_path / "Stage6PipelineEnvironment.class").exists()
+	assert (tmp_path / "jason_stdout.txt").exists()
+	assert (tmp_path / "jason_stderr.txt").exists()
+	assert (tmp_path / "jason_validation.json").exists()
+
+	validation_payload = json.loads((tmp_path / "jason_validation.json").read_text())
+	assert validation_payload["status"] == "success"
+	assert validation_payload["environment_adapter"]["success"] is True
+
+
+def test_validate_fails_when_environment_ready_marker_missing(monkeypatch, tmp_path):
+	stage6_dir = tmp_path / "stage6"
+	stage6_dir.mkdir()
+	runner = JasonRunner(stage6_dir=stage6_dir, timeout_seconds=1)
+	jar_file = tmp_path / "jason-cli-all.jar"
+	log_conf = tmp_path / "console-info.properties"
+	jar_file.write_text("jar")
+	log_conf.write_text("log")
+
+	monkeypatch.setattr(runner, "_select_java_binary", lambda: ("/java23", 23))
+	monkeypatch.setattr(runner, "_select_javac_binary", lambda java_bin: "/javac23")
+	monkeypatch.setattr(runner, "_ensure_jason_jar", lambda java_bin: jar_file)
+	monkeypatch.setattr(runner, "_resolve_log_config", lambda: log_conf)
+	monkeypatch.setattr(
+		runner,
+		"_compile_environment_java",
+		lambda **kwargs: (tmp_path / "Stage6PipelineEnvironment.class").write_text("class"),
+	)
 	monkeypatch.setattr(
 		subprocess,
 		"run",
@@ -139,24 +219,17 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 		),
 	)
 
-	result = runner.validate(
-		agentspeak_code="domain(test).",
-		target_literals=[
-			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
-		],
-		domain_name="blocksworld",
-		output_dir=tmp_path,
-	)
+	with pytest.raises(JasonValidationError) as exc_info:
+		runner.validate(
+			agentspeak_code="domain(test).",
+			target_literals=[],
+			action_schemas=_sample_action_schemas(),
+			domain_name="blocksworld",
+			output_dir=tmp_path,
+		)
 
-	assert result.status == "success"
-	assert (tmp_path / "jason_runner_agent.asl").exists()
-	assert (tmp_path / "jason_runner.mas2j").exists()
-	assert (tmp_path / "jason_stdout.txt").exists()
-	assert (tmp_path / "jason_stderr.txt").exists()
-	assert (tmp_path / "jason_validation.json").exists()
-
-	validation_payload = json.loads((tmp_path / "jason_validation.json").read_text())
-	assert validation_payload["status"] == "success"
+	assert "environment adapter validation failed" in str(exc_info.value)
+	assert exc_info.value.metadata["environment_adapter"]["success"] is False
 
 
 def test_validate_timeout_is_reported(monkeypatch, tmp_path):
@@ -169,14 +242,20 @@ def test_validate_timeout_is_reported(monkeypatch, tmp_path):
 	log_conf.write_text("log")
 
 	monkeypatch.setattr(runner, "_select_java_binary", lambda: ("/java23", 23))
+	monkeypatch.setattr(runner, "_select_javac_binary", lambda java_bin: "/javac23")
 	monkeypatch.setattr(runner, "_ensure_jason_jar", lambda java_bin: jar_file)
 	monkeypatch.setattr(runner, "_resolve_log_config", lambda: log_conf)
+	monkeypatch.setattr(
+		runner,
+		"_compile_environment_java",
+		lambda **kwargs: (tmp_path / "Stage6PipelineEnvironment.class").write_text("class"),
+	)
 
 	def raise_timeout(*args, **kwargs):
 		raise subprocess.TimeoutExpired(
 			cmd=args[0],
 			timeout=1,
-			output="stage6 exec start\n",
+			output="stage6 env ready\nstage6 exec start\n",
 			stderr="timeout",
 		)
 
@@ -186,6 +265,7 @@ def test_validate_timeout_is_reported(monkeypatch, tmp_path):
 		runner.validate(
 			agentspeak_code="domain(test).",
 			target_literals=[],
+			action_schemas=_sample_action_schemas(),
 			domain_name="blocksworld",
 			output_dir=tmp_path,
 		)
