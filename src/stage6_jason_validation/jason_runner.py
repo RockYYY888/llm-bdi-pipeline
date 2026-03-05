@@ -86,6 +86,7 @@ class JasonRunner:
         *,
         agentspeak_code: str,
         target_literals: Sequence[HTNLiteral],
+        seed_facts: Sequence[str] = (),
         domain_name: str,
         output_dir: str | Path,
     ) -> JasonValidationResult:
@@ -104,7 +105,11 @@ class JasonRunner:
         stderr_path = output_path / "jason_stderr.txt"
         validation_json_path = output_path / "jason_validation.json"
 
-        runner_asl = self._build_runner_asl(agentspeak_code, target_literals)
+        runner_asl = self._build_runner_asl(
+            agentspeak_code,
+            target_literals,
+            seed_facts,
+        )
         runner_mas2j = self._build_runner_mas2j(domain_name)
         runner_asl_path.write_text(runner_asl)
         runner_mas2j_path.write_text(runner_mas2j)
@@ -198,9 +203,16 @@ class JasonRunner:
         self,
         agentspeak_code: str,
         target_literals: Sequence[HTNLiteral],
+        seed_facts: Sequence[str],
     ) -> str:
-        seed_beliefs = self._seed_beliefs_from_literals(target_literals)
+        seed_beliefs = self._seed_beliefs_from_hddl_facts(seed_facts)
+        if not seed_beliefs:
+            seed_beliefs = self._seed_beliefs_from_literals(target_literals)
+        target_context = self._target_context_expression(target_literals)
         lines = [agentspeak_code.rstrip(), "", "/* Stage 6 Execution Wrapper */", "!stage6_exec.", ""]
+        lines.append(f"+!stage6_verify_targets : {target_context} <-")
+        lines.extend(self._indent_body(["true"]))
+        lines.append("")
         lines.append("+!stage6_exec : true <-")
 
         body_lines: List[str] = [f"+{belief}" for belief in seed_beliefs]
@@ -208,6 +220,9 @@ class JasonRunner:
             [
                 '.print("stage6 exec start")',
                 "!run_dfa",
+                "?dfa_state(FINAL_STATE)",
+                "?accepting_state(FINAL_STATE)",
+                "!stage6_verify_targets",
                 '.print("stage6 exec success")',
                 ".stopMAS",
             ],
@@ -243,6 +258,59 @@ class JasonRunner:
             seen.add(belief)
             beliefs.append(belief)
         return beliefs
+
+    def _seed_beliefs_from_hddl_facts(self, facts: Sequence[str]) -> List[str]:
+        beliefs: List[str] = []
+        seen: set[str] = set()
+        for fact in facts:
+            atom = self._hddl_fact_to_atom(fact)
+            if atom is None or atom in seen:
+                continue
+            seen.add(atom)
+            beliefs.append(atom)
+        return beliefs
+
+    @staticmethod
+    def _hddl_fact_to_atom(fact: str) -> Optional[str]:
+        text = (fact or "").strip()
+        if not text.startswith("(") or not text.endswith(")"):
+            return None
+        inner = text[1:-1].strip()
+        if not inner or inner.startswith("not "):
+            return None
+        tokens = inner.split()
+        if not tokens:
+            return None
+        predicate, args = tokens[0], tokens[1:]
+        if predicate == "=":
+            return None
+        if not args:
+            return predicate
+        return f"{predicate}({', '.join(args)})"
+
+    def _target_context_expression(self, target_literals: Sequence[HTNLiteral]) -> str:
+        rendered_literals = [
+            self._literal_to_context_expression(literal)
+            for literal in target_literals
+        ]
+        rendered_literals = [item for item in rendered_literals if item]
+        if not rendered_literals:
+            return "true"
+        return " & ".join(rendered_literals)
+
+    @staticmethod
+    def _literal_to_context_expression(literal: HTNLiteral) -> str:
+        if literal.is_equality and len(literal.args) == 2:
+            operator = "==" if literal.is_positive else "\\=="
+            return f"{literal.args[0]} {operator} {literal.args[1]}"
+        atom = (
+            f"{literal.predicate}({', '.join(literal.args)})"
+            if literal.args
+            else literal.predicate
+        )
+        if literal.is_positive:
+            return atom
+        return f"not {atom}"
 
     @staticmethod
     def _literal_to_atom(literal: HTNLiteral) -> str:

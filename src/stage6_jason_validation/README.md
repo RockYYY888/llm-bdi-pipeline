@@ -16,8 +16,9 @@ For each pipeline run, Stage 6 writes and executes:
 1. `jason_runner_agent.asl`
    - Copy of Stage 5 output
    - Appended wrapper goal `!stage6_exec`
-   - Seeds positive target beliefs from Stage 3 literals
+   - Seeds beliefs from Stage 4 witness `initial_facts` (falls back to positive target literals if none)
    - Executes `!run_dfa`
+   - Validates accepting DFA state and target-literal context before success marker
    - Emits markers:
      - `stage6 exec success`
      - `stage6 exec failed`
@@ -48,6 +49,9 @@ Stage 6 succeeds only if all checks pass:
 2. Exit code is `0`
 3. `stdout` contains `stage6 exec success`
 4. `stdout` does **not** contain `stage6 exec failed`
+5. Runtime checks inside ASL pass:
+   - `dfa_state(FINAL_STATE)` and `accepting_state(FINAL_STATE)` both hold
+   - `!stage6_verify_targets` context matches all Stage 3 target literals
 
 ## Java Discovery
 

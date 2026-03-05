@@ -23,17 +23,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python src/main.py "Stack block C on block B"
-  python src/main.py "Stack block C on block B" --mode dfa_agentspeak
-  python src/main.py "Given blocks a, b, c on table, stack a on b on c"
+  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl
+  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --mode dfa_agentspeak
+  python src/main.py "Given blocks a, b, c on table, stack a on b on c" --domain-file ./src/domains/blocksworld/domain.hddl
 
 Note:
   Only 'dfa_agentspeak' mode is supported.
+  Domain file is mandatory and must be provided with --domain-file.
   The pipeline runs Stage 3 (HTN synthesis), Stage 4 (PANDA planning),
   Stage 5 (AgentSpeak rendering), and Stage 6 (Jason runtime validation).
         '''
     )
     parser.add_argument('instruction', help='Natural language instruction')
+    parser.add_argument(
+        '--domain-file',
+        required=True,
+        help='Path to HDDL domain file (required)',
+    )
     parser.add_argument(
         '--mode',
         choices=['dfa_agentspeak'],
@@ -44,6 +50,14 @@ Note:
     args = parser.parse_args()
     nl_instruction = args.instruction
     mode = args.mode
+    domain_file = str(Path(args.domain_file).expanduser().resolve())
+
+    if not Path(domain_file).exists():
+        print("="*80)
+        print("ERROR: Domain File Not Found")
+        print("="*80)
+        print(f"\nProvided --domain-file path does not exist:\n{domain_file}")
+        sys.exit(1)
 
     # Validate configuration
     config = get_config()
@@ -63,7 +77,7 @@ Note:
         sys.exit(1)
 
     # Execute pipeline
-    pipeline = LTL_BDI_Pipeline()
+    pipeline = LTL_BDI_Pipeline(domain_file=domain_file)
     results = pipeline.execute(nl_instruction, mode=mode)
 
     # Exit with appropriate code

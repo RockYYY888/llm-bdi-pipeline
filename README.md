@@ -238,7 +238,9 @@ PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
 9. Run the full pipeline on a real blocksworld instruction:
 
 ```bash
-./.venv/bin/python src/main.py "Using blocks a and b, arrange them so that a is on b."
+./.venv/bin/python src/main.py \
+  "Using blocks a and b, arrange them so that a is on b." \
+  --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
 10. Inspect the generated artifacts:
@@ -265,13 +267,16 @@ PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
 The default entry point is:
 
 ```bash
-python src/main.py "Put block a on block b"
+python src/main.py \
+  "Put block a on block b" \
+  --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
 Notes:
 
 - Stage 1 requires an LLM API key.
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
+- `--domain-file` is required. The pipeline does not use an implicit default domain.
 - Stage 4 looks for `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` in this order:
   `PATH`, `PANDA_PI_HOME/bin`, `PANDA_PI_BIN`, `$HOME/.local/pandaPI/bin`.
 - Stage 6 looks for a supported Java runtime (17-23) in this order:

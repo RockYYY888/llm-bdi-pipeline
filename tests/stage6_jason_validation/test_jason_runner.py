@@ -27,6 +27,41 @@ def test_seed_beliefs_only_keeps_positive_non_equality_literals():
 	assert runner._seed_beliefs_from_literals(target_literals) == ["on(a, b)"]
 
 
+def test_seed_beliefs_from_hddl_facts_ignores_not_and_equality():
+	runner = JasonRunner()
+	facts = [
+		"(on a b)",
+		"(clear a)",
+		"(not (clear b))",
+		"(= a b)",
+		"(handempty)",
+		"(on a b)",
+	]
+
+	assert runner._seed_beliefs_from_hddl_facts(facts) == [
+		"on(a, b)",
+		"clear(a)",
+		"handempty",
+	]
+
+
+def test_runner_asl_includes_accepting_and_target_validation():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"domain(test).",
+		[
+			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="clear", args=("b",), is_positive=False, source_symbol=None),
+		],
+		(),
+	)
+
+	assert "+!stage6_verify_targets : on(a, b) & not clear(b) <-" in asl
+	assert "?dfa_state(FINAL_STATE)" in asl
+	assert "?accepting_state(FINAL_STATE)" in asl
+	assert "!stage6_verify_targets" in asl
+
+
 def test_select_java_prefers_highest_supported_version(monkeypatch):
 	runner = JasonRunner()
 	candidates = ["/java24", "/java23", "/java17"]

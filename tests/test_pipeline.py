@@ -37,6 +37,10 @@ from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
 from utils.pipeline_logger import PipelineLogger
 
+DEFAULT_DOMAIN_FILE = str(
+	(Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl").resolve(),
+)
+
 
 BANNED_TASK_PREFIXES = ("achieve_", "maintain_not_", "ensure_", "goal_")
 
@@ -341,7 +345,7 @@ def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 
 	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
 
-	pipeline = LTL_BDI_Pipeline()
+	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
 	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path))
 	pipeline.logger.start_pipeline(
 		"demo instruction",
@@ -362,6 +366,80 @@ def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 	assert stage3_data["summary"]["llm_attempt_durations_seconds"] == [1.0, 2.21]
 
 
+def test_pipeline_requires_explicit_domain_file():
+	with pytest.raises(ValueError, match="domain_file is required"):
+		LTL_BDI_Pipeline(domain_file=None)  # type: ignore[arg-type]
+
+
+def test_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path):
+	domain_file = tmp_path / "domain_transport.hddl"
+	domain_file.write_text(
+		"""
+(define (domain transport)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types robot package location)
+  (:predicates
+    (at_robot ?r - robot ?l - location)
+    (at_package ?p - package ?l - location)
+  )
+  (:task deliver
+    :parameters (?r - robot ?p - package ?to - location)
+  )
+  (:action drive
+    :parameters (?r - robot ?from - location ?to - location)
+    :precondition (and (at_robot ?r ?from))
+    :effect (and (at_robot ?r ?to) (not (at_robot ?r ?from)))
+  )
+)
+		""".strip(),
+	)
+	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("deliver", ("ROBOT", "PACKAGE", "LOCATION"), False, ("at_package",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_deliver_drive",
+				task_name="deliver",
+				parameters=("ROBOT", "PACKAGE", "LOCATION", "FROM"),
+				context=(
+					HTNLiteral("at_robot", ("ROBOT", "FROM"), True, None),
+					HTNLiteral("at_package", ("PACKAGE", "FROM"), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="drive",
+						args=("ROBOT", "FROM", "LOCATION"),
+						kind="primitive",
+						action_name="drive",
+					),
+				),
+				ordering=(),
+			),
+		],
+		target_literals=[
+			HTNLiteral("at_package", ("pkg1", "loc2"), True, None),
+		],
+		target_task_bindings=[
+			HTNTargetTaskBinding("at_package(pkg1, loc2)", "deliver"),
+		],
+	)
+	object_pool, object_types = pipeline._seed_validation_scope(
+		"deliver",
+		method_library,
+		("r1", "pkg1", "loc2"),
+		("r1", "pkg1", "loc1", "loc2"),
+	)
+
+	assert set(object_pool) == {"r1", "pkg1", "loc2"}
+	assert object_types["r1"] == "robot"
+	assert object_types["pkg1"] == "package"
+	assert object_types["loc2"] == "location"
+
+
 def _run_query_case(query_id: str) -> Dict[str, Any]:
 	if query_id not in QUERY_CASES:
 		raise KeyError(
@@ -369,7 +447,7 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 		)
 
 	case = QUERY_CASES[query_id]
-	pipeline = LTL_BDI_Pipeline()
+	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
 	test_logs_dir = Path(__file__).parent / "logs"
 	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir))
 
@@ -520,7 +598,7 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 
 
 def test_method_validation_initial_facts_are_branch_specific():
-	pipeline = LTL_BDI_Pipeline()
+	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_hold_block_from_block",
@@ -573,7 +651,7 @@ def test_method_validation_initial_facts_are_branch_specific():
 
 
 def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
-	pipeline = LTL_BDI_Pipeline()
+	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_place_on_direct",
@@ -635,7 +713,7 @@ def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
 
 
 def test_task_witness_initial_facts_merge_sibling_branches():
-	pipeline = LTL_BDI_Pipeline()
+	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method_library = HTNMethodLibrary(
 		methods=[
@@ -680,7 +758,7 @@ def test_task_witness_initial_facts_merge_sibling_branches():
 
 
 def test_method_validation_initial_facts_allocate_typed_witness_objects():
-	pipeline = LTL_BDI_Pipeline()
+	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_remove_on_clear_first",

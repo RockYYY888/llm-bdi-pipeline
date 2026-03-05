@@ -2,8 +2,9 @@
 LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
 """
 
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
 
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
@@ -29,12 +30,12 @@ class LTL_BDI_Pipeline:
     Stage 6: AgentSpeak -> Jason Runtime Validation
     """
 
-    def __init__(self, domain_file: str = None):
+    def __init__(self, domain_file: str):
         """
         Initialize pipeline
 
         Args:
-            domain_file: Path to HDDL domain file. If None, uses default blocksworld domain.
+            domain_file: Path to HDDL domain file.
         """
         self.config = get_config()
 
@@ -43,10 +44,10 @@ class LTL_BDI_Pipeline:
         project_root = Path(__file__).parent.parent  # src/ -> project root
         self.logger = PipelineLogger(logs_dir=str(project_root / "logs"))
 
-        # Domain file path
-        if domain_file is None:
-            # Default to blocksworld domain
-            domain_file = str(Path(__file__).parent / "domains" / "blocksworld" / "domain.hddl")
+        if not domain_file:
+            raise ValueError(
+                "domain_file is required. Pass an explicit HDDL domain path to LTL_BDI_Pipeline.",
+            )
 
         self.domain_file = domain_file
 
@@ -55,6 +56,9 @@ class LTL_BDI_Pipeline:
         self.domain = HDDLParser.parse_domain(domain_file)
         self.domain_actions = self.domain.get_action_names()
         self.domain_predicates = self.domain.get_predicate_signatures()
+        self.predicate_type_map = self._predicate_type_map()
+        self.action_type_map = self._action_type_map()
+        self.task_type_map = self._task_type_map()
 
         # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
@@ -608,16 +612,27 @@ class LTL_BDI_Pipeline:
         objects,
     ):
         default_type = self._default_object_type()
-        object_pool = list(dict.fromkeys(objects or task_args))
+        object_pool = list(dict.fromkeys(task_args or objects))
+        type_candidates: Dict[str, Set[str]] = defaultdict(set)
+        self._merge_type_candidates(
+            type_candidates,
+            self._target_literal_type_candidates(method_library.target_literals),
+        )
+        self._merge_type_candidates(
+            type_candidates,
+            self._task_argument_type_candidates(
+                task_name,
+                task_args,
+                method_library,
+            ),
+        )
         object_types = {
-            obj: default_type
+            obj: self._resolve_type_candidate(
+                type_candidates.get(obj, set()),
+                default_type,
+            )
             for obj in object_pool
         }
-
-        task_schema = method_library.task_for_name(task_name)
-        if task_schema is not None:
-            for parameter, arg in zip(task_schema.parameters, task_args):
-                object_types[arg] = self._infer_type_from_symbol(parameter)
 
         return object_pool, object_types
 
@@ -632,6 +647,197 @@ class LTL_BDI_Pipeline:
         if getattr(self.domain, "types", None):
             return self.domain.types[0]
         return "object"
+
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        return name.replace("-", "_")
+
+    @staticmethod
+    def _is_variable_symbol(symbol: str) -> bool:
+        return bool(symbol) and symbol[0].isupper()
+
+    @staticmethod
+    def _parameter_type(parameter: str) -> Optional[str]:
+        if "-" not in parameter:
+            return None
+        return parameter.split("-", 1)[1].strip()
+
+    def _predicate_type_map(self) -> Dict[str, Tuple[str, ...]]:
+        mapping: Dict[str, Tuple[str, ...]] = {}
+        for predicate in getattr(self.domain, "predicates", []):
+            mapping[predicate.name] = tuple(
+                self._parameter_type(parameter) or self._default_object_type()
+                for parameter in predicate.parameters
+            )
+        return mapping
+
+    def _action_type_map(self) -> Dict[str, Tuple[str, ...]]:
+        mapping: Dict[str, Tuple[str, ...]] = {}
+        for action in getattr(self.domain, "actions", []):
+            type_signature = tuple(
+                self._parameter_type(parameter) or self._default_object_type()
+                for parameter in action.parameters
+            )
+            mapping[action.name] = type_signature
+            mapping[self._sanitize_name(action.name)] = type_signature
+        return mapping
+
+    def _task_type_map(self) -> Dict[str, Tuple[str, ...]]:
+        mapping: Dict[str, Tuple[str, ...]] = {}
+        for task in getattr(self.domain, "tasks", []):
+            mapping[task.name] = tuple(
+                self._parameter_type(parameter) or self._default_object_type()
+                for parameter in task.parameters
+            )
+        return mapping
+
+    @staticmethod
+    def _merge_type_candidates(
+        target: Dict[str, Set[str]],
+        incoming: Dict[str, Set[str]],
+    ) -> None:
+        for symbol, type_names in incoming.items():
+            if not symbol:
+                continue
+            if symbol not in target:
+                target[symbol] = set()
+            target[symbol].update(item for item in type_names if item)
+
+    @staticmethod
+    def _add_type_candidate(
+        candidates: Dict[str, Set[str]],
+        symbol: str,
+        type_name: Optional[str],
+    ) -> None:
+        if not symbol or not type_name:
+            return
+        candidates.setdefault(symbol, set()).add(type_name)
+
+    @staticmethod
+    def _resolve_type_candidate(
+        candidate_types: Set[str],
+        default_type: str,
+    ) -> str:
+        if not candidate_types:
+            return default_type
+        if len(candidate_types) == 1:
+            return next(iter(candidate_types))
+        if default_type in candidate_types:
+            return default_type
+        return sorted(candidate_types)[0]
+
+    def _literal_type_candidates(
+        self,
+        literal: HTNLiteral,
+    ) -> Dict[str, Set[str]]:
+        candidates: Dict[str, Set[str]] = defaultdict(set)
+        predicate_types = self.predicate_type_map.get(literal.predicate, ())
+        for index, arg in enumerate(literal.args):
+            if index >= len(predicate_types):
+                continue
+            self._add_type_candidate(candidates, arg, predicate_types[index])
+        return candidates
+
+    def _target_literal_type_candidates(
+        self,
+        target_literals: Sequence[HTNLiteral],
+    ) -> Dict[str, Set[str]]:
+        candidates: Dict[str, Set[str]] = defaultdict(set)
+        for literal in target_literals:
+            self._merge_type_candidates(candidates, self._literal_type_candidates(literal))
+        return candidates
+
+    def _method_variable_type_hints(
+        self,
+        method,
+    ) -> Dict[str, str]:
+        candidates: Dict[str, Set[str]] = defaultdict(set)
+
+        def collect_literal(literal: Optional[HTNLiteral]) -> None:
+            if literal is None or literal.is_equality:
+                return
+            literal_candidates = self._literal_type_candidates(literal)
+            self._merge_type_candidates(candidates, literal_candidates)
+
+        for literal in method.context:
+            collect_literal(literal)
+
+        for step in method.subtasks:
+            collect_literal(step.literal)
+            for literal in step.preconditions:
+                collect_literal(literal)
+            for literal in step.effects:
+                collect_literal(literal)
+            if step.kind != "primitive":
+                continue
+
+            action_types = self.action_type_map.get(step.action_name or "")
+            if action_types is None:
+                action_types = self.action_type_map.get(step.task_name)
+            if action_types is None and step.action_name:
+                action_types = self.action_type_map.get(self._sanitize_name(step.action_name))
+            if action_types is None:
+                continue
+            for index, arg in enumerate(step.args):
+                if index >= len(action_types):
+                    continue
+                self._add_type_candidate(candidates, arg, action_types[index])
+
+        default_type = self._default_object_type()
+        return {
+            symbol: self._resolve_type_candidate(type_names, default_type)
+            for symbol, type_names in candidates.items()
+            if self._is_variable_symbol(symbol)
+        }
+
+    def _task_argument_type_candidates(
+        self,
+        task_name: str,
+        task_args: Sequence[str],
+        method_library,
+    ) -> Dict[str, Set[str]]:
+        candidates: Dict[str, Set[str]] = defaultdict(set)
+        default_type = self._default_object_type()
+
+        domain_task_types = self.task_type_map.get(task_name, ())
+        for index, arg in enumerate(task_args):
+            if index < len(domain_task_types):
+                self._add_type_candidate(candidates, arg, domain_task_types[index])
+
+        for binding in method_library.target_task_bindings:
+            if binding.task_name != task_name:
+                continue
+            target_literal = next(
+                (
+                    literal
+                    for literal in method_library.target_literals
+                    if literal.to_signature() == binding.target_literal
+                ),
+                None,
+            )
+            if target_literal is None:
+                continue
+            self._merge_type_candidates(
+                candidates,
+                self._literal_type_candidates(target_literal),
+            )
+
+        for method in method_library.methods_for_task(task_name):
+            variable_types = self._method_variable_type_hints(method)
+            for parameter, arg in zip(method.parameters, task_args):
+                self._add_type_candidate(candidates, arg, variable_types.get(parameter))
+            for literal in method.context:
+                literal_candidates = self._literal_type_candidates(literal)
+                for symbol, type_names in literal_candidates.items():
+                    if self._is_variable_symbol(symbol):
+                        continue
+                    self._merge_type_candidates(candidates, {symbol: type_names})
+
+        for arg in task_args:
+            if arg not in candidates:
+                self._add_type_candidate(candidates, arg, default_type)
+
+        return candidates
 
     def _infer_type_from_symbol(self, symbol):
         if not symbol:
@@ -667,6 +873,7 @@ class LTL_BDI_Pipeline:
             obj: self._default_object_type()
             for obj in object_pool
         }
+        method_variable_types = self._method_variable_type_hints(method)
 
         def bind_symbol(symbol):
             if not symbol:
@@ -679,7 +886,7 @@ class LTL_BDI_Pipeline:
                         bindings[symbol] = candidate
                         break
                 else:
-                    candidate_type = self._infer_type_from_symbol(symbol)
+                    candidate_type = method_variable_types.get(symbol) or self._infer_type_from_symbol(symbol)
                     index = 1
                     candidate = f"witness_{candidate_type}_{index}"
                     while candidate in object_pool:
@@ -888,6 +1095,7 @@ class LTL_BDI_Pipeline:
                 parameter: arg
                 for parameter, arg in zip(child_method.parameters, grounded_args)
             }
+            child_variable_types = self._method_variable_type_hints(child_method)
             grounded_literals = []
             grounded_seen = set()
             promoted_literals = self._promoted_child_context_literals(
@@ -902,6 +1110,7 @@ class LTL_BDI_Pipeline:
                     parsed_known_signatures,
                     object_pool,
                     object_types,
+                    child_variable_types,
                 )
                 signature = grounded_literal.to_signature()
                 if signature in blocked_signatures or signature in grounded_seen:
@@ -972,6 +1181,7 @@ class LTL_BDI_Pipeline:
         parsed_known_signatures,
         object_pool,
         object_types,
+        variable_type_hints,
     ):
         for candidate in parsed_known_signatures:
             if candidate["predicate"] != literal.predicate:
@@ -1027,7 +1237,7 @@ class LTL_BDI_Pipeline:
                     None,
                 )
                 if candidate is None:
-                    candidate_type = self._infer_type_from_symbol(token)
+                    candidate_type = variable_type_hints.get(token) or self._infer_type_from_symbol(token)
                     index = 1
                     candidate = f"witness_{candidate_type}_{index}"
                     while candidate in object_pool:
@@ -1176,9 +1386,14 @@ class LTL_BDI_Pipeline:
         try:
             stage6_dir = Path(__file__).parent / "stage6_jason_validation"
             runner = JasonRunner(stage6_dir=stage6_dir)
+            seed_facts, seed_transition = self._stage6_seed_facts(
+                plan_records,
+                method_library.target_literals,
+            )
             result = runner.validate(
                 agentspeak_code=asl_code,
                 target_literals=method_library.target_literals,
+                seed_facts=seed_facts,
                 domain_name=self.domain.name,
                 output_dir=self.output_dir,
             )
@@ -1192,6 +1407,8 @@ class LTL_BDI_Pipeline:
                 "timed_out": result.timed_out,
                 "transition_count": len(plan_records),
                 "target_literal_count": len(method_library.target_literals),
+                "seed_fact_count": len(seed_facts),
+                "seed_transition": seed_transition,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(
@@ -1205,6 +1422,7 @@ class LTL_BDI_Pipeline:
             print(f"  Java: {result.java_path} (major={result.java_version})")
             print(f"  Jason jar: {result.jason_jar}")
             print(f"  Exit code: {result.exit_code}")
+            print(f"  Seed facts: {len(seed_facts)} (from {seed_transition})")
             print(f"  Stage 6 artifacts saved to: {self.output_dir}")
 
             return {
@@ -1249,3 +1467,42 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None
+
+    @staticmethod
+    def _stage6_seed_facts(plan_records, target_literals):
+        if not plan_records:
+            return (), None
+        negative_targets = {
+            (literal.predicate, tuple(literal.args))
+            for literal in target_literals
+            if not literal.is_positive and not literal.is_equality
+        }
+        facts: List[str] = []
+        seen_facts: Set[str] = set()
+        source_steps: List[str] = []
+
+        for record in plan_records:
+            source_steps.append(record.get("transition_name", "unknown"))
+            for fact in tuple(record.get("initial_facts", ()) or ()):
+                parsed = LTL_BDI_Pipeline._parse_positive_hddl_fact(fact)
+                if parsed is not None and parsed in negative_targets:
+                    continue
+                if fact in seen_facts:
+                    continue
+                seen_facts.add(fact)
+                facts.append(fact)
+
+        return tuple(facts), ",".join(source_steps)
+
+    @staticmethod
+    def _parse_positive_hddl_fact(fact: str):
+        text = (fact or "").strip()
+        if not text.startswith("(") or not text.endswith(")"):
+            return None
+        inner = text[1:-1].strip()
+        if not inner or inner.startswith("not "):
+            return None
+        tokens = inner.split()
+        if not tokens or tokens[0] == "=":
+            return None
+        return tokens[0], tuple(tokens[1:])
