@@ -168,8 +168,8 @@ Your JSON structure MUST reflect the correct operator precedence through proper 
 }}
 ```
 **CRITICAL**: Propositional constants "true" and "false" are represented as plain strings, NOT as dictionaries.
-- ✅ CORRECT: "formula": "true"
-- ❌ WRONG: "formula": {{"true": []}}, "formula": {{"true": "constant"}}, "formula": {{"constant": []}}
+- CORRECT: "formula": "true"
+- WRONG: "formula": {{"true": []}}, "formula": {{"true": "constant"}}, "formula": {{"constant": []}}
 
 **Example 1:** "F on(a,b) & clear(c)" → F(on(a,b)) & clear(c)
 ```json
@@ -291,13 +291,13 @@ Output: **F(on(a, b)) & G(clear(c))**
 
 **COMMON MISTAKES TO AVOID:**
 
-❌ **WRONG - Using commas to separate formulas:**
+**WRONG - Using commas to separate formulas:**
 ```json
 {{"ltl_formulas": [{{"type": "temporal", "operator": "F", ...}}, {{"type": "temporal", "operator": "G", ...}}]}}
 ```
 This outputs: `F(on(a, b)), G(clear(c))` - **INVALID! Commas are NOT LTL operators!**
 
-✓ **CORRECT - Using & operator in a conjunction:**
+**CORRECT - Using & operator in a conjunction:**
 ```json
 {{
   "ltl_formulas": [
@@ -313,11 +313,11 @@ This outputs: `F(on(a, b)), G(clear(c))` - **INVALID! Commas are NOT LTL operato
 ```
 This outputs: `F(on(a, b)) & G(clear(c))` - **CORRECT!**
 
-❌ **WRONG - Treating "and" as a separator:**
+**WRONG - Treating "and" as a separator:**
 Natural language: "Eventually on a b and always clear c"
 Wrong interpretation: Two separate goals → outputs `F(on(a, b)), G(clear(c))`
 
-✓ **CORRECT - Treating "and" as Boolean AND operator:**
+**CORRECT - Treating "and" as Boolean AND operator:**
 Natural language: "Eventually on a b and always clear c"
 Correct interpretation: Single conjunction → outputs `F(on(a, b)) & G(clear(c))`
 
@@ -383,7 +383,7 @@ Predicates have different arities (number of arguments). You MUST include the co
 
 4. **Negation**: ALWAYS include FULL predicate with ALL arguments
    - CORRECT: {{{{"type": "negation", "formula": {{{{"on": ["a", "b"]}}}}}}}}
-   - WRONG: {{{{"not": ["on"]}}}} ❌ Missing arguments!
+   - WRONG: {{{{"not": ["on"]}}}} Missing arguments!
    - Output formula: G(!(on(a, b)))
 
 **IMPORTANT**: Do NOT assume or specify any initial state while extracting the LTL goal.
