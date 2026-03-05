@@ -58,6 +58,12 @@ class PipelineRecord:
 	stage5_code_size_chars: int = 0
 	stage5_metadata: Optional[Dict[str, Any]] = None
 
+	stage6_status: str = "pending"
+	stage6_backend: str = "RunLocalMAS"
+	stage6_error: Optional[str] = None
+	stage6_metadata: Optional[Dict[str, Any]] = None
+	stage6_artifacts: Optional[Dict[str, Any]] = None
+
 	domain_file: str = "domains/blocksworld/domain.hddl"
 	output_dir: str = "output"
 	execution_time_seconds: float = 0.0
@@ -310,6 +316,35 @@ class PipelineLogger:
 
 		self._save_current_state()
 
+	def log_stage6_jason_validation(
+		self,
+		artifacts: Optional[Dict[str, Any]],
+		status: str,
+		*,
+		error: str | None = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		if not self.current_record:
+			return
+
+		self.current_record.stage6_metadata = metadata
+		backend = None
+		if isinstance(metadata, dict):
+			backend = metadata.get("backend")
+		if not backend and isinstance(artifacts, dict):
+			backend = artifacts.get("backend")
+		if backend:
+			self.current_record.stage6_backend = str(backend)
+		if status == "Success" and artifacts is not None:
+			self.current_record.stage6_status = "success"
+			self.current_record.stage6_artifacts = artifacts
+		elif error:
+			self.current_record.stage6_status = "failed"
+			self.current_record.stage6_error = str(error)
+			self.current_record.stage6_artifacts = artifacts
+
+		self._save_current_state()
+
 	def _save_current_state(self) -> None:
 		if not self.current_record or not self.current_log_dir:
 			return
@@ -353,6 +388,7 @@ class PipelineLogger:
 			self._write_stage3(handle, record)
 			self._write_stage4(handle, record)
 			self._write_stage5(handle, record)
+			self._write_stage6(handle, record)
 
 			handle.write("=" * 80 + "\n")
 			handle.write("END OF RECORD\n")
@@ -529,5 +565,36 @@ class PipelineLogger:
 			handle.write("\n")
 		elif record["stage5_error"]:
 			handle.write(f"\nError: {record['stage5_error']}\n")
+
+		handle.write("\n")
+
+	def _write_stage6(self, handle: Any, record: Dict[str, Any]) -> None:
+		handle.write("-" * 80 + "\n")
+		handle.write("STAGE 6: AgentSpeak → Jason Runtime Validation\n")
+		handle.write("-" * 80 + "\n")
+		handle.write(f"Status: {record['stage6_status'].upper()}\n")
+		handle.write(f"Backend: {record['stage6_backend']}\n")
+
+		if record["stage6_metadata"]:
+			handle.write("\n" + "~" * 40 + "\n")
+			title = (
+				"JASON VALIDATION SUMMARY"
+				if record["stage6_status"] == "success"
+				else "JASON VALIDATION DIAGNOSTICS"
+			)
+			handle.write(f"{title}\n")
+			handle.write("~" * 40 + "\n")
+			for key, value in record["stage6_metadata"].items():
+				handle.write(f"{key}: {value}\n")
+			handle.write("\n")
+
+		if record["stage6_status"] == "success" and record["stage6_artifacts"] is not None:
+			handle.write("\n" + "~" * 40 + "\n")
+			handle.write("JASON ARTIFACTS (Stage 6)\n")
+			handle.write("~" * 40 + "\n")
+			handle.write(json.dumps(record["stage6_artifacts"], indent=2))
+			handle.write("\n")
+		elif record["stage6_error"]:
+			handle.write(f"\nError: {record['stage6_error']}\n")
 
 		handle.write("\n")

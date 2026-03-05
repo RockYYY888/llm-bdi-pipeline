@@ -12,6 +12,7 @@ from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
 from stage3_method_synthesis.htn_schema import HTNLiteral
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
+from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
 from utils.hddl_condition_parser import HDDLConditionParser
 from utils.pipeline_logger import PipelineLogger
 
@@ -25,6 +26,7 @@ class LTL_BDI_Pipeline:
     Stage 3: DFA -> HTN Method Synthesis
     Stage 4: HTN Method Library -> PANDA Planning
     Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering
+    Stage 6: AgentSpeak -> Jason Runtime Validation
     """
 
     def __init__(self, domain_file: str = None):
@@ -135,10 +137,21 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 5", "error": "AgentSpeak rendering failed"}
 
+        # Stage 6: AgentSpeak -> Jason runtime validation
+        stage6_data = self._stage6_jason_validation(
+            ltl_spec,
+            method_library,
+            plan_records,
+            asl_code,
+        )
+        if stage6_data is None:
+            log_filepath = self.logger.end_pipeline(success=False)
+            print(f"\nExecution log saved to: {log_filepath}")
+            return {"success": False, "stage": "Stage 6", "error": "Jason runtime validation failed"}
+
         print("\n" + "="*80)
-        print("STAGES 1-5 COMPLETED SUCCESSFULLY")
+        print("STAGES 1-6 COMPLETED SUCCESSFULLY")
         print("="*80)
-        print("\nNote: Stage 6 (Jason validation / execution assets) is not part of the default run path")
 
         # End logger and save results
         log_filepath = self.logger.end_pipeline(success=True)
@@ -150,6 +163,7 @@ class LTL_BDI_Pipeline:
             "method_library": stage3_data["method_library"],
             "plans": stage4_data["transitions"],
             "agentspeak_code": asl_code,
+            "stage6": stage6_data,
         }
 
     def _stage1_parse_nl(self, nl_instruction: str):
@@ -1153,3 +1167,85 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None, None
+
+    def _stage6_jason_validation(self, ltl_spec, method_library, plan_records, asl_code):
+        """Stage 6: run generated AgentSpeak with Jason (RunLocalMAS)."""
+        print("\n[STAGE 6] Jason Runtime Validation")
+        print("-"*80)
+
+        try:
+            stage6_dir = Path(__file__).parent / "stage6_jason_validation"
+            runner = JasonRunner(stage6_dir=stage6_dir)
+            result = runner.validate(
+                agentspeak_code=asl_code,
+                target_literals=method_library.target_literals,
+                domain_name=self.domain.name,
+                output_dir=self.output_dir,
+            )
+            summary = {
+                "backend": result.backend,
+                "status": result.status,
+                "java_path": result.java_path,
+                "java_version": result.java_version,
+                "jason_jar": result.jason_jar,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "transition_count": len(plan_records),
+                "target_literal_count": len(method_library.target_literals),
+            }
+            artifacts = result.to_dict()
+            self.logger.log_stage6_jason_validation(
+                artifacts,
+                "Success",
+                metadata=summary,
+            )
+
+            print("✓ Jason runtime validation complete")
+            print(f"  Backend: {result.backend}")
+            print(f"  Java: {result.java_path} (major={result.java_version})")
+            print(f"  Jason jar: {result.jason_jar}")
+            print(f"  Exit code: {result.exit_code}")
+            print(f"  Stage 6 artifacts saved to: {self.output_dir}")
+
+            return {
+                "summary": summary,
+                "artifacts": artifacts,
+            }
+
+        except JasonValidationError as e:
+            metadata = dict(getattr(e, "metadata", {}) or {})
+            summary = {
+                "backend": "RunLocalMAS",
+                "status": "failed",
+                "error": str(e),
+            }
+            if metadata:
+                summary.update({
+                    "java_path": metadata.get("java_path"),
+                    "java_version": metadata.get("java_version"),
+                    "jason_jar": metadata.get("jason_jar"),
+                    "exit_code": metadata.get("exit_code"),
+                    "timed_out": metadata.get("timed_out"),
+                })
+            self.logger.log_stage6_jason_validation(
+                metadata if metadata else None,
+                "Failed",
+                error=str(e),
+                metadata=summary,
+            )
+            print(f"✗ Stage 6 Failed: {e}")
+            return None
+        except Exception as e:
+            self.logger.log_stage6_jason_validation(
+                None,
+                "Failed",
+                error=str(e),
+                metadata={
+                    "backend": "RunLocalMAS",
+                    "status": "failed",
+                },
+            )
+            print(f"✗ Stage 6 Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None

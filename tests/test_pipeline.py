@@ -9,6 +9,7 @@ This file is the canonical acceptance entry point:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTask,
 )
 from stage4_panda_planning.panda_planner import PANDAPlanner
+from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
 from utils.pipeline_logger import PipelineLogger
 
@@ -87,12 +89,26 @@ QUERY_CASES: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _pytest_selected_query_ids() -> List[str]:
+	"""Default to a single live query; opt in to full sweep explicitly."""
+	run_all = os.getenv("PIPELINE_TEST_ALL", "").lower() in {"1", "true", "yes"}
+	if run_all:
+		return sorted(QUERY_CASES)
+
+	query_id = os.getenv("PIPELINE_TEST_QUERY", "query_1")
+	if query_id not in QUERY_CASES:
+		query_id = "query_1"
+	return [query_id]
+
+
 def _ensure_live_dependencies() -> None:
 	config = get_config()
 	if not config.validate():
 		pytest.skip("Live pipeline tests require a valid OPENAI_API_KEY")
 	if not PANDAPlanner().toolchain_available():
 		pytest.skip("Live pipeline tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
+	if not JasonRunner().toolchain_available():
+		pytest.skip("Live pipeline tests require Stage 6 Java 17-23 and Jason runtime toolchain")
 
 
 def _required_artifact_paths(log_dir: Path) -> List[Path]:
@@ -106,6 +122,11 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "htn_method_library.json",
 		log_dir / "panda_transitions.json",
 		log_dir / "dfa.json",
+		log_dir / "jason_runner_agent.asl",
+		log_dir / "jason_runner.mas2j",
+		log_dir / "jason_stdout.txt",
+		log_dir / "jason_stderr.txt",
+		log_dir / "jason_validation.json",
 	]
 
 
@@ -377,7 +398,14 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 	if execution["natural_language"] != case["instruction"]:
 		bug_messages.append("execution.json natural_language does not match selected query")
 
-	for stage_key in ("stage1_status", "stage2_status", "stage3_status", "stage4_status", "stage5_status"):
+	for stage_key in (
+		"stage1_status",
+		"stage2_status",
+		"stage3_status",
+		"stage4_status",
+		"stage5_status",
+		"stage6_status",
+	):
 		if execution.get(stage_key) != "success":
 			bug_messages.append(f"{stage_key} is not success")
 
@@ -464,6 +492,21 @@ def _run_query_case(query_id: str) -> Dict[str, Any]:
 		bug_messages.append("execution.txt is missing Stage 4 section")
 	if "STAGE 5: HTN Methods + DFA Wrappers → AgentSpeak Rendering" not in execution_txt:
 		bug_messages.append("execution.txt is missing Stage 5 section")
+	if "STAGE 6: AgentSpeak → Jason Runtime Validation" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 6 section")
+
+	stage6_artifacts = execution.get("stage6_artifacts") or {}
+	if stage6_artifacts.get("status") != "success":
+		bug_messages.append("Stage 6 status payload is not success")
+	if stage6_artifacts.get("backend") != "RunLocalMAS":
+		bug_messages.append("Stage 6 backend is not RunLocalMAS")
+	if stage6_artifacts.get("timed_out"):
+		bug_messages.append("Stage 6 run timed out")
+	stage6_stdout = stage6_artifacts.get("stdout") or ""
+	if "stage6 exec success" not in stage6_stdout:
+		bug_messages.append("Stage 6 stdout missing success marker")
+	if "stage6 exec failed" in stage6_stdout:
+		bug_messages.append("Stage 6 stdout contains failure marker")
 
 	return {
 		"query_id": query_id,
@@ -697,7 +740,7 @@ def test_method_validation_initial_facts_allocate_typed_witness_objects():
 	assert object_types["witness_block_1"] == "block"
 
 
-@pytest.mark.parametrize("query_id", sorted(QUERY_CASES))
+@pytest.mark.parametrize("query_id", _pytest_selected_query_ids())
 def test_blocksworld_pipeline_query_case(query_id: str):
 	_ensure_live_dependencies()
 	report = _run_query_case(query_id)

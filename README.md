@@ -1,8 +1,8 @@
-# LTLf to PANDA-Backed BDI Pipeline
+# LTLf-HTN-PANDA-AgentSpeak-Jason Pipeline
 
 This repository generates AgentSpeak plan libraries from natural-language goals.
-The pipeline now uses **Stage 3 HTN method synthesis, Stage 4 PANDA planning,**
-and **Stage 5 AgentSpeak rendering**.
+The default runtime mainline is **Stage 1 -> Stage 6** in
+`src/main.py` -> `LTL_BDI_Pipeline.execute(mode="dfa_agentspeak")`.
 The only actively maintained planning domain in this repository is **blocksworld**.
 
 ## Current Architecture
@@ -25,23 +25,27 @@ The only actively maintained planning domain in this repository is **blocksworld
    - Does: uses an LLM to synthesize the HTN method library for the current DFA targets
    - Output: `HTNMethodLibrary`
 
-4. **Stage 4: HTN Method Library -> PANDA Planning**
+4. **Stage 4: HTN Method Library -> PANDA Validation**
    - `src/stage4_panda_planning/`
-   - Input: `HTNMethodLibrary` + target transition literals + concrete object set
-   - Does: builds a temporary HDDL domain/problem pair, augments export-time noop guards for already-satisfied literal-check helper tasks, and solves it with the PANDA PI toolchain
-   - Output: PANDA plan records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
+   - Input: `HTNMethodLibrary` + Stage 3 transition specs + concrete object set
+   - Does: builds temporary HDDL domain/problem files and uses PANDA PI to produce
+     existence witnesses for (a) transition-bound tasks and (b) query-relevant sibling methods
+   - Output: PANDA validation records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
 
 5. **Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering**
    - `src/stage5_agentspeak_rendering/`
-   - Input: `HTNMethodLibrary` + validated PANDA transition records + HDDL domain
+   - Input: `HTNMethodLibrary` + validated transition records + HDDL domain
    - Does: emits primitive action wrappers, the full HTN method library as AgentSpeak plans,
      and DFA state-aware transition wrappers
    - Output: `agentspeak_generated.asl`
 
-6. **Stage 6 Assets: Jason Validation**
+6. **Stage 6: AgentSpeak -> Jason Runtime Validation**
    - `src/stage6_jason_validation/`
-   - Contains Jason source and a local validation project
-   - This is not part of the default Stage 1-5 generation path
+   - Input: Stage 5 `agentspeak_generated.asl` + Stage 3 target literals
+   - Does: appends a Stage 6 execution wrapper, launches Jason via
+     `jason.infra.local.RunLocalMAS`, and validates runtime markers
+   - Output: `jason_runner_agent.asl`, `jason_runner.mas2j`, runtime stdout/stderr,
+     and `jason_validation.json`
 
 ## Important Design Choices
 
@@ -49,13 +53,19 @@ The only actively maintained planning domain in this repository is **blocksworld
 - Stage 4 uses the PANDA PI toolchain on temporary HDDL domain/problem files.
 - Stage 4 keeps the problem-instance builder separate from the planner entrypoint. The default
   builder is explicit and configurable instead of hard-coding initial-state facts inside the planner.
+- Stage 4 is an existence-witness validation step for the current query structure, not a global
+  completeness proof over the entire domain state space.
 - Stage 5 renders static, domain-specific AgentSpeak from the HTN method library, while Stage 4
-  PANDA results remain validation artifacts plus DFA-edge witnesses.
+  PANDA outputs remain validation artifacts plus DFA-edge witnesses.
+- Stage 6 is enabled by default and is a hard gate: if Jason validation fails, the full pipeline
+  run fails.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
-- The full end-to-end pipeline still requires an API key because Stage 1 is LLM-only.
+- The full end-to-end pipeline requires an API key because Stage 1 and Stage 3 are LLM-backed.
 - The full Stage 4 path requires the PANDA PI toolchain (`pandaPIparser`, `pandaPIgrounder`,
   `pandaPIengine`). The runtime auto-detects a local install under `$HOME/.local/pandaPI/bin`,
   or you can expose it through `PATH`, `PANDA_PI_HOME`, or `PANDA_PI_BIN`.
+- Stage 6 requires Java 17-23 and a Jason CLI build from
+  `src/stage6_jason_validation/jason_src`.
 
 ## Repository Layout
 
@@ -194,24 +204,44 @@ export PATH="$HOME/.local/pandaPI/bin:$PATH"
 If you do not add that `PATH` export, the Stage 4 runtime still auto-discovers
 the default install directory above.
 
-6. Run the canonical acceptance test:
+6. Ensure Java 17-23 is available and build Jason CLI:
 
 ```bash
-./.venv/bin/pytest -q tests/test_pipeline.py
+# Example (macOS Corretto 23)
+export STAGE6_JAVA_HOME=/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home
+export JAVA_HOME="$STAGE6_JAVA_HOME"
+
+cd src/stage6_jason_validation/jason_src
+./gradlew config
+cd ../../..
+```
+
+7. Run the canonical development acceptance test (single query):
+
+```bash
+./.venv/bin/python tests/test_pipeline.py query_1
 ```
 
 This test requires:
 - a valid `OPENAI_API_KEY` in `.env`
 - a working PANDA PI toolchain
-- the default local PANDA install path (`$HOME/.local/pandaPI/bin`) or an equivalent `PATH` / `PANDA_PI_*` configuration
+- Stage 6 Java 17-23 + Jason runtime toolchain
+- the default local PANDA install path (`$HOME/.local/pandaPI/bin`) or an equivalent
+  `PATH` / `PANDA_PI_*` configuration
 
-7. Run the full pipeline on a real blocksworld instruction:
+8. Run the full pipeline acceptance sweep only at final validation:
+
+```bash
+PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
+```
+
+9. Run the full pipeline on a real blocksworld instruction:
 
 ```bash
 ./.venv/bin/python src/main.py "Using blocks a and b, arrange them so that a is on b."
 ```
 
-8. Inspect the generated artifacts:
+10. Inspect the generated artifacts:
 
 - The pipeline writes a timestamped directory under `logs/`
 - Each successful run contains:
@@ -224,6 +254,11 @@ This test requires:
   - `agentspeak_generated.asl`
   - `htn_method_library.json`
   - `panda_transitions.json`
+  - `jason_runner_agent.asl`
+  - `jason_runner.mas2j`
+  - `jason_stdout.txt`
+  - `jason_stderr.txt`
+  - `jason_validation.json`
 
 ## Running the Pipeline
 
@@ -239,6 +274,9 @@ Notes:
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
 - Stage 4 looks for `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` in this order:
   `PATH`, `PANDA_PI_HOME/bin`, `PANDA_PI_BIN`, `$HOME/.local/pandaPI/bin`.
+- Stage 6 looks for a supported Java runtime (17-23) in this order:
+  `STAGE6_JAVA_BIN`, `STAGE6_JAVA_HOME/bin/java`, `JAVA_HOME/bin/java`, `PATH`, and
+  macOS JVM directories.
 - The maintained domain is `src/domains/blocksworld/`.
 - Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
 
@@ -251,19 +289,25 @@ Run the focused stage tests:
 ./.venv/bin/pytest -q tests/stage4_panda_planning/test_panda_planner.py
 ./.venv/bin/pytest -q tests/stage4_panda_planning/test_stage4_panda_planning.py
 ./.venv/bin/pytest -q tests/stage5_agentspeak_rendering/test_agentspeak_renderer.py
-./.venv/bin/pytest -q tests/test_pipeline.py
+./.venv/bin/pytest -q tests/stage6_jason_validation/test_jason_runner.py
+./.venv/bin/pytest -q tests/stage6_jason_validation/test_stage6_integration.py
 ```
 
-The canonical example acceptance test is:
+The canonical development acceptance check is a single live query:
 
 ```bash
-./.venv/bin/pytest -q tests/test_pipeline.py
+./.venv/bin/python tests/test_pipeline.py query_1
 ```
 
-It runs a fixed blocksworld example through `pipeline.execute()` and checks that the logger
-captured each stage's live inputs, outputs, and persisted artifacts. The test uses the real
-Stage 1/2/3/4/5 execution path (no stubbed Stage 1 response) and writes its run records under
-`tests/logs/`.
+For final full acceptance, run the full live sweep explicitly:
+
+```bash
+PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
+```
+
+`tests/test_pipeline.py` defaults to one query in pytest mode and only runs all queries when
+`PIPELINE_TEST_ALL=1` is provided. You can also select a specific query with
+`PIPELINE_TEST_QUERY=query_3`.
 
 Run the Stage 2 DFA tests:
 
@@ -276,11 +320,22 @@ are not part of the default fast regression loop in environments without API acc
 
 ## Pipeline Outputs
 
-A successful Stage 1-5 run writes:
+A successful Stage 1-6 run writes:
 
+- `execution.json`
+- `execution.txt`
+- `grounding_map.json`
+- `dfa_original.dot`
+- `dfa_simplified.dot`
+- `dfa.json`
 - `agentspeak_generated.asl`
 - `htn_method_library.json`
 - `panda_transitions.json`
+- `jason_runner_agent.asl`
+- `jason_runner.mas2j`
+- `jason_stdout.txt`
+- `jason_stderr.txt`
+- `jason_validation.json`
 
 The logger also records the Stage 3 synthesis metadata, Stage 4 PANDA metadata,
 and Stage 5 rendering metadata inside the run log.

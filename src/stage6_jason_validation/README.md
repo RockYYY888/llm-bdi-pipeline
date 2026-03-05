@@ -1,152 +1,87 @@
-# Stage 6: Jason AgentSpeak Validation
+# Stage 6: Jason Runtime Validation
 
-This stage validates AgentSpeak (.asl) code generated from Stage 5 using the Jason BDI framework.
+Stage 6 is part of the default pipeline mainline.
+After Stage 5 renders `agentspeak_generated.asl`, Stage 6 validates runtime execution in Jason.
 
-## Directory Structure
+## Current Backend
 
-```
-stage6_jason_validation/
-├── jason_src/              # Jason framework source code (built from GitHub)
-│   ├── jason-cli/          # Jason command-line interface
-│   └── jason-interpreter/  # Jason interpreter core
-└── jason_project/          # Test project for validating AgentSpeak code
-    ├── src/asl/            # AgentSpeak source files
-    │   ├── test_agent.asl      # Comprehensive test agent
-    │   └── simple_test.asl     # Simple validation agent
-    ├── test_agent.mas2j    # Jason MAS configuration (comprehensive)
-    ├── simple_test.mas2j   # Jason MAS configuration (simple)
-    ├── run_jason.sh        # Wrapper script to run Jason with correct Java
-    └── test_jason.sh       # Test script for validation
-```
+- **Backend**: `RunLocalMAS` (`jason.infra.local.RunLocalMAS`)
+- **Entry implementation**: `src/stage6_jason_validation/jason_runner.py`
+- **Result policy**: hard-fail (Stage 6 failure makes the full pipeline fail)
 
-## Prerequisites
+## Runtime Flow
 
-### 1. Java Installation
+For each pipeline run, Stage 6 writes and executes:
 
-Jason requires Java 17-23. This project uses **Amazon Corretto 23**:
-- **Java Home**: `/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home`
-- Java 24 is **NOT** supported by the current Jason Gradle build system
+1. `jason_runner_agent.asl`
+   - Copy of Stage 5 output
+   - Appended wrapper goal `!stage6_exec`
+   - Seeds positive target beliefs from Stage 3 literals
+   - Executes `!run_dfa`
+   - Emits markers:
+     - `stage6 exec success`
+     - `stage6 exec failed`
 
-### 2. Gradle Installation
+2. `jason_runner.mas2j`
+   - Single-agent MAS file for `jason_runner_agent`
+   - `aslSourcePath: "."`
 
-Gradle is used to build Jason from source:
-```bash
-brew install gradle
-```
-
-## Setup
-
-### Building Jason
-
-Jason has been built from source and is located in `jason_src/`:
+3. Java command:
 
 ```bash
-cd jason_src
-export JAVA_HOME=/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home
-./gradlew config  # Builds Jason CLI
+java -cp <jason-cli-all-*.jar> \
+  jason.infra.local.RunLocalMAS \
+  jason_runner.mas2j \
+  --log-conf <console-info-logging.properties>
 ```
 
-The built Jason JAR is located at:
-```
-jason_src/jason-cli/build/bin/jason-cli-all-3.3.1.jar
-```
+4. Artifacts written in pipeline log dir:
+   - `jason_stdout.txt`
+   - `jason_stderr.txt`
+   - `jason_validation.json`
 
-## Running AgentSpeak Code
+## Success Criteria
 
-### Method 1: Using the Test Script (Recommended)
+Stage 6 succeeds only if all checks pass:
+
+1. Process finished (not timeout)
+2. Exit code is `0`
+3. `stdout` contains `stage6 exec success`
+4. `stdout` does **not** contain `stage6 exec failed`
+
+## Java Discovery
+
+Stage 6 selects Java in this order:
+
+1. `STAGE6_JAVA_BIN`
+2. `STAGE6_JAVA_HOME/bin/java`
+3. `JAVA_HOME/bin/java`
+4. `PATH` (`java`)
+5. macOS JVM directories
+
+Supported versions: **17-23**.
+If no supported Java is found, Stage 6 fails.
+
+## Jason Build Discovery
+
+Stage 6 checks:
+
+- `src/stage6_jason_validation/jason_src/jason-cli/build/bin/jason-cli-all-*.jar`
+
+If missing, Stage 6 runs:
 
 ```bash
-cd jason_project
-./test_jason.sh
-```
-
-This script:
-1. Sets the correct Java version (Java 23)
-2. Runs the simple_test agent
-3. Validates that Jason BDI framework is working
-
-### Method 2: Manual Execution
-
-```bash
-cd jason_project
-export JAVA_HOME=/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home
-$JAVA_HOME/bin/java -jar ../jason_src/jason-cli/build/bin/jason-cli-all-3.3.1.jar <your_file>.mas2j --console
-```
-
-### Method 3: Using run_jason.sh Wrapper
-
-```bash
-cd jason_project
-./run_jason.sh test_agent.mas2j
-```
-
-## Test Agents
-
-### simple_test.asl
-A minimal agent that:
-- Starts with an initial goal
-- Prints success messages
-- Validates basic BDI operations
-- Stops the MAS
-
-### test_agent.asl
-A more comprehensive agent that:
-- Tests goal achievement
-- Tests belief operations (addition and querying)
-- Validates all basic BDI operations
-- Includes failure handling
-
-## Usage for Stage 5 Output
-
-To validate AgentSpeak code generated from Stage 5:
-
-1. Place the generated `.asl` file in `jason_project/src/asl/`
-2. Create or modify the `.mas2j` configuration file:
-```
-MAS your_system_name {
-    infrastructure: Centralised
-    agents: your_agent_name;
-    aslSourcePath: "src/asl";
-}
-```
-3. Run the agent:
-```bash
-./test_jason.sh  # after modifying to use your .mas2j file
-# or
-$JAVA_HOME/bin/java -jar ../jason_src/jason-cli/build/bin/jason-cli-all-3.3.1.jar your_file.mas2j --console
-```
-
-## Troubleshooting
-
-### Java Version Issues
-
-If you encounter "Unsupported class file major version" errors:
-- Ensure you're using Java 23 (Corretto)
-- Check `JAVA_HOME` is set correctly:
-```bash
-export JAVA_HOME=/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home
-```
-
-### Jason Build Issues
-
-If Jason fails to build:
-```bash
-cd jason_src
-export JAVA_HOME=/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home
-./gradlew clean
+cd src/stage6_jason_validation/jason_src
 ./gradlew config
 ```
 
-### No Output from Agent
+If build still does not produce the jar, Stage 6 fails.
 
-Jason runs in console mode with `--console` flag. If no agent output appears:
-- Check that `.stopMAS` is called in your agent
-- Verify the .mas2j file points to the correct .asl file
-- Check for syntax errors in the AgentSpeak code
+## Notes on Negation (Current)
 
-## Notes
+Current Stage 6 follows Stage 5 semantics:
 
-- **Maven was initially attempted** but Jason artifacts are not available in Maven Central or JaCaMo repositories
-- **Gradle is the official build tool** for Jason 3.x
-- **Jason CLI** is the maintained workflow for this validation setup
-- The test agents demonstrate that the Jason BDI framework environment is properly configured and functional
+- `not p(...)` uses Jason NAF behavior (fact absence)
+- No `~p(...)` strong-negation migration in this version
+
+Strong-negation support is planned for a future iteration.
