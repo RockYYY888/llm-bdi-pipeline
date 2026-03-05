@@ -276,6 +276,8 @@ class LTL_BDI_Pipeline:
                 domain=self.domain,
                 grounding_map=grounding_map,
                 dfa_result=dfa_result,
+                query_text=getattr(ltl_spec, "source_instruction", ""),
+                negation_hints=getattr(ltl_spec, "negation_hints", {}),
             )
             self._validate_method_library_typing(method_library)
             summary = {
@@ -288,6 +290,7 @@ class LTL_BDI_Pipeline:
                     "llm_attempt_durations_seconds",
                 ),
                 "target_literals": synthesis_meta["target_literals"],
+                "negation_resolution": synthesis_meta.get("negation_resolution", {}),
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
@@ -1747,7 +1750,12 @@ class LTL_BDI_Pipeline:
                 method_library,
                 seed_facts,
             )
-            action_schemas = self._stage6_action_schemas()
+            negation_mode_lookup = {
+                f"{literal.predicate}/{len(literal.args)}": literal.negation_mode
+                for literal in method_library.target_literals
+                if not literal.is_positive and not literal.is_equality
+            }
+            action_schemas = self._stage6_action_schemas(negation_mode_lookup)
             result = runner.validate(
                 agentspeak_code=asl_code,
                 target_literals=method_library.target_literals,
@@ -1772,6 +1780,7 @@ class LTL_BDI_Pipeline:
                 "resolved_object_types": stage6_object_types,
                 "action_schema_count": len(action_schemas),
                 "environment_adapter": result.environment_adapter,
+                "negation_mode_lookup": negation_mode_lookup,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(
@@ -1857,7 +1866,8 @@ class LTL_BDI_Pipeline:
 
         return tuple(facts), ",".join(source_steps)
 
-    def _stage6_action_schemas(self):
+    def _stage6_action_schemas(self, negation_mode_lookup=None):
+        negation_mode_lookup = dict(negation_mode_lookup or {})
         parser = HDDLConditionParser()
         schemas = []
         for action in self.domain.actions:
@@ -1871,6 +1881,10 @@ class LTL_BDI_Pipeline:
                             "predicate": literal.predicate,
                             "args": list(literal.args),
                             "is_positive": literal.is_positive,
+                            "negation_mode": negation_mode_lookup.get(
+                                f"{literal.predicate}/{len(literal.args)}",
+                                "naf",
+                            ),
                         }
                         for literal in parsed.preconditions
                     ],
@@ -1879,6 +1893,10 @@ class LTL_BDI_Pipeline:
                             "predicate": literal.predicate,
                             "args": list(literal.args),
                             "is_positive": literal.is_positive,
+                            "negation_mode": negation_mode_lookup.get(
+                                f"{literal.predicate}/{len(literal.args)}",
+                                "naf",
+                            ),
                         }
                         for literal in parsed.effects
                     ],

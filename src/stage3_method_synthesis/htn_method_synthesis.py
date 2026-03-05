@@ -25,8 +25,10 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethodLibrary,
 	HTNMethodStep,
 	HTNTask,
+	HTNTargetTaskBinding,
 )
 from utils.hddl_condition_parser import HDDLConditionParser
+from utils.negation_mode_resolver import NegationResolution, resolve_negation_modes
 
 
 class HTNSynthesisError(RuntimeError):
@@ -82,17 +84,31 @@ class HTNMethodSynthesizer:
 		domain: Any,
 		grounding_map: GroundingMap | Dict[str, Any] | None,
 		dfa_result: Dict[str, Any],
+		*,
+		query_text: Optional[str] = None,
+		negation_hints: Optional[Dict[str, Any]] = None,
 	) -> Tuple[HTNMethodLibrary, Dict[str, Any]]:
 		"""Create a method library and metadata for logging."""
 
 		normalised_grounding_map = self._normalise_grounding_map(grounding_map)
 		target_literals = self.extract_target_literals(normalised_grounding_map, dfa_result)
+		negation_resolution = resolve_negation_modes(
+			domain,
+			target_literals,
+			query_text=query_text,
+			stage1_hints=negation_hints,
+		)
+		target_literals = [
+			negation_resolution.apply(literal)
+			for literal in target_literals
+		]
 		primitive_tasks = self._build_primitive_tasks(domain)
 
 		metadata: Dict[str, Any] = {
 			"used_llm": False,
 			"model": self.model if self.client else None,
 			"target_literals": [literal.to_signature() for literal in target_literals],
+			"negation_resolution": negation_resolution.to_dict(),
 			"compound_tasks": 0,
 			"primitive_tasks": len(primitive_tasks),
 			"methods": 0,
@@ -142,6 +158,11 @@ class HTNMethodSynthesizer:
 			target_literals=list(target_literals),
 			target_task_bindings=list(llm_library.target_task_bindings),
 		)
+		llm_only_library = self._apply_negation_resolution_to_library(
+			llm_only_library,
+			negation_resolution,
+		)
+		llm_only_library = self._normalise_target_binding_signatures(llm_only_library)
 		llm_only_library, pruned_count = self._prune_redundant_constructive_siblings(
 			llm_only_library,
 			domain,
@@ -691,6 +712,76 @@ class HTNMethodSynthesizer:
 			target_task_bindings=list(library.target_task_bindings),
 		)
 
+	def _apply_negation_resolution_to_library(
+		self,
+		library: HTNMethodLibrary,
+		negation_resolution: NegationResolution,
+	) -> HTNMethodLibrary:
+		def apply_literal(literal: HTNLiteral) -> HTNLiteral:
+			return negation_resolution.apply(literal)
+
+		def apply_step(step: HTNMethodStep) -> HTNMethodStep:
+			return HTNMethodStep(
+				step_id=step.step_id,
+				task_name=step.task_name,
+				args=step.args,
+				kind=step.kind,
+				action_name=step.action_name,
+				literal=apply_literal(step.literal) if step.literal else None,
+				preconditions=tuple(apply_literal(item) for item in step.preconditions),
+				effects=tuple(apply_literal(item) for item in step.effects),
+			)
+
+		def apply_method(method: HTNMethod) -> HTNMethod:
+			return HTNMethod(
+				method_name=method.method_name,
+				task_name=method.task_name,
+				parameters=method.parameters,
+				context=tuple(apply_literal(item) for item in method.context),
+				subtasks=tuple(apply_step(step) for step in method.subtasks),
+				ordering=method.ordering,
+				origin=method.origin,
+			)
+
+		return HTNMethodLibrary(
+			compound_tasks=list(library.compound_tasks),
+			primitive_tasks=list(library.primitive_tasks),
+			methods=[apply_method(method) for method in library.methods],
+			target_literals=[apply_literal(item) for item in library.target_literals],
+			target_task_bindings=list(library.target_task_bindings),
+		)
+
+	def _normalise_target_binding_signatures(
+		self,
+		library: HTNMethodLibrary,
+	) -> HTNMethodLibrary:
+		canonical_signatures = {
+			literal.to_signature()
+			for literal in library.target_literals
+		}
+		alternate_lookup: Dict[str, str] = {}
+		for signature in canonical_signatures:
+			alternate_lookup[signature] = signature
+			if signature.startswith("!"):
+				alternate_lookup[f"~{signature[1:]}"] = signature
+			elif signature.startswith("~"):
+				alternate_lookup[f"!{signature[1:]}"] = signature
+
+		bindings = [
+			HTNTargetTaskBinding(
+				target_literal=alternate_lookup.get(binding.target_literal, binding.target_literal),
+				task_name=binding.task_name,
+			)
+			for binding in library.target_task_bindings
+		]
+		return HTNMethodLibrary(
+			compound_tasks=list(library.compound_tasks),
+			primitive_tasks=list(library.primitive_tasks),
+			methods=list(library.methods),
+			target_literals=list(library.target_literals),
+			target_task_bindings=bindings,
+		)
+
 	def _normalise_method_parameters(
 		self,
 		parameters: Tuple[str, ...],
@@ -1043,6 +1134,7 @@ class HTNMethodSynthesizer:
 				predicate=literal.predicate,
 				args=tuple(task.parameters),
 				is_positive=literal.is_positive,
+				negation_mode=literal.negation_mode,
 				source_symbol=None,
 			)
 			bound_methods = [
@@ -1222,6 +1314,7 @@ class HTNMethodSynthesizer:
 				predicate=literal.predicate,
 				args=tuple(task.parameters),
 				is_positive=literal.is_positive,
+				negation_mode=literal.negation_mode,
 				source_symbol=None,
 			)
 			bound_methods = methods_by_task.get(task_name, [])
@@ -1323,6 +1416,7 @@ class HTNMethodSynthesizer:
 				predicate=pattern.predicate,
 				args=tuple(bindings.get(arg, arg) for arg in pattern.args),
 				is_positive=pattern.is_positive,
+				negation_mode=getattr(pattern, "negation_mode", "naf"),
 				source_symbol=None,
 			)
 			for pattern in patterns
@@ -1908,6 +2002,7 @@ class HTNMethodSynthesizer:
 									"predicate": "loaded",
 									"args": ["X1"],
 									"is_positive": True,
+									"negation_mode": "naf",
 									"source_symbol": None,
 								},
 								"preconditions": [],
@@ -1923,6 +2018,7 @@ class HTNMethodSynthesizer:
 									"predicate": "delivered",
 									"args": ["X1"],
 									"is_positive": True,
+									"negation_mode": "naf",
 									"source_symbol": None,
 								},
 								"preconditions": [],

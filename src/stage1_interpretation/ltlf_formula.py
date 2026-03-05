@@ -227,6 +227,8 @@ class LTLSpecification:
         self.objects: List[str] = []
         self.initial_state: List[Dict[str, List[str]]] = []
         self.grounding_map: Optional['GroundingMap'] = None
+        self.source_instruction: str = ""
+        self.negation_hints: Dict[str, Any] = {}
 
     def add_formula(self, formula: LTLFormula):
         """Add an LTL formula to the specification"""
@@ -238,11 +240,15 @@ class LTLSpecification:
             "formulas": [f.to_dict() for f in self.formulas],
             "formulas_string": [f.to_string() for f in self.formulas],
             "objects": self.objects,
-            "initial_state": self.initial_state
+            "initial_state": self.initial_state,
         }
 
         # Include grounding map if available
         if self.grounding_map:
             result["grounding_map"] = self.grounding_map.to_dict()
+        if self.source_instruction:
+            result["source_instruction"] = self.source_instruction
+        if self.negation_hints:
+            result["negation_hints"] = dict(self.negation_hints)
 
         return result

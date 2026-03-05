@@ -132,3 +132,46 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
     assert "failure_reason: invalid payload" in execution_txt
     assert "LLM RESPONSE (Stage 3)" in execution_txt
     assert "Error: HTN synthesis failed during response_parse: invalid payload" in execution_txt
+
+
+def test_stage3_summary_uses_tilde_signature_for_strong_negative_literals(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path))
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        output_dir=str(tmp_path),
+    )
+
+    method_library = {
+        "compound_tasks": [
+            {"name": "keep_not_clear", "parameters": ["B"], "is_primitive": False},
+        ],
+        "primitive_tasks": [],
+        "methods": [
+            {"method_name": "m_keep_not_clear_noop", "task_name": "keep_not_clear"},
+        ],
+        "target_literals": [
+            {
+                "predicate": "clear",
+                "args": ["a"],
+                "is_positive": False,
+                "negation_mode": "strong",
+                "source_symbol": "clear_a",
+            },
+        ],
+        "target_task_bindings": [
+            {"target_literal": "~clear(a)", "task_name": "keep_not_clear"},
+        ],
+    }
+
+    logger.log_stage3_method_synthesis(
+        method_library,
+        "Success",
+        metadata={"negation_resolution": {"mode_by_predicate": {"clear/1": "strong"}}},
+    )
+    logger.end_pipeline(success=True)
+
+    execution = json.loads((logger.current_log_dir / "execution.json").read_text())
+    assert execution["stage3_metadata"]["target_literals"] == ["~clear(a)"]
+    assert execution["negation_resolution"]["mode_by_predicate"] == {"clear/1": "strong"}

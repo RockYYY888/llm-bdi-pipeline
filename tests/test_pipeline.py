@@ -324,11 +324,20 @@ def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 		def __init__(self, *args, **kwargs):
 			pass
 
-		def synthesize(self, domain, grounding_map, dfa_result):
+		def synthesize(
+			self,
+			domain,
+			grounding_map,
+			dfa_result,
+			*,
+			query_text=None,
+			negation_hints=None,
+		):
 			return method_library, {
 				"used_llm": True,
 				"model": "deepseek-chat",
 				"target_literals": ["on(a, b)"],
+				"negation_resolution": {"predicates": [], "mode_by_predicate": {}},
 				"compound_tasks": 1,
 				"primitive_tasks": 0,
 				"methods": 1,

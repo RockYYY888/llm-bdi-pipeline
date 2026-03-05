@@ -358,3 +358,66 @@ def test_renderer_emits_agentspeak_equality_and_disequality_constraints():
 
 	assert "+!keep_apart(BLOCK1, BLOCK2) : BLOCK1 \\== BLOCK2 <-" in code
 	assert "+!keep_apart(BLOCK1, BLOCK2) : BLOCK1 == BLOCK2 <-" in code
+
+
+def test_renderer_renders_naf_and_strong_negation_in_contexts():
+	renderer = AgentSpeakRenderer()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("check_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_check_clear_naf",
+				task_name="check_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), False, None, "naf"),
+				),
+			),
+			HTNMethod(
+				method_name="m_check_clear_strong",
+				task_name="check_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), False, None, "strong"),
+				),
+			),
+		],
+		target_literals=[
+			HTNLiteral("clear", ("a",), False, None, "strong"),
+		],
+		target_task_bindings=[
+			HTNTargetTaskBinding("~clear(a)", "check_clear"),
+		],
+	)
+
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a",),
+		method_library=method_library,
+		plan_records=[],
+	)
+
+	assert "+!check_clear(BLOCK) : not clear(BLOCK) <-" in code
+	assert "+!check_clear(BLOCK) : ~clear(BLOCK) <-" in code
+
+
+def test_renderer_emits_strong_negation_effect_updates_for_strong_predicates():
+	renderer = AgentSpeakRenderer()
+	method_library = HTNMethodLibrary(
+		target_literals=[
+			HTNLiteral("clear", ("a",), False, None, "strong"),
+		],
+	)
+
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a", "b"),
+		method_library=method_library,
+		plan_records=[],
+	)
+
+	assert "\t+~clear(BLOCK2)." in code
+	assert "\t-~clear(BLOCK);" in code

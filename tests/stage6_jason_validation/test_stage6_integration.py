@@ -12,7 +12,7 @@ if _src_dir not in sys.path:
 
 from stage3_method_synthesis.htn_schema import HTNLiteral
 from stage6_jason_validation.jason_runner import JasonRunner
-from utils.hddl_condition_parser import HDDLConditionParser
+from utils.hddl_condition_parser import HDDLConditionParser, UnsupportedHDDLConstructError
 from utils.hddl_parser import HDDLParser
 
 
@@ -38,6 +38,7 @@ def _load_blocksworld_action_schemas():
 						"predicate": literal.predicate,
 						"args": list(literal.args),
 						"is_positive": literal.is_positive,
+						"negation_mode": "naf",
 					}
 					for literal in parsed.preconditions
 				],
@@ -46,6 +47,7 @@ def _load_blocksworld_action_schemas():
 						"predicate": literal.predicate,
 						"args": list(literal.args),
 						"is_positive": literal.is_positive,
+						"negation_mode": "naf",
 					}
 					for literal in parsed.effects
 				],
@@ -144,3 +146,99 @@ def test_stage6_runs_mixed_goal_sample_agentspeak(tmp_path):
 	assert result.status == "success"
 	assert "stage6 exec success" in result.stdout
 	assert "stage6 exec failed" not in result.stdout
+
+
+def test_stage6_runs_strong_negation_case(tmp_path):
+	if not _stage6_ready():
+		pytest.skip("Stage 6 integration requires Java 17-23 and Jason runtime toolchain")
+
+	agentspeak_code = """/* Initial Beliefs */
+domain(test).
+object(a).
+dfa_state(q1).
+accepting_state(q2).
+dfa_edge_label(dfa_step_q1_q2_not_clear_a, "~clear(a)").
+
+/* Primitive Action Plans */
++!seal(BLOCK) : ~clear(BLOCK) <-
+\tseal(BLOCK);
+\t+~sealed(BLOCK).
+
+/* HTN Method Plans */
++!keep_not_clear(BLOCK) : true <-
+\t!seal(BLOCK).
+
+/* DFA Transition Wrappers */
++!dfa_step_q1_q2_not_clear_a : dfa_state(q1) <-
+\t!keep_not_clear(a);
+\t-dfa_state(q1);
+\t+dfa_state(q2).
+
+/* DFA Control Plans */
++!run_dfa : dfa_state(q2) & accepting_state(q2) <-
+\ttrue.
+
++!run_dfa : dfa_state(q1) <-
+\t!dfa_step_q1_q2_not_clear_a;
+\t!run_dfa.
+"""
+
+	runner = JasonRunner(timeout_seconds=60)
+	result = runner.validate(
+		agentspeak_code=agentspeak_code,
+		target_literals=[
+			HTNLiteral(
+				predicate="clear",
+				args=("a",),
+				is_positive=False,
+				source_symbol=None,
+				negation_mode="strong",
+			),
+		],
+		action_schemas=[
+			{
+				"functor": "seal",
+				"parameters": ["?x"],
+				"preconditions": [
+					{
+						"predicate": "clear",
+						"args": ["?x"],
+						"is_positive": False,
+						"negation_mode": "strong",
+					},
+				],
+				"effects": [
+					{
+						"predicate": "clear",
+						"args": ["?x"],
+						"is_positive": False,
+						"negation_mode": "strong",
+					},
+				],
+			},
+		],
+		seed_facts=("(not (clear a))",),
+		domain_name="strong_negation_demo",
+		output_dir=tmp_path,
+	)
+
+	assert result.status == "success"
+	assert "stage6 exec success" in result.stdout
+	assert "~clear(a)" in (tmp_path / "jason_runner_agent.asl").read_text()
+
+
+def test_stage6_fail_fast_on_unsupported_hddl_constructs():
+	parser = HDDLConditionParser()
+	action = type(
+		"ActionStub",
+		(),
+		{
+			"name": "unsupported_or",
+			"parameters": ["?x - object"],
+			"preconditions": "(or (p ?x) (q ?x))",
+			"effects": "(and)",
+		},
+	)()
+
+	with pytest.raises(UnsupportedHDDLConstructError, match="unsupported_or"):
+		parser.parse_action(action)

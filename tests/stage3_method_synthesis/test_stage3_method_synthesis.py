@@ -644,6 +644,89 @@ def test_negative_target_binding_must_match_negative_semantics():
 		synthesizer._validate_library(library, domain)
 
 
+def test_synthesize_injects_strong_negation_mode_and_tilde_signature(monkeypatch):
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	synthesizer.client = object()
+
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  node [shape = doublecircle]; 1;\n"
+			"  node [shape = circle]; 0;\n"
+			"  init [shape = plaintext, label = \"\"];\n"
+			"  init -> 0;\n"
+			"  0 -> 1 [label=\"!on_a_b\"];\n"
+			"}\n"
+		),
+	}
+
+	llm_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("remove_on", ("B1", "B2"), False, ("on",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_remove_on_noop",
+				task_name="remove_on",
+				parameters=("B1", "B2"),
+				context=(
+					HTNLiteral("on", ("B1", "B2"), False, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_remove_on_pickup",
+				task_name="remove_on",
+				parameters=("B1", "B2"),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up",
+						args=("B1", "B2"),
+						kind="primitive",
+						action_name="pick-up",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[
+			HTNTargetTaskBinding("!on(a, b)", "remove_on"),
+		],
+	)
+
+	def _fake_request_complete_llm_library(prompt, domain_obj, metadata):
+		return llm_library, '{"ok": true}', "stop"
+
+	monkeypatch.setattr(
+		synthesizer,
+		"_request_complete_llm_library",
+		_fake_request_complete_llm_library,
+	)
+
+	library, metadata = synthesizer.synthesize(
+		domain=domain,
+		grounding_map=grounding_map,
+		dfa_result=dfa_result,
+		query_text="Keep on(a,b) explicitly false.",
+	)
+
+	assert library.target_literals[0].negation_mode == "strong"
+	assert library.target_literals[0].to_signature() == "~on(a, b)"
+	assert metadata["target_literals"] == ["~on(a, b)"]
+	assert metadata["negation_resolution"]["mode_by_predicate"] == {"on/2": "strong"}
+	assert library.target_task_bindings[0].target_literal == "~on(a, b)"
+
+
 def test_method_validation_rejects_unbound_free_variables_in_subtasks():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -909,7 +992,7 @@ def test_sibling_constructive_methods_must_have_distinguishable_contexts():
 		],
 	)
 
-	with pytest.raises(ValueError, match="not semantically distinguishable"):
+	with pytest.raises(ValueError, match="semantically duplicate|not semantically distinguishable"):
 		synthesizer._validate_library(library, domain)
 
 

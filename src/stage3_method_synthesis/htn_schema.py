@@ -15,6 +15,12 @@ def _serialise_literal_list(values: Iterable["HTNLiteral"]) -> List[Dict[str, An
     return [value.to_dict() for value in values]
 
 
+def _normalise_negation_mode(raw_value: Any) -> Literal["naf", "strong"]:
+    if raw_value == "strong":
+        return "strong"
+    return "naf"
+
+
 @dataclass(frozen=True)
 class HTNLiteral:
     """A symbolic literal used by HTN methods and downstream planning artifacts."""
@@ -23,6 +29,7 @@ class HTNLiteral:
     args: Tuple[str, ...] = ()
     is_positive: bool = True
     source_symbol: Optional[str] = None
+    negation_mode: Literal["naf", "strong"] = "naf"
 
     @property
     def is_equality(self) -> bool:
@@ -37,6 +44,8 @@ class HTNLiteral:
             base = f"{base}({', '.join(self.args)})"
         if self.is_positive:
             return base
+        if self.negation_mode == "strong":
+            return f"~{base}"
         return f"!{base}"
 
     def to_agentspeak(self) -> str:
@@ -48,6 +57,8 @@ class HTNLiteral:
             base = f"{base}({', '.join(self.args)})"
         if self.is_positive:
             return base
+        if self.negation_mode == "strong":
+            return f"~{base}"
         return f"not {base}"
 
     def with_args(self, args: Iterable[str]) -> "HTNLiteral":
@@ -55,6 +66,7 @@ class HTNLiteral:
             predicate=self.predicate,
             args=tuple(args),
             is_positive=self.is_positive,
+            negation_mode=self.negation_mode,
             source_symbol=self.source_symbol,
         )
 
@@ -63,6 +75,7 @@ class HTNLiteral:
             "predicate": self.predicate,
             "args": list(self.args),
             "is_positive": self.is_positive,
+            "negation_mode": self.negation_mode,
             "source_symbol": self.source_symbol,
         }
 
@@ -201,6 +214,7 @@ class HTNMethodLibrary:
                 predicate=item["predicate"],
                 args=tuple(item.get("args", [])),
                 is_positive=bool(item.get("is_positive", True)),
+                negation_mode=_normalise_negation_mode(item.get("negation_mode", "naf")),
                 source_symbol=item.get("source_symbol"),
             )
 

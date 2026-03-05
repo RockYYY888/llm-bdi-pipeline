@@ -45,6 +45,7 @@ class PipelineRecord:
 	stage3_llm_prompt: Optional[Dict[str, str]] = None
 	stage3_llm_response: Optional[str] = None
 	stage3_metadata: Optional[Dict[str, Any]] = None
+	negation_resolution: Optional[Dict[str, Any]] = None
 
 	stage4_status: str = "pending"
 	stage4_backend: str = "pandaPI"
@@ -199,6 +200,10 @@ class PipelineLogger:
 			return
 
 		self.current_record.stage3_metadata = dict(metadata or {})
+		if self.current_record.stage3_metadata.get("negation_resolution"):
+			self.current_record.negation_resolution = dict(
+				self.current_record.stage3_metadata["negation_resolution"]
+			)
 		if model:
 			self.current_record.stage3_used_llm = True
 			self.current_record.stage3_model = model
@@ -266,8 +271,13 @@ class PipelineLogger:
 		predicate = item.get("predicate", "")
 		args = item.get("args", [])
 		is_positive = bool(item.get("is_positive", True))
+		negation_mode = item.get("negation_mode", "naf")
 		inner = f"{predicate}({', '.join(args)})" if args else predicate
-		return inner if is_positive else f"!{inner}"
+		if is_positive:
+			return inner
+		if negation_mode == "strong":
+			return f"~{inner}"
+		return f"!{inner}"
 
 	def log_stage4_panda_planning(
 		self,
@@ -500,6 +510,13 @@ class PipelineLogger:
 			handle.write("~" * 40 + "\n")
 			for key, value in record["stage3_metadata"].items():
 				handle.write(f"{key}: {value}\n")
+			handle.write("\n")
+
+		if record.get("negation_resolution"):
+			handle.write("\n" + "~" * 40 + "\n")
+			handle.write("NEGATION RESOLUTION\n")
+			handle.write("~" * 40 + "\n")
+			handle.write(json.dumps(record["negation_resolution"], indent=2))
 			handle.write("\n")
 
 		if record["stage3_status"] == "success" and record["stage3_method_library"] is not None:

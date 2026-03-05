@@ -10,6 +10,30 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Tuple
 
 
+class UnsupportedHDDLConstructError(ValueError):
+    """Raised when an action uses HDDL constructs outside the supported conjunction subset."""
+
+    def __init__(
+        self,
+        construct: str,
+        *,
+        action_name: str | None = None,
+        expression: str | None = None,
+    ) -> None:
+        self.construct = construct
+        self.action_name = action_name
+        self.expression = expression
+        message = (
+            f"Unsupported HDDL construct '{construct}'. "
+            "Only conjunctions, negation, and (in)equality literals are supported."
+        )
+        if action_name:
+            message += f" Action: {action_name}."
+        if expression:
+            message += f" Expression: {expression}"
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class HDDLLiteralPattern:
     """A symbolic literal pattern extracted from an HDDL expression."""
@@ -17,12 +41,14 @@ class HDDLLiteralPattern:
     predicate: str
     args: Tuple[str, ...]
     is_positive: bool = True
+    negation_mode: str = "naf"
 
     def bind(self, bindings: Dict[str, str]) -> "HDDLLiteralPattern":
         return HDDLLiteralPattern(
             predicate=self.predicate,
             args=tuple(bindings.get(arg, arg) for arg in self.args),
             is_positive=self.is_positive,
+            negation_mode=self.negation_mode,
         )
 
 
@@ -95,42 +121,82 @@ class HDDLSExpressionParser:
 class HDDLConditionParser:
     """Extract literal patterns from HDDL preconditions or effects."""
 
-    def parse_literals(self, expression: str) -> Tuple[HDDLLiteralPattern, ...]:
+    def parse_literals(
+        self,
+        expression: str,
+        *,
+        action_name: str | None = None,
+        scope: str = "condition",
+    ) -> Tuple[HDDLLiteralPattern, ...]:
         if not expression or expression.strip() == "none":
             return ()
         tree = HDDLSExpressionParser.parse_expression(expression)
-        return tuple(self._walk(tree))
+        return tuple(
+            self._walk(
+                tree,
+                action_name=action_name,
+                source_scope=scope,
+            )
+        )
 
     def parse_action(self, action: Any) -> ParsedActionSchema:
         parameters = tuple(self._extract_parameter_names(action.parameters))
         return ParsedActionSchema(
             name=action.name,
             parameters=parameters,
-            preconditions=self.parse_literals(action.preconditions),
-            effects=self.parse_literals(action.effects),
+            preconditions=self.parse_literals(
+                action.preconditions,
+                action_name=action.name,
+                scope="precondition",
+            ),
+            effects=self.parse_literals(
+                action.effects,
+                action_name=action.name,
+                scope="effect",
+            ),
         )
 
-    def _walk(self, node: Any, negated: bool = False) -> Iterable[HDDLLiteralPattern]:
+    def _walk(
+        self,
+        node: Any,
+        negated: bool = False,
+        *,
+        action_name: str | None = None,
+        source_scope: str = "condition",
+    ) -> Iterable[HDDLLiteralPattern]:
         if not isinstance(node, list) or not node:
             return ()
 
-        head = node[0]
+        head = str(node[0])
         if head == "and":
             items: List[HDDLLiteralPattern] = []
             for child in node[1:]:
-                items.extend(self._walk(child, negated))
+                items.extend(
+                    self._walk(
+                        child,
+                        negated,
+                        action_name=action_name,
+                        source_scope=source_scope,
+                    )
+                )
             return tuple(items)
 
         if head == "not":
-            if len(node) < 2:
+            if len(node) != 2:
                 return ()
-            return self._walk(node[1], not negated)
+            return self._walk(
+                node[1],
+                not negated,
+                action_name=action_name,
+                source_scope=source_scope,
+            )
 
-        if head in {"or", "when"}:
-            items: List[HDDLLiteralPattern] = []
-            for child in node[1:]:
-                items.extend(self._walk(child, negated))
-            return tuple(items)
+        if head in {"or", "when", "forall", "exists", "imply"}:
+            raise UnsupportedHDDLConstructError(
+                head,
+                action_name=action_name,
+                expression=f"{source_scope}: {node}",
+            )
 
         if head == "=":
             args = tuple(str(value) for value in node[1:])
@@ -139,6 +205,7 @@ class HDDLConditionParser:
                     predicate="=",
                     args=args,
                     is_positive=not negated,
+                    negation_mode="naf",
                 ),
             )
 
@@ -148,6 +215,7 @@ class HDDLConditionParser:
                 predicate=str(head),
                 args=args,
                 is_positive=not negated,
+                negation_mode="naf",
             ),
         )
 

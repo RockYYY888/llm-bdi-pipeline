@@ -83,9 +83,14 @@ If build still does not produce the jar, Stage 6 fails.
 
 ## Notes on Negation (Current)
 
-Current Stage 6 follows Stage 5 semantics:
+Stage 6 now supports both negation modes end-to-end:
 
-- `not p(...)` uses Jason NAF behavior (fact absence)
-- No `~p(...)` strong-negation migration in this version
+- `not p(...)` keeps NAF semantics (fact absence)
+- `~p(...)` uses explicit strong-negation facts
 
-Strong-negation support is planned for a future iteration.
+In the generated Java symbolic environment:
+
+- positive facts are stored in `world`
+- strong-negative facts are stored in `strongNegatives`
+- positive effects on strong predicates clear matching `~p(...)`
+- negative effects on strong predicates add matching `~p(...)`

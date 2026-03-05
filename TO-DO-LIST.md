@@ -2,11 +2,9 @@
 
 ## Current Focus
 
-- Keep the split Stage 3/4/5 path green under live Stage 1 and Stage 3 API runs.
-- Keep PANDA as the default Stage 4 validation backend while validating every
-  retained DFA edge and every remaining reachable sibling method branch.
-- Keep Stage 5 rendering aligned with a query-complete HTN method library rather
-  than a single PANDA witness path.
+- Keep the default Stage 1-6 path green with real Jason runtime validation.
+- Keep negation semantics explicit and traceable (`not` vs `~`) across Stage 3/5/6.
+- Keep HDDL parsing on the sound subset only (fail-fast on unsupported constructs).
 
 ## Milestones
 
@@ -30,3 +28,5 @@
   and full live revalidation for query_1 through query_6
 - [x] Milestone 15: Validation-task closure from target bindings, generic Stage 4 builder defaults,
   and Stage 3 truncation-safe live synthesis
+- [x] Milestone 16: Stage 6 symbolic-environment hardening, `not/~` end-to-end support,
+  negation-mode auto-resolution diagnostics, and HDDL unsupported-construct fail-fast

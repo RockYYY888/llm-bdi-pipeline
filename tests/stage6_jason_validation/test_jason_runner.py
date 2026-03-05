@@ -57,6 +57,24 @@ def test_runner_asl_includes_accepting_and_target_validation_without_manual_seed
 	assert "+on(a" not in asl
 
 
+def test_runner_asl_renders_strong_negation_targets_with_tilde():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"domain(test).",
+		[
+			HTNLiteral(
+				predicate="clear",
+				args=("b",),
+				is_positive=False,
+				source_symbol=None,
+				negation_mode="strong",
+			),
+		],
+	)
+
+	assert "+!stage6_verify_targets : ~clear(b) <-" in asl
+
+
 def test_rewrite_primitive_wrappers_keeps_only_external_action_call():
 	runner = JasonRunner()
 	code = """
@@ -273,3 +291,48 @@ def test_validate_timeout_is_reported(monkeypatch, tmp_path):
 	assert "timeout" in str(exc_info.value)
 	assert exc_info.value.metadata["timed_out"] is True
 	assert (tmp_path / "jason_validation.json").exists()
+
+
+def test_environment_java_source_uses_strong_negation_for_strong_predicates():
+	runner = JasonRunner()
+	java_source = runner._build_environment_java_source(
+		action_schemas=[
+			{
+				"functor": "seal",
+				"parameters": ["?x"],
+				"preconditions": [
+					{
+						"predicate": "clear",
+						"args": ["?x"],
+						"is_positive": False,
+						"negation_mode": "strong",
+					},
+				],
+				"effects": [
+					{
+						"predicate": "clear",
+						"args": ["?x"],
+						"is_positive": False,
+						"negation_mode": "strong",
+					},
+				],
+			},
+		],
+		seed_facts=["(not (clear a))"],
+		target_literals=[
+			HTNLiteral(
+				predicate="clear",
+				args=("a",),
+				is_positive=False,
+				source_symbol=None,
+				negation_mode="strong",
+			),
+		],
+	)
+
+	assert 'new Pattern("clear", false, "strong"' in java_source
+	assert 'strongNegatives.add("clear(a)")' in java_source
+	assert "else if (pattern.isStrongNegation())" in java_source
+	assert "holds = strongNegatives.contains(grounded);" in java_source
+	assert "strongNegatives.add(grounded);" in java_source
+	assert 'addPercept(Literal.parseLiteral("~" + atom));' in java_source
