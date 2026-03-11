@@ -68,7 +68,7 @@ QUERY_CASES: Dict[str, Dict[str, Any]] = {
 		"instruction": "Using blocks a and b, arrange them so that a is on b.",
 		"required_target_literals": ["on(a, b)"],
 		"problem_file": QUERY_1_PROBLEM_FILE,
-		"expected_action_path": ["pick_up_from_table(a)", "put_on_block(a,b)"],
+		"expected_action_path": ["pick-up-from-table(a)", "put-on-block(a,b)"],
 		"description": "Positive reachability goal",
 	},
 	"query_2": {

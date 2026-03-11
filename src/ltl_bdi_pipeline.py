@@ -1917,6 +1917,7 @@ class LTL_BDI_Pipeline:
             schemas.append(
                 {
                     "functor": self._sanitize_name(action.name),
+                    "source_name": action.name,
                     "parameters": list(parsed.parameters),
                     "preconditions": [
                         {

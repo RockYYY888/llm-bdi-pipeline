@@ -391,6 +391,7 @@ class JasonRunner:
 			functor = schema.get("functor")
 			if not functor:
 				continue
+			source_name = str(schema.get("source_name") or functor)
 			parameters = [str(item) for item in (schema.get("parameters") or [])]
 			preconditions = list(schema.get("preconditions") or [])
 			precondition_clauses = list(schema.get("precondition_clauses") or [])
@@ -401,12 +402,14 @@ class JasonRunner:
 				"""
 		register(new ActionSchema(
 			{functor},
+			{source_name},
 			new String[]{{{parameters}}},
 			{precondition_clauses},
 			new Pattern[]{{{effects}}}
 		));
 		""".strip().format(
 					functor=self._java_quote(functor),
+					source_name=self._java_quote(source_name),
 					parameters=", ".join(self._java_quote(item) for item in parameters),
 					precondition_clauses=self._render_precondition_clauses_java(
 						precondition_clauses,
@@ -450,17 +453,20 @@ public class {self.environment_class_name} extends Environment {{
 
 	private static final class ActionSchema {{
 		final String name;
+		final String sourceName;
 		final String[] parameters;
 		final Pattern[][] preconditionClauses;
 		final Pattern[] effects;
 
 		ActionSchema(
 			String name,
+			String sourceName,
 			String[] parameters,
 			Pattern[][] preconditionClauses,
 			Pattern[] effects
 		) {{
 			this.name = name;
+			this.sourceName = sourceName;
 			this.parameters = parameters;
 			this.preconditionClauses = preconditionClauses;
 			this.effects = effects;
@@ -486,8 +492,9 @@ public class {self.environment_class_name} extends Environment {{
 			System.out.println("runtime env unknown action " + action);
 			return false;
 		}}
+		String tracedAction = renderTraceAction(schema.sourceName, action);
 		if (action.getArity() != schema.parameters.length) {{
-			System.out.println("runtime env action failed " + action + " reason=arity");
+			System.out.println("runtime env action failed " + tracedAction + " reason=arity");
 			return false;
 		}}
 
@@ -502,13 +509,13 @@ public class {self.environment_class_name} extends Environment {{
 		}}
 
 		if (!checkPreconditions(schema.preconditionClauses, bindings)) {{
-			System.out.println("runtime env action failed " + action + " reason=precondition");
+			System.out.println("runtime env action failed " + tracedAction + " reason=precondition");
 			return false;
 		}}
 
 		applyEffects(schema.effects, bindings);
 		syncPercepts();
-		System.out.println("runtime env action success " + action);
+		System.out.println("runtime env action success " + tracedAction);
 		return true;
 	}}
 
@@ -613,6 +620,17 @@ public class {self.environment_class_name} extends Environment {{
 			}}
 		}}
 		return value;
+	}}
+
+	private String renderTraceAction(String sourceName, Structure action) {{
+		if (action.getArity() == 0) {{
+			return sourceName;
+		}}
+		String[] args = new String[action.getArity()];
+		for (int i = 0; i < action.getArity(); i++) {{
+			args[i] = canonical(action.getTerm(i).toString());
+		}}
+		return sourceName + "(" + String.join(",", args) + ")";
 	}}
 
 	private void syncPercepts() {{
