@@ -38,6 +38,7 @@ from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
+from utils.ipc_plan_verifier import IPCPlanVerifier
 from utils.pipeline_logger import PipelineLogger
 
 OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = str(
@@ -55,6 +56,7 @@ MARSROVER_PROBLEM_DIR = (
 
 
 BANNED_TASK_PREFIXES = ("achieve_", "maintain_not_", "ensure_", "goal_")
+IPC_PLAN_VERIFIER = IPCPlanVerifier()
 
 MARSROVER_BASE_QUERY_CASES: Dict[str, Dict[str, Any]] = {
 	"rover_query_1": {
@@ -455,6 +457,8 @@ def _ensure_live_dependencies() -> None:
 		pytest.skip("Live pipeline tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
 	if not JasonRunner().toolchain_available():
 		pytest.skip("Live pipeline tests require Stage 6 Java 17-23 and Jason runtime toolchain")
+	if not IPC_PLAN_VERIFIER.tool_available():
+		pytest.skip("Live pipeline tests require the official pandaPIparser verifier on PATH")
 
 
 def _required_artifact_paths(log_dir: Path) -> List[Path]:
@@ -473,6 +477,9 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "jason_stderr.txt",
 		log_dir / "jason_validation.json",
 		log_dir / "action_path.txt",
+		log_dir / "ipc_official_plan.txt",
+		log_dir / "ipc_official_verifier.txt",
+		log_dir / "ipc_official_verification.json",
 	]
 
 
@@ -1087,10 +1094,6 @@ def _run_query_case(
 	if not result["success"]:
 		bug_messages.append("pipeline returned success=False")
 
-	for path in _required_artifact_paths(log_dir):
-		if not path.exists():
-			bug_messages.append(f"missing log artifact: {path.name}")
-
 	if (log_dir / "generated_code.asl").exists():
 		bug_messages.append("unexpected legacy generated_code.asl artifact exists")
 
@@ -1242,12 +1245,37 @@ def _run_query_case(
 	if (log_dir / "jason_runner_agent.asl").exists():
 		bug_messages.append("legacy runtime-only jason_runner_agent.asl artifact still present")
 
+	official_verifier_report = None
+	problem_file = case.get("problem_file")
+	if problem_file:
+		official_verifier_report = IPC_PLAN_VERIFIER.verify_primitive_plan(
+			domain_file=domain_file,
+			problem_file=problem_file,
+			action_path=action_path,
+			output_dir=log_dir,
+		)
+		if not official_verifier_report.tool_available:
+			bug_messages.append("official IPC verifier is not available on PATH")
+		elif official_verifier_report.primitive_plan_executable is not True:
+			bug_messages.append(
+				"official IPC primitive-plan verifier did not accept the runtime action_path",
+			)
+
+	for path in _required_artifact_paths(log_dir):
+		if not path.exists():
+			bug_messages.append(f"missing log artifact: {path.name}")
+
 	return {
 		"query_id": query_id,
 		"case": case,
 		"result": result,
 		"log_dir": log_dir,
 		"execution": execution,
+		"official_verifier": (
+			official_verifier_report.to_dict()
+			if official_verifier_report is not None
+			else None
+		),
 		"bug_messages": bug_messages,
 		"has_bug": bool(bug_messages),
 	}
@@ -1555,6 +1583,13 @@ def _print_cli_report(report: Dict[str, Any]) -> None:
 		f"Stage 3 Target Task Bindings: "
 		f"{(execution.get('stage3_method_library') or {}).get('target_task_bindings', [])}",
 	)
+	official_verifier = report.get("official_verifier") or {}
+	if official_verifier:
+		print(
+			"Official IPC Primitive Verification: "
+			f"primitive_plan_executable={official_verifier.get('primitive_plan_executable')}, "
+			f"verification_result={official_verifier.get('verification_result')}",
+		)
 	print(f"Has Bug: {report['has_bug']}")
 	if report["bug_messages"]:
 		for message in report["bug_messages"]:
@@ -1569,6 +1604,9 @@ def main(argv: List[str]) -> int:
 		return 2
 	if not PANDAPlanner().toolchain_available():
 		print("Live pipeline CLI requires pandaPIparser, pandaPIgrounder, and pandaPIengine.")
+		return 2
+	if not IPC_PLAN_VERIFIER.tool_available():
+		print("Live pipeline CLI requires the official pandaPIparser verifier on PATH.")
 		return 2
 
 	if len(argv) > 2:
