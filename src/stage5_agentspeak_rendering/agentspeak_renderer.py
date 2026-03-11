@@ -92,7 +92,7 @@ class AgentSpeakRenderer:
                 semantics.parameters,
                 args,
             )
-            body_lines = [f"{task_name}({', '.join(args)})"]
+            body_lines = [self._call(task_name, args)]
 
             bindings = {
                 parameter: value

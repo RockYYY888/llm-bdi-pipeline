@@ -82,6 +82,28 @@ def test_marsrover_problem_parser_extracts_objects_init_and_htn_tasks():
     )
 
 
+def test_blocksworld_problem_parser_extracts_ordered_subtasks_as_htn_tasks():
+    problem_path = (
+        Path(__file__).parent.parent.parent
+        / "src"
+        / "domains"
+        / "blocksworld"
+        / "problems"
+        / "p01.hddl"
+    )
+
+    problem = HDDLParser.parse_problem(str(problem_path))
+
+    assert any(
+        task.task_name == "do_put_on" and task.args == ["b4", "b2"]
+        for task in problem.htn_tasks
+    )
+    assert any(
+        task.task_name == "do_put_on" and task.args == ["b1", "b4"]
+        for task in problem.htn_tasks
+    )
+
+
 def test_satellite_hddl_domain_exposes_tasks_methods_and_actions():
     domain_path = (
         Path(__file__).parent.parent.parent
@@ -101,6 +123,25 @@ def test_satellite_hddl_domain_exposes_tasks_methods_and_actions():
     assert "do_observation" in task_names
     assert "method0" in method_names
     assert "take_image" in action_names
+
+
+def test_satellite_problem_parser_extracts_labelled_subtasks_as_htn_tasks():
+    problem_path = (
+        Path(__file__).parent.parent.parent
+        / "src"
+        / "domains"
+        / "satellite"
+        / "problems"
+        / "1obs-1sat-1mod.hddl"
+    )
+
+    problem = HDDLParser.parse_problem(str(problem_path))
+
+    assert any(
+        task.task_name == "do_observation"
+        and task.args == ["Phenomenon4", "thermograph0"]
+        for task in problem.htn_tasks
+    )
 
 
 def test_transport_hddl_domain_exposes_tasks_methods_and_actions():

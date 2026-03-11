@@ -328,6 +328,10 @@ class HDDLParser:
             return []
         tasks_expr = HDDLParser._extract_expression_after_keyword(block, ":tasks")
         if tasks_expr is None:
+            tasks_expr = HDDLParser._extract_expression_after_keyword(block, ":ordered-subtasks")
+        if tasks_expr is None:
+            tasks_expr = HDDLParser._extract_expression_after_keyword(block, ":subtasks")
+        if tasks_expr is None:
             return []
 
         tree = _SimpleSExpressionParser.parse_expression(tasks_expr)
@@ -336,10 +340,21 @@ class HDDLParser:
         for item in items:
             if not isinstance(item, list) or not item:
                 continue
+            if (
+                len(item) == 2
+                and isinstance(item[0], str)
+                and isinstance(item[1], list)
+                and item[1]
+            ):
+                task_name = str(item[1][0])
+                task_args = [str(value) for value in item[1][1:]]
+            else:
+                task_name = str(item[0])
+                task_args = [str(value) for value in item[1:]]
             task_invocations.append(
                 HDDLTaskInvocation(
-                    task_name=str(item[0]),
-                    args=[str(value) for value in item[1:]],
+                    task_name=task_name,
+                    args=task_args,
                 )
             )
         return task_invocations

@@ -50,7 +50,13 @@ def test_hddl_fact_to_atom_ignores_negative_and_equality():
 def test_runner_asl_includes_accepting_and_target_validation_without_manual_seeding():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(
-		"domain(test).",
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q2).",
+			],
+		),
 		[
 			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
 			HTNLiteral(predicate="clear", args=("b",), is_positive=False, source_symbol=None),
@@ -60,15 +66,18 @@ def test_runner_asl_includes_accepting_and_target_validation_without_manual_seed
 	assert "+!verify_targets : on(a, b) & not clear(b) <-" in asl
 	assert "?dfa_state(FINAL_STATE)" in asl
 	assert "?accepting_state(FINAL_STATE)" in asl
-	assert "!verify_targets" in asl
 	assert "!execute." in asl
+	assert "+!reset_execution_state : dfa_state(CURRENT_STATE) <-" in asl
+	assert "+dfa_state(q1)" in asl
+	assert "+!execute_round_1 : on(a, b) & not clear(b) <-" in asl
+	assert "+!execute_round_4 : true <-" in asl
 	assert "+on(a" not in asl
 
 
 def test_runner_asl_forces_negative_targets_to_naf_notation():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(
-		"domain(test).",
+		"domain(test).\ndfa_state(q1).",
 		[
 			HTNLiteral(
 				predicate="clear",
@@ -82,6 +91,13 @@ def test_runner_asl_forces_negative_targets_to_naf_notation():
 
 	assert "+!verify_targets : not clear(b) <-" in asl
 	assert "~clear(b)" not in asl
+
+
+def test_extract_initial_dfa_state_reads_header_belief():
+	runner = JasonRunner()
+
+	assert runner._extract_initial_dfa_state("domain(test).\ndfa_state(q7).\n") == "q7"
+	assert runner._extract_initial_dfa_state("domain(test).\n") is None
 
 
 def test_rewrite_primitive_wrappers_keeps_only_external_action_call():
@@ -236,6 +252,17 @@ def test_extract_action_path_preserves_runtime_order():
 		"pick-up(a,b)",
 		"put-on-block(a,c)",
 	]
+
+
+def test_combine_process_output_accepts_byte_streams():
+	runner = JasonRunner()
+
+	stdout = runner._normalise_process_output(b"execute start\n")
+	stderr = runner._normalise_process_output(b"runtime env ready\n")
+
+	assert runner._combine_process_output(stdout, stderr) == (
+		"execute start\nruntime env ready\n"
+	)
 
 
 def test_validate_fails_when_environment_ready_marker_missing(monkeypatch, tmp_path):

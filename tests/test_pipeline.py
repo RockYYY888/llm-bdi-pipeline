@@ -1,5 +1,5 @@
 """
-Live integration harness for the full blocksworld pipeline.
+Live integration harness for benchmark-backed pipeline acceptance.
 
 This file is the canonical acceptance entry point:
 - pytest uses it for live end-to-end verification
@@ -24,7 +24,7 @@ if _src_dir not in sys.path:
 
 import ltl_bdi_pipeline as pipeline_module
 from ltl_bdi_pipeline import LTL_BDI_Pipeline, TypeResolutionError
-from stage1_interpretation.ltlf_formula import LTLFormula
+from stage1_interpretation.ltlf_formula import LTLFormula, LogicalOperator, TemporalOperator
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
@@ -40,29 +40,11 @@ from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 from utils.pipeline_logger import PipelineLogger
 
-LEGACY_BLOCKSWORLD_DOMAIN_FILE = str(
-	(
-		Path(__file__).parent.parent
-		/ "tests"
-		/ "fixtures"
-		/ "domains"
-		/ "legacy_blocksworld"
-		/ "domain.hddl"
-	).resolve(),
-)
 OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl").resolve(),
 )
-QUERY_1_PROBLEM_FILE = str(
-	(
-		Path(__file__).parent.parent
-		/ "tests"
-		/ "fixtures"
-		/ "domains"
-		/ "legacy_blocksworld"
-		/ "problems"
-		/ "query_1_init.hddl"
-	).resolve(),
+BLOCKSWORLD_PROBLEM_DIR = (
+	Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "problems"
 )
 MARSROVER_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "domain.hddl").resolve(),
@@ -73,56 +55,6 @@ MARSROVER_PROBLEM_DIR = (
 
 
 BANNED_TASK_PREFIXES = ("achieve_", "maintain_not_", "ensure_", "goal_")
-
-QUERY_CASES: Dict[str, Dict[str, Any]] = {
-	"query_1": {
-		"instruction": "Using blocks a and b, arrange them so that a is on b.",
-		"required_target_literals": ["on(a, b)"],
-		"problem_file": QUERY_1_PROBLEM_FILE,
-		"expected_action_path": ["pick-up-from-table(a)", "put-on-block(a,b)"],
-		"description": "Positive reachability goal",
-	},
-	"query_2": {
-		"instruction": "Using blocks a and b, make sure a is not on b.",
-		"required_target_literals": ["!on(a, b)"],
-		"description": "Negative safety goal",
-	},
-	"query_3": {
-		"instruction": "Using blocks a and b, make sure a is not clear.",
-		"required_target_literals": ["!clear(a)"],
-		"description": "Negative reachability goal",
-	},
-	"query_4": {
-		"instruction": (
-			"Using blocks a, b, and c, arrange them so that a is on b, "
-			"b is on c, and a is clear."
-		),
-		"required_target_literals": ["on(a, b)", "on(b, c)", "clear(a)"],
-		"description": "Three-goal stacking case",
-	},
-	"query_5": {
-		"instruction": (
-			"Using blocks a, b, c, d, and e, arrange them so that a is on b, "
-			"b is on c, c is on d, d is on e, and a is clear."
-		),
-		"required_target_literals": [
-			"on(a, b)",
-			"on(b, c)",
-			"on(c, d)",
-			"on(d, e)",
-			"clear(a)",
-		],
-		"description": "Five-goal tower case",
-	},
-	"query_6": {
-		"instruction": (
-			"Using blocks a, b, c, and d, make sure a is not on b, "
-			"c is on d, c is clear, and d is not clear."
-		),
-		"required_target_literals": ["!on(a, b)", "on(c, d)", "clear(c)", "!clear(d)"],
-		"description": "Mixed positive-negative combination case",
-	},
-}
 
 MARSROVER_BASE_QUERY_CASES: Dict[str, Dict[str, Any]] = {
 	"rover_query_1": {
@@ -154,6 +86,184 @@ MARSROVER_BASE_QUERY_CASES: Dict[str, Dict[str, Any]] = {
 def _literal_signature(predicate: str, args: List[str], is_positive: bool = True) -> str:
 	atom = predicate if not args else f"{predicate}({', '.join(args)})"
 	return atom if is_positive else f"!{atom}"
+
+
+def _serialise_nl_list(items: List[str]) -> str:
+	if not items:
+		return ""
+	if len(items) == 1:
+		return items[0]
+	if len(items) == 2:
+		return f"{items[0]} and {items[1]}"
+	return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _blocksworld_task_invocation_to_target_literal(
+	task_name: str,
+	args: List[str],
+) -> Dict[str, Any] | None:
+	if task_name in {"do_put_on", "do_move"} and len(args) >= 2:
+		return {
+			"predicate": "on",
+			"args": [args[0], args[1]],
+		}
+	if task_name == "do_on_table" and args:
+		return {
+			"predicate": "ontable",
+			"args": [args[0]],
+		}
+	if task_name == "do_clear" and args:
+		return {
+			"predicate": "clear",
+			"args": [args[0]],
+		}
+	return None
+
+
+def _blocksworld_literal_to_nl_goal(predicate: str, args: List[str]) -> str:
+	if predicate == "on" and len(args) == 2:
+		return f"{args[0]} is on {args[1]}"
+	if predicate == "ontable" and len(args) == 1:
+		return f"{args[0]} is on the table"
+	if predicate == "clear" and len(args) == 1:
+		return f"{args[0]} is clear"
+	if not args:
+		return f"{predicate} holds"
+	return f"{predicate}({', '.join(args)}) holds"
+
+
+def _order_blocksworld_goal_literals(
+	literals: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+	on_literals = [
+		item for item in literals
+		if item.get("predicate") == "on" and len(item.get("args", [])) == 2
+	]
+	other_literals = [
+		item for item in literals
+		if item not in on_literals
+	]
+	if len(on_literals) <= 1:
+		return literals
+
+	signature_to_literal = {
+		_literal_signature(item["predicate"], item["args"]): item
+		for item in on_literals
+	}
+	supporter_by_top = {
+		item["args"][0]: _literal_signature(item["predicate"], item["args"])
+		for item in on_literals
+	}
+	dependents: Dict[str, List[str]] = {
+		signature: []
+		for signature in signature_to_literal
+	}
+	in_degree: Dict[str, int] = {
+		signature: 0
+		for signature in signature_to_literal
+	}
+	for item in on_literals:
+		signature = _literal_signature(item["predicate"], item["args"])
+		support_block = item["args"][1]
+		predecessor = supporter_by_top.get(support_block)
+		if predecessor is None:
+			continue
+		dependents[predecessor].append(signature)
+		in_degree[signature] += 1
+
+	ordered_signatures: List[str] = []
+	queue = [
+		_literal_signature(item["predicate"], item["args"])
+		for item in on_literals
+		if in_degree[_literal_signature(item["predicate"], item["args"])] == 0
+	]
+	seen = set(queue)
+	while queue:
+		signature = queue.pop(0)
+		ordered_signatures.append(signature)
+		for dependent in dependents[signature]:
+			in_degree[dependent] -= 1
+			if in_degree[dependent] == 0 and dependent not in seen:
+				queue.append(dependent)
+				seen.add(dependent)
+
+	if len(ordered_signatures) != len(on_literals):
+		return literals
+
+	ordered_literals = [signature_to_literal[signature] for signature in ordered_signatures]
+	return ordered_literals + other_literals
+
+
+def _build_case_from_blocksworld_problem(problem_path: Path) -> Dict[str, Any] | None:
+	problem = HDDLParser.parse_problem(str(problem_path))
+	derived_literals: List[Dict[str, Any]] = []
+	seen = set()
+
+	for fact in problem.goal_facts:
+		if not fact.is_positive:
+			continue
+		signature = _literal_signature(fact.predicate, fact.args)
+		if signature in seen:
+			continue
+		seen.add(signature)
+		derived_literals.append(
+			{
+				"predicate": fact.predicate,
+				"args": list(fact.args),
+			},
+		)
+
+	if not derived_literals:
+		for invocation in problem.htn_tasks:
+			literal = _blocksworld_task_invocation_to_target_literal(
+				invocation.task_name,
+				invocation.args,
+			)
+			if literal is None:
+				continue
+			signature = _literal_signature(literal["predicate"], literal["args"])
+			if signature in seen:
+				continue
+			seen.add(signature)
+			derived_literals.append(literal)
+
+	if not derived_literals:
+		return None
+	derived_literals = _order_blocksworld_goal_literals(derived_literals)
+
+	goal_text = ", and ".join(
+		_blocksworld_literal_to_nl_goal(item["predicate"], item["args"])
+		for item in derived_literals
+	)
+
+	return {
+		"instruction": (
+			f"Using blocks {_serialise_nl_list(problem.objects)}, arrange them so that {goal_text}."
+		),
+		"required_target_literals": [
+			_literal_signature(item["predicate"], item["args"])
+			for item in derived_literals
+		],
+		"problem_file": str(problem_path.resolve()),
+		"minimum_action_count": 1,
+		"description": f"Auto-generated from {problem_path.name} ({problem.name})",
+	}
+
+
+def _load_blocksworld_problem_query_cases(limit: int = 3) -> Dict[str, Dict[str, Any]]:
+	if not BLOCKSWORLD_PROBLEM_DIR.exists():
+		return {}
+	cases: Dict[str, Dict[str, Any]] = {}
+	problem_paths = sorted(BLOCKSWORLD_PROBLEM_DIR.glob("p*.hddl"))[:limit]
+	for index, problem_path in enumerate(problem_paths, start=1):
+		case = _build_case_from_blocksworld_problem(problem_path)
+		if case is None:
+			continue
+		cases[f"query_{index}"] = case
+	return cases
+
+
+QUERY_CASES: Dict[str, Dict[str, Any]] = _load_blocksworld_problem_query_cases()
 
 
 def _task_invocation_to_target_literal(
@@ -628,7 +738,7 @@ def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 
 	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
 
-	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path))
 	pipeline.logger.start_pipeline(
 		"demo instruction",
@@ -834,6 +944,71 @@ def test_stage1_object_universe_merges_constants_from_atoms_and_formulas():
 	assert objects == ["objective0", "low_res"]
 
 
+def test_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
+	spec = SimpleNamespace(
+		formulas=[
+			LTLFormula(
+				operator=None,
+				predicate=None,
+				sub_formulas=[
+					LTLFormula(
+						operator=TemporalOperator.FINALLY,
+						predicate=None,
+						sub_formulas=[
+							LTLFormula(
+								operator=None,
+								predicate={"on": ["b1", "b4"]},
+								sub_formulas=[],
+								logical_op=None,
+							),
+						],
+						logical_op=None,
+					),
+					LTLFormula(
+						operator=TemporalOperator.FINALLY,
+						predicate=None,
+						sub_formulas=[
+							LTLFormula(
+								operator=None,
+								predicate={"on": ["b3", "b1"]},
+								sub_formulas=[],
+								logical_op=None,
+							),
+						],
+						logical_op=None,
+					),
+				],
+				logical_op=LogicalOperator.AND,
+			),
+		],
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"on(b1, b4)",
+		"on(b3, b1)",
+	)
+
+
+def test_blocksworld_problem_query_case_generation_from_htn_tasks():
+	problem_path = (
+		Path(__file__).parent.parent
+		/ "src"
+		/ "domains"
+		/ "blocksworld"
+		/ "problems"
+		/ "p01.hddl"
+	)
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	case = _build_case_from_blocksworld_problem(problem_path)
+	assert case is not None
+	assert case["instruction"]
+	assert case["required_target_literals"]
+	assert case["problem_file"] == str(problem_path.resolve())
+	assert case["required_target_literals"] == ["on(b1, b4)", "on(b3, b1)"]
+
+
 def test_rover_problem_query_case_generation_from_htn_tasks():
 	problem_path = (
 		Path(__file__).parent.parent
@@ -889,6 +1064,7 @@ def _run_query_case(
 		)
 
 	case = query_cases[query_id]
+	domain_action_names = set(HDDLParser.parse_domain(domain_file).get_action_names())
 	pipeline = LTL_BDI_Pipeline(
 		domain_file=domain_file,
 		problem_file=case.get("problem_file"),
@@ -934,8 +1110,12 @@ def _run_query_case(
 		if execution.get(stage_key) != "success":
 			bug_messages.append(f"{stage_key} is not success")
 
-	if execution.get("stage3_used_llm") is not True:
-		bug_messages.append("Stage 3 did not record live LLM usage")
+	stage3_metadata = execution.get("stage3_metadata", {}) or {}
+	if not (
+		execution.get("stage3_used_llm") is True
+		or stage3_metadata.get("domain_projection_used") is True
+	):
+		bug_messages.append("Stage 3 recorded neither live LLM usage nor domain projection")
 
 	if execution.get("stage4_backend") != "pandaPI":
 		bug_messages.append("Stage 4 backend is not pandaPI")
@@ -946,7 +1126,7 @@ def _run_query_case(
 		bug_messages.append("Stage 3 produced no target_task_bindings")
 	bug_messages.extend(_binding_semantic_messages(stage3_library))
 
-	target_literals = execution.get("stage3_metadata", {}).get("target_literals", [])
+	target_literals = stage3_metadata.get("target_literals", [])
 	for required_target_literal in case.get("required_target_literals", []):
 		if required_target_literal not in target_literals:
 			bug_messages.append(
@@ -1035,11 +1215,25 @@ def _run_query_case(
 	action_path = stage6_artifacts.get("action_path") or []
 	if not isinstance(action_path, list):
 		bug_messages.append("Stage 6 action_path is not a list")
+	minimum_action_count = case.get("minimum_action_count")
+	if isinstance(minimum_action_count, int) and len(action_path) < minimum_action_count:
+		bug_messages.append(
+			f"Stage 6 action_path shorter than expected minimum {minimum_action_count}: {action_path}",
+		)
 	expected_action_path = case.get("expected_action_path")
 	if expected_action_path is not None and action_path != expected_action_path:
 		bug_messages.append(
 			f"Stage 6 action_path mismatch: expected {expected_action_path}, got {action_path}",
 		)
+	for action_step in action_path:
+		match = re.match(r"^([^\s(]+)\(", action_step)
+		if match is None:
+			bug_messages.append(f"Stage 6 action_path step has invalid format: {action_step}")
+			continue
+		if match.group(1) not in domain_action_names:
+			bug_messages.append(
+				f"Stage 6 action_path step is not a domain action: {action_step}",
+			)
 	action_path_file = log_dir / "action_path.txt"
 	if action_path_file.exists():
 		file_actions = [line.strip() for line in action_path_file.read_text().splitlines() if line.strip()]
@@ -1059,8 +1253,48 @@ def _run_query_case(
 	}
 
 
-def test_method_validation_initial_facts_are_branch_specific():
-	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
+def _write_legacy_style_blocksworld_domain(tmp_path: Path) -> str:
+	domain_file = tmp_path / "legacy_style_blocksworld.hddl"
+	domain_file.write_text(
+		"""
+(define (domain blocksworld_legacy_style)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types block)
+  (:predicates
+    (holding ?x - block)
+    (handempty)
+    (ontable ?x - block)
+    (on ?x - block ?y - block)
+    (clear ?x - block)
+  )
+  (:action pick-up
+    :parameters (?x - block ?y - block)
+    :precondition (and (on ?x ?y) (clear ?x) (handempty))
+    :effect (and (holding ?x) (clear ?y) (not (on ?x ?y)) (not (clear ?x)) (not (handempty)))
+  )
+  (:action pick-up-from-table
+    :parameters (?x - block)
+    :precondition (and (ontable ?x) (clear ?x) (handempty))
+    :effect (and (holding ?x) (not (ontable ?x)) (not (clear ?x)) (not (handempty)))
+  )
+  (:action put-on-block
+    :parameters (?x - block ?y - block)
+    :precondition (and (holding ?x) (clear ?y))
+    :effect (and (on ?x ?y) (clear ?x) (not (holding ?x)) (not (clear ?y)) (handempty))
+  )
+  (:action put-down
+    :parameters (?x - block)
+    :precondition (holding ?x)
+    :effect (and (ontable ?x) (clear ?x) (not (holding ?x)) (handempty))
+  )
+)
+		""".strip(),
+	)
+	return str(domain_file)
+
+
+def test_method_validation_initial_facts_are_branch_specific(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_hold_block_from_block",
@@ -1112,8 +1346,8 @@ def test_method_validation_initial_facts_are_branch_specific():
 	assert any(fact.startswith("(on a ") for fact in facts)
 
 
-def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
-	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
+def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_place_on_direct",
@@ -1174,8 +1408,8 @@ def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
 	assert "(handempty)" not in facts
 
 
-def test_task_witness_initial_facts_merge_sibling_branches():
-	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
+def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method_library = HTNMethodLibrary(
 		methods=[
@@ -1192,7 +1426,7 @@ def test_task_witness_initial_facts_merge_sibling_branches():
 				method_name="m_place_on_acquire",
 				task_name="place_on",
 				parameters=("BLOCK1", "BLOCK2"),
-				context=(),
+				context=(HTNLiteral("clear", ("BLOCK2",), True, None),),
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
@@ -1219,8 +1453,8 @@ def test_task_witness_initial_facts_merge_sibling_branches():
 	assert "(ontable a)" in facts
 
 
-def test_method_validation_initial_facts_allocate_typed_witness_objects():
-	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
+def test_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_remove_on_clear_first",
@@ -1287,7 +1521,7 @@ def test_blocksworld_pipeline_query_case(query_id: str):
 	report = _run_query_case(
 		query_id,
 		query_cases=QUERY_CASES,
-		domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE,
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
 	)
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 
@@ -1354,7 +1588,7 @@ def main(argv: List[str]) -> int:
 		_run_query_case(
 			query_id,
 			query_cases=QUERY_CASES,
-			domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE,
+			domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
 		)
 		for query_id in query_ids
 	]

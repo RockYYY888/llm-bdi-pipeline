@@ -274,6 +274,7 @@ class LTL_BDI_Pipeline:
 
         try:
             grounding_map = ltl_spec.grounding_map
+            ordered_literal_signatures = self._ordered_literal_signatures_from_spec(ltl_spec)
             synthesizer = HTNMethodSynthesizer(
                 api_key=self.config.openai_api_key,
                 model=self.config.openai_model,
@@ -287,6 +288,7 @@ class LTL_BDI_Pipeline:
                 dfa_result=dfa_result,
                 query_text=getattr(ltl_spec, "source_instruction", ""),
                 negation_hints=getattr(ltl_spec, "negation_hints", {}),
+                ordered_literal_signatures=ordered_literal_signatures,
             )
             self._validate_method_library_typing(method_library)
             summary = {
@@ -300,6 +302,7 @@ class LTL_BDI_Pipeline:
                 ),
                 "target_literals": synthesis_meta["target_literals"],
                 "negation_resolution": synthesis_meta.get("negation_resolution", {}),
+                "domain_projection_used": synthesis_meta.get("domain_projection_used", False),
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
@@ -307,6 +310,7 @@ class LTL_BDI_Pipeline:
             transition_specs = synthesizer.extract_progressing_transitions(
                 grounding_map,
                 dfa_result,
+                ordered_literal_signatures=ordered_literal_signatures,
             )
             summary["dfa_progress_transitions"] = len(transition_specs)
 
@@ -354,6 +358,77 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None, None
+
+    @classmethod
+    def _ordered_literal_signatures_from_spec(cls, ltl_spec) -> Tuple[str, ...]:
+        ordered: List[str] = []
+        seen: Set[str] = set()
+        for formula in getattr(ltl_spec, "formulas", []) or []:
+            formula_literals = cls._ordered_literal_signatures_from_formula(formula)
+            if not formula_literals:
+                return ()
+            for signature in formula_literals:
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                ordered.append(signature)
+        return tuple(ordered)
+
+    @classmethod
+    def _ordered_literal_signatures_from_formula(cls, formula) -> Tuple[str, ...]:
+        predicate = getattr(formula, "predicate", None)
+        operator = getattr(formula, "operator", None)
+        logical_op = getattr(formula, "logical_op", None)
+        sub_formulas = tuple(getattr(formula, "sub_formulas", ()) or ())
+
+        if predicate is not None and operator is None and logical_op is None:
+            if not isinstance(predicate, dict):
+                return ()
+            pred_name = next(iter(predicate.keys()), None)
+            if pred_name is None:
+                return ()
+            args = predicate[pred_name]
+            return (cls._literal_signature(pred_name, args, True),)
+
+        if operator is not None:
+            operator_name = getattr(operator, "value", None)
+            if operator_name in {"F", "G"} and len(sub_formulas) == 1:
+                return cls._ordered_literal_signatures_from_formula(sub_formulas[0])
+            return ()
+
+        logical_name = getattr(logical_op, "value", None)
+        if logical_name == "not":
+            if len(sub_formulas) != 1:
+                return ()
+            child = sub_formulas[0]
+            child_predicate = getattr(child, "predicate", None)
+            if (
+                getattr(child, "operator", None) is not None
+                or getattr(child, "logical_op", None) is not None
+                or not isinstance(child_predicate, dict)
+            ):
+                return ()
+            pred_name = next(iter(child_predicate.keys()), None)
+            if pred_name is None:
+                return ()
+            args = child_predicate[pred_name]
+            return (cls._literal_signature(pred_name, args, False),)
+
+        if logical_name == "and":
+            ordered: List[str] = []
+            for child in sub_formulas:
+                child_literals = cls._ordered_literal_signatures_from_formula(child)
+                if not child_literals:
+                    return ()
+                ordered.extend(child_literals)
+            return tuple(ordered)
+
+        return ()
+
+    @staticmethod
+    def _literal_signature(predicate: str, args: Sequence[str], is_positive: bool) -> str:
+        atom = predicate if not args else f"{predicate}({', '.join(args)})"
+        return atom if is_positive else f"!{atom}"
 
     def _stage4_panda_planning(self, ltl_spec, method_library, transition_specs):
         """Stage 4: HTN method library -> PANDA planning."""

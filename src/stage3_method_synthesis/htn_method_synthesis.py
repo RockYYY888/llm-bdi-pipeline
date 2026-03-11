@@ -12,7 +12,7 @@ import json
 import re
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
 from stage3_method_synthesis.htn_prompts import (
@@ -87,11 +87,16 @@ class HTNMethodSynthesizer:
 		*,
 		query_text: Optional[str] = None,
 		negation_hints: Optional[Dict[str, Any]] = None,
+		ordered_literal_signatures: Optional[Sequence[str]] = None,
 	) -> Tuple[HTNMethodLibrary, Dict[str, Any]]:
 		"""Create a method library and metadata for logging."""
 
 		normalised_grounding_map = self._normalise_grounding_map(grounding_map)
-		target_literals = self.extract_target_literals(normalised_grounding_map, dfa_result)
+		target_literals = self.extract_target_literals(
+			normalised_grounding_map,
+			dfa_result,
+			ordered_literal_signatures=ordered_literal_signatures,
+		)
 		negation_resolution = resolve_negation_modes(
 			domain,
 			target_literals,
@@ -106,6 +111,7 @@ class HTNMethodSynthesizer:
 
 		metadata: Dict[str, Any] = {
 			"used_llm": False,
+			"domain_projection_used": False,
 			"model": self.model if self.client else None,
 			"target_literals": [literal.to_signature() for literal in target_literals],
 			"negation_resolution": negation_resolution.to_dict(),
@@ -122,6 +128,33 @@ class HTNMethodSynthesizer:
 			"pruned_constructive_siblings": 0,
 			"generated_target_guard_methods": 0,
 		}
+
+		projected_library = self._project_domain_method_library(
+			domain,
+			target_literals,
+			primitive_tasks,
+		)
+		if projected_library is not None:
+			projected_library = self._apply_negation_resolution_to_library(
+				projected_library,
+				negation_resolution,
+			)
+			projected_library = self._normalise_target_binding_signatures(projected_library)
+			projected_library, pruned_count = self._prune_redundant_constructive_siblings(
+				projected_library,
+				domain,
+			)
+			metadata["pruned_constructive_siblings"] = pruned_count
+			projected_library, generated_guard_count = self._complete_missing_target_guard_methods(
+				projected_library,
+			)
+			metadata["generated_target_guard_methods"] = generated_guard_count
+			self._validate_library(projected_library, domain)
+			metadata["domain_projection_used"] = True
+			metadata["compound_tasks"] = len(projected_library.compound_tasks)
+			metadata["primitive_tasks"] = len(projected_library.primitive_tasks)
+			metadata["methods"] = len(projected_library.methods)
+			return projected_library, metadata
 
 		if not self.client:
 			raise self._build_synthesis_error(
@@ -213,13 +246,19 @@ class HTNMethodSynthesizer:
 		self,
 		grounding_map: GroundingMap | None,
 		dfa_result: Dict[str, Any],
+		*,
+		ordered_literal_signatures: Optional[Sequence[str]] = None,
 	) -> List[HTNLiteral]:
 		"""Read atomic transition labels from the simplified DFA."""
 
 		if grounding_map is None:
 			return []
 
-		transition_specs = self.extract_progressing_transitions(grounding_map, dfa_result)
+		transition_specs = self.extract_progressing_transitions(
+			grounding_map,
+			dfa_result,
+			ordered_literal_signatures=ordered_literal_signatures,
+		)
 		seen: set[str] = set()
 		literals: List[HTNLiteral] = []
 
@@ -236,6 +275,8 @@ class HTNMethodSynthesizer:
 		self,
 		grounding_map: GroundingMap | None,
 		dfa_result: Dict[str, Any],
+		*,
+		ordered_literal_signatures: Optional[Sequence[str]] = None,
 	) -> List[Dict[str, Any]]:
 		"""Preserve DFA state-to-state progress edges for later rendering."""
 
@@ -286,7 +327,61 @@ class HTNMethodSynthesizer:
 				},
 			)
 
-		return transition_specs
+		return self._reorder_transition_specs_for_literal_order(
+			transition_specs,
+			ordered_literal_signatures,
+		)
+
+	def _reorder_transition_specs_for_literal_order(
+		self,
+		transition_specs: List[Dict[str, Any]],
+		ordered_literal_signatures: Optional[Sequence[str]],
+	) -> List[Dict[str, Any]]:
+		if not transition_specs or not ordered_literal_signatures:
+			return transition_specs
+
+		ordered_unique: List[str] = []
+		seen_labels: set[str] = set()
+		for label in ordered_literal_signatures:
+			if label in seen_labels:
+				continue
+			seen_labels.add(label)
+			ordered_unique.append(label)
+
+		current_labels = [spec["label"] for spec in transition_specs]
+		label_to_spec = {
+			spec["label"]: spec
+			for spec in transition_specs
+		}
+		if not all(label in label_to_spec for label in ordered_unique):
+			return transition_specs
+		if ordered_unique == current_labels and len(current_labels) == len(ordered_unique):
+			return transition_specs
+
+		accepting_state = f"q{len(ordered_unique) + 1}"
+		reordered_specs: List[Dict[str, Any]] = []
+		for index, label in enumerate(ordered_unique, start=1):
+			spec = dict(label_to_spec[label])
+			source_state = f"q{index}"
+			target_state = f"q{index + 1}"
+			literal = spec["literal"]
+			spec.update(
+				{
+					"transition_name": (
+						f"dfa_step_{source_state}_{target_state}_"
+						f"{self._transition_suffix_for_literal(literal)}"
+					),
+					"source_state": source_state,
+					"target_state": target_state,
+					"raw_source_state": source_state,
+					"raw_target_state": target_state,
+					"initial_state": "q1",
+					"accepting_states": [accepting_state],
+				},
+			)
+			reordered_specs.append(spec)
+
+		return reordered_specs
 
 	def _extract_relevant_dfa_labels(self, dfa_dot: str) -> List[str]:
 		"""Prefer labels on goal-progressing edges; fall back when progress is not encoded."""
@@ -481,6 +576,269 @@ class HTNMethodSynthesizer:
 			)
 			for action in actions
 		]
+
+	def _project_domain_method_library(
+		self,
+		domain: Any,
+		target_literals: Sequence[HTNLiteral],
+		primitive_tasks: Sequence[HTNTask],
+	) -> Optional[HTNMethodLibrary]:
+		if not getattr(domain, "tasks", None) or not getattr(domain, "methods", None):
+			return None
+
+		action_names = {action.name for action in getattr(domain, "actions", [])}
+		task_schemas = {
+			task.name: task
+			for task in getattr(domain, "tasks", [])
+		}
+		if not task_schemas:
+			return None
+
+		methods_by_task: Dict[str, List[Any]] = {}
+		for method in getattr(domain, "methods", []):
+			methods_by_task.setdefault(method.task_name, []).append(method)
+
+		task_source_predicates = self._infer_domain_task_source_predicates(domain)
+		bindings = self._project_target_task_bindings(
+			domain,
+			target_literals,
+			task_schemas,
+			methods_by_task,
+		)
+		if bindings is None:
+			return None
+
+		reachable_task_names = set(binding.task_name for binding in bindings)
+		queue = list(reachable_task_names)
+		while queue:
+			task_name = queue.pop(0)
+			for method in methods_by_task.get(task_name, []):
+				for subtask in getattr(method, "subtasks", []):
+					if subtask.task_name in action_names:
+						continue
+					if subtask.task_name not in task_schemas:
+						return None
+					if subtask.task_name in reachable_task_names:
+						continue
+					reachable_task_names.add(subtask.task_name)
+					queue.append(subtask.task_name)
+
+		compound_tasks = [
+			HTNTask(
+				name=task_name,
+				parameters=self._parameter_names(task_schemas[task_name].parameters),
+				is_primitive=False,
+				source_predicates=task_source_predicates.get(task_name, ()),
+			)
+			for task_name in sorted(reachable_task_names)
+		]
+		compound_task_names = {task.name for task in compound_tasks}
+		imported_methods: List[HTNMethod] = []
+		for task_name in sorted(reachable_task_names):
+			projected_methods_for_task: List[HTNMethod] = []
+			for index, method in enumerate(methods_by_task.get(task_name, []), start=1):
+				imported_method = self._project_domain_method(
+					method,
+					index=index,
+					action_names=action_names,
+					compound_task_names=compound_task_names,
+				)
+				if imported_method is None:
+					return None
+				projected_methods_for_task.append(imported_method)
+			projected_methods_for_task.sort(
+				key=lambda item: (
+					0 if not item.subtasks else 1,
+					len(item.subtasks),
+					item.method_name,
+				),
+			)
+			imported_methods.extend(projected_methods_for_task)
+
+		return HTNMethodLibrary(
+			compound_tasks=compound_tasks,
+			primitive_tasks=list(primitive_tasks),
+			methods=imported_methods,
+			target_literals=list(target_literals),
+			target_task_bindings=list(bindings),
+		)
+
+	def _infer_domain_task_source_predicates(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		source_predicates: Dict[str, set[str]] = {}
+		for method in getattr(domain, "methods", []):
+			try:
+				clauses = self.parser.parse_dnf(
+					method.precondition,
+					action_name=method.name,
+					scope="method_precondition",
+				)
+			except Exception:
+				continue
+			if len(clauses) != 1 or len(clauses[0]) != 1:
+				continue
+			literal = clauses[0][0]
+			if not literal.is_positive or literal.predicate == "=":
+				continue
+			if list(literal.args) != list(method.task_args):
+				continue
+			source_predicates.setdefault(method.task_name, set()).add(literal.predicate)
+		return {
+			task_name: tuple(sorted(predicates))
+			for task_name, predicates in source_predicates.items()
+		}
+
+	def _project_target_task_bindings(
+		self,
+		domain: Any,
+		target_literals: Sequence[HTNLiteral],
+		task_schemas: Dict[str, Any],
+		methods_by_task: Dict[str, List[Any]],
+	) -> Optional[List[HTNTargetTaskBinding]]:
+		bindings: List[HTNTargetTaskBinding] = []
+		for literal in target_literals:
+			candidates: List[str] = []
+			for task_name, methods in methods_by_task.items():
+				task_schema = task_schemas.get(task_name)
+				if task_schema is None:
+					continue
+				task_parameters = self._parameter_names(task_schema.parameters)
+				if len(task_parameters) != len(literal.args):
+					continue
+				for method in methods:
+					try:
+						clauses = self.parser.parse_dnf(
+							method.precondition,
+							action_name=method.name,
+							scope="method_precondition",
+						)
+					except Exception:
+						continue
+					if len(clauses) != 1 or len(clauses[0]) != 1:
+						continue
+					guard = clauses[0][0]
+					if (
+						guard.predicate != literal.predicate
+						or guard.is_positive != literal.is_positive
+						or guard.predicate == "="
+						or list(guard.args) != list(method.task_args)
+					):
+						continue
+					candidates.append(task_name)
+					break
+			candidates = sorted(set(candidates))
+			if len(candidates) != 1:
+				return None
+			bindings.append(
+				HTNTargetTaskBinding(
+					target_literal=literal.to_signature(),
+					task_name=candidates[0],
+				),
+			)
+		return bindings
+
+	def _project_domain_method(
+		self,
+		method: Any,
+		*,
+		index: int,
+		action_names: set[str],
+		compound_task_names: set[str],
+	) -> Optional[HTNMethod]:
+		try:
+			clauses = self.parser.parse_dnf(
+				method.precondition,
+				action_name=method.name,
+				scope="method_precondition",
+			)
+		except Exception:
+			return None
+		if len(clauses) != 1:
+			return None
+
+		variable_map = self._parameter_name_map(method.parameters)
+		context = tuple(
+			self._pattern_to_literal(literal, variable_map)
+			for literal in clauses[0]
+		)
+		subtasks: List[HTNMethodStep] = []
+		for subtask in getattr(method, "subtasks", []):
+			step_id = self._sanitize_name(subtask.label)
+			step_args = tuple(variable_map.get(arg, self._sanitize_symbol(arg)) for arg in subtask.args)
+			if subtask.task_name in action_names:
+				task_name = self._sanitize_name(subtask.task_name)
+				action_name = subtask.task_name
+				kind = "primitive"
+			elif subtask.task_name in compound_task_names:
+				task_name = subtask.task_name
+				action_name = None
+				kind = "compound"
+			else:
+				return None
+			subtasks.append(
+				HTNMethodStep(
+					step_id=step_id,
+					task_name=task_name,
+					args=step_args,
+					kind=kind,
+					action_name=action_name,
+				),
+			)
+
+		if (
+			len(subtasks) == 1
+			and subtasks[0].kind == "primitive"
+			and subtasks[0].action_name == "nop"
+		):
+			subtasks = []
+
+		ordering = tuple(
+			(self._sanitize_name(source), self._sanitize_name(target))
+			for source, target in getattr(method, "ordering", [])
+		)
+		if not subtasks:
+			ordering = ()
+		return HTNMethod(
+			method_name=f"m_{self._sanitize_name(method.task_name)}_domain_{index}",
+			task_name=method.task_name,
+			parameters=self._parameter_names(method.parameters),
+			context=context,
+			subtasks=tuple(subtasks),
+			ordering=ordering,
+			origin="domain",
+		)
+
+	def _parameter_name_map(self, parameters: Sequence[str]) -> Dict[str, str]:
+		return {
+			self._parameter_symbol(parameter): self._sanitize_symbol(self._parameter_symbol(parameter))
+			for parameter in parameters
+		}
+
+	def _parameter_names(self, parameters: Sequence[str]) -> Tuple[str, ...]:
+		return tuple(
+			self._sanitize_symbol(self._parameter_symbol(parameter))
+			for parameter in parameters
+		)
+
+	@staticmethod
+	def _parameter_symbol(parameter: str) -> str:
+		variable_part = parameter.split("-", 1)[0].strip()
+		return variable_part.split()[0].strip()
+
+	def _pattern_to_literal(
+		self,
+		pattern: Any,
+		variable_map: Dict[str, str],
+	) -> HTNLiteral:
+		return HTNLiteral(
+			predicate=pattern.predicate,
+			args=tuple(variable_map.get(arg, self._sanitize_symbol(arg)) for arg in pattern.args),
+			is_positive=pattern.is_positive,
+			source_symbol=None,
+		)
+
+	@staticmethod
+	def _sanitize_symbol(symbol: str) -> str:
+		return symbol.lstrip("?").replace("-", "_").upper()
 
 	def _request_complete_llm_library(
 		self,
@@ -1513,7 +1871,7 @@ class HTNMethodSynthesizer:
 		task_lookup: Dict[str, HTNTask],
 	) -> None:
 		task_schema = task_lookup.get(method.task_name)
-		if task_schema is None:
+		if method.origin == "domain" or task_schema is None:
 			bound_variables = set(method.parameters)
 		else:
 			bound_variables = set(method.parameters[: len(task_schema.parameters)])

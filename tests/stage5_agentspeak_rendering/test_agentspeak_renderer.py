@@ -487,3 +487,31 @@ def test_renderer_supports_imply_in_primitive_precondition_context():
 	)
 
 	assert "+!seal_if_clear(OBJECT) : not clear(OBJECT) | holding(OBJECT) <-" in code
+
+
+def test_renderer_uses_zero_arity_action_functor_without_empty_parentheses(tmp_path):
+	domain_file = tmp_path / "zero_arity_domain.hddl"
+	domain_file.write_text(
+		"""
+(define (domain zero_arity)
+  (:requirements :typing :hierarchy)
+  (:types block)
+  (:predicates (ready))
+  (:action nop
+    :parameters ()
+    :precondition (and)
+    :effect (and)
+  )
+)
+		""".strip(),
+	)
+	renderer = AgentSpeakRenderer()
+	code = renderer.generate(
+		domain=HDDLParser.parse_domain(str(domain_file)),
+		objects=(),
+		method_library=HTNMethodLibrary(),
+		plan_records=[],
+	)
+
+	assert "\tnop." in code
+	assert "nop()." not in code

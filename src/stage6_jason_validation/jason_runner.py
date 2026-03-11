@@ -175,8 +175,8 @@ class JasonRunner:
 
 		timed_out = False
 		exit_code: Optional[int] = None
-		raw_stdout = ""
-		raw_stderr = ""
+		raw_stdout: str | bytes = ""
+		raw_stderr: str | bytes = ""
 
 		try:
 			result = subprocess.run(
@@ -195,12 +195,14 @@ class JasonRunner:
 			raw_stdout = exc.stdout or ""
 			raw_stderr = exc.stderr or ""
 
-		stdout = self._combine_process_output(raw_stdout, raw_stderr)
-		stderr = raw_stderr
+		stdout_text = self._normalise_process_output(raw_stdout)
+		stderr_text = self._normalise_process_output(raw_stderr)
+		stdout = self._combine_process_output(stdout_text, stderr_text)
+		stderr = stderr_text
 		action_path = self._extract_action_path(stdout)
 
 		stdout_path.write_text(stdout)
-		stderr_path.write_text(raw_stderr)
+		stderr_path.write_text(stderr)
 		action_path_path.write_text(self._render_action_path(action_path))
 
 		artifacts = {
@@ -272,6 +274,8 @@ class JasonRunner:
 	) -> str:
 		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(agentspeak_code)
 		target_context = self._target_context_expression(target_literals)
+		initial_dfa_state = self._extract_initial_dfa_state(environment_ready_code) or "q1"
+		max_execution_passes = max(2, len(target_literals) + 1)
 		lines = [
 			environment_ready_code.rstrip(),
 			"",
@@ -282,22 +286,81 @@ class JasonRunner:
 		lines.append(f"+!verify_targets : {target_context} <-")
 		lines.extend(self._indent_body(["true"]))
 		lines.append("")
+		lines.append("+!reset_execution_state : dfa_state(CURRENT_STATE) <-")
+		lines.extend(
+			self._indent_body(
+				[
+					"-dfa_state(CURRENT_STATE)",
+					f"+dfa_state({initial_dfa_state})",
+				],
+			),
+		)
+		lines.append("")
 		lines.append("+!execute : true <-")
-		body_lines: List[str] = [
-			'.print("execute start")',
-			"!run_dfa",
-			"?dfa_state(FINAL_STATE)",
-			"?accepting_state(FINAL_STATE)",
-			"!verify_targets",
-			'.print("execute success")',
-			".stopMAS",
-		]
-		lines.extend(self._indent_body(body_lines))
+		lines.extend(
+			self._indent_body(
+				[
+					'.print("execute start")',
+					"!execute_round_1",
+				],
+			),
+		)
+		lines.append("")
+		for round_index in range(1, max_execution_passes + 1):
+			goal_name = f"execute_round_{round_index}"
+			next_goal_name = f"execute_round_{round_index + 1}"
+			lines.append(f"+!{goal_name} : {target_context} <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("")
+			body_lines: List[str] = [
+				"!run_dfa",
+				"?dfa_state(FINAL_STATE)",
+				"?accepting_state(FINAL_STATE)",
+			]
+			if round_index < max_execution_passes:
+				body_lines.extend(
+					[
+						"!reset_execution_state",
+						f"!{next_goal_name}",
+					],
+				)
+			else:
+				body_lines.append(f"!{next_goal_name}")
+			lines.append(f"+!{goal_name} : true <-")
+			lines.extend(self._indent_body(body_lines))
+			lines.append("")
+
+		final_goal_name = f"execute_round_{max_execution_passes + 1}"
+		lines.append(f"+!{final_goal_name} : {target_context} <-")
+		lines.extend(
+			self._indent_body(
+				[
+					'.print("execute success")',
+					".stopMAS",
+				],
+			),
+		)
+		lines.append("")
+		lines.append(f"+!{final_goal_name} : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		lines.append("-!execute : true <-")
 		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
+
+	def _extract_initial_dfa_state(self, agentspeak_code: str) -> Optional[str]:
+		match = re.search(r"^\s*dfa_state\(([^)]+)\)\.\s*$", agentspeak_code, re.MULTILINE)
+		if match is None:
+			return None
+		return match.group(1).strip()
 
 	def _extract_action_path(self, stdout: str) -> List[str]:
 		pattern = re.compile(r"^runtime env action success (.+?)\s*$")
@@ -1000,6 +1063,14 @@ public class {self.environment_class_name} extends Environment {{
 		if not args:
 			return predicate
 		return f"{predicate}({','.join(args)})"
+
+	@staticmethod
+	def _normalise_process_output(output: str | bytes | None) -> str:
+		if output is None:
+			return ""
+		if isinstance(output, bytes):
+			return output.decode("utf-8", errors="replace")
+		return output
 
 	@staticmethod
 	def _combine_process_output(stdout: str, stderr: str) -> str:

@@ -162,6 +162,139 @@ def test_extract_target_literals_discards_non_progressing_transitions():
 	]
 
 
+def test_extract_progressing_transitions_can_follow_explicit_literal_order():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
+	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
+	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  node [shape = doublecircle]; 3;\n"
+			"  node [shape = circle]; 1 s1 s2;\n"
+			"  init [shape = plaintext, label = \"\"];\n"
+			"  init -> 1;\n"
+			"  1 -> s1 [label=\"on_b1_b4\"];\n"
+			"  s1 -> s2 [label=\"on_b3_b1\"];\n"
+			"  s2 -> 3 [label=\"on_b4_b2\"];\n"
+			"}\n"
+		),
+	}
+
+	transition_specs = synthesizer.extract_progressing_transitions(
+		grounding_map,
+		dfa_result,
+		ordered_literal_signatures=[
+			"on(b4, b2)",
+			"on(b1, b4)",
+			"on(b3, b1)",
+		],
+	)
+
+	assert [
+		(
+			spec["transition_name"],
+			spec["source_state"],
+			spec["target_state"],
+			spec["label"],
+		)
+		for spec in transition_specs
+	] == [
+		("dfa_step_q1_q2_on_b4_b2", "q1", "q2", "on(b4, b2)"),
+		("dfa_step_q2_q3_on_b1_b4", "q2", "q3", "on(b1, b4)"),
+		("dfa_step_q3_q4_on_b3_b1", "q3", "q4", "on(b3, b1)"),
+	]
+
+
+def test_extract_progressing_transitions_can_drop_auxiliary_dfa_labels_when_query_order_is_known():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
+	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
+	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  node [shape = doublecircle]; 4;\n"
+			"  node [shape = circle]; 1 s1 s2 s3;\n"
+			"  init [shape = plaintext, label = \"\"];\n"
+			"  init -> 1;\n"
+			"  1 -> s1 [label=\"on_b1_b4\"];\n"
+			"  s1 -> s2 [label=\"!on_b1_b4\"];\n"
+			"  s2 -> s3 [label=\"on_b3_b1\"];\n"
+			"  s3 -> 4 [label=\"on_b4_b2\"];\n"
+			"}\n"
+		),
+	}
+
+	transition_specs = synthesizer.extract_progressing_transitions(
+		grounding_map,
+		dfa_result,
+		ordered_literal_signatures=[
+			"on(b4, b2)",
+			"on(b1, b4)",
+			"on(b3, b1)",
+		],
+	)
+
+	assert [spec["label"] for spec in transition_specs] == [
+		"on(b4, b2)",
+		"on(b1, b4)",
+		"on(b3, b1)",
+	]
+
+
+def test_synthesize_can_project_official_blocksworld_methods_without_llm():
+	domain_path = (
+		Path(__file__).parent.parent.parent
+		/ "src"
+		/ "domains"
+		/ "blocksworld"
+		/ "domain.hddl"
+	)
+	domain = HDDLParser.parse_domain(str(domain_path))
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
+	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
+	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  node [shape = doublecircle]; 3;\n"
+			"  node [shape = circle]; 1 s1 s2;\n"
+			"  init [shape = plaintext, label = \"\"];\n"
+			"  init -> 1;\n"
+			"  1 -> s1 [label=\"on_b1_b4\"];\n"
+			"  s1 -> s2 [label=\"on_b3_b1\"];\n"
+			"  s2 -> 3 [label=\"on_b4_b2\"];\n"
+			"}\n"
+		),
+	}
+
+	library, metadata = HTNMethodSynthesizer().synthesize(
+		domain=domain,
+		grounding_map=grounding_map,
+		dfa_result=dfa_result,
+		ordered_literal_signatures=["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"],
+	)
+
+	assert metadata["used_llm"] is False
+	assert metadata["domain_projection_used"] is True
+	assert metadata["target_literals"] == ["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"]
+	assert {binding.task_name for binding in library.target_task_bindings} == {"do_put_on"}
+	assert {"do_put_on", "do_clear", "do_on_table", "do_move"} <= {
+		task.name for task in library.compound_tasks
+	}
+	assert any(method.task_name == "do_put_on" for method in library.methods)
+	assert any(
+		method.task_name == "do_clear"
+		and method.context
+		and not method.subtasks
+		for method in library.methods
+	)
+
+
 def test_extract_target_literals_keeps_accepting_loops_when_no_progress_edge_exists():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
