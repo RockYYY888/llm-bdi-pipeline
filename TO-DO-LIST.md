@@ -38,3 +38,6 @@
 - [x] Milestone 19: Seed Stage 6 from explicit `problem.hddl :init` when provided,
   make `agentspeak_generated.asl` the only runtime ASL artifact, and rename runtime entrypoints
   to neutral `execute/verify_targets`
+- [x] Milestone 20: Replace `src/domains` with official IPC benchmark assets
+  (Blocksworld-GTOHP, Rover, Satellite, Transport), move legacy blocksworld fixtures into tests,
+  and keep runtime `action_path` aligned with original HDDL action names

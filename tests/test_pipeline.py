@@ -40,15 +40,26 @@ from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 from utils.pipeline_logger import PipelineLogger
 
-DEFAULT_DOMAIN_FILE = str(
+LEGACY_BLOCKSWORLD_DOMAIN_FILE = str(
+	(
+		Path(__file__).parent.parent
+		/ "tests"
+		/ "fixtures"
+		/ "domains"
+		/ "legacy_blocksworld"
+		/ "domain.hddl"
+	).resolve(),
+)
+OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl").resolve(),
 )
 QUERY_1_PROBLEM_FILE = str(
 	(
 		Path(__file__).parent.parent
-		/ "src"
+		/ "tests"
+		/ "fixtures"
 		/ "domains"
-		/ "blocksworld"
+		/ "legacy_blocksworld"
 		/ "problems"
 		/ "query_1_init.hddl"
 	).resolve(),
@@ -617,7 +628,7 @@ def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 
 	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
 
-	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
+	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
 	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path))
 	pipeline.logger.start_pipeline(
 		"demo instruction",
@@ -1049,7 +1060,7 @@ def _run_query_case(
 
 
 def test_method_validation_initial_facts_are_branch_specific():
-	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
+	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_hold_block_from_block",
@@ -1102,7 +1113,7 @@ def test_method_validation_initial_facts_are_branch_specific():
 
 
 def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
-	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
+	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_place_on_direct",
@@ -1164,7 +1175,7 @@ def test_method_validation_initial_facts_avoid_conflicting_global_defaults():
 
 
 def test_task_witness_initial_facts_merge_sibling_branches():
-	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
+	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method_library = HTNMethodLibrary(
 		methods=[
@@ -1209,7 +1220,7 @@ def test_task_witness_initial_facts_merge_sibling_branches():
 
 
 def test_method_validation_initial_facts_allocate_typed_witness_objects():
-	pipeline = LTL_BDI_Pipeline(domain_file=DEFAULT_DOMAIN_FILE)
+	pipeline = LTL_BDI_Pipeline(domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_remove_on_clear_first",
@@ -1276,7 +1287,7 @@ def test_blocksworld_pipeline_query_case(query_id: str):
 	report = _run_query_case(
 		query_id,
 		query_cases=QUERY_CASES,
-		domain_file=DEFAULT_DOMAIN_FILE,
+		domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE,
 	)
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 
@@ -1343,7 +1354,7 @@ def main(argv: List[str]) -> int:
 		_run_query_case(
 			query_id,
 			query_cases=QUERY_CASES,
-			domain_file=DEFAULT_DOMAIN_FILE,
+			domain_file=LEGACY_BLOCKSWORLD_DOMAIN_FILE,
 		)
 		for query_id in query_ids
 	]

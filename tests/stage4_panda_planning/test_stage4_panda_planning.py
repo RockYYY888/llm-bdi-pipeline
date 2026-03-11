@@ -22,9 +22,10 @@ from utils.hddl_parser import HDDLParser
 def _domain():
 	domain_path = (
 		Path(__file__).parent.parent.parent
-		/ "src"
+		/ "tests"
+		/ "fixtures"
 		/ "domains"
-		/ "blocksworld"
+		/ "legacy_blocksworld"
 		/ "domain.hddl"
 	)
 	return HDDLParser.parse_domain(str(domain_path))

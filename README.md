@@ -3,7 +3,12 @@
 This repository generates AgentSpeak plan libraries from natural-language goals.
 The default runtime mainline is **Stage 1 -> Stage 6** in
 `src/main.py` -> `LTL_BDI_Pipeline.execute(mode="dfa_agentspeak")`.
-The only actively maintained planning domain in this repository is **blocksworld**.
+The repository now carries four benchmark-aligned planning domains:
+
+- `blocksworld` (official IPC HTN total-order `Blocksworld-GTOHP`)
+- `marsrover` (official IPC HTN partial-order `Rover`)
+- `satellite` (official IPC HTN partial-order `Satellite`)
+- `transport` (official IPC HTN partial-order `Transport`)
 
 ## Current Architecture
 
@@ -295,7 +300,7 @@ Notes:
 - Stage 6 looks for a supported Java runtime (17-23) in this order:
   `STAGE6_JAVA_BIN`, `STAGE6_JAVA_HOME/bin/java`, `JAVA_HOME/bin/java`, `PATH`, and
   macOS JVM directories.
-- The maintained domain is `src/domains/blocksworld/`.
+- Benchmark domains live under `src/domains/`.
 - Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
 
 ## Running Tests
