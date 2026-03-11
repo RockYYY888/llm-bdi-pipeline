@@ -35,3 +35,6 @@
 - [x] Milestone 17: Publish Stage 1-6 assumption boundary document and link it from README
 - [x] Milestone 18: Export Stage 6 executed primitive trace as `action_path.txt`
   and record `src/tests` run origin in pipeline logs
+- [x] Milestone 19: Seed Stage 6 from explicit `problem.hddl :init` when provided,
+  make `agentspeak_generated.asl` the only runtime ASL artifact, and rename runtime entrypoints
+  to neutral `execute/verify_targets`

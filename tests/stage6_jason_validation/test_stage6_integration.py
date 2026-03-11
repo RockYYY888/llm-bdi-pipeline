@@ -124,8 +124,8 @@ def test_stage6_runs_query2_sample_agentspeak(tmp_path):
 	)
 
 	assert result.status == "success"
-	assert "stage6 exec success" in result.stdout
-	assert "stage6 exec failed" not in result.stdout
+	assert "execute success" in result.stdout
+	assert "execute failed" not in result.stdout
 
 
 def test_stage6_runs_mixed_goal_sample_agentspeak(tmp_path):
@@ -153,8 +153,8 @@ def test_stage6_runs_mixed_goal_sample_agentspeak(tmp_path):
 	)
 
 	assert result.status == "success"
-	assert "stage6 exec success" in result.stdout
-	assert "stage6 exec failed" not in result.stdout
+	assert "execute success" in result.stdout
+	assert "execute failed" not in result.stdout
 
 
 def test_stage6_runs_negative_target_case_with_naf(tmp_path):
@@ -238,8 +238,8 @@ dfa_edge_label(dfa_step_q1_q2_not_clear_a, "!clear(a)").
 	)
 
 	assert result.status == "success"
-	assert "stage6 exec success" in result.stdout
-	assert "~clear(a)" not in (tmp_path / "jason_runner_agent.asl").read_text()
+	assert "execute success" in result.stdout
+	assert "~clear(a)" not in (tmp_path / "agentspeak_generated.asl").read_text()
 
 
 def test_stage6_runs_or_precondition_case(tmp_path):
@@ -323,8 +323,8 @@ dfa_edge_label(dfa_step_q1_q2_checked_a, "checked(a)").
 	)
 
 	assert result.status == "success"
-	assert "stage6 exec success" in result.stdout
-	assert "stage6 exec failed" not in result.stdout
+	assert "execute success" in result.stdout
+	assert "execute failed" not in result.stdout
 
 
 def test_stage6_fail_fast_on_unsupported_hddl_constructs():

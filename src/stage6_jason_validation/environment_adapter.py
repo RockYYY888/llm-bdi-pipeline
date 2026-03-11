@@ -47,10 +47,10 @@ class JasonEnvironmentRuntimeAdapter(Stage6EnvironmentAdapter):
 	mode = "real"
 
 	def validate(self, *, stdout: str, stderr: str) -> EnvironmentAdapterResult:
-		has_ready_marker = "stage6 env ready" in stdout
-		has_action_failure = "stage6 env action failed" in stdout
-		has_unknown_action = "stage6 env unknown action" in stdout
-		has_compile_error = "stage6 env compile failed" in stdout
+		has_ready_marker = "runtime env ready" in stdout
+		has_action_failure = "runtime env action failed" in stdout
+		has_unknown_action = "runtime env unknown action" in stdout
+		has_compile_error = "runtime env compile failed" in stdout
 
 		details = {
 			"has_ready_marker": has_ready_marker,

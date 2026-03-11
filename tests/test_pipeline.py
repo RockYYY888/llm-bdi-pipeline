@@ -43,6 +43,16 @@ from utils.pipeline_logger import PipelineLogger
 DEFAULT_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl").resolve(),
 )
+QUERY_1_PROBLEM_FILE = str(
+	(
+		Path(__file__).parent.parent
+		/ "src"
+		/ "domains"
+		/ "blocksworld"
+		/ "problems"
+		/ "query_1_init.hddl"
+	).resolve(),
+)
 MARSROVER_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "domain.hddl").resolve(),
 )
@@ -57,6 +67,8 @@ QUERY_CASES: Dict[str, Dict[str, Any]] = {
 	"query_1": {
 		"instruction": "Using blocks a and b, arrange them so that a is on b.",
 		"required_target_literals": ["on(a, b)"],
+		"problem_file": QUERY_1_PROBLEM_FILE,
+		"expected_action_path": ["pick_up_from_table(a)", "put_on_block(a,b)"],
 		"description": "Positive reachability goal",
 	},
 	"query_2": {
@@ -335,7 +347,6 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "htn_method_library.json",
 		log_dir / "panda_transitions.json",
 		log_dir / "dfa.json",
-		log_dir / "jason_runner_agent.asl",
 		log_dir / "jason_runner.mas2j",
 		log_dir / "jason_stdout.txt",
 		log_dir / "jason_stderr.txt",
@@ -867,7 +878,10 @@ def _run_query_case(
 		)
 
 	case = query_cases[query_id]
-	pipeline = LTL_BDI_Pipeline(domain_file=domain_file)
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=domain_file,
+		problem_file=case.get("problem_file"),
+	)
 	test_logs_dir = Path(__file__).parent / "logs"
 	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
 
@@ -1003,18 +1017,25 @@ def _run_query_case(
 	if stage6_artifacts.get("timed_out"):
 		bug_messages.append("Stage 6 run timed out")
 	stage6_stdout = stage6_artifacts.get("stdout") or ""
-	if "stage6 exec success" not in stage6_stdout:
+	if "execute success" not in stage6_stdout:
 		bug_messages.append("Stage 6 stdout missing success marker")
-	if "stage6 exec failed" in stage6_stdout:
+	if "execute failed" in stage6_stdout:
 		bug_messages.append("Stage 6 stdout contains failure marker")
 	action_path = stage6_artifacts.get("action_path") or []
 	if not isinstance(action_path, list):
 		bug_messages.append("Stage 6 action_path is not a list")
+	expected_action_path = case.get("expected_action_path")
+	if expected_action_path is not None and action_path != expected_action_path:
+		bug_messages.append(
+			f"Stage 6 action_path mismatch: expected {expected_action_path}, got {action_path}",
+		)
 	action_path_file = log_dir / "action_path.txt"
 	if action_path_file.exists():
 		file_actions = [line.strip() for line in action_path_file.read_text().splitlines() if line.strip()]
 		if file_actions != action_path:
 			bug_messages.append("Stage 6 action_path.txt does not match execution.json action_path")
+	if (log_dir / "jason_runner_agent.asl").exists():
+		bug_messages.append("legacy runtime-only jason_runner_agent.asl artifact still present")
 
 	return {
 		"query_id": query_id,

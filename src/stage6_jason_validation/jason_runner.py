@@ -73,8 +73,8 @@ class JasonRunner:
 	"""Run Stage 5 AgentSpeak output in Jason and validate runtime outcomes."""
 
 	backend_name = "RunLocalMAS"
-	success_marker = "stage6 exec success"
-	failure_marker = "stage6 exec failed"
+	success_marker = "execute success"
+	failure_marker = "execute failed"
 	min_java_major = 17
 	max_java_major = 23
 	environment_class_name = "Stage6PipelineEnvironment"
@@ -124,7 +124,7 @@ class JasonRunner:
 		jason_jar = self._ensure_jason_jar(java_bin)
 		log_conf = self._resolve_log_config()
 
-		runner_asl_path = output_path / "jason_runner_agent.asl"
+		runner_asl_path = output_path / "agentspeak_generated.asl"
 		runner_mas2j_path = output_path / "jason_runner.mas2j"
 		env_java_path = output_path / f"{self.environment_class_name}.java"
 		env_class_path = output_path / f"{self.environment_class_name}.class"
@@ -204,7 +204,7 @@ class JasonRunner:
 		action_path_path.write_text(self._render_action_path(action_path))
 
 		artifacts = {
-			"jason_runner_agent": str(runner_asl_path),
+			"agentspeak_generated": str(runner_asl_path),
 			"jason_runner_mas2j": str(runner_mas2j_path),
 			"stage6_environment_java": str(env_java_path),
 			"stage6_environment_class": str(env_class_path),
@@ -275,32 +275,32 @@ class JasonRunner:
 		lines = [
 			environment_ready_code.rstrip(),
 			"",
-			"/* Stage 6 Execution Wrapper */",
-			"!stage6_exec.",
+			"/* Execution Entry */",
+			"!execute.",
 			"",
 		]
-		lines.append(f"+!stage6_verify_targets : {target_context} <-")
+		lines.append(f"+!verify_targets : {target_context} <-")
 		lines.extend(self._indent_body(["true"]))
 		lines.append("")
-		lines.append("+!stage6_exec : true <-")
+		lines.append("+!execute : true <-")
 		body_lines: List[str] = [
-			'.print("stage6 exec start")',
+			'.print("execute start")',
 			"!run_dfa",
 			"?dfa_state(FINAL_STATE)",
 			"?accepting_state(FINAL_STATE)",
-			"!stage6_verify_targets",
-			'.print("stage6 exec success")',
+			"!verify_targets",
+			'.print("execute success")',
 			".stopMAS",
 		]
 		lines.extend(self._indent_body(body_lines))
 		lines.append("")
-		lines.append("-!stage6_exec : true <-")
-		lines.extend(self._indent_body(['.print("stage6 exec failed")', ".stopMAS"]))
+		lines.append("-!execute : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
 
 	def _extract_action_path(self, stdout: str) -> List[str]:
-		pattern = re.compile(r"^stage6 env action success (.+?)\s*$")
+		pattern = re.compile(r"^runtime env action success (.+?)\s*$")
 		return [
 			match.group(1).strip()
 			for line in stdout.splitlines()
@@ -363,11 +363,11 @@ class JasonRunner:
 	def _build_runner_mas2j(self, domain_name: str) -> str:
 		sanitized_domain = re.sub(r"[^a-zA-Z0-9_]+", "_", domain_name).strip("_").lower()
 		if not sanitized_domain:
-			sanitized_domain = "stage6"
+			sanitized_domain = "runtime"
 		return (
-			f"MAS stage6_{sanitized_domain} {{\n"
+			f"MAS execute_{sanitized_domain} {{\n"
 			f"    environment: {self.environment_class_name}\n"
-			"    agents: jason_runner_agent;\n"
+			"    agents: agentspeak_generated;\n"
 			"    aslSourcePath: \".\";\n"
 			"}\n"
 		)
@@ -476,18 +476,18 @@ public class {self.environment_class_name} extends Environment {{
 		seedInitialFacts();
 		loadActions();
 		syncPercepts();
-		System.out.println("stage6 env ready");
+		System.out.println("runtime env ready");
 	}}
 
 	@Override
 	public synchronized boolean executeAction(String agName, Structure action) {{
 		ActionSchema schema = actions.get(action.getFunctor());
 		if (schema == null) {{
-			System.out.println("stage6 env unknown action " + action);
+			System.out.println("runtime env unknown action " + action);
 			return false;
 		}}
 		if (action.getArity() != schema.parameters.length) {{
-			System.out.println("stage6 env action failed " + action + " reason=arity");
+			System.out.println("runtime env action failed " + action + " reason=arity");
 			return false;
 		}}
 
@@ -502,13 +502,13 @@ public class {self.environment_class_name} extends Environment {{
 		}}
 
 		if (!checkPreconditions(schema.preconditionClauses, bindings)) {{
-			System.out.println("stage6 env action failed " + action + " reason=precondition");
+			System.out.println("runtime env action failed " + action + " reason=precondition");
 			return false;
 		}}
 
 		applyEffects(schema.effects, bindings);
 		syncPercepts();
-		System.out.println("stage6 env action success " + action);
+		System.out.println("runtime env action success " + action);
 		return true;
 	}}
 

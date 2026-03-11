@@ -42,9 +42,9 @@ The only actively maintained planning domain in this repository is **blocksworld
 6. **Stage 6: AgentSpeak -> Jason Runtime Validation**
    - `src/stage6_jason_validation/`
    - Input: Stage 5 `agentspeak_generated.asl` + Stage 3 target literals
-   - Does: appends a Stage 6 execution wrapper, launches Jason via
+   - Does: rewrites `agentspeak_generated.asl` into the Jason runtime form, launches Jason via
      `jason.infra.local.RunLocalMAS`, and validates runtime markers
-   - Output: `jason_runner_agent.asl`, `jason_runner.mas2j`, runtime stdout/stderr,
+   - Output: `agentspeak_generated.asl`, `jason_runner.mas2j`, runtime stdout/stderr,
      `action_path.txt`, and `jason_validation.json`
 
 ## Important Design Choices
@@ -267,7 +267,6 @@ PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
   - `agentspeak_generated.asl`
   - `htn_method_library.json`
   - `panda_transitions.json`
-  - `jason_runner_agent.asl`
   - `jason_runner.mas2j`
   - `jason_stdout.txt`
   - `jason_stderr.txt`
@@ -289,6 +288,8 @@ Notes:
 - Stage 1 requires an LLM API key.
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
 - `--domain-file` is required. The pipeline does not use an implicit default domain.
+- `--problem-file` is optional and, when provided, Stage 6 seeds runtime facts from the
+  official HDDL problem `:init`.
 - Stage 4 looks for `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` in this order:
   `PATH`, `PANDA_PI_HOME/bin`, `PANDA_PI_BIN`, `$HOME/.local/pandaPI/bin`.
 - Stage 6 looks for a supported Java runtime (17-23) in this order:
@@ -348,7 +349,6 @@ A successful Stage 1-6 run writes:
 - `agentspeak_generated.asl`
 - `htn_method_library.json`
 - `panda_transitions.json`
-- `jason_runner_agent.asl`
 - `jason_runner.mas2j`
 - `jason_stdout.txt`
 - `jason_stderr.txt`

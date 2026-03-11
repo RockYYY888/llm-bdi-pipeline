@@ -56,10 +56,11 @@ def test_runner_asl_includes_accepting_and_target_validation_without_manual_seed
 		],
 	)
 
-	assert "+!stage6_verify_targets : on(a, b) & not clear(b) <-" in asl
+	assert "+!verify_targets : on(a, b) & not clear(b) <-" in asl
 	assert "?dfa_state(FINAL_STATE)" in asl
 	assert "?accepting_state(FINAL_STATE)" in asl
-	assert "!stage6_verify_targets" in asl
+	assert "!verify_targets" in asl
+	assert "!execute." in asl
 	assert "+on(a" not in asl
 
 
@@ -78,7 +79,7 @@ def test_runner_asl_forces_negative_targets_to_naf_notation():
 		],
 	)
 
-	assert "+!stage6_verify_targets : not clear(b) <-" in asl
+	assert "+!verify_targets : not clear(b) <-" in asl
 	assert "~clear(b)" not in asl
 
 
@@ -180,10 +181,10 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 			args=args[0],
 			returncode=0,
 			stdout=(
-				"stage6 env ready\n"
-				"stage6 env action success pick_up(a,b)\n"
-				"stage6 exec start\n"
-				"stage6 exec success\n"
+				"runtime env ready\n"
+				"runtime env action success pick_up(a,b)\n"
+				"execute start\n"
+				"execute success\n"
 			),
 			stderr="",
 		),
@@ -202,7 +203,7 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 
 	assert result.status == "success"
 	assert result.environment_adapter["success"] is True
-	assert (tmp_path / "jason_runner_agent.asl").exists()
+	assert (tmp_path / "agentspeak_generated.asl").exists()
 	assert (tmp_path / "jason_runner.mas2j").exists()
 	assert (tmp_path / "Stage6PipelineEnvironment.java").exists()
 	assert (tmp_path / "Stage6PipelineEnvironment.class").exists()
@@ -223,10 +224,10 @@ def test_extract_action_path_preserves_runtime_order():
 	runner = JasonRunner()
 	stdout = "\n".join(
 		[
-			"stage6 env ready",
-			"stage6 env action success pick_up(a,b)",
-			"stage6 env action success put_on_block(a,c)",
-			"stage6 exec success",
+			"runtime env ready",
+			"runtime env action success pick_up(a,b)",
+			"runtime env action success put_on_block(a,c)",
+			"execute success",
 		],
 	)
 
@@ -260,7 +261,7 @@ def test_validate_fails_when_environment_ready_marker_missing(monkeypatch, tmp_p
 		lambda *args, **kwargs: subprocess.CompletedProcess(
 			args=args[0],
 			returncode=0,
-			stdout="stage6 exec start\nstage6 exec success\n",
+			stdout="execute start\nexecute success\n",
 			stderr="",
 		),
 	)
@@ -301,7 +302,7 @@ def test_validate_timeout_is_reported(monkeypatch, tmp_path):
 		raise subprocess.TimeoutExpired(
 			cmd=args[0],
 			timeout=1,
-			output="stage6 env ready\nstage6 exec start\n",
+			output="runtime env ready\nexecute start\n",
 			stderr="timeout",
 		)
 

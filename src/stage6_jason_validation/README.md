@@ -13,18 +13,18 @@ After Stage 5 renders `agentspeak_generated.asl`, Stage 6 validates runtime exec
 
 For each pipeline run, Stage 6 writes and executes:
 
-1. `jason_runner_agent.asl`
-   - Copy of Stage 5 output
-   - Appended wrapper goal `!stage6_exec`
-   - Seeds beliefs from Stage 4 witness `initial_facts` (falls back to positive target literals if none)
+1. `agentspeak_generated.asl`
+   - Stage 5 output rewritten into the Jason runtime form
+   - Appended entry goal `!execute`
+   - Seeds runtime facts from `problem.hddl :init` when available, otherwise from Stage 4 witnesses
    - Executes `!run_dfa`
    - Validates accepting DFA state and target-literal context before success marker
    - Emits markers:
-     - `stage6 exec success`
-     - `stage6 exec failed`
+     - `execute success`
+     - `execute failed`
 
 2. `jason_runner.mas2j`
-   - Single-agent MAS file for `jason_runner_agent`
+   - Single-agent MAS file for `agentspeak_generated`
    - `aslSourcePath: "."`
 
 3. Java command:
@@ -48,11 +48,11 @@ Stage 6 succeeds only if all checks pass:
 
 1. Process finished (not timeout)
 2. Exit code is `0`
-3. `stdout` contains `stage6 exec success`
-4. `stdout` does **not** contain `stage6 exec failed`
+3. `stdout` contains `execute success`
+4. `stdout` does **not** contain `execute failed`
 5. Runtime checks inside ASL pass:
    - `dfa_state(FINAL_STATE)` and `accepting_state(FINAL_STATE)` both hold
-   - `!stage6_verify_targets` context matches all Stage 3 target literals
+   - `!verify_targets` context matches all Stage 3 target literals
 
 ## Java Discovery
 

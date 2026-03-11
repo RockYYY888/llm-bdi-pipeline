@@ -34,12 +34,13 @@ class LTL_BDI_Pipeline:
     Stage 6: AgentSpeak -> Jason Runtime Validation
     """
 
-    def __init__(self, domain_file: str):
+    def __init__(self, domain_file: str, problem_file: str | None = None):
         """
         Initialize pipeline
 
         Args:
             domain_file: Path to HDDL domain file.
+            problem_file: Optional path to HDDL problem file used for runtime initialisation.
         """
         self.config = get_config()
 
@@ -54,10 +55,17 @@ class LTL_BDI_Pipeline:
             )
 
         self.domain_file = domain_file
+        self.problem_file = problem_file
 
         # Parse domain to extract actions, predicates, tasks, and methods
         from utils.hddl_parser import HDDLParser
         self.domain = HDDLParser.parse_domain(domain_file)
+        self.problem = HDDLParser.parse_problem(problem_file) if problem_file else None
+        if self.problem is not None and self.problem.domain_name.lower() != self.domain.name.lower():
+            raise ValueError(
+                "problem_file domain does not match domain_file: "
+                f"{self.problem.domain_name} != {self.domain.name}",
+            )
         self.domain_actions = self.domain.get_action_names()
         self.domain_predicates = self.domain.get_predicate_signatures()
         self.type_parent_map = self._build_type_parent_map()
@@ -91,6 +99,7 @@ class LTL_BDI_Pipeline:
             nl_instruction,
             mode=mode,
             domain_file=self.domain_file,
+            problem_file=self.problem_file,
             output_dir="logs",
         )
 
@@ -1751,14 +1760,16 @@ class LTL_BDI_Pipeline:
         try:
             stage6_dir = Path(__file__).parent / "stage6_jason_validation"
             runner = JasonRunner(stage6_dir=stage6_dir)
-            seed_facts, seed_transition = self._stage6_seed_facts(
+            seed_facts, seed_transition = self._stage6_runtime_seed_facts(
                 plan_records,
                 method_library.target_literals,
             )
+            stage6_objects = self._stage6_runtime_objects(ltl_spec.objects, seed_facts)
             stage6_object_types = self._stage6_object_types(
-                ltl_spec.objects,
+                stage6_objects,
                 method_library,
                 seed_facts,
+                problem_object_types=self.problem.object_types if self.problem is not None else None,
             )
             action_schemas = self._stage6_action_schemas()
             result = runner.validate(
@@ -1784,9 +1795,10 @@ class LTL_BDI_Pipeline:
                 "seed_transition": seed_transition,
                 "executed_action_count": len(result.action_path),
                 "action_path_artifact": result.artifacts.get("action_path"),
+                "runtime_object_count": len(stage6_objects),
                 "resolved_object_types": stage6_object_types,
                 "action_schema_count": len(action_schemas),
-	                "environment_adapter": result.environment_adapter,
+                "environment_adapter": result.environment_adapter,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(
@@ -1845,6 +1857,31 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None
+
+    def _stage6_runtime_seed_facts(self, plan_records, target_literals):
+        if self.problem is not None:
+            return self._stage6_problem_seed_facts()
+        return self._stage6_seed_facts(plan_records, target_literals)
+
+    def _stage6_problem_seed_facts(self):
+        if self.problem is None or not self.problem_file:
+            return (), None
+        return (
+            tuple(self._render_problem_fact(fact) for fact in self.problem.init_facts),
+            f"problem_init:{Path(self.problem_file).name}",
+        )
+
+    def _stage6_runtime_objects(self, objects, seed_facts):
+        runtime_objects = list(self.problem.objects) if self.problem is not None else list(objects or [])
+        for fact in seed_facts:
+            parsed = self._parse_positive_hddl_fact(fact)
+            if parsed is None:
+                continue
+            _, args = parsed
+            for arg in args:
+                if arg not in runtime_objects:
+                    runtime_objects.append(arg)
+        return tuple(runtime_objects)
 
     @staticmethod
     def _stage6_seed_facts(plan_records, target_literals):
@@ -1912,7 +1949,14 @@ class LTL_BDI_Pipeline:
             )
         return schemas
 
-    def _stage6_object_types(self, objects, method_library, seed_facts):
+    def _stage6_object_types(
+        self,
+        objects,
+        method_library,
+        seed_facts,
+        *,
+        problem_object_types: Optional[Dict[str, str]] = None,
+    ):
         candidates: Dict[str, Set[str]] = defaultdict(set)
         required_objects: Set[str] = set()
         self._merge_type_candidates(
@@ -1960,8 +2004,20 @@ class LTL_BDI_Pipeline:
             self._merge_type_candidates(candidates, temp_candidates)
 
         resolved = {}
-        for obj in objects:
+        available_objects = list(dict.fromkeys(objects or ()))
+        for obj in sorted(required_objects):
+            if obj not in available_objects:
+                available_objects.append(obj)
+        for obj in available_objects:
             if obj not in required_objects:
+                continue
+            if problem_object_types and obj in problem_object_types:
+                type_name = problem_object_types[obj]
+                if type_name not in self.domain_type_names:
+                    raise TypeResolutionError(
+                        f"Stage 6 object typing: problem object '{obj}' has unknown type '{type_name}'.",
+                    )
+                resolved[obj] = type_name
                 continue
             resolved[obj] = self._resolve_symbol_type(
                 symbol=obj,
@@ -1969,6 +2025,13 @@ class LTL_BDI_Pipeline:
                 scope="Stage 6 object typing",
             )
         return resolved
+
+    @staticmethod
+    def _render_problem_fact(fact) -> str:
+        inner = fact.predicate
+        if fact.args:
+            inner = f"{inner} {' '.join(fact.args)}"
+        return f"({inner})" if fact.is_positive else f"(not ({inner}))"
 
     @staticmethod
     def _parse_positive_hddl_fact(fact: str):

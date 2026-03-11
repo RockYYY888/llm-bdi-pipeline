@@ -68,6 +68,7 @@ class PipelineRecord:
 	stage6_artifacts: Optional[Dict[str, Any]] = None
 
 	domain_file: str = "domains/blocksworld/domain.hddl"
+	problem_file: Optional[str] = None
 	output_dir: str = "output"
 	execution_time_seconds: float = 0.0
 
@@ -88,6 +89,7 @@ class PipelineLogger:
 		natural_language: str,
 		mode: str = "dfa_agentspeak",
 		domain_file: str = "domains/blocksworld/domain.hddl",
+		problem_file: str | None = None,
 		output_dir: str = "output",
 		timestamp: str | None = None,
 	) -> None:
@@ -107,6 +109,7 @@ class PipelineLogger:
 			run_origin=self.run_origin,
 			logs_root=str(self.logs_dir.resolve()),
 			domain_file=domain_file,
+			problem_file=problem_file,
 			output_dir=output_dir,
 		)
 
@@ -390,6 +393,8 @@ class PipelineLogger:
 			handle.write(f"Run Origin: {record['run_origin']}\n")
 			handle.write(f"Logs Root: {record['logs_root']}\n")
 			handle.write(f"Domain: {record['domain_file']}\n")
+			if record.get("problem_file"):
+				handle.write(f"Problem: {record['problem_file']}\n")
 			handle.write(f"Output Directory: {record['output_dir']}\n\n")
 
 			handle.write("-" * 80 + "\n")
