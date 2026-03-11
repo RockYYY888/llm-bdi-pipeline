@@ -1782,9 +1782,11 @@ class LTL_BDI_Pipeline:
                 "target_literal_count": len(method_library.target_literals),
                 "seed_fact_count": len(seed_facts),
                 "seed_transition": seed_transition,
+                "executed_action_count": len(result.action_path),
+                "action_path_artifact": result.artifacts.get("action_path"),
                 "resolved_object_types": stage6_object_types,
                 "action_schema_count": len(action_schemas),
-                "environment_adapter": result.environment_adapter,
+	                "environment_adapter": result.environment_adapter,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(

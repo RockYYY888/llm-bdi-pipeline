@@ -175,3 +175,24 @@ def test_stage3_summary_uses_bang_signature_for_negative_literals(tmp_path):
     execution = json.loads((logger.current_log_dir / "execution.json").read_text())
     assert execution["stage3_metadata"]["target_literals"] == ["!clear(a)"]
     assert execution["negation_resolution"]["mode_by_predicate"] == {"clear/1": "naf"}
+
+
+def test_pipeline_logger_records_run_origin_and_logs_root(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path / "tests_logs"), run_origin="tests")
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        output_dir=str(tmp_path),
+    )
+    logger.end_pipeline(success=True)
+
+    log_dir = logger.current_log_dir
+    assert log_dir is not None
+
+    execution = json.loads((log_dir / "execution.json").read_text())
+    execution_txt = (log_dir / "execution.txt").read_text()
+
+    assert execution["run_origin"] == "tests"
+    assert execution["logs_root"] == str((tmp_path / "tests_logs").resolve())
+    assert "Run Origin: tests" in execution_txt

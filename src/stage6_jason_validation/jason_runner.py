@@ -47,6 +47,7 @@ class JasonValidationResult:
 	timed_out: bool
 	stdout: str
 	stderr: str
+	action_path: List[str]
 	environment_adapter: Dict[str, Any]
 	artifacts: Dict[str, str]
 
@@ -60,11 +61,12 @@ class JasonValidationResult:
 			"jason_jar": self.jason_jar,
 			"exit_code": self.exit_code,
 			"timed_out": self.timed_out,
-			"stdout": self.stdout,
-			"stderr": self.stderr,
-			"environment_adapter": dict(self.environment_adapter),
-			"artifacts": dict(self.artifacts),
-		}
+				"stdout": self.stdout,
+				"stderr": self.stderr,
+				"action_path": list(self.action_path),
+				"environment_adapter": dict(self.environment_adapter),
+				"artifacts": dict(self.artifacts),
+			}
 
 
 class JasonRunner:
@@ -128,6 +130,7 @@ class JasonRunner:
 		env_class_path = output_path / f"{self.environment_class_name}.class"
 		stdout_path = output_path / "jason_stdout.txt"
 		stderr_path = output_path / "jason_stderr.txt"
+		action_path_path = output_path / "action_path.txt"
 		validation_json_path = output_path / "jason_validation.json"
 
 		runner_asl = self._build_runner_asl(
@@ -194,9 +197,11 @@ class JasonRunner:
 
 		stdout = self._combine_process_output(raw_stdout, raw_stderr)
 		stderr = raw_stderr
+		action_path = self._extract_action_path(stdout)
 
 		stdout_path.write_text(stdout)
 		stderr_path.write_text(raw_stderr)
+		action_path_path.write_text(self._render_action_path(action_path))
 
 		artifacts = {
 			"jason_runner_agent": str(runner_asl_path),
@@ -205,6 +210,7 @@ class JasonRunner:
 			"stage6_environment_class": str(env_class_path),
 			"jason_stdout": str(stdout_path),
 			"jason_stderr": str(stderr_path),
+			"action_path": str(action_path_path),
 			"jason_validation": str(validation_json_path),
 		}
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
@@ -222,13 +228,14 @@ class JasonRunner:
 			java_version=java_major,
 			javac_path=javac_bin,
 			jason_jar=str(jason_jar),
-			exit_code=exit_code,
-			timed_out=timed_out,
-			stdout=stdout,
-			stderr=stderr,
-			environment_adapter=environment_result.to_dict(),
-			artifacts=artifacts,
-		)
+				exit_code=exit_code,
+				timed_out=timed_out,
+				stdout=stdout,
+				stderr=stderr,
+				action_path=action_path,
+				environment_adapter=environment_result.to_dict(),
+				artifacts=artifacts,
+			)
 		validation_json_path.write_text(json.dumps(result_payload.to_dict(), indent=2))
 
 		if not is_success:
@@ -291,6 +298,19 @@ class JasonRunner:
 		lines.extend(self._indent_body(['.print("stage6 exec failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
+
+	def _extract_action_path(self, stdout: str) -> List[str]:
+		pattern = re.compile(r"^stage6 env action success (.+?)\s*$")
+		return [
+			match.group(1).strip()
+			for line in stdout.splitlines()
+			if (match := pattern.match(line.strip())) is not None
+		]
+
+	def _render_action_path(self, action_path: Sequence[str]) -> str:
+		if not action_path:
+			return ""
+		return "\n".join(action_path) + "\n"
 
 	def _rewrite_primitive_wrappers_for_environment(self, agentspeak_code: str) -> str:
 		start_marker = "/* Primitive Action Plans */"

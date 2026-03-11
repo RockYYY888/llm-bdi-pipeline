@@ -340,6 +340,7 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "jason_stdout.txt",
 		log_dir / "jason_stderr.txt",
 		log_dir / "jason_validation.json",
+		log_dir / "action_path.txt",
 	]
 
 
@@ -868,7 +869,7 @@ def _run_query_case(
 	case = query_cases[query_id]
 	pipeline = LTL_BDI_Pipeline(domain_file=domain_file)
 	test_logs_dir = Path(__file__).parent / "logs"
-	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir))
+	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
 
 	result = pipeline.execute(case["instruction"], mode="dfa_agentspeak")
 	log_dir = pipeline.logger.current_log_dir
@@ -894,6 +895,8 @@ def _run_query_case(
 
 	if execution["natural_language"] != case["instruction"]:
 		bug_messages.append("execution.json natural_language does not match selected query")
+	if execution.get("run_origin") != "tests":
+		bug_messages.append("execution.json run_origin is not tests")
 
 	for stage_key in (
 		"stage1_status",
@@ -1004,6 +1007,14 @@ def _run_query_case(
 		bug_messages.append("Stage 6 stdout missing success marker")
 	if "stage6 exec failed" in stage6_stdout:
 		bug_messages.append("Stage 6 stdout contains failure marker")
+	action_path = stage6_artifacts.get("action_path") or []
+	if not isinstance(action_path, list):
+		bug_messages.append("Stage 6 action_path is not a list")
+	action_path_file = log_dir / "action_path.txt"
+	if action_path_file.exists():
+		file_actions = [line.strip() for line in action_path_file.read_text().splitlines() if line.strip()]
+		if file_actions != action_path:
+			bug_messages.append("Stage 6 action_path.txt does not match execution.json action_path")
 
 	return {
 		"query_id": query_id,

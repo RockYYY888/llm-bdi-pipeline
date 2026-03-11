@@ -39,6 +39,7 @@ java -cp <jason-cli-all-*.jar> \
 4. Artifacts written in pipeline log dir:
    - `jason_stdout.txt`
    - `jason_stderr.txt`
+   - `action_path.txt`
    - `jason_validation.json`
 
 ## Success Criteria

@@ -33,3 +33,5 @@
 - [x] Milestone 16: Stage 6 symbolic-environment hardening, `not/~` end-to-end support,
   negation-mode auto-resolution diagnostics, and HDDL unsupported-construct fail-fast
 - [x] Milestone 17: Publish Stage 1-6 assumption boundary document and link it from README
+- [x] Milestone 18: Export Stage 6 executed primitive trace as `action_path.txt`
+  and record `src/tests` run origin in pipeline logs

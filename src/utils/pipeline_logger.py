@@ -19,6 +19,8 @@ class PipelineRecord:
 	natural_language: str
 	success: bool
 	mode: str = "dfa_agentspeak"
+	run_origin: str = "src"
+	logs_root: str = "logs"
 
 	stage1_status: str = "pending"
 	stage1_ltlf_spec: Optional[Dict[str, Any]] = None
@@ -73,9 +75,10 @@ class PipelineRecord:
 class PipelineLogger:
 	"""Save structured JSON and readable logs after each pipeline stage."""
 
-	def __init__(self, logs_dir: str = "logs") -> None:
+	def __init__(self, logs_dir: str = "logs", run_origin: str = "src") -> None:
 		self.logs_dir = Path(logs_dir)
 		self.logs_dir.mkdir(parents=True, exist_ok=True)
+		self.run_origin = run_origin
 		self.current_record: Optional[PipelineRecord] = None
 		self.start_time: Optional[datetime] = None
 		self.current_log_dir: Optional[Path] = None
@@ -101,6 +104,8 @@ class PipelineLogger:
 			natural_language=natural_language,
 			success=False,
 			mode=mode,
+			run_origin=self.run_origin,
+			logs_root=str(self.logs_dir.resolve()),
 			domain_file=domain_file,
 			output_dir=output_dir,
 		)
@@ -382,6 +387,8 @@ class PipelineLogger:
 			handle.write(f"Timestamp: {record['timestamp']}\n")
 			handle.write(f"Execution Time: {record['execution_time_seconds']:.2f} seconds\n")
 			handle.write(f"Overall Status: {'✓ SUCCESS' if record['success'] else '✗ FAILED'}\n")
+			handle.write(f"Run Origin: {record['run_origin']}\n")
+			handle.write(f"Logs Root: {record['logs_root']}\n")
 			handle.write(f"Domain: {record['domain_file']}\n")
 			handle.write(f"Output Directory: {record['output_dir']}\n\n")
 

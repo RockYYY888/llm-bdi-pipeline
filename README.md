@@ -45,7 +45,7 @@ The only actively maintained planning domain in this repository is **blocksworld
    - Does: appends a Stage 6 execution wrapper, launches Jason via
      `jason.infra.local.RunLocalMAS`, and validates runtime markers
    - Output: `jason_runner_agent.asl`, `jason_runner.mas2j`, runtime stdout/stderr,
-     and `jason_validation.json`
+     `action_path.txt`, and `jason_validation.json`
 
 ## Important Design Choices
 
@@ -271,6 +271,7 @@ PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
   - `jason_runner.mas2j`
   - `jason_stdout.txt`
   - `jason_stderr.txt`
+  - `action_path.txt`
   - `jason_validation.json`
 
 ## Running the Pipeline
@@ -351,6 +352,7 @@ A successful Stage 1-6 run writes:
 - `jason_runner.mas2j`
 - `jason_stdout.txt`
 - `jason_stderr.txt`
+- `action_path.txt`
 - `jason_validation.json`
 
 The logger also records the Stage 3 synthesis metadata, Stage 4 PANDA metadata,

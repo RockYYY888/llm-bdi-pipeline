@@ -209,10 +209,31 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 	assert (tmp_path / "jason_stdout.txt").exists()
 	assert (tmp_path / "jason_stderr.txt").exists()
 	assert (tmp_path / "jason_validation.json").exists()
+	assert (tmp_path / "action_path.txt").exists()
+	assert (tmp_path / "action_path.txt").read_text() == "pick_up(a,b)\n"
 
 	validation_payload = json.loads((tmp_path / "jason_validation.json").read_text())
 	assert validation_payload["status"] == "success"
 	assert validation_payload["environment_adapter"]["success"] is True
+	assert validation_payload["action_path"] == ["pick_up(a,b)"]
+	assert validation_payload["artifacts"]["action_path"] == str(tmp_path / "action_path.txt")
+
+
+def test_extract_action_path_preserves_runtime_order():
+	runner = JasonRunner()
+	stdout = "\n".join(
+		[
+			"stage6 env ready",
+			"stage6 env action success pick_up(a,b)",
+			"stage6 env action success put_on_block(a,c)",
+			"stage6 exec success",
+		],
+	)
+
+	assert runner._extract_action_path(stdout) == [
+		"pick_up(a,b)",
+		"put_on_block(a,c)",
+	]
 
 
 def test_validate_fails_when_environment_ready_marker_missing(monkeypatch, tmp_path):
