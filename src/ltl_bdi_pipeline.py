@@ -633,6 +633,26 @@ class LTL_BDI_Pipeline:
                 "planned_tasks": [record["plan"].task_name for record in plan_records],
             }
 
+            failed_method_names = sorted(
+                item["method_name"]
+                for item in method_validation_artifacts
+                if item["status"] == "failed"
+            )
+            if failed_method_names:
+                error = RuntimeError(
+                    "Stage 4 method validation failed for query-relevant methods: "
+                    f"{failed_method_names}",
+                )
+                setattr(
+                    error,
+                    "metadata",
+                    {
+                        **summary,
+                        "failed_method_names": failed_method_names,
+                    },
+                )
+                raise error
+
             self.logger.log_stage4_panda_planning(
                 {
                     "transitions": transition_artifacts,

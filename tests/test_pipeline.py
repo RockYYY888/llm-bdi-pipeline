@@ -573,6 +573,107 @@ def test_method_validation_task_args_respect_equality_bound_constants(tmp_path):
 	assert args == ("rover0", "waypoint5")
 
 
+def test_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatch):
+	class FakePlan:
+		def __init__(self, task_name: str, task_args: tuple[str, ...]):
+			self.task_name = task_name
+			self.task_args = task_args
+
+		def to_dict(self):
+			return {
+				"task_name": self.task_name,
+				"task_args": list(self.task_args),
+				"steps": [],
+			}
+
+	class FakePlanner:
+		def __init__(self, workspace: str):
+			self.workspace = workspace
+
+		def plan(self, **kwargs):
+			root_method = kwargs.get("root_method")
+			if root_method is not None and root_method.method_name == "m_place_on_bad":
+				raise RuntimeError("simulated method validation failure")
+			task_name = kwargs["task_name"]
+			task_args = tuple(kwargs.get("task_args") or kwargs["target_literal"].args)
+			return FakePlan(task_name, task_args)
+
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", FakePlanner)
+
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path / "logs"))
+	pipeline.logger.start_pipeline(
+		"demo instruction",
+		mode="dfa_agentspeak",
+		domain_file=pipeline.domain_file,
+		output_dir=str(tmp_path),
+	)
+	pipeline.output_dir = pipeline.logger.current_log_dir
+
+	monkeypatch.setattr(
+		pipeline,
+		"_seed_validation_scope",
+		lambda *args, **kwargs: (("a", "b"), {"a": "block", "b": "block"}),
+	)
+	monkeypatch.setattr(
+		pipeline,
+		"_task_witness_initial_facts",
+		lambda *args, **kwargs: ("(clear a)", "(clear b)"),
+	)
+	monkeypatch.setattr(
+		pipeline,
+		"_method_validation_initial_facts",
+		lambda *args, **kwargs: ("(clear a)", "(clear b)"),
+	)
+
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="place_on", parameters=("X", "Y"), is_primitive=False),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_place_on_good",
+				task_name="place_on",
+				parameters=("X", "Y"),
+			),
+			HTNMethod(
+				method_name="m_place_on_bad",
+				task_name="place_on",
+				parameters=("X", "Y"),
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
+	)
+	transition_specs = [
+		{
+			"transition_name": "dfa_step_q1_q2_on_a_b",
+			"source_state": "q1",
+			"target_state": "q2",
+			"raw_source_state": "1",
+			"raw_target_state": "2",
+			"initial_state": "q1",
+			"accepting_states": ["q2"],
+			"literal": HTNLiteral("on", ("a", "b"), True, None),
+		},
+	]
+
+	plan_records, stage4_data = pipeline._stage4_panda_planning(
+		SimpleNamespace(objects=["a", "b"]),
+		method_library,
+		transition_specs,
+	)
+
+	assert plan_records is None
+	assert stage4_data is None
+
+	execution = json.loads((pipeline.logger.current_log_dir / "execution.json").read_text())
+	assert execution["stage4_status"] == "failed"
+	assert execution["stage4_metadata"]["failed_method_validations"] == 1
+	assert execution["stage4_metadata"]["failed_method_names"] == ["m_place_on_bad"]
+
+
 def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 	method_library = HTNMethodLibrary(
 		compound_tasks=[HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",))],

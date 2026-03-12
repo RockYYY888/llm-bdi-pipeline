@@ -34,7 +34,8 @@ The repository now carries four benchmark-aligned planning domains:
    - `src/stage4_panda_planning/`
    - Input: `HTNMethodLibrary` + Stage 3 transition specs + concrete object set
    - Does: builds temporary HDDL domain/problem files and uses PANDA PI to produce
-     existence witnesses for (a) transition-bound tasks and (b) query-relevant sibling methods
+     existence witnesses for (a) transition-bound tasks and (b) query-relevant sibling methods;
+     any failed query-relevant method validation now hard-fails the pipeline
    - Output: PANDA validation records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
 
 5. **Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering**

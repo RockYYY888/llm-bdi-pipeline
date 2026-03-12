@@ -50,3 +50,5 @@
 - [x] Milestone 22: Promote the official IPC verifier into formal Stage 7, rename log directories
   to `{timestamp}_{domain}_{problem}`, keep `problem.hddl` out of synthesis, and re-accept official
   blocksworld `p01`-`p03` with end-to-end `Has Bug: False`
+- [x] Milestone 23: Make Stage 4 query-relevant method-validation failures hard-fail the pipeline
+  instead of remaining diagnostic-only, and re-accept official blocksworld `p01`-`p03`
