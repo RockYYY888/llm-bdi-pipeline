@@ -1,9 +1,11 @@
 """
-Live integration harness for benchmark-backed pipeline acceptance.
+Live integration harness for the current benchmark-backed acceptance scope.
 
 This file is the canonical acceptance entry point:
 - pytest uses it for live end-to-end verification
 - CLI can run a named query case: `python tests/test_pipeline.py query_2`
+- current live query cases are the reverse-generated NL instructions for
+  official IPC Blocksworld `p01`-`p03`
 """
 
 from __future__ import annotations
@@ -24,7 +26,13 @@ if _src_dir not in sys.path:
 
 import ltl_bdi_pipeline as pipeline_module
 from ltl_bdi_pipeline import LTL_BDI_Pipeline, TypeResolutionError
-from stage1_interpretation.ltlf_formula import LTLFormula, LogicalOperator, TemporalOperator
+from stage1_interpretation.grounding_map import GroundingMap
+from stage1_interpretation.ltlf_formula import (
+	LTLFormula,
+	LTLSpecification,
+	LogicalOperator,
+	TemporalOperator,
+)
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
@@ -50,39 +58,10 @@ BLOCKSWORLD_PROBLEM_DIR = (
 MARSROVER_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "domain.hddl").resolve(),
 )
-MARSROVER_PROBLEM_DIR = (
-	Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "problems"
-)
 
 
 BANNED_TASK_PREFIXES = ("achieve_", "maintain_not_", "ensure_", "goal_")
 IPC_PLAN_VERIFIER = IPCPlanVerifier()
-
-MARSROVER_BASE_QUERY_CASES: Dict[str, Dict[str, Any]] = {
-	"rover_query_1": {
-		"instruction": (
-			"Using rover rover0 and waypoints waypoint1 and waypoint5, "
-			"make sure rover0 is at waypoint5."
-		),
-		"required_target_literals": ["at(rover0, waypoint5)"],
-		"description": "Rover navigation reachability goal",
-	},
-	"rover_query_2": {
-		"instruction": (
-			"Using waypoint waypoint2, make sure rock data from waypoint2 is communicated."
-		),
-		"required_target_literals": ["communicated_rock_data(waypoint2)"],
-		"description": "Rover communicated rock data goal",
-	},
-	"rover_query_3": {
-		"instruction": (
-			"Using objective objective0 and mode low_res, make sure image data for objective0 "
-			"in low_res mode is communicated."
-		),
-		"required_target_literals": ["communicated_image_data(objective0, low_res)"],
-		"description": "Rover communicated image data goal",
-	},
-}
 
 
 def _literal_signature(predicate: str, args: List[str], is_positive: bool = True) -> str:
@@ -268,147 +247,6 @@ def _load_blocksworld_problem_query_cases(limit: int = 3) -> Dict[str, Dict[str,
 QUERY_CASES: Dict[str, Dict[str, Any]] = _load_blocksworld_problem_query_cases()
 
 
-def _task_invocation_to_target_literal(
-	task_name: str,
-	args: List[str],
-) -> Dict[str, Any] | None:
-	"""
-	Convert rover HTN top-level tasks to canonical predicate targets.
-
-	This is derived from the rover domain method/action semantics and lets us
-	reverse official `pfile*.hddl` missions into NL query assertions.
-	"""
-	if task_name in {"get_soil_data", "send_soil_data"} and args:
-		return {
-			"predicate": "communicated_soil_data",
-			"args": [args[-1]],
-		}
-	if task_name in {"get_rock_data", "send_rock_data"} and args:
-		return {
-			"predicate": "communicated_rock_data",
-			"args": [args[-1]],
-		}
-	if task_name in {"get_image_data", "send_image_data"} and len(args) >= 2:
-		return {
-			"predicate": "communicated_image_data",
-			"args": args[-2:],
-		}
-	if task_name == "navigate_abs" and len(args) >= 2:
-		return {
-			"predicate": "at",
-			"args": [args[0], args[1]],
-		}
-	if task_name == "calibrate_abs" and len(args) >= 2:
-		return {
-			"predicate": "calibrated",
-			"args": [args[1], args[0]],
-		}
-	if task_name == "empty-store" and args:
-		return {
-			"predicate": "empty",
-			"args": [args[0]],
-		}
-	return None
-
-
-def _literal_to_nl_goal(predicate: str, args: List[str]) -> str:
-	if predicate == "communicated_soil_data" and len(args) == 1:
-		return f"soil data from {args[0]} is communicated"
-	if predicate == "communicated_rock_data" and len(args) == 1:
-		return f"rock data from {args[0]} is communicated"
-	if predicate == "communicated_image_data" and len(args) == 2:
-		return f"image data for {args[0]} in {args[1]} mode is communicated"
-	if predicate == "at" and len(args) == 2:
-		return f"{args[0]} is at {args[1]}"
-	if predicate == "calibrated" and len(args) == 2:
-		return f"{args[0]} is calibrated for {args[1]}"
-	if predicate == "empty" and len(args) == 1:
-		return f"{args[0]} is empty"
-	if not args:
-		return f"{predicate} holds"
-	return f"{predicate}({', '.join(args)}) holds"
-
-
-def _build_case_from_rover_problem(problem_path: Path) -> Dict[str, Any] | None:
-	problem = HDDLParser.parse_problem(str(problem_path))
-	derived_literals: List[Dict[str, Any]] = []
-	seen = set()
-	for invocation in problem.htn_tasks:
-		literal = _task_invocation_to_target_literal(invocation.task_name, invocation.args)
-		if literal is None:
-			continue
-		signature = _literal_signature(literal["predicate"], literal["args"])
-		if signature in seen:
-			continue
-		seen.add(signature)
-		derived_literals.append(literal)
-		if len(derived_literals) >= 3:
-			break
-
-	if not derived_literals:
-		return None
-
-	relevant_objects = []
-	for literal in derived_literals:
-		for arg in literal["args"]:
-			if arg not in relevant_objects:
-				relevant_objects.append(arg)
-	if not relevant_objects:
-		relevant_objects = problem.objects[:4]
-
-	initial_anchor = next(
-		(
-			fact
-			for fact in problem.init_facts
-			if fact.predicate == "at"
-			and len(fact.args) == 2
-			and fact.args[0].startswith("rover")
-		),
-		None,
-	)
-	goal_text = ", and ".join(
-		_literal_to_nl_goal(item["predicate"], item["args"])
-		for item in derived_literals
-	)
-	instruction_parts = [
-		f"Using objects {', '.join(relevant_objects)}, make sure {goal_text}.",
-	]
-	if initial_anchor is not None:
-		instruction_parts.insert(
-			0,
-			f"Initially {initial_anchor.args[0]} is at {initial_anchor.args[1]}.",
-		)
-
-	return {
-		"instruction": " ".join(instruction_parts),
-		"required_target_literals": [
-			_literal_signature(item["predicate"], item["args"])
-			for item in derived_literals
-		],
-		"description": f"Auto-generated from {problem_path.name} ({problem.name})",
-	}
-
-
-def _load_rover_problem_query_cases(limit: int = 5) -> Dict[str, Dict[str, Any]]:
-	if not MARSROVER_PROBLEM_DIR.exists():
-		return {}
-	cases: Dict[str, Dict[str, Any]] = {}
-	problem_paths = sorted(MARSROVER_PROBLEM_DIR.glob("pfile*.hddl"))[:limit]
-	for index, problem_path in enumerate(problem_paths, start=1):
-		case = _build_case_from_rover_problem(problem_path)
-		if case is None:
-			continue
-		case_id = f"rover_problem_{index:02d}"
-		cases[case_id] = case
-	return cases
-
-
-MARSROVER_QUERY_CASES: Dict[str, Dict[str, Any]] = {
-	**MARSROVER_BASE_QUERY_CASES,
-	**_load_rover_problem_query_cases(),
-}
-
-
 def _pytest_selected_case_ids(
 	case_map: Dict[str, Dict[str, Any]],
 	*,
@@ -434,19 +272,6 @@ def _pytest_selected_query_ids() -> List[str]:
 		all_env="PIPELINE_TEST_ALL",
 		default_query="query_1",
 	)
-
-
-def _pytest_selected_rover_query_ids() -> List[str]:
-	return _pytest_selected_case_ids(
-		MARSROVER_QUERY_CASES,
-		query_env="PIPELINE_TEST_ROVER_QUERY",
-		all_env="PIPELINE_TEST_ROVER_ALL",
-		default_query="rover_query_1",
-	)
-
-
-def _is_rover_live_enabled() -> bool:
-	return os.getenv("PIPELINE_TEST_ROVER", "").lower() in {"1", "true", "yes"}
 
 
 def _ensure_live_dependencies() -> None:
@@ -1069,26 +894,43 @@ def test_blocksworld_problem_query_case_generation_from_htn_tasks():
 	assert case["required_target_literals"] == ["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"]
 
 
-def test_rover_problem_query_case_generation_from_htn_tasks():
+def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
 	problem_path = (
 		Path(__file__).parent.parent
 		/ "src"
 		/ "domains"
-		/ "marsrover"
+		/ "blocksworld"
 		/ "problems"
-		/ "pfile01.hddl"
+		/ "p01.hddl"
 	)
 	if not problem_path.exists():
-		pytest.skip(f"Missing rover problem file: {problem_path}")
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
 
-	case = _build_case_from_rover_problem(problem_path)
-	assert case is not None
-	assert case["instruction"]
-	assert case["required_target_literals"]
-	assert any(
-		item.startswith("communicated_") or item.startswith("at(") or item.startswith("calibrated(")
-		for item in case["required_target_literals"]
+	captured: Dict[str, Any] = {}
+
+	def fake_generate(self, nl_instruction):
+		captured["instruction"] = nl_instruction
+		spec = LTLSpecification()
+		spec.add_formula(LTLFormula(None, "true", [], None))
+		spec.objects = ["b1", "b2", "b3", "b4", "b5"]
+		spec.grounding_map = GroundingMap()
+		spec.source_instruction = nl_instruction
+		return spec, {"system": "stub", "user": "stub"}, "{\"ok\": true}"
+
+	monkeypatch.setattr(NLToLTLfGenerator, "generate", fake_generate)
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
 	)
+	spec = pipeline._stage1_parse_nl(
+		"Using blocks b1, b2, b3, b4, and b5, arrange them so that b4 is on b2, "
+		"and b1 is on b4, and b3 is on b1.",
+	)
+
+	assert captured["instruction"] == spec.source_instruction
+	assert "p01.hddl" not in captured["instruction"]
+	assert "(on b4 b2)" not in captured["instruction"]
 
 
 def test_stage6_object_type_resolution_ignores_unused_query_objects():
@@ -1619,21 +1461,6 @@ def test_blocksworld_pipeline_query_case(query_id: str):
 		query_id,
 		query_cases=QUERY_CASES,
 		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
-	)
-	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
-
-
-@pytest.mark.parametrize("query_id", _pytest_selected_rover_query_ids())
-def test_marsrover_pipeline_query_case(query_id: str):
-	if not _is_rover_live_enabled():
-		pytest.skip("Set PIPELINE_TEST_ROVER=1 to enable MarsRover live query tests")
-	if not Path(MARSROVER_DOMAIN_FILE).exists():
-		pytest.skip(f"MarsRover domain file missing: {MARSROVER_DOMAIN_FILE}")
-	_ensure_live_dependencies()
-	report = _run_query_case(
-		query_id,
-		query_cases=MARSROVER_QUERY_CASES,
-		domain_file=MARSROVER_DOMAIN_FILE,
 	)
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 

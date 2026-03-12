@@ -10,6 +10,14 @@ This template serves as a **reference guide** for:
 3. Ensuring consistent NL → LTLf translation quality across different domains
 4. Debugging failed LTLf generation attempts
 
+## Current Benchmark-Backed Testing Rule
+
+For official benchmark-backed acceptance tests, the natural-language query must fully
+contain the requested target semantics on its own. The HDDL `problem.hddl` file is used
+only for runtime initialisation and post-run verification; it is not part of the Stage 1
+or Stage 3 LLM semantic input. In the current live acceptance setup, this rule is applied
+to the first three official IPC Blocksworld benchmark problems (`p01`-`p03`).
+
 ## Domain Requirements
 
 Before creating NL instructions for a new domain, you need:
