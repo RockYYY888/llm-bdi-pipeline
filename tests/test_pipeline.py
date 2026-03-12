@@ -201,33 +201,33 @@ def _build_case_from_blocksworld_problem(problem_path: Path) -> Dict[str, Any] |
 	derived_literals: List[Dict[str, Any]] = []
 	seen = set()
 
-	for fact in problem.goal_facts:
-		if not fact.is_positive:
+	for invocation in problem.htn_tasks:
+		literal = _blocksworld_task_invocation_to_target_literal(
+			invocation.task_name,
+			invocation.args,
+		)
+		if literal is None:
 			continue
-		signature = _literal_signature(fact.predicate, fact.args)
+		signature = _literal_signature(literal["predicate"], literal["args"])
 		if signature in seen:
 			continue
 		seen.add(signature)
-		derived_literals.append(
-			{
-				"predicate": fact.predicate,
-				"args": list(fact.args),
-			},
-		)
+		derived_literals.append(literal)
 
 	if not derived_literals:
-		for invocation in problem.htn_tasks:
-			literal = _blocksworld_task_invocation_to_target_literal(
-				invocation.task_name,
-				invocation.args,
-			)
-			if literal is None:
+		for fact in problem.goal_facts:
+			if not fact.is_positive:
 				continue
-			signature = _literal_signature(literal["predicate"], literal["args"])
+			signature = _literal_signature(fact.predicate, fact.args)
 			if signature in seen:
 				continue
 			seen.add(signature)
-			derived_literals.append(literal)
+			derived_literals.append(
+				{
+					"predicate": fact.predicate,
+					"args": list(fact.args),
+				},
+			)
 
 	if not derived_literals:
 		return None
@@ -477,6 +477,7 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "jason_stderr.txt",
 		log_dir / "jason_validation.json",
 		log_dir / "action_path.txt",
+		log_dir / "method_trace.json",
 		log_dir / "ipc_official_plan.txt",
 		log_dir / "ipc_official_verifier.txt",
 		log_dir / "ipc_official_verification.json",
@@ -693,6 +694,58 @@ def test_representative_task_args_uses_typed_witness_placeholders(tmp_path):
 	)
 
 	assert args == ("witness_rover_1", "witness_waypoint_2")
+
+
+def test_method_validation_task_args_respect_equality_bound_constants(tmp_path):
+	domain_file = tmp_path / "domain_move.hddl"
+	domain_file.write_text(
+		"""
+(define (domain move_domain)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types rover waypoint)
+  (:predicates
+    (at ?r - rover ?w - waypoint)
+  )
+  (:task move_to
+    :parameters (?r - rover ?w - waypoint)
+  )
+  (:action navigate
+    :parameters (?r - rover ?from - waypoint ?to - waypoint)
+    :precondition (and (at ?r ?from))
+    :effect (and (not (at ?r ?from)) (at ?r ?to))
+  )
+)
+		""".strip(),
+	)
+	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("move_to", ("ROVER", "WAYPOINT"), False, ("at",)),
+		],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+	method = HTNMethod(
+		method_name="m_move_to_keep_waypoint",
+		task_name="move_to",
+		parameters=("ROVER", "WAYPOINT"),
+		task_args=("ROVER", "WAYPOINT"),
+		context=(
+			HTNLiteral("=", ("ROVER", "rover0"), True, None),
+			HTNLiteral("=", ("WAYPOINT", "waypoint5"), True, None),
+			HTNLiteral("at", ("rover0", "waypoint5"), True, None),
+		),
+	)
+
+	args = pipeline._method_validation_task_args(
+		method,
+		("witness_rover_1", "witness_waypoint_2"),
+		method_library,
+	)
+
+	assert args == ("rover0", "waypoint5")
 
 
 def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
@@ -1013,7 +1066,7 @@ def test_blocksworld_problem_query_case_generation_from_htn_tasks():
 	assert case["instruction"]
 	assert case["required_target_literals"]
 	assert case["problem_file"] == str(problem_path.resolve())
-	assert case["required_target_literals"] == ["on(b1, b4)", "on(b3, b1)"]
+	assert case["required_target_literals"] == ["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"]
 
 
 def test_rover_problem_query_case_generation_from_htn_tasks():
@@ -1242,23 +1295,39 @@ def _run_query_case(
 		file_actions = [line.strip() for line in action_path_file.read_text().splitlines() if line.strip()]
 		if file_actions != action_path:
 			bug_messages.append("Stage 6 action_path.txt does not match execution.json action_path")
+	method_trace = stage6_artifacts.get("method_trace") or []
+	if not isinstance(method_trace, list):
+		bug_messages.append("Stage 6 method_trace is not a list")
+	method_trace_file = log_dir / "method_trace.json"
+	if method_trace_file.exists():
+		file_trace = json.loads(method_trace_file.read_text())
+		if file_trace != method_trace:
+			bug_messages.append("Stage 6 method_trace.json does not match execution.json method_trace")
 	if (log_dir / "jason_runner_agent.asl").exists():
 		bug_messages.append("legacy runtime-only jason_runner_agent.asl artifact still present")
 
 	official_verifier_report = None
 	problem_file = case.get("problem_file")
 	if problem_file:
-		official_verifier_report = IPC_PLAN_VERIFIER.verify_primitive_plan(
+		method_library_path = log_dir / "htn_method_library.json"
+		method_library = HTNMethodLibrary.from_dict(
+			json.loads(method_library_path.read_text()),
+		)
+		official_verifier_report = IPC_PLAN_VERIFIER.verify_plan(
 			domain_file=domain_file,
 			problem_file=problem_file,
 			action_path=action_path,
+			method_library=method_library,
+			method_trace=method_trace,
 			output_dir=log_dir,
 		)
 		if not official_verifier_report.tool_available:
 			bug_messages.append("official IPC verifier is not available on PATH")
-		elif official_verifier_report.primitive_plan_executable is not True:
+		elif official_verifier_report.plan_kind != "hierarchical":
+			bug_messages.append("official IPC verifier fell back to primitive-only plan export")
+		elif official_verifier_report.verification_result is not True:
 			bug_messages.append(
-				"official IPC primitive-plan verifier did not accept the runtime action_path",
+				"official IPC HTN verifier did not accept the generated runtime plan",
 			)
 
 	for path in _required_artifact_paths(log_dir):
@@ -1586,8 +1655,8 @@ def _print_cli_report(report: Dict[str, Any]) -> None:
 	official_verifier = report.get("official_verifier") or {}
 	if official_verifier:
 		print(
-			"Official IPC Primitive Verification: "
-			f"primitive_plan_executable={official_verifier.get('primitive_plan_executable')}, "
+			"Official IPC Verification: "
+			f"plan_kind={official_verifier.get('plan_kind')}, "
 			f"verification_result={official_verifier.get('verification_result')}",
 		)
 	print(f"Has Bug: {report['has_bug']}")

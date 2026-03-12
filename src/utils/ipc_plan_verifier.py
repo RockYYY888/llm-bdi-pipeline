@@ -6,7 +6,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+
+from stage3_method_synthesis.htn_schema import HTNMethod, HTNMethodLibrary
+from utils.hddl_parser import HDDLParser
 
 
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
@@ -24,6 +27,8 @@ class IPCPrimitivePlanVerificationResult:
 	primitive_plan_executable: Optional[bool]
 	verification_result: Optional[bool]
 	reached_goal_state: Optional[bool]
+	plan_kind: str = "primitive_only"
+	build_warning: Optional[str] = None
 	error: Optional[str] = None
 
 	def to_dict(self) -> Dict[str, object]:
@@ -38,18 +43,72 @@ class IPCPrimitivePlanVerificationResult:
 			"primitive_plan_executable": self.primitive_plan_executable,
 			"verification_result": self.verification_result,
 			"reached_goal_state": self.reached_goal_state,
+			"plan_kind": self.plan_kind,
+			"build_warning": self.build_warning,
 			"error": self.error,
 		}
 
 
+@dataclass
+class _PrimitiveNode:
+	name: str
+	args: Tuple[str, ...]
+	node_id: Optional[int] = None
+
+
+@dataclass
+class _AbstractNode:
+	task_name: str
+	args: Tuple[str, ...]
+	method_name: str
+	children: List[Union["_PrimitiveNode", "_AbstractNode"]]
+	node_id: Optional[int] = None
+
+
+_PlanNode = Union[_PrimitiveNode, _AbstractNode]
+_ActionStep = Tuple[str, Tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class _MethodTraceEntry:
+	method_name: str
+	task_args: Tuple[str, ...]
+
+
 class IPCPlanVerifier:
-	"""Run the official PANDA HTN verifier on primitive-only plans."""
+	"""Run the PANDA HTN verifier with best-effort hierarchical plan export."""
 
 	def __init__(self, parser_cmd: str = "pandaPIparser") -> None:
 		self.parser_cmd = parser_cmd
 
 	def tool_available(self) -> bool:
 		return shutil.which(self.parser_cmd) is not None
+
+	def verify_plan(
+		self,
+		*,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		action_path: Sequence[str],
+		method_library: HTNMethodLibrary | None = None,
+		method_trace: Sequence[Dict[str, Any]] | None = None,
+		output_dir: str | Path,
+		plan_filename: str = "ipc_official_plan.txt",
+		output_filename: str = "ipc_official_verifier.txt",
+		json_filename: str = "ipc_official_verification.json",
+	) -> IPCPrimitivePlanVerificationResult:
+		return self._verify(
+			domain_file=domain_file,
+			problem_file=problem_file,
+			action_path=action_path,
+			method_library=method_library,
+			method_trace=method_trace,
+			output_dir=output_dir,
+			plan_filename=plan_filename,
+			output_filename=output_filename,
+			json_filename=json_filename,
+			prefer_hierarchical=True,
+		)
 
 	def verify_primitive_plan(
 		self,
@@ -62,12 +121,57 @@ class IPCPlanVerifier:
 		output_filename: str = "ipc_official_verifier.txt",
 		json_filename: str = "ipc_official_verification.json",
 	) -> IPCPrimitivePlanVerificationResult:
+		return self._verify(
+			domain_file=domain_file,
+			problem_file=problem_file,
+			action_path=action_path,
+			method_library=None,
+			method_trace=None,
+			output_dir=output_dir,
+			plan_filename=plan_filename,
+			output_filename=output_filename,
+			json_filename=json_filename,
+			prefer_hierarchical=False,
+		)
+
+	def _verify(
+		self,
+		*,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		action_path: Sequence[str],
+		method_library: HTNMethodLibrary | None,
+		method_trace: Sequence[Dict[str, Any]] | None,
+		output_dir: str | Path,
+		plan_filename: str,
+		output_filename: str,
+		json_filename: str,
+		prefer_hierarchical: bool,
+	) -> IPCPrimitivePlanVerificationResult:
 		output_path = Path(output_dir).resolve()
 		output_path.mkdir(parents=True, exist_ok=True)
 		plan_path = output_path / plan_filename
 		output_text_path = output_path / output_filename
 		output_json_path = output_path / json_filename
+
+		build_warning = None
+		plan_kind = "primitive_only"
 		plan_text = self.render_primitive_only_plan(action_path)
+		if prefer_hierarchical:
+			try:
+				rendered = self._render_supported_hierarchical_plan(
+					domain_file=domain_file,
+					problem_file=problem_file,
+					action_path=action_path,
+					method_library=method_library,
+					method_trace=method_trace,
+				)
+			except Exception as exc:
+				rendered = None
+				build_warning = str(exc)
+			if rendered is not None:
+				plan_text = rendered
+				plan_kind = "hierarchical"
 		plan_path.write_text(plan_text)
 
 		command = [
@@ -90,6 +194,8 @@ class IPCPlanVerifier:
 				primitive_plan_executable=None,
 				verification_result=None,
 				reached_goal_state=None,
+				plan_kind=plan_kind,
+				build_warning=build_warning,
 				error=f"{self.parser_cmd} is not available on PATH",
 			)
 			output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
@@ -123,6 +229,8 @@ class IPCPlanVerifier:
 				"Plan verification result",
 			),
 			reached_goal_state=self._infer_goal_reached(combined),
+			plan_kind=plan_kind,
+			build_warning=build_warning,
 			error=None if completed.returncode == 0 else f"verifier exited with code {completed.returncode}",
 		)
 		output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
@@ -132,13 +240,364 @@ class IPCPlanVerifier:
 	def render_primitive_only_plan(action_path: Sequence[str]) -> str:
 		lines = ["==>"]
 		for index, action_step in enumerate(action_path):
-			match = re.fullmatch(r"([^\s(]+)\((.*)\)", action_step.strip())
-			if match is None:
-				raise ValueError(f"Invalid action_path step for IPC verifier: {action_step}")
-			args = [arg.strip() for arg in match.group(2).split(",") if arg.strip()]
-			lines.append(" ".join([str(index), match.group(1), *args]))
+			name, args = IPCPlanVerifier._parse_action_step(action_step)
+			lines.append(" ".join([str(index), name, *args]).rstrip())
 		lines.append("root")
-		return "\n".join(lines)
+		return "\n".join(lines) + "\n"
+
+	def _render_supported_hierarchical_plan(
+		self,
+		*,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		action_path: Sequence[str],
+		method_library: HTNMethodLibrary | None,
+		method_trace: Sequence[Dict[str, Any]] | None,
+	) -> Optional[str]:
+		problem = HDDLParser.parse_problem(str(problem_file))
+		if method_library is None or not method_library.methods:
+			return None
+		if method_trace is None:
+			return None
+		if not problem.htn_tasks:
+			return None
+
+		actions = [self._parse_action_step(step) for step in action_path]
+		trace_entries = self._normalise_method_trace(method_trace)
+		root_nodes, action_index, trace_index = self._reconstruct_hierarchy(
+			method_library=method_library,
+			root_tasks=problem.htn_tasks,
+			actions=actions,
+			trace_entries=trace_entries,
+		)
+		if action_index != len(actions):
+			raise ValueError(
+				"hierarchical exporter did not consume the full runtime action path "
+				f"({action_index}/{len(actions)} steps)",
+			)
+		if trace_index != len(trace_entries):
+			raise ValueError(
+				"hierarchical exporter did not consume the full method trace "
+				f"({trace_index}/{len(trace_entries)} entries)",
+			)
+		return self._render_hierarchical_plan(root_nodes)
+
+	def _reconstruct_hierarchy(
+		self,
+		*,
+		method_library: HTNMethodLibrary,
+		root_tasks: Sequence[Any],
+		actions: Sequence[_ActionStep],
+		trace_entries: Sequence[_MethodTraceEntry],
+	) -> Tuple[List[_AbstractNode], int, int]:
+		task_lookup = {
+			task.name: task
+			for task in method_library.compound_tasks + method_library.primitive_tasks
+		}
+		internal_task_by_source: Dict[str, str] = {}
+		source_task_by_internal: Dict[str, str] = {}
+		for task in method_library.compound_tasks + method_library.primitive_tasks:
+			source_name = getattr(task, "source_name", None) or task.name
+			internal_task_by_source.setdefault(source_name, task.name)
+			internal_task_by_source.setdefault(task.name, task.name)
+			source_task_by_internal[task.name] = source_name
+
+		method_lookup = {
+			method.method_name: method
+			for method in method_library.methods
+		}
+		if len(method_lookup) != len(method_library.methods):
+			raise ValueError("method library contains duplicate method names")
+
+		def reconstruct_task(
+			task_name: str,
+			task_args: Tuple[str, ...],
+			source_task_name: str,
+			action_index: int,
+			trace_index: int,
+		) -> Tuple[_AbstractNode, int, int]:
+			if trace_index >= len(trace_entries):
+				raise ValueError(
+					f"method trace ended before task {source_task_name}{task_args} could be reconstructed",
+				)
+
+			entry = trace_entries[trace_index]
+			method = method_lookup.get(entry.method_name)
+			if method is None:
+				raise ValueError(f"method trace references unknown method '{entry.method_name}'")
+			if method.task_name != task_name:
+				raise ValueError(
+					f"expected method for task '{task_name}' but trace selected '{method.task_name}'",
+				)
+			if entry.task_args != task_args:
+				raise ValueError(
+					f"method trace arguments for '{entry.method_name}' do not match task "
+					f"{source_task_name}{task_args}: got {entry.task_args}",
+				)
+			bindings = self._seed_method_bindings(method, task_args, task_lookup)
+
+			next_action_index = action_index
+			next_trace_index = trace_index + 1
+			child_nodes: List[_PlanNode] = []
+			for step in self._ordered_method_steps(method):
+				if step.kind == "primitive":
+					expected_action_name = step.action_name or step.task_name
+					if next_action_index >= len(actions):
+						raise ValueError(
+							f"runtime action path ended before primitive step '{expected_action_name}'",
+						)
+					actual_action_name, actual_action_args = actions[next_action_index]
+					if actual_action_name != expected_action_name:
+						raise ValueError(
+							f"primitive step mismatch for '{expected_action_name}': "
+							f"expected action '{expected_action_name}', got '{actual_action_name}'",
+						)
+					bindings = self._unify_arguments(
+						step.args,
+						actual_action_args,
+						bindings,
+						method.parameters,
+					)
+					child_nodes.append(
+						_PrimitiveNode(
+							name=actual_action_name,
+							args=actual_action_args,
+						),
+					)
+					next_action_index += 1
+					continue
+
+				child_internal_name = step.task_name
+				if next_trace_index >= len(trace_entries):
+					raise ValueError(
+						f"method trace ended before child task '{child_internal_name}' could be reconstructed",
+					)
+				child_entry = trace_entries[next_trace_index]
+				child_task_args = child_entry.task_args
+				bindings = self._unify_arguments(
+					step.args,
+					child_task_args,
+					bindings,
+					method.parameters,
+				)
+				child_source_name = source_task_by_internal.get(
+					child_internal_name,
+					child_internal_name,
+				)
+				child_node, next_action_index, next_trace_index = reconstruct_task(
+					child_internal_name,
+					child_task_args,
+					child_source_name,
+					next_action_index,
+					next_trace_index,
+				)
+				child_nodes.append(child_node)
+
+			return (
+				_AbstractNode(
+					task_name=source_task_name,
+					args=task_args,
+					method_name=method.source_method_name or method.method_name,
+					children=child_nodes,
+				),
+				next_action_index,
+				next_trace_index,
+			)
+
+		root_nodes: List[_AbstractNode] = []
+		next_action_index = 0
+		next_trace_index = 0
+		for task in root_tasks:
+			source_task_name = getattr(task, "task_name")
+			task_args = tuple(getattr(task, "args"))
+			internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
+			root_node, next_action_index, next_trace_index = reconstruct_task(
+				internal_task_name,
+				task_args,
+				source_task_name,
+				next_action_index,
+				next_trace_index,
+			)
+			root_nodes.append(root_node)
+
+		return root_nodes, next_action_index, next_trace_index
+
+	@staticmethod
+	def _normalise_method_trace(
+		method_trace: Sequence[Dict[str, Any]],
+	) -> List[_MethodTraceEntry]:
+		trace_entries: List[_MethodTraceEntry] = []
+		for item in method_trace:
+			method_name = str(item.get("method_name", "")).strip()
+			if not method_name:
+				continue
+			task_args = tuple(
+				str(value).strip()
+				for value in (item.get("task_args") or item.get("bindings") or [])
+			)
+			trace_entries.append(
+				_MethodTraceEntry(
+					method_name=method_name,
+					task_args=task_args,
+				),
+			)
+		return trace_entries
+
+	@staticmethod
+	def _ground_arguments(args: Sequence[str], bindings: Dict[str, str]) -> Tuple[str, ...]:
+		return tuple(bindings.get(arg, arg) for arg in args)
+
+	@staticmethod
+	def _seed_method_bindings(
+		method: HTNMethod,
+		task_args: Tuple[str, ...],
+		task_lookup: Dict[str, Any],
+	) -> Dict[str, str]:
+		pattern = method.task_args or IPCPlanVerifier._default_task_args(method, task_lookup)
+		return IPCPlanVerifier._unify_arguments(
+			pattern,
+			task_args,
+			{},
+			method.parameters,
+		)
+
+	@staticmethod
+	def _unify_arguments(
+		pattern_args: Sequence[str],
+		grounded_args: Sequence[str],
+		bindings: Dict[str, str],
+		known_variables: Sequence[str],
+	) -> Dict[str, str]:
+		if len(pattern_args) != len(grounded_args):
+			raise ValueError(
+				f"argument arity mismatch: expected {len(pattern_args)}, got {len(grounded_args)}",
+			)
+
+		next_bindings = dict(bindings)
+		known_variable_set = set(known_variables)
+		for pattern_arg, grounded_arg in zip(pattern_args, grounded_args):
+			if pattern_arg in known_variable_set or IPCPlanVerifier._looks_like_variable(pattern_arg):
+				existing = next_bindings.get(pattern_arg)
+				if existing is not None and existing != grounded_arg:
+					raise ValueError(
+						f"variable binding mismatch for '{pattern_arg}': "
+						f"expected '{existing}', got '{grounded_arg}'",
+					)
+				next_bindings[pattern_arg] = grounded_arg
+				continue
+			if pattern_arg != grounded_arg:
+				raise ValueError(
+					f"constant mismatch: expected '{pattern_arg}', got '{grounded_arg}'",
+				)
+		return next_bindings
+
+	@staticmethod
+	def _looks_like_variable(token: str) -> bool:
+		return bool(token) and token[0].isupper()
+
+	@staticmethod
+	def _default_task_args(
+		method: HTNMethod,
+		task_lookup: Dict[str, Any],
+	) -> Tuple[str, ...]:
+		task_schema = task_lookup.get(method.task_name)
+		if task_schema is None:
+			return tuple(method.parameters)
+		return tuple(getattr(task_schema, "parameters", ()) or method.parameters)
+
+	@staticmethod
+	def _ordered_method_steps(method: HTNMethod) -> List[Any]:
+		if len(method.subtasks) <= 1 or not method.ordering:
+			return list(method.subtasks)
+
+		step_lookup = {
+			step.step_id: step
+			for step in method.subtasks
+		}
+		dependents: Dict[str, List[str]] = {
+			step.step_id: []
+			for step in method.subtasks
+		}
+		in_degree: Dict[str, int] = {
+			step.step_id: 0
+			for step in method.subtasks
+		}
+
+		for before, after in method.ordering:
+			if before not in step_lookup or after not in step_lookup:
+				return list(method.subtasks)
+			dependents[before].append(after)
+			in_degree[after] += 1
+
+		ordered_steps: List[Any] = []
+		ready = [
+			step.step_id
+			for step in method.subtasks
+			if in_degree[step.step_id] == 0
+		]
+		while ready:
+			current_id = ready.pop(0)
+			ordered_steps.append(step_lookup[current_id])
+			for next_id in dependents[current_id]:
+				in_degree[next_id] -= 1
+				if in_degree[next_id] == 0:
+					ready.append(next_id)
+
+		if len(ordered_steps) != len(method.subtasks):
+			return list(method.subtasks)
+		return ordered_steps
+
+	@staticmethod
+	def _parse_action_step(action_step: str) -> _ActionStep:
+		bare = action_step.strip()
+		if bare and "(" not in bare and ")" not in bare:
+			return bare, ()
+		match = re.fullmatch(r"([^\s(]+)\((.*)\)", action_step.strip())
+		if match is None:
+			raise ValueError(f"Invalid action_path step for IPC verifier: {action_step}")
+		args = tuple(arg.strip() for arg in match.group(2).split(",") if arg.strip())
+		return match.group(1), args
+
+	@staticmethod
+	def _render_hierarchical_plan(root_nodes: Sequence[_AbstractNode]) -> str:
+		primitive_nodes: List[_PrimitiveNode] = []
+		abstract_nodes: List[_AbstractNode] = []
+
+		def visit(node: _PlanNode) -> None:
+			if isinstance(node, _PrimitiveNode):
+				primitive_nodes.append(node)
+				return
+			abstract_nodes.append(node)
+			for child in node.children:
+				visit(child)
+
+		for root_node in root_nodes:
+			visit(root_node)
+
+		for index, node in enumerate(primitive_nodes):
+			node.node_id = index
+		for index, node in enumerate(abstract_nodes, start=len(primitive_nodes)):
+			node.node_id = index
+
+		lines = ["==>"]
+		for node in primitive_nodes:
+			lines.append(" ".join([str(node.node_id), node.name, *node.args]).rstrip())
+		lines.append("root " + " ".join(str(node.node_id) for node in root_nodes))
+		for node in abstract_nodes:
+			child_ids = [str(child.node_id) for child in node.children]
+			lines.append(
+				" ".join(
+					[
+						str(node.node_id),
+						node.task_name,
+						*node.args,
+						"->",
+						node.method_name,
+						*child_ids,
+					],
+				).rstrip(),
+			)
+		return "\n".join(lines) + "\n"
 
 	@staticmethod
 	def strip_ansi(text: str) -> str:
@@ -165,6 +624,8 @@ class IPCPlanVerifier:
 	def _infer_goal_reached(text: str) -> Optional[bool]:
 		if "Primitive plan does not reach the goal state" in text:
 			return False
+		if IPCPlanVerifier._extract_bool(text, "Plan verification result") is True:
+			return True
 		primitive_plan_executable = IPCPlanVerifier._extract_bool(
 			text,
 			"Primitive plan alone executable",

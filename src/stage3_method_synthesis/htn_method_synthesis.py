@@ -12,6 +12,7 @@ import json
 import re
 import time
 from collections import deque
+from itertools import combinations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
@@ -140,15 +141,8 @@ class HTNMethodSynthesizer:
 				negation_resolution,
 			)
 			projected_library = self._normalise_target_binding_signatures(projected_library)
-			projected_library, pruned_count = self._prune_redundant_constructive_siblings(
-				projected_library,
-				domain,
-			)
-			metadata["pruned_constructive_siblings"] = pruned_count
-			projected_library, generated_guard_count = self._complete_missing_target_guard_methods(
-				projected_library,
-			)
-			metadata["generated_target_guard_methods"] = generated_guard_count
+			metadata["pruned_constructive_siblings"] = 0
+			metadata["generated_target_guard_methods"] = 0
 			self._validate_library(projected_library, domain)
 			metadata["domain_projection_used"] = True
 			metadata["compound_tasks"] = len(projected_library.compound_tasks)
@@ -573,6 +567,7 @@ class HTNMethodSynthesizer:
 				source_predicates=tuple(
 					sorted({literal.predicate for literal in action.positive_effects}),
 				),
+				source_name=action.name,
 			)
 			for action in actions
 		]
@@ -594,6 +589,7 @@ class HTNMethodSynthesizer:
 		if not task_schemas:
 			return None
 
+		action_schemas = self._action_schema_map(domain)
 		methods_by_task: Dict[str, List[Any]] = {}
 		for method in getattr(domain, "methods", []):
 			methods_by_task.setdefault(method.task_name, []).append(method)
@@ -629,6 +625,7 @@ class HTNMethodSynthesizer:
 				parameters=self._parameter_names(task_schemas[task_name].parameters),
 				is_primitive=False,
 				source_predicates=task_source_predicates.get(task_name, ()),
+				source_name=task_name,
 			)
 			for task_name in sorted(reachable_task_names)
 		]
@@ -646,11 +643,18 @@ class HTNMethodSynthesizer:
 				if imported_method is None:
 					return None
 				projected_methods_for_task.append(imported_method)
+			projected_methods_for_task.extend(
+				self._project_target_preserving_guard_methods(
+					methods=projected_methods_for_task,
+					task_schema=task_schemas[task_name],
+					target_literals=target_literals,
+					action_schemas=action_schemas,
+				),
+			)
 			projected_methods_for_task.sort(
-				key=lambda item: (
-					0 if not item.subtasks else 1,
-					len(item.subtasks),
-					item.method_name,
+				key=lambda item: self._projected_method_sort_key(
+					item,
+					action_schemas=action_schemas,
 				),
 			)
 			imported_methods.extend(projected_methods_for_task)
@@ -662,6 +666,102 @@ class HTNMethodSynthesizer:
 			target_literals=list(target_literals),
 			target_task_bindings=list(bindings),
 		)
+
+	def _project_target_preserving_guard_methods(
+		self,
+		*,
+		methods: Sequence[HTNMethod],
+		task_schema: Any,
+		target_literals: Sequence[HTNLiteral],
+		action_schemas: Dict[str, Any],
+	) -> List[HTNMethod]:
+		projected_methods: List[HTNMethod] = []
+		seen_context_signatures: set[Tuple[str, Tuple[str, ...]]] = set()
+		task_args = self._parameter_names(getattr(task_schema, "parameters", []))
+
+		for method in methods:
+			if not self._is_guard_like_method(method, action_schemas):
+				continue
+
+			method_task_args = method.task_args or task_args
+			if not method_task_args:
+				continue
+
+			for literal in target_literals:
+				if not literal.is_positive or literal.is_equality:
+					continue
+				if len(method_task_args) > len(literal.args):
+					continue
+
+				for positions in combinations(range(len(literal.args)), len(method_task_args)):
+					context = list(method.context)
+					for task_arg, position in zip(method_task_args, positions):
+						context.append(
+							HTNLiteral(
+								predicate="=",
+								args=(task_arg, literal.args[position]),
+								is_positive=True,
+								source_symbol=None,
+							),
+						)
+					context.append(literal)
+					signature = tuple(sorted(item.to_signature() for item in context))
+					guard_key = (method.method_name, signature)
+					if guard_key in seen_context_signatures:
+						continue
+					seen_context_signatures.add(guard_key)
+					projected_methods.append(
+						HTNMethod(
+							method_name=(
+								f"{method.method_name}_keep_"
+								f"{self._sanitize_name(literal.predicate)}_"
+								f"{'_'.join(self._sanitize_name(arg) for arg in literal.args)}_"
+								f"{'_'.join(str(position) for position in positions)}"
+							),
+							task_name=method.task_name,
+							parameters=method.parameters,
+							task_args=method.task_args,
+							context=tuple(context),
+							subtasks=method.subtasks,
+							ordering=method.ordering,
+							origin="domain_target_preserving_guard",
+							source_method_name=method.source_method_name,
+						),
+					)
+
+		return projected_methods
+
+	def _projected_method_sort_key(
+		self,
+		method: HTNMethod,
+		*,
+		action_schemas: Dict[str, Any],
+	) -> Tuple[int, int, str]:
+		if method.origin == "domain_target_preserving_guard":
+			return (0, len(method.context), method.method_name)
+		if self._is_guard_like_method(method, action_schemas):
+			return (2, len(method.subtasks), method.method_name)
+		return (1, len(method.subtasks), method.method_name)
+
+	def _is_guard_like_method(
+		self,
+		method: HTNMethod,
+		action_schemas: Dict[str, Any],
+	) -> bool:
+		if not method.subtasks:
+			return True
+		if len(method.subtasks) != 1:
+			return False
+		step = method.subtasks[0]
+		if step.kind != "primitive":
+			return False
+		action_key = step.action_name or step.task_name
+		action_schema = action_schemas.get(action_key) or action_schemas.get(
+			self._sanitize_name(action_key),
+		)
+		if action_schema is None:
+			return False
+		return not getattr(action_schema, "effects", ())
 
 	def _infer_domain_task_source_predicates(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
 		source_predicates: Dict[str, set[str]] = {}
@@ -784,27 +884,23 @@ class HTNMethodSynthesizer:
 				),
 			)
 
-		if (
-			len(subtasks) == 1
-			and subtasks[0].kind == "primitive"
-			and subtasks[0].action_name == "nop"
-		):
-			subtasks = []
-
 		ordering = tuple(
 			(self._sanitize_name(source), self._sanitize_name(target))
 			for source, target in getattr(method, "ordering", [])
 		)
-		if not subtasks:
-			ordering = ()
 		return HTNMethod(
 			method_name=f"m_{self._sanitize_name(method.task_name)}_domain_{index}",
 			task_name=method.task_name,
 			parameters=self._parameter_names(method.parameters),
+			task_args=tuple(
+				variable_map.get(arg, self._sanitize_symbol(arg))
+				for arg in getattr(method, "task_args", [])
+			),
 			context=context,
 			subtasks=tuple(subtasks),
 			ordering=ordering,
 			origin="domain",
+			source_method_name=method.name,
 		)
 
 	def _parameter_name_map(self, parameters: Sequence[str]) -> Dict[str, str]:
@@ -1100,10 +1196,12 @@ class HTNMethodSynthesizer:
 						method.context,
 						tuple(normalised_steps),
 					),
+					task_args=method.task_args,
 					context=method.context,
 					subtasks=tuple(normalised_steps),
 					ordering=method.ordering,
 					origin=method.origin,
+					source_method_name=method.source_method_name,
 				),
 			)
 
@@ -1158,10 +1256,12 @@ class HTNMethodSynthesizer:
 				method_name=method.method_name,
 				task_name=method.task_name,
 				parameters=method.parameters,
+				task_args=method.task_args,
 				context=tuple(apply_literal(item) for item in method.context),
 				subtasks=tuple(apply_step(step) for step in method.subtasks),
 				ordering=method.ordering,
 				origin=method.origin,
+				source_method_name=method.source_method_name,
 			)
 
 		return HTNMethodLibrary(

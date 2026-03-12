@@ -199,6 +199,7 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 			returncode=0,
 			stdout=(
 				"runtime env ready\n"
+				"runtime trace method trace_method(m_do_put_on_domain_2,a,b)\n"
 				"runtime env action success pick-up(a,b)\n"
 				"execute start\n"
 				"execute success\n"
@@ -228,13 +229,18 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 	assert (tmp_path / "jason_stderr.txt").exists()
 	assert (tmp_path / "jason_validation.json").exists()
 	assert (tmp_path / "action_path.txt").exists()
+	assert (tmp_path / "method_trace.json").exists()
 	assert (tmp_path / "action_path.txt").read_text() == "pick-up(a,b)\n"
 
 	validation_payload = json.loads((tmp_path / "jason_validation.json").read_text())
 	assert validation_payload["status"] == "success"
 	assert validation_payload["environment_adapter"]["success"] is True
 	assert validation_payload["action_path"] == ["pick-up(a,b)"]
+	assert validation_payload["method_trace"] == [
+		{"method_name": "m_do_put_on_domain_2", "task_args": ["a", "b"]},
+	]
 	assert validation_payload["artifacts"]["action_path"] == str(tmp_path / "action_path.txt")
+	assert validation_payload["artifacts"]["method_trace"] == str(tmp_path / "method_trace.json")
 
 
 def test_extract_action_path_preserves_runtime_order():
@@ -251,6 +257,24 @@ def test_extract_action_path_preserves_runtime_order():
 	assert runner._extract_action_path(stdout) == [
 		"pick-up(a,b)",
 		"put-on-block(a,c)",
+	]
+
+
+def test_extract_method_trace_preserves_runtime_order():
+	runner = JasonRunner()
+	stdout = "\n".join(
+		[
+			"runtime trace method trace_method(m_drive_to_domain_1,rover0,waypoint1)",
+			"runtime trace method trace_method(m_send_data_domain_2,rover0,waypoint1,channel0)",
+		],
+	)
+
+	assert runner._extract_method_trace(stdout) == [
+		{"method_name": "m_drive_to_domain_1", "task_args": ["rover0", "waypoint1"]},
+		{
+			"method_name": "m_send_data_domain_2",
+			"task_args": ["rover0", "waypoint1", "channel0"],
+		},
 	]
 
 

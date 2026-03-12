@@ -83,6 +83,7 @@ class HTNTask:
     parameters: Tuple[str, ...]
     is_primitive: bool
     source_predicates: Tuple[str, ...] = ()
+    source_name: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -90,6 +91,7 @@ class HTNTask:
             "parameters": list(self.parameters),
             "is_primitive": self.is_primitive,
             "source_predicates": list(self.source_predicates),
+            "source_name": self.source_name,
         }
 
 
@@ -126,20 +128,24 @@ class HTNMethod:
     method_name: str
     task_name: str
     parameters: Tuple[str, ...]
+    task_args: Tuple[str, ...] = ()
     context: Tuple[HTNLiteral, ...] = ()
     subtasks: Tuple[HTNMethodStep, ...] = ()
     ordering: Tuple[Tuple[str, str], ...] = ()
     origin: str = "heuristic"
+    source_method_name: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "method_name": self.method_name,
             "task_name": self.task_name,
             "parameters": list(self.parameters),
+            "task_args": list(self.task_args),
             "context": _serialise_literal_list(self.context),
             "subtasks": [step.to_dict() for step in self.subtasks],
             "ordering": [list(edge) for edge in self.ordering],
             "origin": self.origin,
+            "source_method_name": self.source_method_name,
         }
 
 
@@ -200,6 +206,7 @@ class HTNMethodLibrary:
                 parameters=tuple(item.get("parameters", [])),
                 is_primitive=bool(item.get("is_primitive", False)),
                 source_predicates=tuple(item.get("source_predicates", [])),
+                source_name=item.get("source_name"),
             )
 
         def load_literal(item: Optional[Dict[str, Any]]) -> Optional[HTNLiteral]:
@@ -242,6 +249,7 @@ class HTNMethodLibrary:
                 method_name=item["method_name"],
                 task_name=item["task_name"],
                 parameters=tuple(item.get("parameters", [])),
+                task_args=tuple(item.get("task_args", [])),
                 context=tuple(
                     literal
                     for literal in (
@@ -255,6 +263,7 @@ class HTNMethodLibrary:
                     for edge in item.get("ordering", [])
                 ),
                 origin=item.get("origin", "heuristic"),
+                source_method_name=item.get("source_method_name"),
             )
 
         def load_binding(item: Dict[str, Any]) -> HTNTargetTaskBinding:

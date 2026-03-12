@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from stage3_method_synthesis.htn_schema import HTNLiteral
+from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary
 from stage6_jason_validation.environment_adapter import (
 	EnvironmentAdapterResult,
 	Stage6EnvironmentAdapter,
@@ -48,6 +48,7 @@ class JasonValidationResult:
 	stdout: str
 	stderr: str
 	action_path: List[str]
+	method_trace: List[Dict[str, Any]]
 	environment_adapter: Dict[str, Any]
 	artifacts: Dict[str, str]
 
@@ -64,6 +65,7 @@ class JasonValidationResult:
 				"stdout": self.stdout,
 				"stderr": self.stderr,
 				"action_path": list(self.action_path),
+				"method_trace": list(self.method_trace),
 				"environment_adapter": dict(self.environment_adapter),
 				"artifacts": dict(self.artifacts),
 			}
@@ -103,6 +105,7 @@ class JasonRunner:
 		*,
 		agentspeak_code: str,
 		target_literals: Sequence[HTNLiteral],
+		method_library: HTNMethodLibrary | None = None,
 		action_schemas: Sequence[Dict[str, Any]],
 		seed_facts: Sequence[str] = (),
 		domain_name: str,
@@ -131,11 +134,13 @@ class JasonRunner:
 		stdout_path = output_path / "jason_stdout.txt"
 		stderr_path = output_path / "jason_stderr.txt"
 		action_path_path = output_path / "action_path.txt"
+		method_trace_path = output_path / "method_trace.json"
 		validation_json_path = output_path / "jason_validation.json"
 
 		runner_asl = self._build_runner_asl(
 			agentspeak_code,
 			target_literals,
+			method_library=method_library,
 		)
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
@@ -200,10 +205,12 @@ class JasonRunner:
 		stdout = self._combine_process_output(stdout_text, stderr_text)
 		stderr = stderr_text
 		action_path = self._extract_action_path(stdout)
+		method_trace = self._extract_method_trace(stdout)
 
 		stdout_path.write_text(stdout)
 		stderr_path.write_text(stderr)
 		action_path_path.write_text(self._render_action_path(action_path))
+		method_trace_path.write_text(json.dumps(method_trace, indent=2))
 
 		artifacts = {
 			"agentspeak_generated": str(runner_asl_path),
@@ -213,6 +220,7 @@ class JasonRunner:
 			"jason_stdout": str(stdout_path),
 			"jason_stderr": str(stderr_path),
 			"action_path": str(action_path_path),
+			"method_trace": str(method_trace_path),
 			"jason_validation": str(validation_json_path),
 		}
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
@@ -235,6 +243,7 @@ class JasonRunner:
 				stdout=stdout,
 				stderr=stderr,
 				action_path=action_path,
+				method_trace=method_trace,
 				environment_adapter=environment_result.to_dict(),
 				artifacts=artifacts,
 			)
@@ -271,13 +280,19 @@ class JasonRunner:
 		self,
 		agentspeak_code: str,
 		target_literals: Sequence[HTNLiteral],
+		*,
+		method_library: HTNMethodLibrary | None = None,
 	) -> str:
 		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(agentspeak_code)
+		trace_ready_code = self._instrument_method_plans(
+			environment_ready_code,
+			method_library,
+		)
 		target_context = self._target_context_expression(target_literals)
-		initial_dfa_state = self._extract_initial_dfa_state(environment_ready_code) or "q1"
+		initial_dfa_state = self._extract_initial_dfa_state(trace_ready_code) or "q1"
 		max_execution_passes = max(2, len(target_literals) + 1)
 		lines = [
-			environment_ready_code.rstrip(),
+			trace_ready_code.rstrip(),
 			"",
 			"/* Execution Entry */",
 			"!execute.",
@@ -370,10 +385,38 @@ class JasonRunner:
 			if (match := pattern.match(line.strip())) is not None
 		]
 
+	def _extract_method_trace(self, stdout: str) -> List[Dict[str, Any]]:
+		pattern = re.compile(r"runtime trace method\s+trace_method\((.*)\)\s*$")
+		trace: List[Dict[str, Any]] = []
+		for raw_line in stdout.splitlines():
+			line = raw_line.strip()
+			match = pattern.search(line)
+			if match is None:
+				continue
+			payload = match.group(1).strip()
+			if not payload:
+				continue
+			parts = [part.strip() for part in payload.split(",")]
+			if not parts or not parts[0]:
+				continue
+			trace.append(
+				{
+					"method_name": parts[0],
+					"task_args": [part for part in parts[1:] if part],
+				},
+			)
+		return trace
+
 	def _render_action_path(self, action_path: Sequence[str]) -> str:
 		if not action_path:
 			return ""
 		return "\n".join(action_path) + "\n"
+
+	@staticmethod
+	def _call(name: str, args: Sequence[str] = ()) -> str:
+		if not args:
+			return name
+		return f"{name}({', '.join(args)})"
 
 	def _rewrite_primitive_wrappers_for_environment(self, agentspeak_code: str) -> str:
 		start_marker = "/* Primitive Action Plans */"
@@ -422,6 +465,73 @@ class JasonRunner:
 
 		rewritten_section = "\n\n".join([header, *rewritten_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _instrument_method_plans(
+		self,
+		agentspeak_code: str,
+		method_library: HTNMethodLibrary | None,
+	) -> str:
+		if method_library is None or not method_library.methods:
+			return agentspeak_code
+
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* DFA Transition Wrappers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		if len(chunks) != len(method_library.methods):
+			return agentspeak_code
+
+		instrumented_chunks: List[str] = []
+		for method, chunk in zip(method_library.methods, chunks):
+			head_line = chunk[0]
+			body_lines = chunk[1:]
+			trace_line = self._render_method_trace_statement(method, head_line)
+			instrumented_chunks.append("\n".join([head_line, trace_line, *body_lines]))
+
+		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{instrumented_section}{suffix}"
+
+	def _render_method_trace_statement(self, method: Any, head_line: str) -> str:
+		trigger_args = self._extract_trigger_args(head_line)
+		trace_term = self._call(
+			"trace_method",
+			(method.method_name, *trigger_args),
+		)
+		return f'\t.print("runtime trace method ", {trace_term});'
+
+	@staticmethod
+	def _extract_trigger_args(head_line: str) -> Tuple[str, ...]:
+		match = re.match(r"^\s*\+![^\s(:]+(?:\(([^)]*)\))?\s*:", head_line)
+		if match is None:
+			return ()
+		args_text = (match.group(1) or "").strip()
+		if not args_text:
+			return ()
+		return tuple(part.strip() for part in args_text.split(",") if part.strip())
 
 	def _build_runner_mas2j(self, domain_name: str) -> str:
 		sanitized_domain = re.sub(r"[^a-zA-Z0-9_]+", "_", domain_name).strip("_").lower()
@@ -687,7 +797,7 @@ public class {self.environment_class_name} extends Environment {{
 
 	private String renderTraceAction(String sourceName, Structure action) {{
 		if (action.getArity() == 0) {{
-			return sourceName;
+			return sourceName + "()";
 		}}
 		String[] args = new String[action.getArity()];
 		for (int i = 0; i < action.getArity(); i++) {{

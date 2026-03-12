@@ -41,3 +41,7 @@
 - [x] Milestone 20: Replace `src/domains` with official IPC benchmark assets
   (Blocksworld-GTOHP, Rover, Satellite, Transport), move legacy blocksworld fixtures into tests,
   and keep runtime `action_path` aligned with original HDDL action names
+- [x] Milestone 21: Remove blocksworld-specific IPC hierarchy repair logic, replace it with
+  generic method-trace-based hierarchical plan export, and make Stage 4 method validation
+  respect equality-bound runtime task arguments so official blocksworld `p01`-`p03` all pass
+  with `Has Bug: False` and official hierarchical verification `True`

@@ -287,10 +287,25 @@ def test_synthesize_can_project_official_blocksworld_methods_without_llm():
 		task.name for task in library.compound_tasks
 	}
 	assert any(method.task_name == "do_put_on" for method in library.methods)
+	do_on_table_noop = next(
+		method
+		for method in library.methods
+		if method.source_method_name == "m3_do_on_table"
+		and method.origin == "domain"
+	)
+	assert do_on_table_noop.task_args == ("X",)
+	assert [literal.to_signature() for literal in do_on_table_noop.context] == ["clear(X)"]
+	assert len(do_on_table_noop.subtasks) == 1
+	assert do_on_table_noop.subtasks[0].kind == "primitive"
+	assert do_on_table_noop.subtasks[0].action_name == "nop"
 	assert any(
-		method.task_name == "do_clear"
-		and method.context
-		and not method.subtasks
+		method.source_method_name == "m3_do_on_table"
+		and method.origin == "domain_target_preserving_guard"
+		for method in library.methods
+	)
+	assert any(
+		method.source_method_name == "m1_do_put_on"
+		and method.task_args == ("X", "Y")
 		for method in library.methods
 	)
 

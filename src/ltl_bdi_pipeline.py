@@ -515,25 +515,30 @@ class LTL_BDI_Pipeline:
             method_validation_artifacts = []
             relevant_task_names = self._query_relevant_task_names(method_library, plan_records)
             for task_name in relevant_task_names:
-                representative_args = self._representative_task_args(
+                representative_task_args = self._representative_task_args(
                     task_name,
                     method_library,
                     ltl_spec.objects,
                     plan_records,
                 )
                 for method in method_library.methods_for_task(task_name):
+                    validation_task_args = self._method_validation_task_args(
+                        method,
+                        representative_task_args,
+                        method_library,
+                    )
                     validation_name = f"method_{method.method_name}"
                     validation_objects, validation_object_types = self._seed_validation_scope(
                         task_name,
                         method_library,
-                        representative_args,
+                        validation_task_args,
                         ltl_spec.objects,
                     )
                     validation_initial_facts = self._method_validation_initial_facts(
                         planner,
                         method,
                         method_library,
-                        representative_args,
+                        validation_task_args,
                         ltl_spec.objects,
                         object_pool=validation_objects,
                         object_types=validation_object_types,
@@ -550,7 +555,7 @@ class LTL_BDI_Pipeline:
                                 validation_objects,
                                 validation_object_types,
                             ),
-                            task_args=representative_args,
+                            task_args=validation_task_args,
                             root_method=method,
                             allow_empty_plan=not method.subtasks,
                             initial_facts=validation_initial_facts,
@@ -559,7 +564,7 @@ class LTL_BDI_Pipeline:
                             {
                                 "validation_name": validation_name,
                                 "task_name": task_name,
-                                "task_args": list(representative_args),
+                                "task_args": list(validation_task_args),
                                 "method_name": method.method_name,
                                 "allow_empty_plan": not method.subtasks,
                                 "objects": list(validation_objects),
@@ -573,7 +578,7 @@ class LTL_BDI_Pipeline:
                             {
                                 "validation_name": validation_name,
                                 "task_name": task_name,
-                                "task_args": list(representative_args),
+                                "task_args": list(validation_task_args),
                                 "method_name": method.method_name,
                                 "allow_empty_plan": not method.subtasks,
                                 "objects": list(validation_objects),
@@ -703,6 +708,60 @@ class LTL_BDI_Pipeline:
         while len(values) < arity:
             values.append(source_objects[(len(values)) % len(source_objects)])
         return tuple(values[:arity])
+
+    def _method_validation_task_args(self, method, fallback_task_args, method_library):
+        task_schema = method_library.task_for_name(method.task_name)
+        task_pattern = tuple(
+            getattr(method, "task_args", ())
+            or getattr(task_schema, "parameters", ())
+            or tuple(method.parameters[: len(fallback_task_args)])
+        )
+        if not task_pattern:
+            return tuple(fallback_task_args)
+
+        constant_bindings = self._context_constant_bindings(method.context)
+        resolved_args = []
+        for index, pattern_symbol in enumerate(task_pattern):
+            fallback = fallback_task_args[index] if index < len(fallback_task_args) else pattern_symbol
+            resolved_args.append(constant_bindings.get(pattern_symbol, fallback))
+        return tuple(resolved_args)
+
+    def _context_constant_bindings(self, literals):
+        direct_constant_bindings = {}
+        pending_equalities = []
+
+        for literal in literals:
+            if not getattr(literal, "is_equality", False) or not literal.is_positive:
+                continue
+            left, right = literal.args
+            left_is_var = self._is_variable_symbol(left)
+            right_is_var = self._is_variable_symbol(right)
+            if left_is_var and not right_is_var:
+                direct_constant_bindings[left] = right
+                continue
+            if right_is_var and not left_is_var:
+                direct_constant_bindings[right] = left
+                continue
+            if left_is_var and right_is_var:
+                pending_equalities.append((left, right))
+
+        changed = True
+        while changed and pending_equalities:
+            changed = False
+            remaining = []
+            for left, right in pending_equalities:
+                if left in direct_constant_bindings and right not in direct_constant_bindings:
+                    direct_constant_bindings[right] = direct_constant_bindings[left]
+                    changed = True
+                    continue
+                if right in direct_constant_bindings and left not in direct_constant_bindings:
+                    direct_constant_bindings[left] = direct_constant_bindings[right]
+                    changed = True
+                    continue
+                remaining.append((left, right))
+            pending_equalities = remaining
+
+        return direct_constant_bindings
 
     def _seed_validation_scope(
         self,
@@ -1850,6 +1909,7 @@ class LTL_BDI_Pipeline:
             result = runner.validate(
                 agentspeak_code=asl_code,
                 target_literals=method_library.target_literals,
+                method_library=method_library,
                 action_schemas=action_schemas,
                 seed_facts=seed_facts,
                 domain_name=self.domain.name,
