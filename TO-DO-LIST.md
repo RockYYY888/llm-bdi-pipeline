@@ -2,10 +2,12 @@
 
 ## Current Focus
 
-- Keep the default Stage 1-6 path green with real Jason runtime validation.
+- Keep the default Stage 1-7 path green with Jason runtime execution plus official IPC verification.
 - Keep negation semantics unified to all-NAF (`not`) across Stage 3/5/6.
 - Keep HDDL parsing on the sound subset only (`and/or/not/imply`; fail-fast on unsupported constructs).
-- Expand live coverage beyond blocksworld with official MarsRover HDDL queries and track failures.
+- Keep the benchmark boundary clean: compile from `domain + user query`, use `problem` only for
+  Stage 6 runtime init and Stage 7 official verification.
+- Expand live coverage beyond blocksworld after the official blocksworld `p01`-`p03` harness remains stable.
 - Keep an explicit, code-faithful assumptions boundary document in sync with README.
 
 ## Milestones
@@ -45,3 +47,6 @@
   generic method-trace-based hierarchical plan export, and make Stage 4 method validation
   respect equality-bound runtime task arguments so official blocksworld `p01`-`p03` all pass
   with `Has Bug: False` and official hierarchical verification `True`
+- [x] Milestone 22: Promote the official IPC verifier into formal Stage 7, rename log directories
+  to `{timestamp}_{domain}_{problem}`, keep `problem.hddl` out of synthesis, and re-accept official
+  blocksworld `p01`-`p03` with end-to-end `Has Bug: False`

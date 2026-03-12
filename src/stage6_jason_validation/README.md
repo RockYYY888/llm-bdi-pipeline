@@ -2,6 +2,7 @@
 
 Stage 6 is part of the default pipeline mainline.
 After Stage 5 renders `agentspeak_generated.asl`, Stage 6 validates runtime execution in Jason.
+The official IPC HTN verifier now runs afterwards as Stage 7.
 
 ## Current Backend
 
@@ -14,7 +15,7 @@ After Stage 5 renders `agentspeak_generated.asl`, Stage 6 validates runtime exec
 For each pipeline run, Stage 6 writes and executes:
 
 1. `agentspeak_generated.asl`
-   - Stage 5 output rewritten into the Jason runtime form
+   - Stage 5 output rewritten in place into the Jason runtime form
    - Appended entry goal `!execute`
    - Seeds runtime facts from `problem.hddl :init` when available, otherwise from Stage 4 witnesses
    - Executes `!run_dfa`
@@ -41,6 +42,12 @@ java -cp <jason-cli-all-*.jar> \
    - `jason_stderr.txt`
    - `action_path.txt`
    - `jason_validation.json`
+
+Stage 7 then consumes the same run directory and writes:
+
+- `ipc_official_plan.txt`
+- `ipc_official_verifier.txt`
+- `ipc_official_verification.json`
 
 ## Success Criteria
 

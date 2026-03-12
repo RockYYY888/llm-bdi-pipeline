@@ -14,8 +14,8 @@ This template serves as a **reference guide** for:
 
 For official benchmark-backed acceptance tests, the natural-language query must fully
 contain the requested target semantics on its own. The HDDL `problem.hddl` file is used
-only for runtime initialisation and post-run verification; it is not part of the Stage 1
-or Stage 3 LLM semantic input. In the current live acceptance setup, this rule is applied
+only for Stage 6 runtime initialisation and Stage 7 official verification; it is not part
+of the Stage 1 or Stage 3 LLM semantic input. In the current live acceptance setup, this rule is applied
 to the first three official IPC Blocksworld benchmark problems (`p01`-`p03`).
 
 ## Domain Requirements

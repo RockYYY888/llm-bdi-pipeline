@@ -1,7 +1,7 @@
 # LTLf-HTN-PANDA-AgentSpeak-Jason Pipeline
 
 This repository generates AgentSpeak plan libraries from natural-language goals.
-The default runtime mainline is **Stage 1 -> Stage 6** in
+The default runtime mainline is **Stage 1 -> Stage 7** in
 `src/main.py` -> `LTL_BDI_Pipeline.execute(mode="dfa_agentspeak")`.
 The repository now carries four benchmark-aligned planning domains:
 
@@ -52,6 +52,13 @@ The repository now carries four benchmark-aligned planning domains:
    - Output: `agentspeak_generated.asl`, `jason_runner.mas2j`, runtime stdout/stderr,
      `action_path.txt`, and `jason_validation.json`
 
+7. **Stage 7: Official IPC HTN Plan Verification**
+   - `src/utils/ipc_plan_verifier.py`
+   - Input: Stage 6 `action_path` + `method_trace` + benchmark `domain.hddl` + `problem.hddl`
+   - Does: exports an IPC-style hierarchical plan and verifies it with `pandaPIparser -V`
+   - Output: `ipc_official_plan.txt`, `ipc_official_verifier.txt`, and
+     `ipc_official_verification.json`
+
 ## Important Design Choices
 
 - Stage 3 is **LLM-only** and rejects missing or malformed live model output.
@@ -64,6 +71,8 @@ The repository now carries four benchmark-aligned planning domains:
   PANDA outputs remain validation artifacts plus DFA-edge witnesses.
 - Stage 6 is enabled by default and is a hard gate: if Jason validation fails, the full pipeline
   run fails.
+- Stage 7 is enabled whenever `--problem-file` is provided and is a hard gate for official
+  benchmark-backed runs.
 - The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
 - The full end-to-end pipeline requires an API key because Stage 1 and Stage 3 are LLM-backed.
 - The full Stage 4 path requires the PANDA PI toolchain (`pandaPIparser`, `pandaPIgrounder`,
@@ -74,7 +83,7 @@ The repository now carries four benchmark-aligned planning domains:
 
 ## Assumptions and Validation Boundary
 
-The Stage 1-6 pipeline is general under an explicit set of runtime, HDDL
+The Stage 1-7 pipeline is general under an explicit set of runtime, HDDL
 subset, typing, and semantic assumptions. The full, code-faithful assumption
 list is maintained in:
 
@@ -294,14 +303,16 @@ Notes:
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
 - `--domain-file` is required. The pipeline does not use an implicit default domain.
 - `--problem-file` is optional and, when provided, Stage 6 seeds runtime facts from the
-  official HDDL problem `:init`.
+  official HDDL problem `:init` and Stage 7 verifies the generated hierarchical plan against
+  the same benchmark problem.
 - Stage 4 looks for `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` in this order:
   `PATH`, `PANDA_PI_HOME/bin`, `PANDA_PI_BIN`, `$HOME/.local/pandaPI/bin`.
 - Stage 6 looks for a supported Java runtime (17-23) in this order:
   `STAGE6_JAVA_BIN`, `STAGE6_JAVA_HOME/bin/java`, `JAVA_HOME/bin/java`, `PATH`, and
   macOS JVM directories.
 - Benchmark domains live under `src/domains/`.
-- Generated outputs are written to `logs/<timestamp>_dfa_agentspeak/`.
+- Generated outputs are written to `logs/<timestamp>_<domain>_<problem>/` when a problem is
+  provided, or `logs/<timestamp>_<domain>/` otherwise.
 
 ## Running Tests
 
@@ -343,7 +354,7 @@ are not part of the default fast regression loop in environments without API acc
 
 ## Pipeline Outputs
 
-A successful Stage 1-6 run writes:
+A successful Stage 1-7 benchmark-backed run writes:
 
 - `execution.json`
 - `execution.txt`
@@ -359,6 +370,9 @@ A successful Stage 1-6 run writes:
 - `jason_stderr.txt`
 - `action_path.txt`
 - `jason_validation.json`
+- `ipc_official_plan.txt`
+- `ipc_official_verifier.txt`
+- `ipc_official_verification.json`
 
 The logger also records the Stage 3 synthesis metadata, Stage 4 PANDA metadata,
 and Stage 5 rendering metadata inside the run log.

@@ -1004,9 +1004,24 @@ def _run_query_case(
 		"stage4_status",
 		"stage5_status",
 		"stage6_status",
+		"stage7_status",
 	):
 		if execution.get(stage_key) != "success":
 			bug_messages.append(f"{stage_key} is not success")
+
+	if execution.get("domain_name") != "BLOCKS":
+		bug_messages.append(f"execution.json domain_name mismatch: {execution.get('domain_name')}")
+	if execution.get("problem_name") not in {"BW-rand-5", "BW-rand-7", "BW-rand-9"}:
+		bug_messages.append(
+			f"execution.json problem_name is unexpected: {execution.get('problem_name')}",
+		)
+	log_dir_name = log_dir.name
+	if execution.get("domain_name") and execution.get("problem_name"):
+		expected_suffix = f"_{execution['domain_name']}_{execution['problem_name']}"
+		if not log_dir_name.endswith(expected_suffix):
+			bug_messages.append(
+				f"log directory name does not end with {expected_suffix}: {log_dir_name}",
+			)
 
 	stage3_metadata = execution.get("stage3_metadata", {}) or {}
 	if not (
@@ -1097,6 +1112,8 @@ def _run_query_case(
 		bug_messages.append("execution.txt is missing Stage 5 section")
 	if "STAGE 6: AgentSpeak → Jason Runtime Validation" not in execution_txt:
 		bug_messages.append("execution.txt is missing Stage 6 section")
+	if "STAGE 7: Official IPC HTN Plan Verification" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 7 section")
 
 	stage6_artifacts = execution.get("stage6_artifacts") or {}
 	if stage6_artifacts.get("status") != "success":
@@ -1148,29 +1165,17 @@ def _run_query_case(
 	if (log_dir / "jason_runner_agent.asl").exists():
 		bug_messages.append("legacy runtime-only jason_runner_agent.asl artifact still present")
 
-	official_verifier_report = None
-	problem_file = case.get("problem_file")
-	if problem_file:
-		method_library_path = log_dir / "htn_method_library.json"
-		method_library = HTNMethodLibrary.from_dict(
-			json.loads(method_library_path.read_text()),
-		)
-		official_verifier_report = IPC_PLAN_VERIFIER.verify_plan(
-			domain_file=domain_file,
-			problem_file=problem_file,
-			action_path=action_path,
-			method_library=method_library,
-			method_trace=method_trace,
-			output_dir=log_dir,
-		)
-		if not official_verifier_report.tool_available:
-			bug_messages.append("official IPC verifier is not available on PATH")
-		elif official_verifier_report.plan_kind != "hierarchical":
-			bug_messages.append("official IPC verifier fell back to primitive-only plan export")
-		elif official_verifier_report.verification_result is not True:
-			bug_messages.append(
-				"official IPC HTN verifier did not accept the generated runtime plan",
-			)
+	stage7_artifacts = execution.get("stage7_artifacts") or {}
+	if stage7_artifacts.get("tool_available") is not True:
+		bug_messages.append("official IPC verifier is not available on PATH")
+	if stage7_artifacts.get("plan_kind") != "hierarchical":
+		bug_messages.append("official IPC verifier did not validate a hierarchical plan")
+	if stage7_artifacts.get("verification_result") is not True:
+		bug_messages.append("official IPC HTN verifier did not accept the generated plan")
+	if stage7_artifacts.get("primitive_plan_executable") is not True:
+		bug_messages.append("official IPC verifier did not mark the primitive plan as executable")
+	if stage7_artifacts.get("reached_goal_state") is not True:
+		bug_messages.append("official IPC verifier did not report goal-state achievement")
 
 	for path in _required_artifact_paths(log_dir):
 		if not path.exists():
@@ -1182,11 +1187,7 @@ def _run_query_case(
 		"result": result,
 		"log_dir": log_dir,
 		"execution": execution,
-		"official_verifier": (
-			official_verifier_report.to_dict()
-			if official_verifier_report is not None
-			else None
-		),
+		"official_verifier": stage7_artifacts or None,
 		"bug_messages": bug_messages,
 		"has_bug": bool(bug_messages),
 	}

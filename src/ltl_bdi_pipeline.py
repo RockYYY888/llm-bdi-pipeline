@@ -15,6 +15,7 @@ from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
 from utils.hddl_condition_parser import HDDLConditionParser
+from utils.ipc_plan_verifier import IPCPlanVerifier
 from utils.pipeline_logger import PipelineLogger
 
 
@@ -24,7 +25,7 @@ class TypeResolutionError(RuntimeError):
 
 class LTL_BDI_Pipeline:
     """
-    LTL-BDI pipeline implementing Stages 1-5 (dfa_agentspeak mode)
+    LTL-BDI pipeline implementing compile, execute, and official verification.
 
     Stage 1: Natural Language -> LTLf Specification
     Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
@@ -32,6 +33,7 @@ class LTL_BDI_Pipeline:
     Stage 4: HTN Method Library -> PANDA Planning
     Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering
     Stage 6: AgentSpeak -> Jason Runtime Validation
+    Stage 7: Official IPC HTN Plan Verification
     """
 
     def __init__(self, domain_file: str, problem_file: str | None = None):
@@ -100,6 +102,8 @@ class LTL_BDI_Pipeline:
             mode=mode,
             domain_file=self.domain_file,
             problem_file=self.problem_file,
+            domain_name=self.domain.name,
+            problem_name=self.problem.name if self.problem is not None else None,
             output_dir="logs",
         )
 
@@ -169,7 +173,18 @@ class LTL_BDI_Pipeline:
             return {"success": False, "stage": "Stage 6", "error": "Jason runtime validation failed"}
 
         print("\n" + "="*80)
-        print("STAGES 1-6 COMPLETED SUCCESSFULLY")
+        # Stage 7: Official IPC verifier on generated hierarchical plan
+        stage7_data = self._stage7_official_verification(method_library, stage6_data)
+        if stage7_data is None:
+            log_filepath = self.logger.end_pipeline(success=False)
+            print(f"\nExecution log saved to: {log_filepath}")
+            return {"success": False, "stage": "Stage 7", "error": "Official IPC verification failed"}
+
+        stage7_summary = stage7_data.get("summary") or {}
+        if stage7_summary.get("status") == "skipped":
+            print("STAGES 1-6 COMPLETED SUCCESSFULLY (STAGE 7 SKIPPED)")
+        else:
+            print("STAGES 1-7 COMPLETED SUCCESSFULLY")
         print("="*80)
 
         # End logger and save results
@@ -183,6 +198,7 @@ class LTL_BDI_Pipeline:
             "plans": stage4_data["transitions"],
             "agentspeak_code": asl_code,
             "stage6": stage6_data,
+            "stage7": stage7_data,
         }
 
     def _stage1_parse_nl(self, nl_instruction: str):
@@ -1992,6 +2008,105 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None
+
+    def _stage7_official_verification(self, method_library, stage6_data):
+        """Stage 7: verify the generated hierarchical plan with the official IPC verifier."""
+        print("\n[STAGE 7] Official IPC HTN Plan Verification")
+        print("-"*80)
+
+        if self.problem is None or not self.problem_file:
+            summary = {
+                "backend": "pandaPIparser",
+                "status": "skipped",
+                "reason": "No problem_file was provided",
+            }
+            artifacts = {
+                "tool_available": None,
+                "plan_kind": None,
+                "verification_result": None,
+                "primitive_plan_executable": None,
+                "reached_goal_state": None,
+            }
+            self.logger.log_stage7_official_verification(
+                artifacts,
+                "Skipped",
+                metadata=summary,
+            )
+            print("• Skipped: no problem file was provided")
+            return {
+                "summary": summary,
+                "artifacts": artifacts,
+            }
+
+        verifier = IPCPlanVerifier()
+        if not verifier.tool_available():
+            error = "pandaPIparser is not available on PATH for official IPC verification"
+            self.logger.log_stage7_official_verification(
+                None,
+                "Failed",
+                error=error,
+                metadata={
+                    "backend": "pandaPIparser",
+                    "status": "failed",
+                },
+            )
+            print(f"✗ Stage 7 Failed: {error}")
+            return None
+
+        stage6_artifacts = stage6_data.get("artifacts") or {}
+        verifier_result = verifier.verify_plan(
+            domain_file=self.domain_file,
+            problem_file=self.problem_file,
+            action_path=stage6_artifacts.get("action_path") or [],
+            method_library=method_library,
+            method_trace=stage6_artifacts.get("method_trace") or [],
+            output_dir=self.output_dir,
+        )
+        artifacts = verifier_result.to_dict()
+        summary = {
+            "backend": "pandaPIparser",
+            "status": "success" if verifier_result.verification_result is True else "failed",
+            "tool_available": verifier_result.tool_available,
+            "plan_kind": verifier_result.plan_kind,
+            "verification_result": verifier_result.verification_result,
+            "primitive_plan_executable": verifier_result.primitive_plan_executable,
+            "reached_goal_state": verifier_result.reached_goal_state,
+            "build_warning": verifier_result.build_warning,
+        }
+
+        if (
+            not verifier_result.tool_available
+            or verifier_result.plan_kind != "hierarchical"
+            or verifier_result.verification_result is not True
+        ):
+            error = (
+                "Official IPC verifier rejected the generated hierarchical plan: "
+                f"plan_kind={verifier_result.plan_kind}, "
+                f"verification_result={verifier_result.verification_result}"
+            )
+            self.logger.log_stage7_official_verification(
+                artifacts,
+                "Failed",
+                error=error,
+                metadata=summary,
+            )
+            print(f"✗ Stage 7 Failed: {error}")
+            return None
+
+        self.logger.log_stage7_official_verification(
+            artifacts,
+            "Success",
+            metadata=summary,
+        )
+        print("✓ Official IPC verification complete")
+        print(f"  Plan kind: {verifier_result.plan_kind}")
+        print(f"  Verification result: {verifier_result.verification_result}")
+        print(f"  Verifier output: {artifacts.get('output_file')}")
+
+        return {
+            "summary": summary,
+            "artifacts": artifacts,
+        }
 
     def _stage6_runtime_seed_facts(self, plan_records, target_literals):
         if self.problem is not None:

@@ -15,6 +15,8 @@ def test_stage3_success_summary_in_execution_json_is_derived_from_method_library
         "demo instruction",
         mode="dfa_agentspeak",
         domain_file="demo.hddl",
+        domain_name="BLOCKS",
+        problem_name="BW-rand-5",
         output_dir=str(tmp_path),
     )
 
@@ -61,6 +63,7 @@ def test_stage3_success_summary_in_execution_json_is_derived_from_method_library
 
     log_dir = logger.current_log_dir
     assert log_dir is not None
+    assert log_dir.name.endswith("_BLOCKS_BW-rand-5")
 
     execution = json.loads((log_dir / "execution.json").read_text())
 
@@ -94,6 +97,8 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
         "demo instruction",
         mode="dfa_agentspeak",
         domain_file="demo.hddl",
+        domain_name="BLOCKS",
+        problem_name="BW-rand-5",
         output_dir=str(tmp_path),
     )
 
@@ -140,6 +145,8 @@ def test_stage3_summary_uses_bang_signature_for_negative_literals(tmp_path):
         "demo instruction",
         mode="dfa_agentspeak",
         domain_file="demo.hddl",
+        domain_name="BLOCKS",
+        problem_name="BW-rand-5",
         output_dir=str(tmp_path),
     )
 
@@ -183,6 +190,8 @@ def test_pipeline_logger_records_run_origin_and_logs_root(tmp_path):
         "demo instruction",
         mode="dfa_agentspeak",
         domain_file="demo.hddl",
+        domain_name="BLOCKS",
+        problem_name="BW-rand-5",
         output_dir=str(tmp_path),
     )
     logger.end_pipeline(success=True)
@@ -195,4 +204,48 @@ def test_pipeline_logger_records_run_origin_and_logs_root(tmp_path):
 
     assert execution["run_origin"] == "tests"
     assert execution["logs_root"] == str((tmp_path / "tests_logs").resolve())
+    assert execution["domain_name"] == "BLOCKS"
+    assert execution["problem_name"] == "BW-rand-5"
     assert "Run Origin: tests" in execution_txt
+    assert "Domain Name: BLOCKS" in execution_txt
+    assert "Problem Name: BW-rand-5" in execution_txt
+
+
+def test_pipeline_logger_persists_stage7_verification_details(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path))
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        problem_file="problem.hddl",
+        domain_name="BLOCKS",
+        problem_name="BW-rand-5",
+        output_dir=str(tmp_path),
+    )
+    logger.log_stage7_official_verification(
+        {
+            "tool_available": True,
+            "plan_kind": "hierarchical",
+            "verification_result": True,
+            "primitive_plan_executable": True,
+            "reached_goal_state": True,
+        },
+        "Success",
+        metadata={
+            "backend": "pandaPIparser",
+            "status": "success",
+            "plan_kind": "hierarchical",
+        },
+    )
+    logger.end_pipeline(success=True)
+
+    log_dir = logger.current_log_dir
+    assert log_dir is not None
+    execution = json.loads((log_dir / "execution.json").read_text())
+    execution_txt = (log_dir / "execution.txt").read_text()
+
+    assert execution["stage7_status"] == "success"
+    assert execution["stage7_backend"] == "pandaPIparser"
+    assert execution["stage7_artifacts"]["verification_result"] is True
+    assert "STAGE 7: Official IPC HTN Plan Verification" in execution_txt
+    assert "OFFICIAL VERIFICATION SUMMARY" in execution_txt

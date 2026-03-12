@@ -5,6 +5,7 @@ Pipeline logger for the LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak pipe
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,8 @@ class PipelineRecord:
 	mode: str = "dfa_agentspeak"
 	run_origin: str = "src"
 	logs_root: str = "logs"
+	domain_name: Optional[str] = None
+	problem_name: Optional[str] = None
 
 	stage1_status: str = "pending"
 	stage1_ltlf_spec: Optional[Dict[str, Any]] = None
@@ -67,6 +70,12 @@ class PipelineRecord:
 	stage6_metadata: Optional[Dict[str, Any]] = None
 	stage6_artifacts: Optional[Dict[str, Any]] = None
 
+	stage7_status: str = "pending"
+	stage7_backend: str = "pandaPIparser"
+	stage7_error: Optional[str] = None
+	stage7_metadata: Optional[Dict[str, Any]] = None
+	stage7_artifacts: Optional[Dict[str, Any]] = None
+
 	domain_file: str = "domains/blocksworld/domain.hddl"
 	problem_file: Optional[str] = None
 	output_dir: str = "output"
@@ -90,6 +99,8 @@ class PipelineLogger:
 		mode: str = "dfa_agentspeak",
 		domain_file: str = "domains/blocksworld/domain.hddl",
 		problem_file: str | None = None,
+		domain_name: str | None = None,
+		problem_name: str | None = None,
 		output_dir: str = "output",
 		timestamp: str | None = None,
 	) -> None:
@@ -97,7 +108,12 @@ class PipelineLogger:
 		if timestamp is None:
 			timestamp = self.start_time.strftime("%Y%m%d_%H%M%S")
 
-		dir_name = f"{timestamp}_{mode}"
+		resolved_domain_name = self._slug_component(domain_name or Path(domain_file).stem)
+		resolved_problem_name = self._slug_component(problem_name) if problem_name else None
+		dir_parts = [timestamp, resolved_domain_name]
+		if resolved_problem_name:
+			dir_parts.append(resolved_problem_name)
+		dir_name = "_".join(part for part in dir_parts if part)
 		self.current_log_dir = self.logs_dir / dir_name
 		self.current_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -108,10 +124,18 @@ class PipelineLogger:
 			mode=mode,
 			run_origin=self.run_origin,
 			logs_root=str(self.logs_dir.resolve()),
+			domain_name=domain_name,
+			problem_name=problem_name,
 			domain_file=domain_file,
 			problem_file=problem_file,
 			output_dir=output_dir,
 		)
+
+	@staticmethod
+	def _slug_component(value: str | None) -> str:
+		if not value:
+			return "unknown"
+		return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "unknown"
 
 	def log_stage1_success(
 		self,
@@ -360,6 +384,38 @@ class PipelineLogger:
 
 		self._save_current_state()
 
+	def log_stage7_official_verification(
+		self,
+		artifacts: Optional[Dict[str, Any]],
+		status: str,
+		*,
+		error: str | None = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		if not self.current_record:
+			return
+
+		self.current_record.stage7_metadata = metadata
+		backend = None
+		if isinstance(metadata, dict):
+			backend = metadata.get("backend")
+		if not backend and isinstance(artifacts, dict):
+			backend = artifacts.get("backend")
+		if backend:
+			self.current_record.stage7_backend = str(backend)
+		if status == "Success" and artifacts is not None:
+			self.current_record.stage7_status = "success"
+			self.current_record.stage7_artifacts = artifacts
+		elif status == "Skipped":
+			self.current_record.stage7_status = "skipped"
+			self.current_record.stage7_artifacts = artifacts
+		elif error:
+			self.current_record.stage7_status = "failed"
+			self.current_record.stage7_error = str(error)
+			self.current_record.stage7_artifacts = artifacts
+
+		self._save_current_state()
+
 	def _save_current_state(self) -> None:
 		if not self.current_record or not self.current_log_dir:
 			return
@@ -392,6 +448,10 @@ class PipelineLogger:
 			handle.write(f"Overall Status: {'✓ SUCCESS' if record['success'] else '✗ FAILED'}\n")
 			handle.write(f"Run Origin: {record['run_origin']}\n")
 			handle.write(f"Logs Root: {record['logs_root']}\n")
+			if record.get("domain_name"):
+				handle.write(f"Domain Name: {record['domain_name']}\n")
+			if record.get("problem_name"):
+				handle.write(f"Problem Name: {record['problem_name']}\n")
 			handle.write(f"Domain: {record['domain_file']}\n")
 			if record.get("problem_file"):
 				handle.write(f"Problem: {record['problem_file']}\n")
@@ -408,6 +468,7 @@ class PipelineLogger:
 			self._write_stage4(handle, record)
 			self._write_stage5(handle, record)
 			self._write_stage6(handle, record)
+			self._write_stage7(handle, record)
 
 			handle.write("=" * 80 + "\n")
 			handle.write("END OF RECORD\n")
@@ -622,5 +683,36 @@ class PipelineLogger:
 			handle.write("\n")
 		elif record["stage6_error"]:
 			handle.write(f"\nError: {record['stage6_error']}\n")
+
+		handle.write("\n")
+
+	def _write_stage7(self, handle: Any, record: Dict[str, Any]) -> None:
+		handle.write("-" * 80 + "\n")
+		handle.write("STAGE 7: Official IPC HTN Plan Verification\n")
+		handle.write("-" * 80 + "\n")
+		handle.write(f"Status: {record['stage7_status'].upper()}\n")
+		handle.write(f"Backend: {record['stage7_backend']}\n")
+
+		if record["stage7_metadata"]:
+			handle.write("\n" + "~" * 40 + "\n")
+			title = (
+				"OFFICIAL VERIFICATION SUMMARY"
+				if record["stage7_status"] == "success"
+				else "OFFICIAL VERIFICATION DIAGNOSTICS"
+			)
+			handle.write(f"{title}\n")
+			handle.write("~" * 40 + "\n")
+			for key, value in record["stage7_metadata"].items():
+				handle.write(f"{key}: {value}\n")
+			handle.write("\n")
+
+		if record["stage7_status"] == "success" and record["stage7_artifacts"] is not None:
+			handle.write("\n" + "~" * 40 + "\n")
+			handle.write("OFFICIAL VERIFICATION ARTIFACTS (Stage 7)\n")
+			handle.write("~" * 40 + "\n")
+			handle.write(json.dumps(record["stage7_artifacts"], indent=2))
+			handle.write("\n")
+		elif record["stage7_error"]:
+			handle.write(f"\nError: {record['stage7_error']}\n")
 
 		handle.write("\n")

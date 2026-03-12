@@ -220,10 +220,7 @@ class IPCPlanVerifier:
 			stdout=stdout,
 			stderr=stderr,
 			primitive_plan_only="Primitive plan only" in combined,
-			primitive_plan_executable=self._extract_bool(
-				combined,
-				"Primitive plan alone executable",
-			),
+			primitive_plan_executable=self._extract_executability(combined),
 			verification_result=self._extract_bool(
 				combined,
 				"Plan verification result",
@@ -614,6 +611,16 @@ class IPCPlanVerifier:
 		return ""
 
 	@staticmethod
+	def _extract_executability(text: str) -> Optional[bool]:
+		primitive_only_result = IPCPlanVerifier._extract_bool(
+			text,
+			"Primitive plan alone executable",
+		)
+		if primitive_only_result is not None:
+			return primitive_only_result
+		return IPCPlanVerifier._extract_bool(text, "Plan is executable")
+
+	@staticmethod
 	def _extract_bool(text: str, label: str) -> Optional[bool]:
 		match = re.search(rf"{re.escape(label)}:\s*(true|false)", text, re.IGNORECASE)
 		if match is None:
@@ -626,10 +633,7 @@ class IPCPlanVerifier:
 			return False
 		if IPCPlanVerifier._extract_bool(text, "Plan verification result") is True:
 			return True
-		primitive_plan_executable = IPCPlanVerifier._extract_bool(
-			text,
-			"Primitive plan alone executable",
-		)
+		primitive_plan_executable = IPCPlanVerifier._extract_executability(text)
 		if primitive_plan_executable is None:
 			return None
 		return primitive_plan_executable

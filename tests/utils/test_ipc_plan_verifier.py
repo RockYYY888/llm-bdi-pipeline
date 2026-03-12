@@ -49,6 +49,18 @@ def test_parse_verifier_summary_distinguishes_primitive_success_from_full_htn_su
 	assert IPCPlanVerifier._infer_goal_reached(clean) is True
 
 
+def test_parse_verifier_summary_accepts_hierarchical_executability_marker():
+	output = "\n".join(
+		[
+			"Plan is executable: true",
+			"Plan verification result: true",
+		],
+	)
+
+	assert IPCPlanVerifier._extract_executability(output) is True
+	assert IPCPlanVerifier._infer_goal_reached(output) is True
+
+
 def test_render_supported_hierarchical_plan_contains_root_and_decompositions():
 	root = Path(__file__).resolve().parents[2]
 	verifier = IPCPlanVerifier()
