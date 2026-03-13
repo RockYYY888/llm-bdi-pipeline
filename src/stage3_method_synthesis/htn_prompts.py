@@ -29,125 +29,56 @@ def _clause_signature(clause: Iterable[Any]) -> str:
 
 def build_htn_system_prompt() -> str:
     return (
-        "You generate a compact HTN method library for a symbolic planning domain.\n"
-        "Your JSON is compiled directly into Jason AgentSpeak plans with syntax like:\n"
-        "+!goal(X) : context <- !subgoal(X); action(X).\n"
-        "If your identifiers or task structure are invalid, the generated .asl will be invalid.\n"
-        "Do an internal two-pass review before returning: first check JSON/schema validity, "
-        "then check task-coverage completeness. Do not output that internal reasoning.\n"
+        "You generate a query-specific HTN method library for a symbolic planning domain.\n"
+        "The output is compiled directly into Jason AgentSpeak.\n"
+        "Return JSON only. No markdown, no comments, no prose.\n"
         "\n"
-        "NON-NEGOTIABLE OUTPUT RULES:\n"
-        "1. Return valid JSON only. No markdown, no code fences, no prose, no comments.\n"
-        "2. Return exactly one top-level JSON object.\n"
-        "3. The top-level object must contain only the keys requested in the prompt.\n"
-        "4. Every identifier that becomes AgentSpeak code must already be AgentSpeak-safe.\n"
-        "5. Always include exactly these top-level keys: target_task_bindings, "
-        "compound_tasks, methods.\n"
-        "6. Every target_task_bindings item must contain exactly: target_literal, task_name.\n"
-        "7. Every method object must contain exactly: method_name, task_name, parameters, "
-        "context, subtasks, ordering, origin.\n"
-        "8. Every subtask object must contain exactly: step_id, task_name, args, kind, "
-        "action_name, literal, preconditions, effects.\n"
-        "9. Use JSON null for missing optional values. Never omit required keys.\n"
-        "10. Never reveal chain-of-thought, scratch work, analysis, or self-check text. "
-        "Visible output must be final JSON only.\n"
-        "11. Do not emit duplicate target_task_bindings entries, duplicate compound task "
-        "declarations, or semantically identical sibling branches for the same task.\n"
-        "\n"
-        "AGENTSPEAK IDENTIFIER CONTRACT:\n"
+        "OUTPUT CONTRACT:\n"
+        "- Return exactly one JSON object with exactly these top-level keys: "
+        "target_task_bindings, compound_tasks, methods.\n"
+        "- Prefer reusable parameterized compound tasks over one grounded task per target instance.\n"
+        "- Do not encode grounded object constants into compound task names; use parameters instead.\n"
+        "- Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_. Choose semantic reusable names instead.\n"
         "- task_name and method_name must match [a-z][a-z0-9_]*.\n"
-        "- Never use hyphens, spaces, CamelCase, quotes, or punctuation in identifiers.\n"
-        "- Primitive subtasks must use the runtime aliases provided in the prompt, not raw source action names.\n"
-        "- subtask.kind must be exactly 'primitive' or 'compound'. Never use 'guard' in subtasks.\n"
-        "- action_name may keep the source action name, but task_name must use the runtime alias.\n"
-        "- Predicate names inside literal objects must be simple lower-case atoms, except that "
-        "equality/disequality constraints may use the special predicate '=' with exactly two args.\n"
-        "- Compound task names must be semantic intention names such as place_on, "
-        "hold_block, clear_top, deliver_parcel.\n"
-        "- Do not mechanically encode polarity in task names. Never use prefixes "
-        "achieve_, maintain_not_, ensure_, or goal_.\n"
-        "- method_name must follow exactly: m_{task_name}_{strategy}.\n"
-        "- The {strategy} suffix must be short, stable, and describe HOW the task "
-        "is done, such as stack, from_table, recursive, noop.\n"
-        "- For zero-subtask methods that mean the task is already satisfied, prefer "
-        "strategy noop or already_<state>.\n"
+        "- context, literal, preconditions, and effects entries must be JSON literal objects, never strings like \"clear(X)\".\n"
+        "- method_name must be exactly m_{task_name}_{strategy}.\n"
+        "- Primitive subtasks must use the provided runtime primitive aliases.\n"
+        "- Every compound subtask must reference a declared compound task.\n"
+        "- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
+        "- Do not emit duplicate bindings, duplicate compound tasks, or semantically duplicate sibling methods.\n"
+        "PRIORITY ORDER: validity of JSON and bindings > executability of methods > semantic alignment > branch coverage.\n"
+        "If branch coverage conflicts with executability, drop the invalid branch.\n"
         "\n"
-        "HTN STRUCTURE CONTRACT:\n"
-        "- Only create reusable compound tasks and methods.\n"
-        "- Primitive action tasks are injected automatically by the runtime.\n"
-        "- target_task_bindings must contain one entry for every target literal in the prompt.\n"
-        "- Each target_task_bindings.task_name must match a compound task declared in compound_tasks.\n"
-        "- Each target_task_binding must be semantically aligned with the bound literal. "
-        "A positive literal must bind to a task whose methods make that predicate true. "
-        "A negative literal must bind to a task whose methods remove, prevent, or keep the "
-        "predicate false. Never bind !p(...) to a task that constructively establishes p(...).\n"
-        "- The library must be closed under compound references.\n"
-        "- If a compound subtask mentions helper task X, X must appear in compound_tasks.\n"
-        "- If a compound subtask mentions helper task X, at least one method must have task_name X.\n"
-        "- Never reference an undefined helper task. If you cannot define it, inline primitive steps instead.\n"
-        "- If a primitive action precondition has disjunctive applicability (via 'or' or 'imply'), "
-        "explicitly model those alternatives as distinguishable sibling branches.\n"
-        "- Treat implication exactly as: imply(A, B) == (not A) or B when reasoning about branch coverage.\n"
-        "- Do not leave disjunctive applicability implicit in one generic branch with missing context.\n"
-        "- For helper tasks, keep the same semantic naming style: clear_top, move_support, "
-        "free_hand, load_parcel.\n"
-        "- Do not dump raw logical conditions into task names.\n"
-        "- When a target is already satisfied, emit a zero-subtask method with a semantic "
-        "noop/already_* strategy.\n"
-        "- Keep methods shallow, deterministic, and non-redundant.\n"
-        "- Sibling methods for the same task may exist and are expected, but each sibling must "
-        "represent a genuinely different reusable branch.\n"
-        "- Do not emit duplicate compound task declarations, and do not repeat the same sibling "
-        "branch body under different method names for the same task.\n"
-        "- Internally reason by explicit case partitioning before you emit JSON. For each target "
-        "task and helper task, think through at least these families of cases: "
-        "(a) already satisfied, "
-        "(b) directly achievable with current support conditions, "
-        "(c) blocked because a required support condition is missing and must be established first, "
-        "(d) recursively blocked because the support-establishing helper itself has multiple cases. "
-        "Do not output that reasoning; only output the final JSON.\n"
-        "- Do not overfit to one witness plan or one canonical initial state.\n"
-        "- Methods must stay reusable across multiple runtime situations, not just one example state.\n"
-        "- For every target-bound task, include the important runtime branches the agent may face.\n"
-        "- For every helper task that can already be satisfied at runtime, include an already-satisfied "
-        "zero-subtask method with a non-empty context.\n"
-        "- For every helper task that can be achieved in multiple common ways, include separate methods "
-        "for those distinct ways when they are relevant (for example from_table vs from_block).\n"
-        "- Do not invent an extra sibling method whose only difference is that it performs extra "
-        "prerequisite helper steps under the same applicability conditions. If two constructive "
-        "siblings would apply in the same state, merge the prerequisite helper work into the "
-        "correctly-scoped strategy method instead of emitting a redundant clear_first/prepare_first branch.\n"
-        "- Do not rely on later stages to invent missing helper-task branches.\n"
-        "- context is for method-level preconditions checked before decomposition.\n"
-        "- subtask.preconditions is for step-level checks that hold when that step executes.\n"
-        "- For zero-subtask methods, put the already-satisfied condition in context and leave subtasks empty.\n"
-        "- For non-zero-subtask methods, context should usually stay empty unless the whole decomposition "
-        "requires a shared method-level precondition.\n"
-        "- Every ordering edge must reference existing step_id values.\n"
-        "- ordering must be a list of edges [from_step_id, to_step_id].\n"
-        "- For a total order [s1, s2, s3], write ordering as [[\"s1\", \"s2\"], [\"s2\", \"s3\"]].\n"
-        "- For a single-step method, ordering may be [].\n"
-        "- For zero-subtask methods, ordering must be [].\n"
-        "- Respect type discipline. If the domain says a position expects a block, vehicle, "
-        "room, or package, do not reuse a variable of the wrong role there.\n"
-        "- If two roles must stay distinct for the method to make sense, do not silently alias "
-        "them to the same variable. Use separate variables and explicit binding conditions.\n"
-        "- Every step args list must use only parameters already introduced by the method.\n"
-        "- If a method needs an extra local helper variable beyond the task arguments, you may "
-        "introduce it in method.parameters, but you must still connect it to the task arguments "
-        "with a positive binding condition before first use.\n"
-        "- Use stable upper-case variable names derived from the domain types whenever possible.\n"
-        "- If a type appears once in a scope, use TYPE (for example BLOCK, ROOM, PACKAGE).\n"
-        "- If the same type appears multiple times in one task or method scope, use TYPE1, TYPE2, "
-        "TYPE3 in left-to-right semantic order.\n"
-        "- Keep the task-level parameter names stable across all methods of that task.\n"
-        "- Never introduce free variables in subtasks. Every upper-case placeholder used in "
-        "subtask args, subtask literals, preconditions, or effects must already appear in the "
-        "method parameters or be explicitly constrained in method.context or in a binding "
-        "subtask.preconditions literal.\n"
-        "- Constructive sibling methods for the same task must be semantically distinguishable by "
-        "their promoted method-level context. Do not return multiple constructive siblings that all "
-        "use the same empty or generic context.\n"
+        "HIDDEN REASONING RECIPE (DO NOT OUTPUT IT):\n"
+        "1. Bind each target literal to one reusable semantic target-facing task pattern; reuse the same parameterized task across same-semantic targets.\n"
+        "2. For each target-facing task, identify every non-equivalent final primitive action or final helper that can make the target literal true.\n"
+        "3. List that final step's important positive support preconditions.\n"
+        "4. If several different final actions can establish the same literal under different source-state modes, emit distinguishable constructive siblings for those modes.\n"
+        "5. Build methods least-to-most: already-satisfied, direct-prepared, then blocked branches for missing supports.\n"
+        "6. If the final step needs two important supports, explicitly consider missing-first, missing-second, and missing-both.\n"
+        "7. Helper coverage is not a substitute for target-task coverage: helper modes for support_a do not remove the need for target-level missing-support and missing-both siblings.\n"
+        "8. Keep a missing-one-support branch only when the already-satisfied support can remain true while the helper establishes the missing support; otherwise drop that branch or add explicit discharge/re-establish steps.\n"
+        "9. For helper tasks that remove blockers or establish clearance, cover both direct-blocker and recursively-blocked-blocker cases when relevant.\n"
+        "10. If a helper's direct branch depends on a positive support literal q(BLOCKER, ...) and the branch context does not guarantee q(BLOCKER, ...), the recursive blocked-blocker sibling is mandatory.\n"
+        "11. If a missing support has a reusable helper meaning, call that helper explicitly.\n"
+        "12. If helpers and later steps compete for the same execution resource, run resource-demanding helpers first or discharge/reacquire explicitly.\n"
+        "13. Also check helper after-effects: if a helper likely consumes a resource needed by the next step, add the needed discharge/recovery step or reject that branch.\n"
+        "14. A missing-support branch is invalid if its current context already blocks the first helper, unless the branch explicitly discharges and later re-establishes the consumed support.\n"
+        "15. Prefer reusable helper end states over transient ones: if a helper can keep its headline literal true while discharging an unneeded blocker/resource, add that discharge so downstream helpers remain executable.\n"
+        "16. Reject any helper cycle that can bounce on the same arguments without a primitive action, a stricter context split, or a shrinking blocker.\n"
+        "17. Do a silent variable-binding audit and a silent dry-run from a blocked state before returning JSON.\n"
+        "\n"
+        "SEMANTIC RULES:\n"
+        "- A positive literal must bind to a task whose constructive methods make that literal true.\n"
+        "- A negative literal must bind to a task whose constructive methods remove, prevent, or keep false that relation.\n"
+        "- If a compound subtask carries a headline literal p(...), its task_name must semantically align with establishing p(...). Do not use an unrelated task name as a proxy.\n"
+        "- Disjunctive action applicability from or / imply must become distinguishable sibling methods.\n"
+        "- imply(A, B) must be treated as (not A) or B.\n"
+        "- Use only variables introduced by the task or method; no free variables.\n"
+        "- Never invent a disposer/resource variable for a primitive step unless it is already bound in context or parameters.\n"
+        "- not handempty alone does not identify what is being held; if no carried object is bound, recovery via put_down must not be emitted.\n"
+        "- Respect declared types and role distinctions.\n"
+        "- Never reveal chain-of-thought or hidden reasoning.\n"
     )
 
 
@@ -176,6 +107,7 @@ def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], schema_hi
         )
 
     predicate_lines = [f"- {predicate.to_signature()}" for predicate in domain.predicates]
+    task_lines = [f"- {task.to_signature()}" for task in getattr(domain, "tasks", [])]
     type_lines = [f"- {type_name}" for type_name in domain.types]
     targets = "\n".join(f"- {item}" for item in target_literals)
     branch_hints = (
@@ -187,354 +119,210 @@ def build_htn_user_prompt(domain: Any, target_literals: Iterable[str], schema_hi
         f'- {{"target_literal": "{literal}", "task_name": "<semantic_task_name>"}}'
         for literal in target_literals
     )
-    few_shot_examples = """
-Few-shot guidance (illustrative only, not your domain):
+    protocol = """
+MANDATORY TARGET-TASK CONSTRUCTION PROTOCOL:
+1. Choose one semantic target-facing task per target literal.
+   Reuse one parameterized task when several targets share the same constructive semantics.
+2. Identify the final step that realizes the literal.
+3. List the final step's important positive support preconditions.
+4. Cover these branch families unless impossible:
+   - already-satisfied
+   - direct-prepared
+   - missing-first-support
+   - missing-second-support
+   - missing-both-support
+5. Keep a missing-one-support branch only when the already-satisfied support can stay true while the helper establishes the missing support; otherwise drop that branch or add explicit discharge/re-establish steps.
+6. For blocker-removal helpers, cover both direct-blocker and recursively-blocked-blocker cases when relevant.
+7. If a helper's direct branch depends on a positive support literal about a blocker/support object and the branch context does not guarantee it, emit the recursive blocked-blocker sibling. This is mandatory.
+8. If a support predicate has a reusable helper meaning, define or call that helper.
+9. If several different final primitive actions can establish the same literal under different source-state modes, emit distinct constructive siblings for those modes instead of choosing only one action schema.
+10. Helper coverage is not a substitute for target-task coverage: helper modes for one support do not remove the need for target-level missing-support and missing-both siblings.
+11. If a helper subtask is meant to establish literal p(...), choose a task name whose semantics match p(...), not an unrelated proxy task.
+12. If a helper needs a free resource that a later step would consume, run the helper first or discharge/reacquire explicitly.
+13. If a helper likely leaves behind a resource conflict for the next step, add an explicit recovery step or reject that branch.
+14. A missing-support branch is invalid if its current context already blocks its first helper, unless it explicitly discharges and later re-establishes the consumed support.
+15. Prefer reusable helper end states over transient ones: if a helper can keep its headline literal true while discharging an unneeded blocker/resource, add that discharge.
+16. Reject no-progress mutual recursion.
+""".strip()
+    few_shots = """
+Few-shot guidance (illustrative only):
 
-Example 1: Positive target with runtime primitive aliases
-Target literal: delivered(pkg1)
-Required target_task_bindings entry:
-{"target_literal": "delivered(pkg1)", "task_name": "deliver_parcel"}
-Because the first compound step references load_parcel, the final top-level
-compound_tasks array must include BOTH deliver_parcel and load_parcel, and
-the final methods array must include at least one method whose task_name is
-load_parcel.
-Valid method fragment:
-{
-  "method_name": "m_deliver_parcel_drop",
-  "task_name": "deliver_parcel",
-  "parameters": ["X1"],
-  "context": [],
-  "subtasks": [
-    {
-      "step_id": "s1",
-      "task_name": "load_parcel",
-      "args": ["X1"],
-      "kind": "compound",
-      "action_name": null,
-      "literal": {"predicate": "loaded", "args": ["X1"], "is_positive": true, "source_symbol": null},
-      "preconditions": [],
-      "effects": []
-    },
-    {
-      "step_id": "s2",
-      "task_name": "drop_parcel",
-      "args": ["X1"],
-      "kind": "primitive",
-      "action_name": "drop-parcel",
-      "literal": {"predicate": "delivered", "args": ["X1"], "is_positive": true, "source_symbol": null},
-      "preconditions": [],
-      "effects": []
-    }
-  ],
-  "ordering": [["s1", "s2"]],
-  "origin": "llm"
-}
+Example A: branch families for a positive target
+Target literal: on(item1, slot1)
+If the final primitive place_item(ITEM, SLOT) needs holding(ITEM) and clear(SLOT), a reusable target-facing task should cover:
+- already: on(ITEM, SLOT)
+- direct: holding(ITEM) & clear(SLOT) -> place_item
+- missing_holding: clear(SLOT) -> hold_item(ITEM); place_item
+- missing_clear: holding(ITEM) -> clear_slot(SLOT); place_item only if resource ordering stays executable
+- missing_both: establish both supports in an executable order, then place_item
+Invalid pattern: only {already, direct} or only one arbitrary blocked branch.
+Invalid pattern: creating one grounded task per target instance when one parameterized task would cover them all.
 
-Example 2: Negative target needs BOTH a constructive method and an already-satisfied method
-Target literal: !clear(block2)
-Required target_task_bindings entry:
-{"target_literal": "!clear(block2)", "task_name": "keep_not_clear"}
-Valid method fragments:
-{
-  "method_name": "m_keep_not_clear_stack",
-  "task_name": "keep_not_clear",
-  "parameters": ["BLOCK", "BLOCK1"],
-  "context": [
-    {"predicate": "holding", "args": ["BLOCK1"], "is_positive": true, "source_symbol": null}
-  ],
-  "subtasks": [
-    {
-      "step_id": "s1",
-      "task_name": "put_on_block",
-      "args": ["BLOCK1", "BLOCK"],
-      "kind": "primitive",
-      "action_name": "put-on-block",
-      "literal": {"predicate": "clear", "args": ["BLOCK"], "is_positive": false, "source_symbol": null},
-      "preconditions": [],
-      "effects": []
-    }
-  ],
-  "ordering": [],
-  "origin": "llm"
-}
-{
-  "method_name": "m_keep_not_clear_noop",
-  "task_name": "keep_not_clear",
-  "parameters": ["X2"],
-  "context": [
-    {"predicate": "clear", "args": ["X2"], "is_positive": false, "source_symbol": null}
-  ],
-  "subtasks": [],
-  "ordering": [],
-  "origin": "llm"
-}
+Example B: blocked-clear resource conflict
+If clear_slot(SLOT) needs handempty, this is INVALID:
+- context holding(ITEM) & not clear(SLOT)
+- subtasks: clear_slot(SLOT); place_item(ITEM, SLOT)
+Valid pattern: clear SLOT first, then acquire ITEM; or discharge and reacquire only when the carried object is already bound in context.
+Invalid pattern: inventing put_down(Z) or another unbound disposer variable just to regain handempty.
 
-Example 3: Never bind a negative target to a task that establishes the opposite relation
-Target literal: !linked(node1, node2)
-INVALID target_task_bindings entry:
-{"target_literal": "!linked(node1, node2)", "task_name": "link_nodes"}
-Why invalid: link_nodes constructively makes linked(...) true, so it cannot represent !linked(...).
-VALID target_task_bindings entry:
-{"target_literal": "!linked(node1, node2)", "task_name": "unlink_nodes"}
-Rule: if the literal is negated, the task name and its constructive methods must semantically
-remove, undo, block, or keep false that same relation.
+Example E: post-helper resource conflict
+If clear_slot(SLOT) works by unstacking BLOCKER from SLOT, it may leave holding(BLOCKER) and not handempty.
+Therefore this is INVALID when pick_up(ITEM) needs handempty:
+- clear_slot(SLOT); pick_up(ITEM)
+Valid pattern: clear_slot(SLOT); put_down(BLOCKER); pick_up(ITEM) only when BLOCKER is already bound and the recovery step is explicit.
 
-Example 4: OR precondition must become explicit sibling branches
-Action branch hint:
-- inspect_block applicability branches: [clear(BLOCK)] OR [holding(BLOCK)]
-Valid method fragments for task prepare_inspection:
-{
-  "method_name": "m_prepare_inspection_from_clear",
-  "task_name": "prepare_inspection",
-  "parameters": ["BLOCK"],
-  "context": [
-    {"predicate": "clear", "args": ["BLOCK"], "is_positive": true, "source_symbol": null}
-  ],
-  "subtasks": [
-    {
-      "step_id": "s1",
-      "task_name": "inspect_block",
-      "args": ["BLOCK"],
-      "kind": "primitive",
-      "action_name": "inspect-block",
-      "literal": null,
-      "preconditions": [],
-      "effects": []
-    }
-  ],
-  "ordering": [],
-  "origin": "llm"
-}
-{
-  "method_name": "m_prepare_inspection_from_holding",
-  "task_name": "prepare_inspection",
-  "parameters": ["BLOCK"],
-  "context": [
-    {"predicate": "holding", "args": ["BLOCK"], "is_positive": true, "source_symbol": null}
-  ],
-  "subtasks": [
-    {
-      "step_id": "s1",
-      "task_name": "inspect_block",
-      "args": ["BLOCK"],
-      "kind": "primitive",
-      "action_name": "inspect-block",
-      "literal": null,
-      "preconditions": [],
-      "effects": []
-    }
-  ],
-  "ordering": [],
-  "origin": "llm"
-}
-INVALID pattern: one generic method with empty context that hides both OR branches.
+Example F: invalid missing-second-support branch
+If the final step needs support_a and support_b, and the current branch context already satisfies support_a by consuming a scarce resource, then this is INVALID:
+- context support_a & not support_b
+- subtasks: helper_for_support_b; final_step
+unless the branch explicitly discharges and later re-establishes support_a.
+Preferred repair: omit that missing-second-support branch and let missing-both or an explicit discharge/re-establish branch cover those states.
 
-Example 5: IMPLY precondition must be lowered to (not A) OR B before branching
-Action branch hint:
-- seal_if_clear applicability branches: [not clear(BLOCK)] OR [holding(BLOCK)]
-Interpretation rule: imply(clear(BLOCK), holding(BLOCK)) == not clear(BLOCK) OR holding(BLOCK)
-Valid method fragments for task make_sealable:
-{
-  "method_name": "m_make_sealable_not_clear",
-  "task_name": "make_sealable",
-  "parameters": ["BLOCK"],
-  "context": [
-    {"predicate": "clear", "args": ["BLOCK"], "is_positive": false, "source_symbol": null}
-  ],
-  "subtasks": [
-    {
-      "step_id": "s1",
-      "task_name": "seal_if_clear",
-      "args": ["BLOCK"],
-      "kind": "primitive",
-      "action_name": "seal-if-clear",
-      "literal": null,
-      "preconditions": [],
-      "effects": []
-    }
-  ],
-  "ordering": [],
-  "origin": "llm"
-}
-{
-  "method_name": "m_make_sealable_holding",
-  "task_name": "make_sealable",
-  "parameters": ["BLOCK"],
-  "context": [
-    {"predicate": "holding", "args": ["BLOCK"], "is_positive": true, "source_symbol": null}
-  ],
-  "subtasks": [
-    {
-      "step_id": "s1",
-      "task_name": "seal_if_clear",
-      "args": ["BLOCK"],
-      "kind": "primitive",
-      "action_name": "seal-if-clear",
-      "literal": null,
-      "preconditions": [],
-      "effects": []
-    }
-  ],
-  "ordering": [],
-  "origin": "llm"
-}
-INVALID pattern: treating imply(A, B) as if both A and B were jointly required in one context.
+Example G: do not preserve a conflicting support
+If stack(X, Y) needs holding(X) and clear(Y), and clear_block(Y) needs handempty, then this is INVALID:
+- context holding(X) & not clear(Y)
+- subtasks: clear_block(Y); stack(X, Y)
+because the already-satisfied support holding(X) cannot remain true while clear_block(Y) is established.
+Valid options:
+- omit this missing_clear branch and let missing_both cover it, or
+- explicitly discharge and later re-establish holding(X).
+
+Example G2: explicit repaired missing_clear branch
+Only emit the missing_clear sibling if the full recovery is explicit and executable, for example:
+- context holding(X) & not clear(Y)
+- subtasks: put_down(X); make_clear(Y); make_holding(X); stack(X, Y)
+If you do not have that full discharge/re-establish chain, omit the missing_clear sibling entirely.
+
+Example H: underspecified recovery branch
+If pick_up(X) needs handempty and the branch context is:
+- clear(X) & ontable(X) & not handempty
+then this is UNDERSPECIFIED unless the carried object is already named in context or parameters.
+Invalid pattern:
+- put_down(Z); pick_up(X)
+Valid pattern:
+- omit the missing_handempty branch, or
+- use put_down(BLOCKER); pick_up(X) only when BLOCKER is already bound.
+
+Example I: reusable helper end state
+If clear_block(X) is achieved by unstack(BLOCKER, X), the helper may leave holding(BLOCKER).
+If clear(X) remains true after put_down(BLOCKER), prefer:
+- unstack(BLOCKER, X); put_down(BLOCKER)
+over a transient helper ending in holding(BLOCKER), because downstream helpers often need handempty.
+
+Example J: omit underspecified make_holding branch
+If make_holding(X) has a direct branch:
+- clear(X) & ontable(X) & handempty -> pick_up(X)
+then this branch is INVALID:
+- clear(X) & ontable(X) & not handempty -> put_down(Z); pick_up(X)
+because the carried object is unknown.
+Preferred behavior: omit the missing_handempty sibling unless the carried object is already bound.
+
+Example J2: same literal, different final actions
+If holding(X) can be established by two different primitives:
+- pick_up(X) from clear(X) & ontable(X) & handempty
+- unstack(X, Y) from on(X, Y) & clear(X) & handempty
+then make_holding(X) must not choose only one of them.
+Valid pattern:
+- table-mode sibling for ontable(X)
+- stack-mode sibling for on(X, Y)
+- plus blocked variants only when their missing support can be repaired executably
+Invalid pattern:
+- only the table-mode sibling
+because holding(X) then fails whenever X starts on another block.
+
+Example J3: helper coverage does not replace target coverage
+If place_item(X, Y) needs support_a(X) and support_b(Y), and helper support_a(X) has several constructive modes, the target task still needs its own blocked siblings.
+Valid pattern:
+- direct target branch when support_a and support_b already hold
+- target missing-support_a branch that calls helper support_a(X)
+- target missing-both branch that establishes both supports in order
+Invalid pattern:
+- only direct target branch, plus a rich helper support_a library
+because the target still fails whenever support_a or support_b is initially missing.
+
+Example K: exact clear-helper recursion pattern
+If a clear-like helper has this direct branch:
+- context on(B, X) & clear(B) & handempty
+- subtasks unstack(B, X); put_down(B)
+then it must also have the blocked-blocker sibling:
+- context on(B, X) & not clear(B)
+- subtasks make_clear(B); unstack(B, X); put_down(B)
+Invalid pattern:
+- only already + direct
+because make_clear(X) then fails whenever the blocker on X is itself blocked.
+
+Example C: OR / IMPLY must become sibling methods
+If an action is applicable under [clear(BLOCK)] OR [holding(BLOCK)], emit distinguishable siblings for those contexts.
+If an action has imply(clear(BLOCK), holding(BLOCK)), treat it as [not clear(BLOCK)] OR [holding(BLOCK)].
+
+Example D: recursive blocker removal
+If helper make_clear(TARGET) can succeed by unstacking BLOCKER from TARGET, then it must also consider the case where BLOCKER itself is not ready for that unstack step.
+Valid pattern:
+- direct-blocker: on(BLOCKER, TARGET) & clear(BLOCKER) & handempty -> unstack(BLOCKER, TARGET); put_down(BLOCKER)
+- recursive-blocker: on(BLOCKER, TARGET) & not clear(BLOCKER) -> make_clear(BLOCKER); unstack(BLOCKER, TARGET); put_down(BLOCKER)
+- complementary-support rule: if the direct helper branch requires support q(BLOCKER), add the sibling for not q(BLOCKER) whenever that blocked state can arise at runtime.
+Invalid pattern: only the already-satisfied branch and the direct-blocker branch. That leaves the helper unusable when the blocker is itself blocked.
 """.strip()
 
     return (
         "TASK:\n"
-        "Generate a JSON HTN method library that will be compiled into valid AgentSpeak.\n"
-        "The JSON must satisfy the syntax and naming contract below.\n\n"
+        "Generate one JSON HTN method library that compiles into valid AgentSpeak.\n\n"
         f"DOMAIN:\n{domain.name}\n\n"
         f"DOMAIN TYPES:\n{chr(10).join(type_lines) if type_lines else '- object'}\n\n"
+        f"DECLARED DOMAIN TASKS:\n{chr(10).join(task_lines) if task_lines else '- none declared'}\n\n"
         f"PREDICATES:\n{chr(10).join(predicate_lines)}\n\n"
         f"RUNTIME PRIMITIVE ACTION ALIASES:\n{chr(10).join(action_lines)}\n\n"
         f"ACTION PRECONDITION BRANCH HINTS (DNF):\n{branch_hints}\n\n"
         f"TARGET LITERALS:\n{targets}\n\n"
         f"REQUIRED target_task_bindings ENTRIES:\n{binding_hints}\n\n"
+        "DECISION PRIORITY:\n"
+        "1. Valid JSON and bound variables.\n"
+        "2. Executable methods under their own contexts.\n"
+        "3. Semantic task naming.\n"
+        "4. Broad branch coverage.\n"
+        "If a candidate sibling is not executable, omit it even if branch coverage becomes smaller.\n\n"
+        f"{protocol}\n\n"
         "TOP-LEVEL JSON SHAPE:\n"
-        "Primitive tasks are injected automatically by the runtime, so only define "
-        "target_task_bindings, compound_tasks, and methods.\n"
+        "Primitive tasks are injected automatically by the runtime, so only define target_task_bindings, compound_tasks, and methods.\n"
         f"{schema_hint}\n\n"
-        f"{few_shot_examples}\n\n"
+        f"{few_shots}\n\n"
         "REQUIRED CONTENT RULES:\n"
-        "- Include one target_task_bindings entry for every target literal shown above.\n"
-        "- Each target_task_bindings.task_name must be a semantic task name, not a mechanical "
-        "logic-name such as achieve_on or maintain_not_clear.\n"
-        "- Think twice before returning: first verify the JSON shape, then verify task coverage. "
-        "Do not print your reasoning.\n"
-        "- Never reveal chain-of-thought, hidden reasoning, self-critique, or analysis text. "
-        "Return only one complete JSON object.\n"
-        "- Do not duplicate target_task_bindings entries or compound task declarations.\n"
-        "- Multiple methods for the same task are normal when they express different sibling "
-        "branches, but do not emit semantically identical sibling branch bodies for one task. "
-        "Each reusable branch should appear once.\n"
-        "- If an action precondition has disjunctive alternatives (or/imply lowered to DNF), "
-        "cover those alternatives with explicit, distinguishable sibling method branches.\n"
-        "- Treat implication preconditions as disjunctions: imply(A, B) == not A or B.\n"
-        "- For every negative target literal, include at least one constructive (non-zero-subtask) "
-        "method for its bound task. Do not return only a noop/already-satisfied method.\n"
-        "- For every negative target literal, bind it to a task that semantically makes the negated "
-        "relation true (for example remove_on, detach_block, keep_not_clear). Never bind a negative "
-        "literal to a task whose constructive branch makes the positive relation true.\n"
-        "- Invalid pattern: binding !p(...) to a task like add_p, place_p, connect_p, or any other "
-        "task whose constructive branch establishes p(...).\n"
-        "- For every target-bound task, do not stop at one witness path. Include the key reusable "
-        "branches needed by the agent across different runtime situations.\n"
-        "- Think in explicit case splits before returning. For each target-bound task, first "
-        "mentally enumerate: already-satisfied, directly-achievable, blocked-because-support-is-missing, "
-        "and recursively-blocked helper cases. Then emit methods that cover those reusable cases. "
-        "Do not print the reasoning.\n"
-        "- Each method.task_name must reference an existing compound task.\n"
-        "- Each primitive subtask.task_name must match one of the provided runtime primitive action aliases exactly.\n"
-        "- If subtask.task_name is a runtime primitive action alias, then kind must be 'primitive'.\n"
-        "- If subtask.task_name is a compound helper task, then kind must be 'compound'.\n"
-        "- If the source action is written with hyphens, convert task_name to the provided underscore alias.\n"
-        "- Each compound subtask.task_name must reference a compound task that exists in compound_tasks.\n"
-        "- For every compound subtask.task_name X, include a compound_tasks entry named X.\n"
-        "- For every compound subtask.task_name X, include at least one method whose task_name is X.\n"
-        "- Do not reference helper tasks unless you fully define them in the same JSON object.\n"
-        "- If you only need one extra primitive step, inline it instead of inventing an undefined helper.\n"
-        "- Use semantic helper task names such as clear_top, remove_support, free_hand, load_parcel.\n"
-        "- Do not overfit methods to the default all-objects-on-table example state. The methods must "
-        "remain reusable when an object is already held, already clear, already on another object, or "
-        "already at the target relation.\n"
-        "- Use the declared HDDL types and typed action signatures exactly. Method parameters, helper "
-        "variables, and subtask arguments must respect the domain's type roles.\n"
-        "- Do not collapse two distinct semantic roles onto one variable unless the domain semantics "
-        "really allow that aliasing.\n"
-        "- If a decomposition needs two different objects, keep two distinct variables and bind them "
-        "explicitly; do not fake distinctness by reusing one variable name.\n"
-        "- If a task changes the state of object X because another object is blocking, supporting, "
-        "or occupying X, introduce and bind the actual blocker/support object as a separate variable. "
-        "Do not incorrectly reuse X where the domain action really operates on a distinct related object.\n"
-        "- If your method logic depends on equality or inequality, encode it only with the supported "
-        "literal form: predicate '=' with exactly two args. Use is_positive=true for equality and "
-        "is_positive=false for disequality.\n"
-        "- For every helper task that denotes a reusable stateful intention (for example hold_block, "
-        "clear_top, remove_on, place_on, make_clear), include both:\n"
-        "  (a) at least one constructive method, and\n"
-        "  (b) an already-satisfied zero-subtask method with a non-empty context whenever that task can "
-        "already hold at runtime.\n"
-        "- If a helper task has multiple common acquisition modes that matter at runtime (for example "
-        "from_table and from_block), include separate methods for each relevant mode.\n"
-        "- Those sibling strategy methods must be distinguishable by reusable method-level context. "
-        "For example, a from_table branch should expose a context such as ontable(BLOCK), while a "
-        "from_block branch should expose a context such as on(BLOCK1, BLOCK2).\n"
-        "- Do not create a generic clear_first or prepare_first sibling unless it has its own real "
-        "method-level applicability condition that is different from every other sibling. Extra helper "
-        "steps alone are not a valid reason to add another sibling.\n"
-        "- Invalid pattern: one sibling says acquire, another says stack, but acquire has no unique "
-        "context and merely performs prerequisite work for stack. Merge them instead of emitting both.\n"
-        "- Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you.\n"
-        "- Do not use achieve_, maintain_not_, ensure_, or goal_ prefixes anywhere in compound task names.\n"
-        "- Every task_name and method_name must already be underscore_case.\n"
-        "- For every method, method_name must be exactly 'm_' + task_name + '_' + a short strategy suffix.\n"
-        "- For zero-subtask methods, prefer a strategy suffix of noop or already_<state>.\n"
-        "- Do not use any other method naming pattern.\n"
-        "- Use parameter names already introduced by the task or method.\n"
-        "- Do not invent free variables such as TOP, SUPPORT, X, or Y unless they are already "
-        "task parameters or are explicitly constrained in method.context or by a binding "
-        "subtask.preconditions literal.\n"
-        "- If you introduce an extra local variable in method.parameters (for example a blocker or "
-        "support object), do not leave it floating. Add a positive binding relation in method.context "
-        "before any subtask uses it.\n"
-        "- Do not rename an existing task parameter to a fresh variable. If the task parameter "
-        "is B, B1, B2, PKG, ROOM, or similar, keep using that same variable name instead of "
-        "switching to X, Y, OBJ, or another alias.\n"
-        "- Prefer type-based upper-case variable names in the final JSON. For example, use BLOCK "
-        "or BLOCK1/BLOCK2 instead of random X/Y placeholders.\n"
-        "- If a helper method needs a local helper variable, bind it in method.context first "
-        "or by an explicit binding precondition (for example a predicate relating that variable "
-        "to an existing task parameter) before reusing it in subtasks.\n"
-        "- For a zero-subtask method, use a non-empty context, an empty subtasks list, and an empty ordering list.\n"
-        "- For a non-zero-subtask method, put method-wide decomposition checks in context; "
-        "put step-local checks in subtask.preconditions.\n"
-        "- ordering is a list of [from_step_id, to_step_id] edges.\n"
-        "- For a total order s1 -> s2 -> s3, write ordering as [[\"s1\", \"s2\"], [\"s2\", \"s3\"]].\n"
-        "- For a single-step method, ordering may be [].\n"
-        "- Do not invent unsupported top-level keys.\n"
-        "- Do not omit required method keys or required subtask keys.\n"
-        "- Use JSON null, not the string \"null\", for missing optional values.\n"
-        "- Do not include explanations.\n"
-        "\n"
-        "FINAL SELF-CHECK BEFORE RETURNING JSON:\n"
-        "1. Is there exactly one target_task_bindings entry for every target literal shown above?\n"
-        "2. Are all task_name values semantic underscore_case identifiers?\n"
-        "3. Did you avoid achieve_, maintain_not_, ensure_, and goal_ prefixes in compound task names?\n"
-        "4. Do primitive steps use runtime aliases rather than raw source action names?\n"
-        "5. Do all ordering edges reference real step_id values?\n"
-        "6. Is every compound helper task declared in compound_tasks and implemented by at least one method?\n"
-        "7. Do all methods use the exact m_task_strategy naming pattern?\n"
-        "8. Does every negative target task have at least one constructive non-zero-subtask method?\n"
-        "9. Do all zero-subtask methods keep subtasks/orderings empty and use a clear already-satisfied strategy name?\n"
-        "10. Does the JSON contain only the requested keys?\n"
-        "11. Would each task_name compile cleanly inside +!task_name(...) AgentSpeak syntax?\n"
-        "12. For every helper task that can already be true at runtime, did you include an already-satisfied "
-        "zero-subtask method with a non-empty context?\n"
-        "13. For every helper task with multiple common runtime modes, did you include the distinct relevant methods?\n"
-        "14. Did you avoid overfitting to one canonical initial state or one witness plan?\n"
-        "15. Did you avoid every unbound free variable in subtasks by binding it in the task "
-        "parameters or method.context first?\n"
-        "16. Did you explicitly cover the already-satisfied, direct, blocked, and recursive-helper "
-        "case families for each top-level target task?\n"
-        "17. Did every variable and subtask argument respect the domain's declared types?\n"
-        "18. Did every equality/disequality constraint use the supported literal form with "
-        "predicate '=' and exactly two args?\n"
-        "19. Did you keep existing task parameters stable instead of renaming them to fresh "
-        "single-letter aliases such as X or Y?\n"
-        "20. Did every constructive sibling method for the same task expose a distinguishable "
-        "method-level context rather than sharing the same generic context?\n"
-        "21. Did you use stable upper-case type-based variable names such as BLOCK or BLOCK1/BLOCK2 "
-        "instead of random placeholders?\n"
-        "22. Did every target_task_binding use a task whose semantics match the target literal's "
-        "polarity, especially for negative literals?\n"
-        "23. Did you avoid adding redundant clear_first/prepare_first siblings that do not introduce "
-        "a new applicability condition?\n"
-        "24. Did you avoid printing any chain-of-thought, analysis, or self-check prose and "
-        "return only one complete JSON object?\n"
-        "25. Did you avoid duplicate binding entries, duplicate compound task declarations, and "
-        "semantically duplicate sibling branch bodies for the same task?\n"
-        "26. For every disjunctive action precondition (including imply lowered to not/or), did you "
-        "emit explicit distinguishable sibling branches instead of one ambiguous generic branch?\n"
+        "- Prefer declared domain task names when they match the target-facing intention, but generate fresh methods yourself; do not assume any pre-existing method body exists.\n"
+        "- Reuse one parameterized compound task for repeated goal patterns; do not clone a new grounded task for each target literal instance.\n"
+        "- Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_ in compound task names.\n"
+        "- Do not invent grounded task names like achieve_p_a_b; task names must stay semantic and reusable.\n"
+        "- Every target_task_bindings.task_name must match a declared compound task in compound_tasks.\n"
+        "- For every target-bound task, cover reusable blocked states, not only the already-prepared endgame state.\n"
+        "- For a direct branch with two important support preconditions, missing-both coverage is mandatory unless provably impossible.\n"
+        "- Emit a missing-first or missing-second branch only when the support already true in that branch can remain true while the missing support is established.\n"
+        "- For a place-on style target, do not emit `holding(X) & not clear(Y) -> clear_helper(Y); final_step` unless you also emit the full discharge/re-establish chain.\n"
+        "- For blocker-removal helpers, do not stop at the direct-blocker case if the blocker itself may be unprepared. Add the recursive-blocker branch when relevant.\n"
+        "- If a direct blocker-removal branch requires clear(BLOCKER) or an analogous readiness literal and the branch context does not guarantee it, the recursive blocked-blocker sibling is mandatory.\n"
+        "- A clear-like helper is incomplete if it only has already-satisfied and direct-blocker methods while the blocker itself may be blocked.\n"
+        "- For clear-like helpers, a direct branch `on(B, X) & clear(B) & handempty` should normally be paired with a blocked-blocker sibling `on(B, X) & not clear(B)`.\n"
+        "- If multiple primitive actions can establish the same headline literal under different source-state modes, emit separate constructive siblings for those modes.\n"
+        "- For make_holding-style helpers in blocks-like domains, cover both table-mode acquisition and stack-mode acquisition when both exist.\n"
+        "- Helper coverage does not replace target-task coverage: a rich helper library does not remove target-level missing-support and missing-both branches.\n"
+        "- If a compound helper subtask is annotated with literal p(...), the helper task itself must semantically establish p(...). Do not use an unrelated task name as a proxy for that literal.\n"
+        "- Every context entry and every literal-bearing field must use object form with predicate/args/is_positive, not string shorthand.\n"
+        "- Do not create clear_first / prepare_first siblings unless they have their own real applicability condition.\n"
+        "- Do not use unbound disposer variables such as a made-up held object just to regain a resource; only call a primitive when all of its arguments are already bound.\n"
+        "- If a branch needs handempty but the carried object is not named in context or parameters, do not emit a put_down-style recovery step for an unknown object.\n"
+        "- If a helper likely leaves holding(BLOCKER) or otherwise consumes a resource needed by the very next step, add the explicit recovery step or reject that branch.\n"
+        "- If a missing-support branch starts in a context that already blocks its first helper, either add explicit discharge/re-establish steps or drop that branch.\n"
+        "- Prefer dropping an invalid missing-second-support branch over emitting a branch that only works by assuming a helper can ignore the current resource conflict.\n"
+        "- If not handempty is true but the carried object is not bound anywhere, treat recovery as underspecified and omit that branch.\n"
+        "- For make_holding-style helpers, do not emit a missing_handempty sibling unless the carried object for the recovery step is already bound.\n"
+        "- When a helper can preserve its headline literal and also restore a consumed resource, prefer that reusable end state over a transient end state.\n"
+        "- Do not introduce free variables. Bind every variable before use.\n"
+        "- Do not output chain-of-thought. Output final JSON only.\n\n"
+        "FINAL SILENT CHECKLIST:\n"
+        "1. Exactly one binding per target literal.\n"
+        "2. JSON keys and identifier format are valid.\n"
+        "3. No undefined helper tasks.\n"
+        "4. No free variables.\n"
+        "5. No no-progress recursion.\n"
+        "6. Missing-first / missing-second / missing-both support cases considered when relevant.\n"
+        "7. Shared-resource ordering is executable.\n"
+        "8. Return one complete JSON object and nothing else.\n"
     )

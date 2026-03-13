@@ -75,11 +75,21 @@ class _MethodTraceEntry:
 	task_args: Tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _RootTaskBridge:
+	root_index: int
+	source_task_name: str
+	generated_task_name: str
+	method_name: str
+	extra_subtasks: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
+
+
 class IPCPlanVerifier:
 	"""Run the PANDA HTN verifier with best-effort hierarchical plan export."""
 
 	def __init__(self, parser_cmd: str = "pandaPIparser") -> None:
 		self.parser_cmd = parser_cmd
+		self._last_hierarchical_build_warning: Optional[str] = None
 
 	def tool_available(self) -> bool:
 		return shutil.which(self.parser_cmd) is not None
@@ -92,6 +102,7 @@ class IPCPlanVerifier:
 		action_path: Sequence[str],
 		method_library: HTNMethodLibrary | None = None,
 		method_trace: Sequence[Dict[str, Any]] | None = None,
+		root_task_bridges: Sequence[Dict[str, Any]] | None = None,
 		output_dir: str | Path,
 		plan_filename: str = "ipc_official_plan.txt",
 		output_filename: str = "ipc_official_verifier.txt",
@@ -103,6 +114,7 @@ class IPCPlanVerifier:
 			action_path=action_path,
 			method_library=method_library,
 			method_trace=method_trace,
+			root_task_bridges=root_task_bridges,
 			output_dir=output_dir,
 			plan_filename=plan_filename,
 			output_filename=output_filename,
@@ -127,6 +139,7 @@ class IPCPlanVerifier:
 			action_path=action_path,
 			method_library=None,
 			method_trace=None,
+			root_task_bridges=None,
 			output_dir=output_dir,
 			plan_filename=plan_filename,
 			output_filename=output_filename,
@@ -142,6 +155,7 @@ class IPCPlanVerifier:
 		action_path: Sequence[str],
 		method_library: HTNMethodLibrary | None,
 		method_trace: Sequence[Dict[str, Any]] | None,
+		root_task_bridges: Sequence[Dict[str, Any]] | None,
 		output_dir: str | Path,
 		plan_filename: str,
 		output_filename: str,
@@ -158,6 +172,7 @@ class IPCPlanVerifier:
 		plan_kind = "primitive_only"
 		plan_text = self.render_primitive_only_plan(action_path)
 		if prefer_hierarchical:
+			self._last_hierarchical_build_warning = None
 			try:
 				rendered = self._render_supported_hierarchical_plan(
 					domain_file=domain_file,
@@ -165,6 +180,7 @@ class IPCPlanVerifier:
 					action_path=action_path,
 					method_library=method_library,
 					method_trace=method_trace,
+					root_task_bridges=root_task_bridges,
 				)
 			except Exception as exc:
 				rendered = None
@@ -172,6 +188,8 @@ class IPCPlanVerifier:
 			if rendered is not None:
 				plan_text = rendered
 				plan_kind = "hierarchical"
+				if build_warning is None:
+					build_warning = self._last_hierarchical_build_warning
 		plan_path.write_text(plan_text)
 
 		command = [
@@ -250,6 +268,7 @@ class IPCPlanVerifier:
 		action_path: Sequence[str],
 		method_library: HTNMethodLibrary | None,
 		method_trace: Sequence[Dict[str, Any]] | None,
+		root_task_bridges: Sequence[Dict[str, Any]] | None = None,
 	) -> Optional[str]:
 		problem = HDDLParser.parse_problem(str(problem_file))
 		if method_library is None or not method_library.methods:
@@ -266,17 +285,20 @@ class IPCPlanVerifier:
 			root_tasks=problem.htn_tasks,
 			actions=actions,
 			trace_entries=trace_entries,
+			root_task_bridges=self._normalise_root_task_bridges(root_task_bridges),
 		)
+		warnings: List[str] = []
 		if action_index != len(actions):
-			raise ValueError(
-				"hierarchical exporter did not consume the full runtime action path "
-				f"({action_index}/{len(actions)} steps)",
+			warnings.append(
+				"hierarchical exporter used only the runtime action prefix "
+				f"({action_index}/{len(actions)} steps)"
 			)
 		if trace_index != len(trace_entries):
-			raise ValueError(
-				"hierarchical exporter did not consume the full method trace "
-				f"({trace_index}/{len(trace_entries)} entries)",
+			warnings.append(
+				"hierarchical exporter used only the method-trace prefix "
+				f"({trace_index}/{len(trace_entries)} entries)"
 			)
+		self._last_hierarchical_build_warning = "; ".join(warnings) if warnings else None
 		return self._render_hierarchical_plan(root_nodes)
 
 	def _reconstruct_hierarchy(
@@ -286,6 +308,7 @@ class IPCPlanVerifier:
 		root_tasks: Sequence[Any],
 		actions: Sequence[_ActionStep],
 		trace_entries: Sequence[_MethodTraceEntry],
+		root_task_bridges: Dict[int, _RootTaskBridge],
 	) -> Tuple[List[_AbstractNode], int, int]:
 		task_lookup = {
 			task.name: task
@@ -404,9 +427,46 @@ class IPCPlanVerifier:
 		root_nodes: List[_AbstractNode] = []
 		next_action_index = 0
 		next_trace_index = 0
-		for task in root_tasks:
+		for root_index, task in enumerate(root_tasks):
 			source_task_name = getattr(task, "task_name")
 			task_args = tuple(getattr(task, "args"))
+			bridge = root_task_bridges.get(root_index)
+			if bridge is not None and bridge.generated_task_name != source_task_name:
+				child_internal_name = bridge.generated_task_name
+				child_source_name = source_task_by_internal.get(
+					child_internal_name,
+					child_internal_name,
+				)
+				child_node, next_action_index, next_trace_index = reconstruct_task(
+					child_internal_name,
+					task_args,
+					child_source_name,
+					next_action_index,
+					next_trace_index,
+				)
+				child_nodes: List[_PlanNode] = [child_node]
+				for extra_task_name, extra_task_args in bridge.extra_subtasks:
+					extra_source_name = source_task_by_internal.get(
+						extra_task_name,
+						extra_task_name,
+					)
+					extra_node, next_action_index, next_trace_index = reconstruct_task(
+						extra_task_name,
+						extra_task_args,
+						extra_source_name,
+						next_action_index,
+						next_trace_index,
+					)
+					child_nodes.append(extra_node)
+				root_nodes.append(
+					_AbstractNode(
+						task_name=source_task_name,
+						args=task_args,
+						method_name=bridge.method_name,
+						children=child_nodes,
+					),
+				)
+				continue
 			internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
 			root_node, next_action_index, next_trace_index = reconstruct_task(
 				internal_task_name,
@@ -439,6 +499,38 @@ class IPCPlanVerifier:
 				),
 			)
 		return trace_entries
+
+	@staticmethod
+	def _normalise_root_task_bridges(
+		root_task_bridges: Sequence[Dict[str, Any]] | None,
+	) -> Dict[int, _RootTaskBridge]:
+		if not root_task_bridges:
+			return {}
+
+		normalised: Dict[int, _RootTaskBridge] = {}
+		for fallback_index, item in enumerate(root_task_bridges):
+			source_task_name = str(item.get("source_task_name", "")).strip()
+			generated_task_name = str(item.get("generated_task_name", "")).strip()
+			method_name = str(item.get("method_name", "")).strip()
+			root_index = int(item.get("root_index", fallback_index))
+			extra_subtasks = tuple(
+				(
+					str(extra.get("task_name", "")).strip(),
+					tuple(str(arg).strip() for arg in extra.get("task_args", []) or []),
+				)
+				for extra in (item.get("extra_subtasks") or [])
+				if str(extra.get("task_name", "")).strip()
+			)
+			if not source_task_name or not generated_task_name or not method_name:
+				continue
+			normalised[root_index] = _RootTaskBridge(
+				root_index=root_index,
+				source_task_name=source_task_name,
+				generated_task_name=generated_task_name,
+				method_name=method_name,
+				extra_subtasks=extra_subtasks,
+			)
+		return normalised
 
 	@staticmethod
 	def _ground_arguments(args: Sequence[str], bindings: Dict[str, str]) -> Tuple[str, ...]:

@@ -239,6 +239,7 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 	assert validation_payload["method_trace"] == [
 		{"method_name": "m_do_put_on_domain_2", "task_args": ["a", "b"]},
 	]
+	assert validation_payload["failed_goals"] == []
 	assert validation_payload["artifacts"]["action_path"] == str(tmp_path / "action_path.txt")
 	assert validation_payload["artifacts"]["method_trace"] == str(tmp_path / "method_trace.json")
 
@@ -275,6 +276,21 @@ def test_extract_method_trace_preserves_runtime_order():
 			"method_name": "m_send_data_domain_2",
 			"task_args": ["rover0", "waypoint1", "channel0"],
 		},
+	]
+
+
+def test_extract_failed_goals_preserves_runtime_order():
+	runner = JasonRunner()
+	stdout = "\n".join(
+		[
+			"runtime goal failed fail_goal(hold_block,b4)",
+			"runtime goal failed fail_goal(clear_top,b2)",
+		],
+	)
+
+	assert runner._extract_failed_goals(stdout) == [
+		"hold_block,b4",
+		"clear_top,b2",
 	]
 
 
@@ -458,3 +474,14 @@ def test_environment_java_source_supports_disjunctive_precondition_clauses():
 
 	assert 'new Pattern[][]{new Pattern[]{new Pattern("clear", true, new String[]{"?x"})}, ' in java_source
 	assert 'new Pattern[]{new Pattern("holding", true, new String[]{"?x"})}}' in java_source
+
+
+def test_environment_java_source_treats_true_as_builtin_noop():
+	runner = JasonRunner()
+	java_source = runner._build_environment_java_source(
+		action_schemas=_sample_action_schemas(),
+		seed_facts=[],
+		target_literals=[],
+	)
+
+	assert 'if ("true".equals(action.getFunctor()) && action.getArity() == 0)' in java_source

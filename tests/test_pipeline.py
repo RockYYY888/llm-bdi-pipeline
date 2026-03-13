@@ -1055,6 +1055,46 @@ def test_stage6_object_type_resolution_ignores_unused_query_objects():
 	assert "waypoint1" not in resolved
 
 
+def test_stage7_build_root_task_bridges_matches_problem_tasks_by_ground_args():
+	problem_file = str((BLOCKSWORLD_PROBLEM_DIR / "p02.hddl").resolve())
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=problem_file,
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("make_on", ("X", "Y"), False, ("on",)),
+		],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[
+			HTNLiteral("on", ("b3", "b5"), True, None),
+			HTNLiteral("on", ("b6", "b3"), True, None),
+			HTNLiteral("on", ("b1", "b6"), True, None),
+			HTNLiteral("on", ("b2", "b1"), True, None),
+			HTNLiteral("on", ("b4", "b2"), True, None),
+			HTNLiteral("on", ("b7", "b4"), True, None),
+		],
+		target_task_bindings=[
+			HTNTargetTaskBinding("on(b3, b5)", "make_on"),
+			HTNTargetTaskBinding("on(b6, b3)", "make_on"),
+			HTNTargetTaskBinding("on(b1, b6)", "make_on"),
+			HTNTargetTaskBinding("on(b2, b1)", "make_on"),
+			HTNTargetTaskBinding("on(b4, b2)", "make_on"),
+			HTNTargetTaskBinding("on(b7, b4)", "make_on"),
+		],
+	)
+
+	bridge_specs = pipeline._stage7_build_root_task_bridges(method_library, [])
+
+	assert len(bridge_specs) == 6
+	assert all(spec["source_task_name"] == "do_put_on" for spec in bridge_specs)
+	assert all(spec["generated_task_name"] == "make_on" for spec in bridge_specs)
+	assert all(spec["extra_subtasks"] == [] for spec in bridge_specs)
+	assert bridge_specs[0]["method_name"] == "m_verify_bridge_do_put_on_1_make_on"
+	assert bridge_specs[-1]["method_name"] == "m_verify_bridge_do_put_on_6_make_on"
+
+
 def _run_query_case(
 	query_id: str,
 	*,
@@ -1125,11 +1165,8 @@ def _run_query_case(
 			)
 
 	stage3_metadata = execution.get("stage3_metadata", {}) or {}
-	if not (
-		execution.get("stage3_used_llm") is True
-		or stage3_metadata.get("domain_projection_used") is True
-	):
-		bug_messages.append("Stage 3 recorded neither live LLM usage nor domain projection")
+	if execution.get("stage3_used_llm") is not True:
+		bug_messages.append("Stage 3 did not record live LLM synthesis")
 
 	if execution.get("stage4_backend") != "pandaPI":
 		bug_messages.append("Stage 4 backend is not pandaPI")

@@ -19,7 +19,7 @@ from stage1_interpretation.ltlf_formula import (
 	LTLSpecification,
 	TemporalOperator,
 )
-from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
+from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer, HTNSynthesisError
 from stage3_method_synthesis.htn_prompts import (
 	build_htn_system_prompt,
 	build_htn_user_prompt,
@@ -245,7 +245,7 @@ def test_extract_progressing_transitions_can_drop_auxiliary_dfa_labels_when_quer
 	]
 
 
-def test_synthesize_can_project_official_blocksworld_methods_without_llm():
+def test_synthesize_requires_live_llm():
 	domain_path = (
 		Path(__file__).parent.parent.parent
 		/ "src"
@@ -272,42 +272,15 @@ def test_synthesize_can_project_official_blocksworld_methods_without_llm():
 		),
 	}
 
-	library, metadata = HTNMethodSynthesizer().synthesize(
-		domain=domain,
-		grounding_map=grounding_map,
-		dfa_result=dfa_result,
-		ordered_literal_signatures=["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"],
-	)
+	with pytest.raises(HTNSynthesisError) as exc_info:
+		HTNMethodSynthesizer().synthesize(
+			domain=domain,
+			grounding_map=grounding_map,
+			dfa_result=dfa_result,
+			ordered_literal_signatures=["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"],
+		)
 
-	assert metadata["used_llm"] is False
-	assert metadata["domain_projection_used"] is True
-	assert metadata["target_literals"] == ["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"]
-	assert {binding.task_name for binding in library.target_task_bindings} == {"do_put_on"}
-	assert {"do_put_on", "do_clear", "do_on_table", "do_move"} <= {
-		task.name for task in library.compound_tasks
-	}
-	assert any(method.task_name == "do_put_on" for method in library.methods)
-	do_on_table_noop = next(
-		method
-		for method in library.methods
-		if method.source_method_name == "m3_do_on_table"
-		and method.origin == "domain"
-	)
-	assert do_on_table_noop.task_args == ("X",)
-	assert [literal.to_signature() for literal in do_on_table_noop.context] == ["clear(X)"]
-	assert len(do_on_table_noop.subtasks) == 1
-	assert do_on_table_noop.subtasks[0].kind == "primitive"
-	assert do_on_table_noop.subtasks[0].action_name == "nop"
-	assert any(
-		method.source_method_name == "m3_do_on_table"
-		and method.origin == "domain_target_preserving_guard"
-		for method in library.methods
-	)
-	assert any(
-		method.source_method_name == "m1_do_put_on"
-		and method.task_args == ("X", "Y")
-		for method in library.methods
-	)
+	assert "requires a configured OPENAI_API_KEY" in str(exc_info.value)
 
 
 def test_extract_target_literals_keeps_accepting_loops_when_no_progress_edge_exists():
@@ -570,79 +543,106 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 		'{"target_task_bindings": [], "compound_tasks": [], "methods": []}',
 	)
 
-	assert "Always include exactly these top-level keys: target_task_bindings, compound_tasks, methods." in system_prompt
-	assert "method_name must follow exactly: m_{task_name}_{strategy}." in system_prompt
-	assert "Never use prefixes achieve_, maintain_not_, ensure_, or goal_." in system_prompt
-	assert "ordering must be a list of edges [from_step_id, to_step_id]." in system_prompt
-	assert "Do an internal two-pass review before returning" in system_prompt
-	assert "Internally reason by explicit case partitioning" in system_prompt
-	assert "Do not overfit to one witness plan or one canonical initial state." in system_prompt
-	assert "Do not rely on later stages to invent missing helper-task branches." in system_prompt
-	assert "Never introduce free variables in subtasks." in system_prompt
-	assert "Respect type discipline." in system_prompt
-	assert "If two roles must stay distinct" in system_prompt
-	assert "Use stable upper-case variable names derived from the domain types" in system_prompt
-	assert "If a method needs an extra local helper variable beyond the task arguments" in system_prompt
-	assert "Constructive sibling methods for the same task must be semantically distinguishable" in system_prompt
-	assert "A negative literal must bind to a task whose methods remove, prevent, or keep the predicate false." in system_prompt
-	assert "Do not invent an extra sibling method whose only difference is that it performs extra prerequisite helper steps" in system_prompt
-	assert "If a primitive action precondition has disjunctive applicability (via 'or' or 'imply')" in system_prompt
-	assert "Treat implication exactly as: imply(A, B) == (not A) or B" in system_prompt
-	assert "Never reveal chain-of-thought, scratch work, analysis, or self-check text." in system_prompt
-	assert "Do not emit duplicate target_task_bindings entries, duplicate compound task " in system_prompt
-	assert "Sibling methods for the same task may exist and are expected" in system_prompt
-	assert "same sibling branch body under different method names for the same task" in system_prompt
+	assert "OUTPUT CONTRACT:" in system_prompt
+	assert "HIDDEN REASONING RECIPE (DO NOT OUTPUT IT):" in system_prompt
+	assert "Prefer reusable parameterized compound tasks" in system_prompt
+	assert "Do not encode grounded object constants into compound task names" in system_prompt
+	assert "Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
+	assert "must be JSON literal objects, never strings" in system_prompt
+	assert "PRIORITY ORDER: validity of JSON and bindings > executability of methods > semantic alignment > branch coverage." in system_prompt
+	assert "not handempty alone does not identify what is being held" in system_prompt
+	assert "identify every non-equivalent final primitive action or final helper" in system_prompt
+	assert "If several different final actions can establish the same literal" in system_prompt
+	assert "Helper coverage is not a substitute for target-task coverage" in system_prompt
+	assert "missing-first, missing-second, and missing-both" in system_prompt
+	assert "Keep a missing-one-support branch only when the already-satisfied support can remain true" in system_prompt
+	assert "direct-blocker and recursively-blocked-blocker cases" in system_prompt
+	assert "recursive blocked-blocker sibling is mandatory" in system_prompt
+	assert "positive support literal q(BLOCKER, ...)" in system_prompt
+	assert "check helper after-effects" in system_prompt
+	assert "A missing-support branch is invalid if its current context already blocks the first helper" in system_prompt
+	assert "Prefer reusable helper end states over transient ones" in system_prompt
+	assert "A clear-like helper is incomplete if it only has already-satisfied and direct-blocker methods" in user_prompt
+	assert "Reject any helper cycle" in system_prompt
+	assert "Disjunctive action applicability from or / imply must become distinguishable sibling methods." in system_prompt
+	assert "Never reveal chain-of-thought or hidden reasoning." in system_prompt
 
 	assert "DOMAIN TYPES:" in user_prompt
+	assert "DECLARED DOMAIN TASKS:" in user_prompt
 	assert "ACTION PRECONDITION BRANCH HINTS (DNF):" in user_prompt
-	assert "- none" in user_prompt
 	assert "REQUIRED target_task_bindings ENTRIES:" in user_prompt
-	assert '{"target_literal": "on(a, b)", "task_name": "<semantic_task_name>"}' in user_prompt
-	assert "Think in explicit case splits before returning." in user_prompt
-	assert "Do not use achieve_, maintain_not_, ensure_, or goal_ prefixes anywhere in compound task names." in user_prompt
-	assert "For every method, method_name must be exactly 'm_' + task_name + '_' + a short strategy suffix." in user_prompt
-	assert "For a single-step method, ordering may be []." in user_prompt
-	assert "Do all methods use the exact m_task_strategy naming pattern?" in user_prompt
-	assert "Do not overfit methods to the default all-objects-on-table example state." in user_prompt
-	assert "Use the declared HDDL types and typed action signatures exactly." in user_prompt
-	assert "Do not collapse two distinct semantic roles onto one variable" in user_prompt
-	assert "introduce and bind the actual blocker/support object as a separate variable" in user_prompt
-	assert "Use is_positive=true for equality and is_positive=false for disequality." in user_prompt
-	assert "Do not assume PANDA, the renderer, or any later stage will synthesize missing branches for you." in user_prompt
-	assert "For every helper task that denotes a reusable stateful intention" in user_prompt
-	assert "Think twice before returning: first verify the JSON shape, then verify task coverage." in user_prompt
-	assert "Never reveal chain-of-thought, hidden reasoning, self-critique, or analysis text." in user_prompt
-	assert "Do not duplicate target_task_bindings entries or compound task declarations." in user_prompt
-	assert "Multiple methods for the same task are normal when they express different sibling " in user_prompt
-	assert "If an action precondition has disjunctive alternatives (or/imply lowered to DNF)" in user_prompt
-	assert "Treat implication preconditions as disjunctions: imply(A, B) == not A or B." in user_prompt
-	assert "Do not invent free variables such as TOP, SUPPORT, X, or Y" in user_prompt
-	assert "If you introduce an extra local variable in method.parameters" in user_prompt
-	assert "Do not rename an existing task parameter to a fresh variable." in user_prompt
-	assert "Prefer type-based upper-case variable names in the final JSON." in user_prompt
-	assert "Those sibling strategy methods must be distinguishable by reusable method-level context." in user_prompt
-	assert "Never bind a negative literal to a task whose constructive branch makes the positive relation true." in user_prompt
-	assert "INVALID target_task_bindings entry:" in user_prompt
-	assert "Why invalid: link_nodes constructively makes linked(...) true" in user_prompt
-	assert "Example 4: OR precondition must become explicit sibling branches" in user_prompt
-	assert "INVALID pattern: one generic method with empty context that hides both OR branches." in user_prompt
-	assert "Example 5: IMPLY precondition must be lowered to (not A) OR B before branching" in user_prompt
-	assert "Interpretation rule: imply(clear(BLOCK), holding(BLOCK)) == not clear(BLOCK) OR holding(BLOCK)" in user_prompt
-	assert "INVALID pattern: treating imply(A, B) as if both A and B were jointly required in one context." in user_prompt
-	assert "Do not create a generic clear_first or prepare_first sibling" in user_prompt
-	assert "Invalid pattern: one sibling says acquire, another says stack" in user_prompt
-	assert "Did you avoid every unbound free variable in subtasks" in user_prompt
-	assert "Did you explicitly cover the already-satisfied, direct, blocked, and recursive-helper case families" in user_prompt
-	assert "Did every variable and subtask argument respect the domain's declared types?" in user_prompt
-	assert "Did every equality/disequality constraint use the supported literal form" in user_prompt
-	assert "Did you keep existing task parameters stable instead of renaming them" in user_prompt
-	assert "Did every constructive sibling method for the same task expose a distinguishable" in user_prompt
-	assert "Did you use stable upper-case type-based variable names" in user_prompt
-	assert "Did every target_task_binding use a task whose semantics match the target literal's polarity" in user_prompt
-	assert "Did you avoid adding redundant clear_first/prepare_first siblings" in user_prompt
-	assert "Did you avoid printing any chain-of-thought, analysis, or self-check prose" in user_prompt
-	assert "Did you avoid duplicate binding entries, duplicate compound task declarations, and " in user_prompt
-	assert "For every disjunctive action precondition (including imply lowered to not/or)" in user_prompt
+	assert "MANDATORY TARGET-TASK CONSTRUCTION PROTOCOL:" in user_prompt
+	assert "DECISION PRIORITY:" in user_prompt
+	assert "If a candidate sibling is not executable, omit it" in user_prompt
+	assert "Reuse one parameterized task" in user_prompt
+	assert "missing-both-support" in user_prompt
+	assert "Keep a missing-one-support branch only when the already-satisfied support can stay true" in user_prompt
+	assert "Few-shot guidance (illustrative only):" in user_prompt
+	assert "Example A: branch families for a positive target" in user_prompt
+	assert "Example B: blocked-clear resource conflict" in user_prompt
+	assert "Example C: OR / IMPLY must become sibling methods" in user_prompt
+	assert "Example D: recursive blocker removal" in user_prompt
+	assert "Example E: post-helper resource conflict" in user_prompt
+	assert "Example F: invalid missing-second-support branch" in user_prompt
+	assert "Example G: do not preserve a conflicting support" in user_prompt
+	assert "Example G2: explicit repaired missing_clear branch" in user_prompt
+	assert "Example H: underspecified recovery branch" in user_prompt
+	assert "Example I: reusable helper end state" in user_prompt
+	assert "Example J: omit underspecified make_holding branch" in user_prompt
+	assert "Example J2: same literal, different final actions" in user_prompt
+	assert "Example J3: helper coverage does not replace target coverage" in user_prompt
+	assert "Example K: exact clear-helper recursion pattern" in user_prompt
+	assert "missing-both coverage is mandatory unless provably impossible" in user_prompt
+	assert "do not clone a new grounded task for each target literal instance" in user_prompt
+	assert "Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_" in user_prompt
+	assert "Do not invent grounded task names like achieve_p_a_b" in user_prompt
+	assert "recursive-blocker: on(BLOCKER, TARGET) & not clear(BLOCKER)" in user_prompt
+	assert "complementary-support rule" in user_prompt
+	assert "Invalid pattern: only the already-satisfied branch and the direct-blocker branch." in user_prompt
+	assert "positive support literal about a blocker/support object" in user_prompt
+	assert "This is mandatory." in user_prompt
+	assert "direct blocker-removal branch requires clear(BLOCKER)" in user_prompt
+	assert "must use object form with predicate/args/is_positive" in user_prompt
+	assert "Do not use unbound disposer variables" in user_prompt
+	assert "inventing put_down(Z)" in user_prompt
+	assert "carried object is not named in context or parameters" in user_prompt
+	assert "clear_slot(SLOT); pick_up(ITEM)" in user_prompt
+	assert "helper likely leaves holding(BLOCKER)" in user_prompt
+	assert "already blocks its first helper" in user_prompt
+	assert "omit that missing-second-support branch" in user_prompt
+	assert "holding(X) & not clear(Y)" in user_prompt
+	assert "put_down(X); make_clear(Y); make_holding(X); stack(X, Y)" in user_prompt
+	assert "put_down(Z); pick_up(X)" in user_prompt
+	assert "treat recovery as underspecified and omit that branch" in user_prompt
+	assert "omit the missing_handempty sibling unless the carried object is already bound" in user_prompt
+	assert "table-mode acquisition and stack-mode acquisition" in user_prompt
+	assert "multiple primitive actions can establish the same headline literal" in user_prompt
+	assert "Helper coverage does not replace target-task coverage" in user_prompt
+	assert "do not emit `holding(X) & not clear(Y) -> clear_helper(Y); final_step`" in user_prompt
+	assert "unstack(BLOCKER, TARGET); put_down(BLOCKER)" in user_prompt
+	assert "context on(B, X) & not clear(B)" in user_prompt
+	assert "FINAL SILENT CHECKLIST:" in user_prompt
+	assert "Return one complete JSON object and nothing else." in user_prompt
+
+
+def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	targets = [
+		"on(b3, b5)",
+		"on(b6, b3)",
+		"on(b1, b6)",
+		"on(b2, b1)",
+		"on(b4, b2)",
+		"on(b7, b4)",
+	]
+	system_prompt = build_htn_system_prompt()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		targets,
+		HTNMethodSynthesizer._schema_hint(),
+	)
+
+	assert len(system_prompt) + len(user_prompt) < 21500
 
 
 def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
@@ -1032,7 +1032,6 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 		prompt,
 		domain_obj,
 		metadata,
-		repair_instruction=None,
 	):
 		return llm_library, '{"ok": true}', "stop"
 
@@ -1420,7 +1419,7 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 	synthesizer._validate_library(pruned_library, domain)
 
 
-def test_direct_self_recursive_siblings_are_pruned_when_non_recursive_alternative_exists():
+def test_direct_self_recursive_siblings_are_preserved_when_contexts_are_distinct():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
@@ -1491,9 +1490,10 @@ def test_direct_self_recursive_siblings_are_pruned_when_non_recursive_alternativ
 		domain,
 	)
 
-	assert pruned_count == 1
+	assert pruned_count == 0
 	assert {method.method_name for method in pruned_library.methods} == {
 		"m_hold_block_from_table",
+		"m_hold_block_clear_first",
 		"m_clear_top_noop",
 	}
 
@@ -1654,49 +1654,11 @@ def test_validate_library_rejects_semantically_duplicate_methods():
 		synthesizer._validate_library(library, domain)
 
 
-def test_request_complete_llm_library_retries_until_full_json():
+def test_request_complete_llm_library_fails_on_truncated_json():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer(max_attempts=2)
 	prompt = {"system": "system", "user": "user"}
 	metadata = {"llm_attempts": 0}
-	valid_payload = json.dumps(
-		{
-			"compound_tasks": [
-				{
-					"name": "place_on",
-					"parameters": ["BLOCK1", "BLOCK2"],
-					"is_primitive": False,
-					"source_predicates": ["on"],
-				},
-			],
-			"methods": [
-				{
-					"method_name": "m_place_on_noop",
-					"task_name": "place_on",
-					"parameters": ["BLOCK1", "BLOCK2"],
-					"context": [
-						{
-							"predicate": "on",
-							"args": ["BLOCK1", "BLOCK2"],
-							"is_positive": True,
-						},
-					],
-					"subtasks": [],
-					"ordering": [],
-					"origin": "llm",
-				},
-			],
-			"target_task_bindings": [
-				{"target_literal": "on(a, b)", "task_name": "place_on"},
-			],
-		},
-	)
-	responses = iter(
-		[
-			('{"compound_tasks": [', "length"),
-			(valid_payload, "stop"),
-		],
-	)
 
 	def fake_call_llm(
 		prompt_payload: dict,
@@ -1704,21 +1666,19 @@ def test_request_complete_llm_library_retries_until_full_json():
 		retry_instruction: str | None = None,
 		max_tokens: int | None = None,
 	):
-		return next(responses)
+		return ('{"compound_tasks": [', "length")
 
 	synthesizer._call_llm = fake_call_llm  # type: ignore[method-assign]
 
-	library, response_text, finish_reason = synthesizer._request_complete_llm_library(
-		prompt,
-		domain,
-		metadata,
-	)
+	with pytest.raises(HTNSynthesisError, match="truncated before completion"):
+		synthesizer._request_complete_llm_library(
+			prompt,
+			domain,
+			metadata,
+		)
 
-	assert library.compound_tasks
-	assert response_text == valid_payload
-	assert finish_reason == "stop"
-	assert metadata["llm_attempts"] == 2
-	assert len(metadata["llm_attempt_durations_seconds"]) == 2
+	assert metadata["llm_attempts"] == 1
+	assert len(metadata["llm_attempt_durations_seconds"]) == 1
 	assert metadata["llm_response_time_seconds"] >= 0
 
 

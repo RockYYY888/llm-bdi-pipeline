@@ -12,7 +12,6 @@ import json
 import re
 import time
 from collections import deque
-from itertools import combinations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
@@ -112,7 +111,6 @@ class HTNMethodSynthesizer:
 
 		metadata: Dict[str, Any] = {
 			"used_llm": False,
-			"domain_projection_used": False,
 			"model": self.model if self.client else None,
 			"target_literals": [literal.to_signature() for literal in target_literals],
 			"negation_resolution": negation_resolution.to_dict(),
@@ -129,26 +127,6 @@ class HTNMethodSynthesizer:
 			"pruned_constructive_siblings": 0,
 			"generated_target_guard_methods": 0,
 		}
-
-		projected_library = self._project_domain_method_library(
-			domain,
-			target_literals,
-			primitive_tasks,
-		)
-		if projected_library is not None:
-			projected_library = self._apply_negation_resolution_to_library(
-				projected_library,
-				negation_resolution,
-			)
-			projected_library = self._normalise_target_binding_signatures(projected_library)
-			metadata["pruned_constructive_siblings"] = 0
-			metadata["generated_target_guard_methods"] = 0
-			self._validate_library(projected_library, domain)
-			metadata["domain_projection_used"] = True
-			metadata["compound_tasks"] = len(projected_library.compound_tasks)
-			metadata["primitive_tasks"] = len(projected_library.primitive_tasks)
-			metadata["methods"] = len(projected_library.methods)
-			return projected_library, metadata
 
 		if not self.client:
 			raise self._build_synthesis_error(
@@ -170,65 +148,45 @@ class HTNMethodSynthesizer:
 		}
 		metadata["llm_prompt"] = prompt
 
-		retry_feedback: Optional[str] = None
-		last_validation_error: Optional[Exception] = None
-		llm_only_library: Optional[HTNMethodLibrary] = None
-		for generation_attempt in range(1, self.max_attempts + 1):
-			metadata["llm_generation_attempts"] = generation_attempt
-			llm_library, response_text, finish_reason = self._request_complete_llm_library(
-				prompt,
-				domain,
-				metadata,
-				repair_instruction=retry_feedback,
-			)
+		metadata["llm_generation_attempts"] = 1
+		llm_library, response_text, finish_reason = self._request_complete_llm_library(
+			prompt,
+			domain,
+			metadata,
+		)
 
-			metadata["llm_response"] = response_text
-			metadata["llm_finish_reason"] = finish_reason
+		metadata["llm_response"] = response_text
+		metadata["llm_finish_reason"] = finish_reason
 
-			candidate_library = HTNMethodLibrary(
-				compound_tasks=list(llm_library.compound_tasks),
-				primitive_tasks=primitive_tasks,
-				methods=list(llm_library.methods),
-				target_literals=list(target_literals),
-				target_task_bindings=list(llm_library.target_task_bindings),
-			)
-			candidate_library = self._apply_negation_resolution_to_library(
-				candidate_library,
-				negation_resolution,
-			)
-			candidate_library = self._normalise_target_binding_signatures(candidate_library)
-			candidate_library, pruned_count = self._prune_redundant_constructive_siblings(
-				candidate_library,
-				domain,
-			)
-			metadata["pruned_constructive_siblings"] = pruned_count
-			candidate_library, generated_guard_count = self._complete_missing_target_guard_methods(
-				candidate_library,
-			)
-			metadata["generated_target_guard_methods"] = generated_guard_count
-			try:
-				self._validate_library(candidate_library, domain)
-			except Exception as exc:
-				last_validation_error = exc
-				if generation_attempt >= self.max_attempts:
-					break
-				retry_feedback = (
-					"Your previous JSON failed strict validation. "
-					"Regenerate the full JSON object and fix this exact error: "
-					f"{str(exc)[:1200]}"
-				)
-				continue
-			llm_only_library = candidate_library
-			last_validation_error = None
-			break
-
-		if llm_only_library is None:
+		llm_only_library = HTNMethodLibrary(
+			compound_tasks=list(llm_library.compound_tasks),
+			primitive_tasks=primitive_tasks,
+			methods=list(llm_library.methods),
+			target_literals=list(target_literals),
+			target_task_bindings=list(llm_library.target_task_bindings),
+		)
+		llm_only_library = self._apply_negation_resolution_to_library(
+			llm_only_library,
+			negation_resolution,
+		)
+		llm_only_library = self._normalise_target_binding_signatures(llm_only_library)
+		llm_only_library, pruned_count = self._prune_redundant_constructive_siblings(
+			llm_only_library,
+			domain,
+		)
+		metadata["pruned_constructive_siblings"] = pruned_count
+		llm_only_library, generated_guard_count = self._complete_missing_target_guard_methods(
+			llm_only_library,
+		)
+		metadata["generated_target_guard_methods"] = generated_guard_count
+		try:
+			self._validate_library(llm_only_library, domain)
+		except Exception as exc:
 			raise self._build_synthesis_error(
 				metadata,
 				"library_validation",
-				"LLM HTN library failed validation: "
-				f"{last_validation_error}",
-			)
+				f"LLM HTN library failed validation: {exc}",
+			) from exc
 
 		metadata["used_llm"] = True
 		metadata["compound_tasks"] = len(llm_only_library.compound_tasks)
@@ -572,466 +530,55 @@ class HTNMethodSynthesizer:
 			for action in actions
 		]
 
-	def _project_domain_method_library(
-		self,
-		domain: Any,
-		target_literals: Sequence[HTNLiteral],
-		primitive_tasks: Sequence[HTNTask],
-	) -> Optional[HTNMethodLibrary]:
-		if not getattr(domain, "tasks", None) or not getattr(domain, "methods", None):
-			return None
-
-		action_names = {action.name for action in getattr(domain, "actions", [])}
-		task_schemas = {
-			task.name: task
-			for task in getattr(domain, "tasks", [])
-		}
-		if not task_schemas:
-			return None
-
-		action_schemas = self._action_schema_map(domain)
-		methods_by_task: Dict[str, List[Any]] = {}
-		for method in getattr(domain, "methods", []):
-			methods_by_task.setdefault(method.task_name, []).append(method)
-
-		task_source_predicates = self._infer_domain_task_source_predicates(domain)
-		bindings = self._project_target_task_bindings(
-			domain,
-			target_literals,
-			task_schemas,
-			methods_by_task,
-		)
-		if bindings is None:
-			return None
-
-		reachable_task_names = set(binding.task_name for binding in bindings)
-		queue = list(reachable_task_names)
-		while queue:
-			task_name = queue.pop(0)
-			for method in methods_by_task.get(task_name, []):
-				for subtask in getattr(method, "subtasks", []):
-					if subtask.task_name in action_names:
-						continue
-					if subtask.task_name not in task_schemas:
-						return None
-					if subtask.task_name in reachable_task_names:
-						continue
-					reachable_task_names.add(subtask.task_name)
-					queue.append(subtask.task_name)
-
-		compound_tasks = [
-			HTNTask(
-				name=task_name,
-				parameters=self._parameter_names(task_schemas[task_name].parameters),
-				is_primitive=False,
-				source_predicates=task_source_predicates.get(task_name, ()),
-				source_name=task_name,
-			)
-			for task_name in sorted(reachable_task_names)
-		]
-		compound_task_names = {task.name for task in compound_tasks}
-		imported_methods: List[HTNMethod] = []
-		for task_name in sorted(reachable_task_names):
-			projected_methods_for_task: List[HTNMethod] = []
-			for index, method in enumerate(methods_by_task.get(task_name, []), start=1):
-				imported_method = self._project_domain_method(
-					method,
-					index=index,
-					action_names=action_names,
-					compound_task_names=compound_task_names,
-				)
-				if imported_method is None:
-					return None
-				projected_methods_for_task.append(imported_method)
-			projected_methods_for_task.extend(
-				self._project_target_preserving_guard_methods(
-					methods=projected_methods_for_task,
-					task_schema=task_schemas[task_name],
-					target_literals=target_literals,
-					action_schemas=action_schemas,
-				),
-			)
-			projected_methods_for_task.sort(
-				key=lambda item: self._projected_method_sort_key(
-					item,
-					action_schemas=action_schemas,
-				),
-			)
-			imported_methods.extend(projected_methods_for_task)
-
-		return HTNMethodLibrary(
-			compound_tasks=compound_tasks,
-			primitive_tasks=list(primitive_tasks),
-			methods=imported_methods,
-			target_literals=list(target_literals),
-			target_task_bindings=list(bindings),
-		)
-
-	def _project_target_preserving_guard_methods(
-		self,
-		*,
-		methods: Sequence[HTNMethod],
-		task_schema: Any,
-		target_literals: Sequence[HTNLiteral],
-		action_schemas: Dict[str, Any],
-	) -> List[HTNMethod]:
-		projected_methods: List[HTNMethod] = []
-		seen_context_signatures: set[Tuple[str, Tuple[str, ...]]] = set()
-		task_args = self._parameter_names(getattr(task_schema, "parameters", []))
-
-		for method in methods:
-			if not self._is_guard_like_method(method, action_schemas):
-				continue
-
-			method_task_args = method.task_args or task_args
-			if not method_task_args:
-				continue
-
-			for literal in target_literals:
-				if not literal.is_positive or literal.is_equality:
-					continue
-				if len(method_task_args) > len(literal.args):
-					continue
-
-				for positions in combinations(range(len(literal.args)), len(method_task_args)):
-					context = list(method.context)
-					for task_arg, position in zip(method_task_args, positions):
-						context.append(
-							HTNLiteral(
-								predicate="=",
-								args=(task_arg, literal.args[position]),
-								is_positive=True,
-								source_symbol=None,
-							),
-						)
-					context.append(literal)
-					signature = tuple(sorted(item.to_signature() for item in context))
-					guard_key = (method.method_name, signature)
-					if guard_key in seen_context_signatures:
-						continue
-					seen_context_signatures.add(guard_key)
-					projected_methods.append(
-						HTNMethod(
-							method_name=(
-								f"{method.method_name}_keep_"
-								f"{self._sanitize_name(literal.predicate)}_"
-								f"{'_'.join(self._sanitize_name(arg) for arg in literal.args)}_"
-								f"{'_'.join(str(position) for position in positions)}"
-							),
-							task_name=method.task_name,
-							parameters=method.parameters,
-							task_args=method.task_args,
-							context=tuple(context),
-							subtasks=method.subtasks,
-							ordering=method.ordering,
-							origin="domain_target_preserving_guard",
-							source_method_name=method.source_method_name,
-						),
-					)
-
-		return projected_methods
-
-	def _projected_method_sort_key(
-		self,
-		method: HTNMethod,
-		*,
-		action_schemas: Dict[str, Any],
-	) -> Tuple[int, int, str]:
-		if method.origin == "domain_target_preserving_guard":
-			return (0, len(method.context), method.method_name)
-		if self._is_guard_like_method(method, action_schemas):
-			return (2, len(method.subtasks), method.method_name)
-		return (1, len(method.subtasks), method.method_name)
-
-	def _is_guard_like_method(
-		self,
-		method: HTNMethod,
-		action_schemas: Dict[str, Any],
-	) -> bool:
-		if not method.subtasks:
-			return True
-		if len(method.subtasks) != 1:
-			return False
-		step = method.subtasks[0]
-		if step.kind != "primitive":
-			return False
-		action_key = step.action_name or step.task_name
-		action_schema = action_schemas.get(action_key) or action_schemas.get(
-			self._sanitize_name(action_key),
-		)
-		if action_schema is None:
-			return False
-		return not getattr(action_schema, "effects", ())
-
-	def _infer_domain_task_source_predicates(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
-		source_predicates: Dict[str, set[str]] = {}
-		for method in getattr(domain, "methods", []):
-			try:
-				clauses = self.parser.parse_dnf(
-					method.precondition,
-					action_name=method.name,
-					scope="method_precondition",
-				)
-			except Exception:
-				continue
-			if len(clauses) != 1 or len(clauses[0]) != 1:
-				continue
-			literal = clauses[0][0]
-			if not literal.is_positive or literal.predicate == "=":
-				continue
-			if list(literal.args) != list(method.task_args):
-				continue
-			source_predicates.setdefault(method.task_name, set()).add(literal.predicate)
-		return {
-			task_name: tuple(sorted(predicates))
-			for task_name, predicates in source_predicates.items()
-		}
-
-	def _project_target_task_bindings(
-		self,
-		domain: Any,
-		target_literals: Sequence[HTNLiteral],
-		task_schemas: Dict[str, Any],
-		methods_by_task: Dict[str, List[Any]],
-	) -> Optional[List[HTNTargetTaskBinding]]:
-		bindings: List[HTNTargetTaskBinding] = []
-		for literal in target_literals:
-			candidates: List[str] = []
-			for task_name, methods in methods_by_task.items():
-				task_schema = task_schemas.get(task_name)
-				if task_schema is None:
-					continue
-				task_parameters = self._parameter_names(task_schema.parameters)
-				if len(task_parameters) != len(literal.args):
-					continue
-				for method in methods:
-					try:
-						clauses = self.parser.parse_dnf(
-							method.precondition,
-							action_name=method.name,
-							scope="method_precondition",
-						)
-					except Exception:
-						continue
-					if len(clauses) != 1 or len(clauses[0]) != 1:
-						continue
-					guard = clauses[0][0]
-					if (
-						guard.predicate != literal.predicate
-						or guard.is_positive != literal.is_positive
-						or guard.predicate == "="
-						or list(guard.args) != list(method.task_args)
-					):
-						continue
-					candidates.append(task_name)
-					break
-			candidates = sorted(set(candidates))
-			if len(candidates) != 1:
-				return None
-			bindings.append(
-				HTNTargetTaskBinding(
-					target_literal=literal.to_signature(),
-					task_name=candidates[0],
-				),
-			)
-		return bindings
-
-	def _project_domain_method(
-		self,
-		method: Any,
-		*,
-		index: int,
-		action_names: set[str],
-		compound_task_names: set[str],
-	) -> Optional[HTNMethod]:
-		try:
-			clauses = self.parser.parse_dnf(
-				method.precondition,
-				action_name=method.name,
-				scope="method_precondition",
-			)
-		except Exception:
-			return None
-		if len(clauses) != 1:
-			return None
-
-		variable_map = self._parameter_name_map(method.parameters)
-		context = tuple(
-			self._pattern_to_literal(literal, variable_map)
-			for literal in clauses[0]
-		)
-		subtasks: List[HTNMethodStep] = []
-		for subtask in getattr(method, "subtasks", []):
-			step_id = self._sanitize_name(subtask.label)
-			step_args = tuple(variable_map.get(arg, self._sanitize_symbol(arg)) for arg in subtask.args)
-			if subtask.task_name in action_names:
-				task_name = self._sanitize_name(subtask.task_name)
-				action_name = subtask.task_name
-				kind = "primitive"
-			elif subtask.task_name in compound_task_names:
-				task_name = subtask.task_name
-				action_name = None
-				kind = "compound"
-			else:
-				return None
-			subtasks.append(
-				HTNMethodStep(
-					step_id=step_id,
-					task_name=task_name,
-					args=step_args,
-					kind=kind,
-					action_name=action_name,
-				),
-			)
-
-		ordering = tuple(
-			(self._sanitize_name(source), self._sanitize_name(target))
-			for source, target in getattr(method, "ordering", [])
-		)
-		return HTNMethod(
-			method_name=f"m_{self._sanitize_name(method.task_name)}_domain_{index}",
-			task_name=method.task_name,
-			parameters=self._parameter_names(method.parameters),
-			task_args=tuple(
-				variable_map.get(arg, self._sanitize_symbol(arg))
-				for arg in getattr(method, "task_args", [])
-			),
-			context=context,
-			subtasks=tuple(subtasks),
-			ordering=ordering,
-			origin="domain",
-			source_method_name=method.name,
-		)
-
-	def _parameter_name_map(self, parameters: Sequence[str]) -> Dict[str, str]:
-		return {
-			self._parameter_symbol(parameter): self._sanitize_symbol(self._parameter_symbol(parameter))
-			for parameter in parameters
-		}
-
-	def _parameter_names(self, parameters: Sequence[str]) -> Tuple[str, ...]:
-		return tuple(
-			self._sanitize_symbol(self._parameter_symbol(parameter))
-			for parameter in parameters
-		)
-
-	@staticmethod
-	def _parameter_symbol(parameter: str) -> str:
-		variable_part = parameter.split("-", 1)[0].strip()
-		return variable_part.split()[0].strip()
-
-	def _pattern_to_literal(
-		self,
-		pattern: Any,
-		variable_map: Dict[str, str],
-	) -> HTNLiteral:
-		return HTNLiteral(
-			predicate=pattern.predicate,
-			args=tuple(variable_map.get(arg, self._sanitize_symbol(arg)) for arg in pattern.args),
-			is_positive=pattern.is_positive,
-			source_symbol=None,
-		)
-
-	@staticmethod
-	def _sanitize_symbol(symbol: str) -> str:
-		return symbol.lstrip("?").replace("-", "_").upper()
-
 	def _request_complete_llm_library(
 		self,
 		prompt: Dict[str, str],
 		domain: Any,
 		metadata: Dict[str, Any],
-		repair_instruction: Optional[str] = None,
 	) -> Tuple[HTNMethodLibrary, str, Optional[str]]:
-		last_error: Optional[Exception] = None
-		attempt_durations: List[float] = []
 		total_start = time.monotonic()
-
-		for attempt in range(1, self.max_attempts + 1):
-			metadata["llm_attempts"] = attempt
-			retry_instructions: List[str] = []
-			if repair_instruction:
-				retry_instructions.append(repair_instruction)
-			if attempt > 1:
-				retry_instructions.append(
-					"Your previous response was incomplete. Return the entire JSON object "
-					"again from the beginning. Do not summarize, do not omit any fields, "
-					"and do not stop until every brace and bracket is closed."
-				)
-			retry_instruction = "\n\n".join(retry_instructions) if retry_instructions else None
-			attempt_start = time.monotonic()
-			try:
-				response_text, finish_reason = self._call_llm(
-					prompt,
-					retry_instruction=retry_instruction,
-					max_tokens=self.max_tokens,
-				)
-			except Exception as exc:
-				attempt_durations.append(time.monotonic() - attempt_start)
-				metadata["llm_attempt_durations_seconds"] = [
-					round(duration, 3) for duration in attempt_durations
-				]
-				metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
-				last_error = exc
-				if attempt == self.max_attempts:
-					raise self._build_synthesis_error(
-						metadata,
-						"llm_call",
-						f"LLM request failed after {attempt} attempts: {exc}",
-					) from exc
-				continue
-
-			attempt_durations.append(time.monotonic() - attempt_start)
+		metadata["llm_attempts"] = 1
+		attempt_start = time.monotonic()
+		try:
+			response_text, finish_reason = self._call_llm(
+				prompt,
+				max_tokens=self.max_tokens,
+			)
+		except Exception as exc:
 			metadata["llm_attempt_durations_seconds"] = [
-				round(duration, 3) for duration in attempt_durations
+				round(time.monotonic() - attempt_start, 3),
 			]
 			metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
-			metadata["llm_response"] = response_text
-			metadata["llm_finish_reason"] = finish_reason
+			raise self._build_synthesis_error(
+				metadata,
+				"llm_call",
+				f"LLM request failed: {exc}",
+			) from exc
 
-			if finish_reason == "length":
-				last_error = ValueError(
-					"LLM response was truncated before completion (finish_reason=length).",
-				)
-				if attempt < self.max_attempts:
-					continue
-				raise self._build_synthesis_error(
-					metadata,
-					"response_parse",
-					(
-						"LLM response was truncated before completion "
-						f"after {attempt} attempts (finish_reason=length)."
-					),
-				)
+		metadata["llm_attempt_durations_seconds"] = [
+			round(time.monotonic() - attempt_start, 3),
+		]
+		metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
+		metadata["llm_response"] = response_text
+		metadata["llm_finish_reason"] = finish_reason
 
-			try:
-				parsed_library = self._parse_llm_library(response_text)
-			except Exception as exc:
-				last_error = exc
-				if self._is_retryable_incomplete_response(exc) and attempt < self.max_attempts:
-					continue
-				raise self._build_synthesis_error(
-					metadata,
-					"response_parse",
-					f"LLM response could not be parsed as a valid HTN library: {exc}",
-				) from exc
-
-			return self._normalise_llm_library(parsed_library, domain), response_text, finish_reason
-
-		if last_error is not None:
+		if finish_reason == "length":
 			raise self._build_synthesis_error(
 				metadata,
 				"response_parse",
-				(
-					"LLM response could not be completed after "
-					f"{self.max_attempts} attempts: {last_error}"
-				),
+				"LLM response was truncated before completion (finish_reason=length).",
 			)
-		raise self._build_synthesis_error(
-			metadata,
-			"response_parse",
-			"LLM response could not be completed after exhausting the retry budget.",
-		)
+
+		try:
+			parsed_library = self._parse_llm_library(response_text)
+		except Exception as exc:
+			raise self._build_synthesis_error(
+				metadata,
+				"response_parse",
+				f"LLM response could not be parsed as a valid HTN library: {exc}",
+			) from exc
+
+		return self._normalise_llm_library(parsed_library, domain), response_text, finish_reason
 
 	def _call_llm(
 		self,
@@ -1736,20 +1283,12 @@ class HTNMethodSynthesizer:
 		for task_name, methods in methods_by_task.items():
 			guard_methods = [method for method in methods if not method.subtasks]
 			constructive_methods = [method for method in methods if method.subtasks]
-			candidate_constructive_methods = [
-				method
-				for method in constructive_methods
-				if not self._is_direct_self_recursive_method(method)
-			]
-			if not candidate_constructive_methods:
-				candidate_constructive_methods = constructive_methods
-			if len(candidate_constructive_methods) <= 1:
+			if len(constructive_methods) <= 1:
 				allowed_method_names.update(method.method_name for method in guard_methods)
 				allowed_method_names.update(
-					method.method_name for method in candidate_constructive_methods
+					method.method_name for method in constructive_methods
 				)
 				continue
-			constructive_methods = candidate_constructive_methods
 
 			context_signatures: Dict[str, Tuple[str, ...]] = {}
 			has_distinguishing_context = False
@@ -1810,13 +1349,6 @@ class HTNMethodSynthesizer:
 			if candidate not in existing_names:
 				return candidate
 			index += 1
-
-	@staticmethod
-	def _is_direct_self_recursive_method(method: HTNMethod) -> bool:
-		return any(
-			step.kind == "compound" and step.task_name == method.task_name
-			for step in method.subtasks
-		)
 
 	def _validate_target_task_bindings(
 		self,
@@ -2512,74 +2044,15 @@ class HTNMethodSynthesizer:
 
 	@staticmethod
 	def _schema_hint() -> str:
-		return json.dumps(
-			{
-				"target_task_bindings": [
-					{
-						"target_literal": "delivered(X1)",
-						"task_name": "deliver_parcel",
-					},
-				],
-				"compound_tasks": [
-					{
-						"name": "deliver_parcel",
-						"parameters": ["X1"],
-						"is_primitive": False,
-						"source_predicates": ["delivered"],
-					},
-					{
-						"name": "load_parcel",
-						"parameters": ["X1"],
-						"is_primitive": False,
-						"source_predicates": ["loaded"],
-					},
-				],
-				"methods": [
-					{
-						"method_name": "m_deliver_parcel_drop",
-						"task_name": "deliver_parcel",
-						"parameters": ["X1"],
-						"context": [],
-						"subtasks": [
-							{
-								"step_id": "s1",
-								"task_name": "load_parcel",
-								"args": ["X1"],
-								"kind": "compound",
-								"action_name": None,
-								"literal": {
-									"predicate": "loaded",
-									"args": ["X1"],
-									"is_positive": True,
-									"negation_mode": "naf",
-									"source_symbol": None,
-								},
-								"preconditions": [],
-								"effects": [],
-							},
-							{
-								"step_id": "s2",
-								"task_name": "drop_parcel",
-								"args": ["X1"],
-								"kind": "primitive",
-								"action_name": "drop-parcel",
-								"literal": {
-									"predicate": "delivered",
-									"args": ["X1"],
-									"is_positive": True,
-									"negation_mode": "naf",
-									"source_symbol": None,
-								},
-								"preconditions": [],
-								"effects": [],
-							},
-						],
-						"ordering": [["s1", "s2"]],
-						"origin": "llm",
-					},
-				],
-			},
-			indent=2,
+		return (
+			'{"target_task_bindings":[{"target_literal":"goal(X)","task_name":"make_goal"}],'
+			'"compound_tasks":[{"name":"make_goal","parameters":["X"],"is_primitive":false,'
+			'"source_predicates":["goal"]}],'
+			'"methods":[{"method_name":"m_make_goal_direct","task_name":"make_goal",'
+			'"parameters":["X"],"context":[],"subtasks":[{"step_id":"s1","task_name":"do_goal",'
+			'"args":["X"],"kind":"primitive","action_name":"do-goal","literal":{"predicate":"goal",'
+			'"args":["X"],"is_positive":true,"negation_mode":"naf","source_symbol":null},'
+			'"preconditions":[],"effects":[]}],"ordering":[],"origin":"llm"}]}'
 		)
 
 	@staticmethod

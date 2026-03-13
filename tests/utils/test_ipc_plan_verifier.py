@@ -9,6 +9,14 @@ if _src_dir not in sys.path:
 
 from stage1_interpretation.grounding_map import GroundingMap
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
+from stage3_method_synthesis.htn_schema import (
+	HTNLiteral,
+	HTNMethod,
+	HTNMethodLibrary,
+	HTNMethodStep,
+	HTNTargetTaskBinding,
+	HTNTask,
+)
 from utils.hddl_parser import HDDLParser
 from utils.ipc_plan_verifier import IPCPlanVerifier
 
@@ -144,3 +152,73 @@ def test_render_supported_hierarchical_plan_contains_root_and_decompositions():
 	assert "\n0 nop\n" in f"\n{plan_text}"
 	assert "\nroot " in plan_text
 	assert "-> m1_do_put_on" in plan_text
+
+
+def test_render_supported_hierarchical_plan_can_bridge_official_root_tasks(tmp_path):
+	problem_file = tmp_path / "problem.hddl"
+	problem_file.write_text(
+		"""
+(define (problem bridge-problem)
+  (:domain BRIDGE)
+  (:objects a b - block)
+  (:htn
+    :tasks (and
+      (t1 (do_put_on a b))
+    )
+    :ordering (and)
+  )
+  (:init)
+  (:goal (and))
+)
+""".strip()
+		+ "\n",
+	)
+	verifier = IPCPlanVerifier()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("make_on", ("X", "Y"), False, ("on",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_make_on_direct",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("X", "Y"),
+						kind="primitive",
+						action_name="stack",
+						literal=HTNLiteral("on", ("X", "Y"), True, None),
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "make_on")],
+	)
+
+	plan_text = verifier._render_supported_hierarchical_plan(
+		domain_file=tmp_path / "domain.hddl",
+		problem_file=problem_file,
+		action_path=["stack(a,b)"],
+		method_library=method_library,
+		method_trace=[{"method_name": "m_make_on_direct", "task_args": ["a", "b"]}],
+		root_task_bridges=[
+			{
+				"source_task_name": "do_put_on",
+				"generated_task_name": "make_on",
+				"method_name": "m_verify_bridge_do_put_on_make_on",
+			},
+		],
+	)
+
+	assert plan_text is not None
+	assert "root " in plan_text
+	assert "do_put_on a b -> m_verify_bridge_do_put_on_make_on" in plan_text
+	assert "make_on a b -> m_make_on_direct 0" in plan_text

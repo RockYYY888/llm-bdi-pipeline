@@ -2,6 +2,7 @@
 LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
 """
 
+import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
@@ -10,7 +11,7 @@ from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.dfa_builder import DFABuilder
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
-from stage3_method_synthesis.htn_schema import HTNLiteral
+from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
@@ -135,14 +136,15 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
 
-        # Stage 3: DFA -> HTN method synthesis
-        method_library, stage3_data = self._stage3_method_synthesis(ltl_spec, dfa_result)
+        method_library, stage3_data = self._stage3_method_synthesis(
+            ltl_spec,
+            dfa_result,
+        )
         if not method_library:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 3", "error": "HTN method synthesis failed"}
 
-        # Stage 4: HTN method library -> PANDA planning
         plan_records, stage4_data = self._stage4_panda_planning(
             ltl_spec,
             method_library,
@@ -153,14 +155,12 @@ class LTL_BDI_Pipeline:
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 4", "error": "PANDA planning failed"}
 
-        # Stage 5: HTN method library + validated DFA wrappers -> AgentSpeak rendering
         asl_code, _ = self._stage5_agentspeak_rendering(ltl_spec, method_library, plan_records)
         if not asl_code:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
             return {"success": False, "stage": "Stage 5", "error": "AgentSpeak rendering failed"}
 
-        # Stage 6: AgentSpeak -> Jason runtime validation
         stage6_data = self._stage6_jason_validation(
             ltl_spec,
             method_library,
@@ -174,7 +174,7 @@ class LTL_BDI_Pipeline:
 
         print("\n" + "="*80)
         # Stage 7: Official IPC verifier on generated hierarchical plan
-        stage7_data = self._stage7_official_verification(method_library, stage6_data)
+        stage7_data = self._stage7_official_verification(ltl_spec, method_library, stage6_data)
         if stage7_data is None:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
@@ -318,7 +318,6 @@ class LTL_BDI_Pipeline:
                 ),
                 "target_literals": synthesis_meta["target_literals"],
                 "negation_resolution": synthesis_meta.get("negation_resolution", {}),
-                "domain_projection_used": synthesis_meta.get("domain_projection_used", False),
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
@@ -1922,7 +1921,13 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None, None
 
-    def _stage6_jason_validation(self, ltl_spec, method_library, plan_records, asl_code):
+    def _stage6_jason_validation(
+        self,
+        ltl_spec,
+        method_library,
+        plan_records,
+        asl_code,
+    ):
         """Stage 6: run generated AgentSpeak with Jason (RunLocalMAS)."""
         print("\n[STAGE 6] Jason Runtime Validation")
         print("-"*80)
@@ -2029,7 +2034,7 @@ class LTL_BDI_Pipeline:
             traceback.print_exc()
             return None
 
-    def _stage7_official_verification(self, method_library, stage6_data):
+    def _stage7_official_verification(self, ltl_spec, method_library, stage6_data):
         """Stage 7: verify the generated hierarchical plan with the official IPC verifier."""
         print("\n[STAGE 7] Official IPC HTN Plan Verification")
         print("-"*80)
@@ -2074,12 +2079,21 @@ class LTL_BDI_Pipeline:
             return None
 
         stage6_artifacts = stage6_data.get("artifacts") or {}
+        root_task_bridges = self._stage7_build_root_task_bridges(
+            method_library,
+            stage6_artifacts.get("method_trace") or [],
+        )
+        verification_domain_file = self._stage7_build_verification_domain(
+            method_library,
+            root_task_bridges,
+        )
         verifier_result = verifier.verify_plan(
-            domain_file=self.domain_file,
+            domain_file=verification_domain_file,
             problem_file=self.problem_file,
             action_path=stage6_artifacts.get("action_path") or [],
             method_library=method_library,
             method_trace=stage6_artifacts.get("method_trace") or [],
+            root_task_bridges=root_task_bridges,
             output_dir=self.output_dir,
         )
         artifacts = verifier_result.to_dict()
@@ -2092,6 +2106,9 @@ class LTL_BDI_Pipeline:
             "primitive_plan_executable": verifier_result.primitive_plan_executable,
             "reached_goal_state": verifier_result.reached_goal_state,
             "build_warning": verifier_result.build_warning,
+            "root_task_bridges": root_task_bridges,
+            "verification_domain_file": str(verification_domain_file),
+            "verification_problem_file": str(Path(self.problem_file).resolve()),
         }
 
         if (
@@ -2127,6 +2144,200 @@ class LTL_BDI_Pipeline:
             "summary": summary,
             "artifacts": artifacts,
         }
+
+    def _stage7_build_verification_domain(self, method_library, root_task_bridges):
+        planner = PANDAPlanner()
+        verification_library = self._stage7_with_root_task_bridges(
+            method_library,
+            root_task_bridges,
+        )
+        verification_domain_hddl = planner._build_domain_hddl(
+            self.domain,
+            verification_library,
+            self.domain.name,
+            suppress_guard_tasks=None,
+        )
+        verification_domain_path = self.output_dir / "ipc_verification_domain.hddl"
+        verification_domain_path.write_text(verification_domain_hddl)
+        return verification_domain_path
+
+    def _stage7_build_root_task_bridges(self, method_library, method_trace):
+        if self.problem is None:
+            return []
+
+        literal_task_by_args: Dict[Tuple[str, ...], set[str]] = defaultdict(set)
+        binding_lookup = {
+            binding.target_literal: binding.task_name
+            for binding in method_library.target_task_bindings
+        }
+        for literal in method_library.target_literals:
+            task_name = binding_lookup.get(literal.to_signature())
+            if task_name is None:
+                continue
+            literal_task_by_args[tuple(literal.args)].add(task_name)
+
+        generated_task_lookup = {
+            task.name: task
+            for task in method_library.compound_tasks
+        }
+        domain_task_lookup = {
+            task.name: task
+            for task in getattr(self.domain, "tasks", [])
+        }
+
+        bridge_specs: List[Dict[str, Any]] = []
+        for root_index, task in enumerate(getattr(self.problem, "htn_tasks", []) or []):
+            source_task_name = getattr(task, "task_name", "")
+            task_args = tuple(getattr(task, "args", ()) or ())
+            generated_task_names = literal_task_by_args.get(task_args)
+            if generated_task_names is None or len(generated_task_names) != 1:
+                continue
+            generated_task_name = next(iter(generated_task_names))
+            if generated_task_name == source_task_name:
+                continue
+            generated_task = generated_task_lookup.get(generated_task_name)
+            source_task = domain_task_lookup.get(source_task_name)
+            if generated_task is None or source_task is None:
+                continue
+            source_parameters = tuple(
+                self._stage7_normalise_task_parameter(parameter)
+                for parameter in getattr(source_task, "parameters", []) or []
+            )
+            if len(source_parameters) != len(generated_task.parameters):
+                continue
+            bridge_specs.append({
+                "root_index": root_index,
+                "source_task_name": source_task_name,
+                "source_task_args": list(task_args),
+                "generated_task_name": generated_task_name,
+                "method_name": f"m_verify_bridge_{source_task_name}_{root_index + 1}_{generated_task_name}",
+                "extra_subtasks": [],
+            })
+
+        method_lookup = {
+            method.method_name: method
+            for method in method_library.methods
+        }
+        target_task_names = {
+            binding.task_name
+            for binding in method_library.target_task_bindings
+        }
+        top_level_invocations: List[Tuple[str, Tuple[str, ...]]] = []
+        for item in method_trace or []:
+            method_name = str(item.get("method_name", "")).strip()
+            method = method_lookup.get(method_name)
+            if method is None or method.task_name not in target_task_names:
+                continue
+            task_args = tuple(
+                str(value).strip()
+                for value in (item.get("task_args") or item.get("bindings") or [])
+            )
+            top_level_invocations.append((method.task_name, task_args))
+
+        if bridge_specs and len(top_level_invocations) > len(bridge_specs):
+            bridge_specs[-1]["extra_subtasks"] = [
+                {
+                    "task_name": task_name,
+                    "task_args": list(task_args),
+                }
+                for task_name, task_args in top_level_invocations[len(bridge_specs):]
+            ]
+
+        return bridge_specs
+
+    def _stage7_with_root_task_bridges(self, method_library, root_task_bridges):
+        if not root_task_bridges:
+            return method_library
+
+        existing_tasks = {
+            task.name: task
+            for task in method_library.compound_tasks
+        }
+        existing_method_names = {
+            method.method_name
+            for method in method_library.methods
+        }
+        domain_task_lookup = {
+            task.name: task
+            for task in getattr(self.domain, "tasks", [])
+        }
+
+        bridged_tasks = list(method_library.compound_tasks)
+        bridged_methods = list(method_library.methods)
+        for bridge in root_task_bridges:
+            source_task_name = bridge["source_task_name"]
+            generated_task_name = bridge["generated_task_name"]
+            method_name = bridge["method_name"]
+            if method_name in existing_method_names:
+                continue
+            source_task = domain_task_lookup.get(source_task_name)
+            generated_task = method_library.task_for_name(generated_task_name)
+            if source_task is None or generated_task is None:
+                continue
+            source_parameters = tuple(
+                self._stage7_normalise_task_parameter(parameter)
+                for parameter in getattr(source_task, "parameters", []) or []
+            )
+            if len(source_parameters) != len(generated_task.parameters):
+                continue
+            if source_task_name not in existing_tasks:
+                bridged_task = HTNTask(
+                    name=source_task_name,
+                    parameters=source_parameters,
+                    is_primitive=False,
+                    source_predicates=(),
+                    source_name=source_task_name,
+                )
+                bridged_tasks.append(bridged_task)
+                existing_tasks[source_task_name] = bridged_task
+            subtask_steps = [
+                HTNMethodStep(
+                    step_id="s1",
+                    task_name=generated_task_name,
+                    args=source_parameters,
+                    kind="compound",
+                ),
+            ]
+            for extra_index, extra in enumerate(bridge.get("extra_subtasks") or [], start=2):
+                extra_task_name = extra.get("task_name")
+                extra_task_args = tuple(extra.get("task_args") or [])
+                if not extra_task_name:
+                    continue
+                subtask_steps.append(
+                    HTNMethodStep(
+                        step_id=f"s{extra_index}",
+                        task_name=extra_task_name,
+                        args=extra_task_args,
+                        kind="compound",
+                    ),
+                )
+            bridged_methods.append(
+                HTNMethod(
+                    method_name=method_name,
+                    task_name=source_task_name,
+                    parameters=source_parameters,
+                    task_args=source_parameters,
+                    context=(),
+                    subtasks=tuple(subtask_steps),
+                    ordering=(),
+                    origin="stage7_root_bridge",
+                    source_method_name=method_name,
+                ),
+            )
+            existing_method_names.add(method_name)
+
+        return HTNMethodLibrary(
+            compound_tasks=bridged_tasks,
+            primitive_tasks=list(method_library.primitive_tasks),
+            methods=bridged_methods,
+            target_literals=list(method_library.target_literals),
+            target_task_bindings=list(method_library.target_task_bindings),
+        )
+
+    @staticmethod
+    def _stage7_normalise_task_parameter(parameter: str) -> str:
+        name = parameter.split("-", 1)[0].strip().lstrip("?")
+        return name.upper()
 
     def _stage6_runtime_seed_facts(self, plan_records, target_literals):
         if self.problem is not None:

@@ -49,6 +49,7 @@ class JasonValidationResult:
 	stderr: str
 	action_path: List[str]
 	method_trace: List[Dict[str, Any]]
+	failed_goals: List[str]
 	environment_adapter: Dict[str, Any]
 	artifacts: Dict[str, str]
 
@@ -62,13 +63,14 @@ class JasonValidationResult:
 			"jason_jar": self.jason_jar,
 			"exit_code": self.exit_code,
 			"timed_out": self.timed_out,
-				"stdout": self.stdout,
-				"stderr": self.stderr,
-				"action_path": list(self.action_path),
-				"method_trace": list(self.method_trace),
-				"environment_adapter": dict(self.environment_adapter),
-				"artifacts": dict(self.artifacts),
-			}
+			"stdout": self.stdout,
+			"stderr": self.stderr,
+			"action_path": list(self.action_path),
+			"method_trace": list(self.method_trace),
+			"failed_goals": list(self.failed_goals),
+			"environment_adapter": dict(self.environment_adapter),
+			"artifacts": dict(self.artifacts),
+		}
 
 
 class JasonRunner:
@@ -206,6 +208,7 @@ class JasonRunner:
 		stderr = stderr_text
 		action_path = self._extract_action_path(stdout)
 		method_trace = self._extract_method_trace(stdout)
+		failed_goals = self._extract_failed_goals(stdout)
 
 		stdout_path.write_text(stdout)
 		stderr_path.write_text(stderr)
@@ -238,15 +241,16 @@ class JasonRunner:
 			java_version=java_major,
 			javac_path=javac_bin,
 			jason_jar=str(jason_jar),
-				exit_code=exit_code,
-				timed_out=timed_out,
-				stdout=stdout,
-				stderr=stderr,
-				action_path=action_path,
-				method_trace=method_trace,
-				environment_adapter=environment_result.to_dict(),
-				artifacts=artifacts,
-			)
+			exit_code=exit_code,
+			timed_out=timed_out,
+			stdout=stdout,
+			stderr=stderr,
+			action_path=action_path,
+			method_trace=method_trace,
+			failed_goals=failed_goals,
+			environment_adapter=environment_result.to_dict(),
+			artifacts=artifacts,
+		)
 		validation_json_path.write_text(json.dumps(result_payload.to_dict(), indent=2))
 
 		if not is_success:
@@ -293,6 +297,8 @@ class JasonRunner:
 		max_execution_passes = max(2, len(target_literals) + 1)
 		lines = [
 			trace_ready_code.rstrip(),
+			"",
+			*self._render_failure_handlers(method_library),
 			"",
 			"/* Execution Entry */",
 			"!execute.",
@@ -407,6 +413,19 @@ class JasonRunner:
 			)
 		return trace
 
+	def _extract_failed_goals(self, stdout: str) -> List[str]:
+		pattern = re.compile(r"runtime goal failed\s+fail_goal\((.*)\)\s*$")
+		failed: List[str] = []
+		for raw_line in stdout.splitlines():
+			line = raw_line.strip()
+			match = pattern.search(line)
+			if match is None:
+				continue
+			payload = match.group(1).strip()
+			if payload:
+				failed.append(payload)
+		return failed
+
 	def _render_action_path(self, action_path: Sequence[str]) -> str:
 		if not action_path:
 			return ""
@@ -417,6 +436,26 @@ class JasonRunner:
 		if not args:
 			return name
 		return f"{name}({', '.join(args)})"
+
+	def _render_failure_handlers(self, method_library: HTNMethodLibrary | None) -> List[str]:
+		lines = ["/* Failure Handlers */"]
+		lines.append("-!run_dfa : true <-")
+		lines.extend(self._indent_body(['.print("runtime goal failed ", fail_goal(run_dfa))', ".fail"]))
+		lines.append("")
+		lines.append("-!verify_targets : true <-")
+		lines.extend(
+			self._indent_body(['.print("runtime goal failed ", fail_goal(verify_targets))', ".fail"]),
+		)
+		lines.append("")
+		if method_library is None:
+			return lines
+		for task in method_library.compound_tasks:
+			trigger = self._call(task.name, task.parameters)
+			fail_term = self._call("fail_goal", (task.name, *task.parameters))
+			lines.append(f"-!{trigger} : true <-")
+			lines.extend(self._indent_body([f'.print("runtime goal failed ", {fail_term})', ".fail"]))
+			lines.append("")
+		return lines
 
 	def _rewrite_primitive_wrappers_for_environment(self, agentspeak_code: str) -> str:
 		start_marker = "/* Primitive Action Plans */"
@@ -660,6 +699,9 @@ public class {self.environment_class_name} extends Environment {{
 
 	@Override
 	public synchronized boolean executeAction(String agName, Structure action) {{
+		if ("true".equals(action.getFunctor()) && action.getArity() == 0) {{
+			return true;
+		}}
 		ActionSchema schema = actions.get(action.getFunctor());
 		if (schema == null) {{
 			System.out.println("runtime env unknown action " + action);
