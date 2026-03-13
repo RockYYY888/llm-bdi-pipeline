@@ -31,7 +31,7 @@ def _domain():
 		/ "tests"
 		/ "fixtures"
 		/ "domains"
-		/ "legacy_blocksworld"
+		/ "minimal_blocksworld"
 		/ "domain.hddl"
 	)
 	return HDDLParser.parse_domain(str(domain_path))

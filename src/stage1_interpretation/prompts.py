@@ -29,7 +29,13 @@ Supported Syntax (in order):
 """
 
 
-def get_ltl_system_prompt(domain_name: str, types_str: str, predicates_str: str, actions_str: str = "") -> str:
+def get_ltl_system_prompt(
+	domain_name: str,
+	types_str: str,
+	predicates_str: str,
+	actions_str: str = "",
+	tasks_str: str = "",
+) -> str:
     """
     Generate system prompt for NL -> LTLf conversion
 
@@ -38,11 +44,13 @@ def get_ltl_system_prompt(domain_name: str, types_str: str, predicates_str: str,
         types_str: String describing domain types (e.g., "blocks (e.g., a, b, c)")
         predicates_str: Multi-line string listing available predicates with signatures
         actions_str: Multi-line string listing available actions with preconditions and effects
+        tasks_str: Multi-line string listing available task signatures
 
     Returns:
         System prompt string with domain-specific information
     """
     actions_section = f"\n\nActions:\n{actions_str}" if actions_str else ""
+    tasks_section = f"\n\nTasks:\n{tasks_str}" if tasks_str else ""
 
     return f"""You are an expert in Linear Temporal Logic on Finite Traces (LTLf) and BDI agent systems.
 
@@ -51,7 +59,14 @@ Domain: {domain_name}
 Objects: {types_str}
 
 Predicates:
-{predicates_str}{actions_section}
+{predicates_str}{actions_section}{tasks_section}
+
+Task-grounded query rule:
+- The user may describe the desired outcome either with predicates or by naming task
+  invocations from the domain.
+- If a task invocation is mentioned, infer the intended predicate-level outcome from the
+  available domain tasks, methods, actions, and predicates.
+- The JSON output must still be predicate-grounded LTLf; never emit task names as atoms.
 
 **LTLf Syntax Reference**
 

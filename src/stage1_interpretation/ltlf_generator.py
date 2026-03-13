@@ -86,20 +86,23 @@ class NLToLTLfGenerator:
         """
         from .prompts import get_ltl_system_prompt, get_ltl_user_prompt
 
-        # Build system prompt dynamically from domain
-        if self.domain:
-            domain_name = self.domain.name
-            types_str = ', '.join(self.domain.types) if self.domain.types else 'objects'
-            predicates_str = '\n'.join([f"- {pred.to_signature()}" for pred in self.domain.predicates])
-            actions_str = '\n'.join([f"- {action.to_description()}" for action in self.domain.actions])
-        else:
-            # Fallback to hardcoded blocksworld
-            domain_name = "ERROR IN LTLF GENERATOR"
-            types_str = "ERROR IN LTLF GENERATOR"
-            predicates_str = "ERROR IN LTLF GENERATOR"
-            actions_str = "ERROR IN LTLF GENERATOR"
+        # Build system prompt dynamically from the parsed domain.
+        if not self.domain:
+            raise RuntimeError("NLToLTLfGenerator requires parsed domain context.")
 
-        system_prompt = get_ltl_system_prompt(domain_name, types_str, predicates_str, actions_str)
+        domain_name = self.domain.name
+        types_str = ', '.join(self.domain.types) if self.domain.types else 'objects'
+        predicates_str = '\n'.join([f"- {pred.to_signature()}" for pred in self.domain.predicates])
+        actions_str = '\n'.join([f"- {action.to_description()}" for action in self.domain.actions])
+        tasks_str = '\n'.join([f"- {task.to_signature()}" for task in self.domain.tasks])
+
+        system_prompt = get_ltl_system_prompt(
+            domain_name,
+            types_str,
+            predicates_str,
+            actions_str,
+            tasks_str,
+        )
         user_prompt = get_ltl_user_prompt(nl_instruction)
 
         # Store prompt for logging

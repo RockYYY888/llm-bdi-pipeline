@@ -955,7 +955,7 @@ class HTNMethodSynthesizer:
 				)
 
 		for task in library.compound_tasks:
-			if self._is_legacy_task_name(task.name):
+			if self._is_deprecated_task_name(task.name):
 				raise ValueError(
 					f"Legacy task name '{task.name}' is not allowed. "
 					"Use semantic task names such as place_on, hold_block, clear_top, or "
@@ -2039,7 +2039,7 @@ class HTNMethodSynthesizer:
 		return bool(symbol) and symbol[0].isupper()
 
 	@classmethod
-	def _is_legacy_task_name(cls, task_name: str) -> bool:
+	def _is_deprecated_task_name(cls, task_name: str) -> bool:
 		return task_name.startswith(("achieve_", "maintain_not_", "ensure_", "goal_"))
 
 	@staticmethod

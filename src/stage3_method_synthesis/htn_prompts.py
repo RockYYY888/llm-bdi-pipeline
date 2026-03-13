@@ -38,7 +38,7 @@ def build_htn_system_prompt() -> str:
         "target_task_bindings, compound_tasks, methods.\n"
         "- Prefer reusable parameterized compound tasks over one grounded task per target instance.\n"
         "- Do not encode grounded object constants into compound task names; use parameters instead.\n"
-        "- Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_. Choose semantic reusable names instead.\n"
+        "- Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_. Choose semantic reusable names instead.\n"
         "- task_name and method_name must match [a-z][a-z0-9_]*.\n"
         "- context, literal, preconditions, and effects entries must be JSON literal objects, never strings like \"clear(X)\".\n"
         "- method_name must be exactly m_{task_name}_{strategy}.\n"
@@ -240,6 +240,17 @@ Invalid pattern:
 - only direct target branch, plus a rich helper support_a library
 because the target still fails whenever support_a or support_b is initially missing.
 
+Example J4: exact make_holding recursion pattern
+If make_holding(X) has these direct acquisition modes:
+- ontable(X) & clear(X) & handempty -> pick_up(X)
+- on(X, Y) & clear(X) & handempty -> unstack(X, Y)
+then blocked-clear siblings are required whenever the location mode is already known:
+- ontable(X) & not clear(X) -> make_clear(X); make_holding(X)
+- on(X, Y) & not clear(X) -> make_clear(X); make_holding(X)
+Invalid pattern:
+- only the direct table-mode and direct stack-mode siblings
+because make_holding(X) then fails whenever X is known but blocked.
+
 Example K: exact clear-helper recursion pattern
 If a clear-like helper has this direct branch:
 - context on(B, X) & clear(B) & handempty
@@ -289,7 +300,7 @@ Invalid pattern: only the already-satisfied branch and the direct-blocker branch
         "REQUIRED CONTENT RULES:\n"
         "- Prefer declared domain task names when they match the target-facing intention, but generate fresh methods yourself; do not assume any pre-existing method body exists.\n"
         "- Reuse one parameterized compound task for repeated goal patterns; do not clone a new grounded task for each target literal instance.\n"
-        "- Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_ in compound task names.\n"
+        "- Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_ in compound task names.\n"
         "- Do not invent grounded task names like achieve_p_a_b; task names must stay semantic and reusable.\n"
         "- Every target_task_bindings.task_name must match a declared compound task in compound_tasks.\n"
         "- For every target-bound task, cover reusable blocked states, not only the already-prepared endgame state.\n"
@@ -302,6 +313,8 @@ Invalid pattern: only the already-satisfied branch and the direct-blocker branch
         "- For clear-like helpers, a direct branch `on(B, X) & clear(B) & handempty` should normally be paired with a blocked-blocker sibling `on(B, X) & not clear(B)`.\n"
         "- If multiple primitive actions can establish the same headline literal under different source-state modes, emit separate constructive siblings for those modes.\n"
         "- For make_holding-style helpers in blocks-like domains, cover both table-mode acquisition and stack-mode acquisition when both exist.\n"
+        "- If all direct acquisition modes for a helper require clear(X) or an analogous readiness literal, and some branch context can already locate X while not readiness(X), add the blocked-readiness sibling `helper_for_readiness(X); helper(X)`.\n"
+        "- For make_holding-style helpers, do not stop at table-mode and stack-mode direct branches when X can be located but blocked. Add the blocked-clear recursive sibling when relevant.\n"
         "- Helper coverage does not replace target-task coverage: a rich helper library does not remove target-level missing-support and missing-both branches.\n"
         "- If a compound helper subtask is annotated with literal p(...), the helper task itself must semantically establish p(...). Do not use an unrelated task name as a proxy for that literal.\n"
         "- Every context entry and every literal-bearing field must use object form with predicate/args/is_positive, not string shorthand.\n"

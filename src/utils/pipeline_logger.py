@@ -76,7 +76,7 @@ class PipelineRecord:
 	stage7_metadata: Optional[Dict[str, Any]] = None
 	stage7_artifacts: Optional[Dict[str, Any]] = None
 
-	domain_file: str = "domains/blocksworld/domain.hddl"
+	domain_file: str = ""
 	problem_file: Optional[str] = None
 	output_dir: str = "output"
 	execution_time_seconds: float = 0.0
@@ -97,7 +97,7 @@ class PipelineLogger:
 		self,
 		natural_language: str,
 		mode: str = "dfa_agentspeak",
-		domain_file: str = "domains/blocksworld/domain.hddl",
+		domain_file: str = "",
 		problem_file: str | None = None,
 		domain_name: str | None = None,
 		problem_name: str | None = None,

@@ -21,7 +21,7 @@ def _stage6_ready() -> bool:
 
 
 def _load_blocksworld_action_schemas():
-	domain_path = Path("tests/fixtures/domains/legacy_blocksworld/domain.hddl")
+	domain_path = Path("tests/fixtures/domains/minimal_blocksworld/domain.hddl")
 	if not domain_path.exists():
 		pytest.skip(f"Blocksworld domain missing: {domain_path}")
 	domain = HDDLParser.parse_domain(str(domain_path))

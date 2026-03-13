@@ -42,7 +42,7 @@ def _domain():
 		/ "tests"
 		/ "fixtures"
 		/ "domains"
-		/ "legacy_blocksworld"
+		/ "minimal_blocksworld"
 		/ "domain.hddl"
 	)
 	return HDDLParser.parse_domain(str(domain_path))
@@ -547,7 +547,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "HIDDEN REASONING RECIPE (DO NOT OUTPUT IT):" in system_prompt
 	assert "Prefer reusable parameterized compound tasks" in system_prompt
 	assert "Do not encode grounded object constants into compound task names" in system_prompt
-	assert "Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
+	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
 	assert "must be JSON literal objects, never strings" in system_prompt
 	assert "PRIORITY ORDER: validity of JSON and bindings > executability of methods > semantic alignment > branch coverage." in system_prompt
 	assert "not handempty alone does not identify what is being held" in system_prompt
@@ -594,7 +594,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Example K: exact clear-helper recursion pattern" in user_prompt
 	assert "missing-both coverage is mandatory unless provably impossible" in user_prompt
 	assert "do not clone a new grounded task for each target literal instance" in user_prompt
-	assert "Never use legacy task prefixes achieve_, ensure_, goal_, or maintain_not_" in user_prompt
+	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in user_prompt
 	assert "Do not invent grounded task names like achieve_p_a_b" in user_prompt
 	assert "recursive-blocker: on(BLOCKER, TARGET) & not clear(BLOCKER)" in user_prompt
 	assert "complementary-support rule" in user_prompt
@@ -642,7 +642,7 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		HTNMethodSynthesizer._schema_hint(),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 21500
+	assert len(system_prompt) + len(user_prompt) < 22500
 
 
 def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
@@ -815,7 +815,7 @@ def test_normalise_llm_library_promotes_used_local_variables_into_method_paramet
 	assert normalised.methods[0].parameters == ("BLOCK", "BLOCK1")
 
 
-def test_method_validation_rejects_legacy_task_prefixes():
+def test_method_validation_rejects_deprecated_task_prefixes():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(

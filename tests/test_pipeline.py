@@ -4,8 +4,8 @@ Live integration harness for the current benchmark-backed acceptance scope.
 This file is the canonical acceptance entry point:
 - pytest uses it for live end-to-end verification
 - CLI can run a named query case: `python tests/test_pipeline.py query_2`
-- current live query cases are the reverse-generated NL instructions for
-  official IPC Blocksworld `p01`-`p03`
+- current live query cases are reverse-generated from official IPC Blocksworld
+  `p01`-`p03` into canonical literal-holding NL instructions
 """
 
 from __future__ import annotations
@@ -79,152 +79,38 @@ def _serialise_nl_list(items: List[str]) -> str:
 	return f"{', '.join(items[:-1])}, and {items[-1]}"
 
 
-def _blocksworld_task_invocation_to_target_literal(
-	task_name: str,
-	args: List[str],
-) -> Dict[str, Any] | None:
-	if task_name in {"do_put_on", "do_move"} and len(args) >= 2:
-		return {
-			"predicate": "on",
-			"args": [args[0], args[1]],
-		}
-	if task_name == "do_on_table" and args:
-		return {
-			"predicate": "ontable",
-			"args": [args[0]],
-		}
-	if task_name == "do_clear" and args:
-		return {
-			"predicate": "clear",
-			"args": [args[0]],
-		}
-	return None
-
-
-def _blocksworld_literal_to_nl_goal(predicate: str, args: List[str]) -> str:
-	if predicate == "on" and len(args) == 2:
-		return f"{args[0]} is on {args[1]}"
-	if predicate == "ontable" and len(args) == 1:
-		return f"{args[0]} is on the table"
-	if predicate == "clear" and len(args) == 1:
-		return f"{args[0]} is clear"
+def _task_invocation_to_query_clause(task_name: str, args: List[str]) -> str:
 	if not args:
-		return f"{predicate} holds"
-	return f"{predicate}({', '.join(args)}) holds"
+		return f"{task_name}()"
+	return f"{task_name}({', '.join(args)})"
 
 
-def _order_blocksworld_goal_literals(
-	literals: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-	on_literals = [
-		item for item in literals
-		if item.get("predicate") == "on" and len(item.get("args", [])) == 2
-	]
-	other_literals = [
-		item for item in literals
-		if item not in on_literals
-	]
-	if len(on_literals) <= 1:
-		return literals
-
-	signature_to_literal = {
-		_literal_signature(item["predicate"], item["args"]): item
-		for item in on_literals
-	}
-	supporter_by_top = {
-		item["args"][0]: _literal_signature(item["predicate"], item["args"])
-		for item in on_literals
-	}
-	dependents: Dict[str, List[str]] = {
-		signature: []
-		for signature in signature_to_literal
-	}
-	in_degree: Dict[str, int] = {
-		signature: 0
-		for signature in signature_to_literal
-	}
-	for item in on_literals:
-		signature = _literal_signature(item["predicate"], item["args"])
-		support_block = item["args"][1]
-		predecessor = supporter_by_top.get(support_block)
-		if predecessor is None:
-			continue
-		dependents[predecessor].append(signature)
-		in_degree[signature] += 1
-
-	ordered_signatures: List[str] = []
-	queue = [
-		_literal_signature(item["predicate"], item["args"])
-		for item in on_literals
-		if in_degree[_literal_signature(item["predicate"], item["args"])] == 0
-	]
-	seen = set(queue)
-	while queue:
-		signature = queue.pop(0)
-		ordered_signatures.append(signature)
-		for dependent in dependents[signature]:
-			in_degree[dependent] -= 1
-			if in_degree[dependent] == 0 and dependent not in seen:
-				queue.append(dependent)
-				seen.add(dependent)
-
-	if len(ordered_signatures) != len(on_literals):
-		return literals
-
-	ordered_literals = [signature_to_literal[signature] for signature in ordered_signatures]
-	return ordered_literals + other_literals
+def _typed_object_phrase(problem: Any) -> str:
+	object_types = {problem.object_types.get(obj) for obj in problem.objects}
+	object_types.discard(None)
+	if len(object_types) == 1:
+		object_type = next(iter(object_types))
+		if object_type:
+			type_phrase = object_type if object_type.endswith("s") else f"{object_type}s"
+			return f"Using {type_phrase} {_serialise_nl_list(problem.objects)}"
+	return f"Using objects {_serialise_nl_list(problem.objects)}"
 
 
 def _build_case_from_blocksworld_problem(problem_path: Path) -> Dict[str, Any] | None:
 	problem = HDDLParser.parse_problem(str(problem_path))
-	derived_literals: List[Dict[str, Any]] = []
-	seen = set()
-
-	for invocation in problem.htn_tasks:
-		literal = _blocksworld_task_invocation_to_target_literal(
-			invocation.task_name,
-			invocation.args,
-		)
-		if literal is None:
-			continue
-		signature = _literal_signature(literal["predicate"], literal["args"])
-		if signature in seen:
-			continue
-		seen.add(signature)
-		derived_literals.append(literal)
-
-	if not derived_literals:
-		for fact in problem.goal_facts:
-			if not fact.is_positive:
-				continue
-			signature = _literal_signature(fact.predicate, fact.args)
-			if signature in seen:
-				continue
-			seen.add(signature)
-			derived_literals.append(
-				{
-					"predicate": fact.predicate,
-					"args": list(fact.args),
-				},
-			)
-
-	if not derived_literals:
+	task_clauses = [
+		_task_invocation_to_query_clause(invocation.task_name, invocation.args)
+		for invocation in problem.htn_tasks
+	]
+	if not task_clauses:
 		return None
-	derived_literals = _order_blocksworld_goal_literals(derived_literals)
-
-	goal_text = ", and ".join(
-		_blocksworld_literal_to_nl_goal(item["predicate"], item["args"])
-		for item in derived_literals
-	)
 
 	return {
 		"instruction": (
-			f"Using blocks {_serialise_nl_list(problem.objects)}, arrange them so that {goal_text}."
+			f"{_typed_object_phrase(problem)}, complete the ordered tasks "
+			f"{_serialise_nl_list(task_clauses)}."
 		),
-		"required_target_literals": [
-			_literal_signature(item["predicate"], item["args"])
-			for item in derived_literals
-		],
+		"required_task_clauses": task_clauses,
 		"problem_file": str(problem_path.resolve()),
 		"minimum_action_count": 1,
 		"description": f"Auto-generated from {problem_path.name} ({problem.name})",
@@ -975,7 +861,7 @@ def test_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
 	)
 
 
-def test_blocksworld_problem_query_case_generation_from_htn_tasks():
+def test_official_blocksworld_problem_query_case_generation_from_problem_tasks():
 	problem_path = (
 		Path(__file__).parent.parent
 		/ "src"
@@ -989,10 +875,16 @@ def test_blocksworld_problem_query_case_generation_from_htn_tasks():
 
 	case = _build_case_from_blocksworld_problem(problem_path)
 	assert case is not None
-	assert case["instruction"]
-	assert case["required_target_literals"]
+	assert case["instruction"] == (
+		"Using blocks b1, b2, b3, b4, and b5, "
+		"complete the ordered tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1)."
+	)
+	assert case["required_task_clauses"] == [
+		"do_put_on(b4, b2)",
+		"do_put_on(b1, b4)",
+		"do_put_on(b3, b1)",
+	]
 	assert case["problem_file"] == str(problem_path.resolve())
-	assert case["required_target_literals"] == ["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"]
 
 
 def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
@@ -1131,7 +1023,7 @@ def _run_query_case(
 		bug_messages.append("pipeline returned success=False")
 
 	if (log_dir / "generated_code.asl").exists():
-		bug_messages.append("unexpected legacy generated_code.asl artifact exists")
+		bug_messages.append("unexpected deprecated generated_code.asl artifact exists")
 
 	if execution["natural_language"] != case["instruction"]:
 		bug_messages.append("execution.json natural_language does not match selected query")
@@ -1177,13 +1069,6 @@ def _run_query_case(
 		bug_messages.append("Stage 3 produced no target_task_bindings")
 	bug_messages.extend(_binding_semantic_messages(stage3_library))
 
-	target_literals = stage3_metadata.get("target_literals", [])
-	for required_target_literal in case.get("required_target_literals", []):
-		if required_target_literal not in target_literals:
-			bug_messages.append(
-				f"required target literal '{required_target_literal}' not present in Stage 3 metadata",
-			)
-
 	stage4_artifacts = execution.get("stage4_artifacts") or {}
 	method_validations = stage4_artifacts.get("method_validations") or []
 	if not method_validations:
@@ -1225,17 +1110,17 @@ def _run_query_case(
 	if "+!dfa_step_" not in stage5_code:
 		bug_messages.append("Stage 5 code is missing state-aware dfa_step wrappers")
 	if "/* PANDA Goal Plans */" in stage5_code:
-		bug_messages.append("legacy PANDA-only task plan section still present in Stage 5 code")
+		bug_messages.append("deprecated PANDA-only task plan section still present in Stage 5 code")
 	if "target_label(" in stage5_code:
-		bug_messages.append("legacy target_label facts still present in Stage 5 code")
+		bug_messages.append("deprecated target_label facts still present in Stage 5 code")
 	if "+!transition_" in stage5_code:
-		bug_messages.append("legacy transition_i wrappers still present in Stage 5 code")
+		bug_messages.append("deprecated transition_i wrappers still present in Stage 5 code")
 	bug_messages.extend(_method_free_variable_messages(stage5_code))
 
 	for binding in target_bindings:
 		task_name = binding["task_name"]
 		if task_name.startswith(BANNED_TASK_PREFIXES):
-			bug_messages.append(f"legacy task prefix still present: {task_name}")
+			bug_messages.append(f"deprecated task prefix still present: {task_name}")
 		if (
 			f"+!{task_name}(" not in stage5_code
 			and f"+!{task_name} :" not in stage5_code
@@ -1301,7 +1186,7 @@ def _run_query_case(
 		if file_trace != method_trace:
 			bug_messages.append("Stage 6 method_trace.json does not match execution.json method_trace")
 	if (log_dir / "jason_runner_agent.asl").exists():
-		bug_messages.append("legacy runtime-only jason_runner_agent.asl artifact still present")
+		bug_messages.append("deprecated runtime-only jason_runner_agent.asl artifact still present")
 
 	stage7_artifacts = execution.get("stage7_artifacts") or {}
 	if stage7_artifacts.get("tool_available") is not True:
@@ -1331,11 +1216,11 @@ def _run_query_case(
 	}
 
 
-def _write_legacy_style_blocksworld_domain(tmp_path: Path) -> str:
-	domain_file = tmp_path / "legacy_style_blocksworld.hddl"
+def _write_action_only_blocksworld_domain(tmp_path: Path) -> str:
+	domain_file = tmp_path / "action_only_blocksworld.hddl"
 	domain_file.write_text(
 		"""
-(define (domain blocksworld_legacy_style)
+(define (domain blocksworld_action_only)
   (:requirements :typing :hierarchy :negative-preconditions)
   (:types block)
   (:predicates
@@ -1372,7 +1257,7 @@ def _write_legacy_style_blocksworld_domain(tmp_path: Path) -> str:
 
 
 def test_method_validation_initial_facts_are_branch_specific(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_hold_block_from_block",
@@ -1425,7 +1310,7 @@ def test_method_validation_initial_facts_are_branch_specific(tmp_path):
 
 
 def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_place_on_direct",
@@ -1487,7 +1372,7 @@ def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_p
 
 
 def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method_library = HTNMethodLibrary(
 		methods=[
@@ -1532,7 +1417,7 @@ def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
 
 
 def test_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_legacy_style_blocksworld_domain(tmp_path))
+	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_remove_on_clear_first",
