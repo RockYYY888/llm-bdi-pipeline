@@ -9,6 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+_tests_dir = str(Path(__file__).parent.parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
@@ -35,17 +38,13 @@ from stage3_method_synthesis.htn_schema import (
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 
+OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
+)
+
 
 def _domain():
-	domain_path = (
-		Path(__file__).parent.parent.parent
-		/ "tests"
-		/ "fixtures"
-		/ "domains"
-		/ "minimal_blocksworld"
-		/ "domain.hddl"
-	)
-	return HDDLParser.parse_domain(str(domain_path))
+	return HDDLParser.parse_domain(str(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE))
 
 
 def _marsrover_domain():

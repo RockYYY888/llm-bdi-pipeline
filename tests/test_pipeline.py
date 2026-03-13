@@ -1,11 +1,12 @@
 """
-Live integration harness for the current benchmark-backed acceptance scope.
+Live end-to-end acceptance harness for reverse-generated official benchmark queries.
 
 This file is the canonical acceptance entry point:
-- pytest uses it for live end-to-end verification
-- CLI can run a named query case: `python tests/test_pipeline.py query_2`
+- pytest uses it only for end-to-end verification
+- CLI can run `python tests/test_pipeline.py query_2`, `all`, or `list`
 - current live query cases are reverse-generated from official IPC Blocksworld
-  `p01`-`p03` into canonical literal-holding NL instructions
+  `p01`-`p03` into single-sentence natural-language instructions
+- non-E2E pipeline unit tests live in `tests/test_pipeline_units.py`
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ from typing import Any, Dict, List
 
 import pytest
 
+_tests_dir = str(Path(__file__).parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
@@ -325,7 +329,7 @@ def _binding_semantic_messages(stage3_library: Dict[str, Any]) -> List[str]:
 	return messages
 
 
-def test_query_relevant_task_names_starts_from_target_bindings_not_only_witnesses():
+def assert_query_relevant_task_names_starts_from_target_bindings_not_only_witnesses():
 	method_library = HTNMethodLibrary(
 		compound_tasks=[
 			HTNTask("top_goal", ("BLOCK",), False, ("clear",)),
@@ -365,7 +369,7 @@ def test_query_relevant_task_names_starts_from_target_bindings_not_only_witnesse
 	assert relevant == ["hidden_helper", "top_goal"]
 
 
-def test_representative_task_args_uses_typed_witness_placeholders(tmp_path):
+def assert_representative_task_args_uses_typed_witness_placeholders(tmp_path):
 	domain_file = tmp_path / "domain_move.hddl"
 	domain_file.write_text(
 		"""
@@ -407,7 +411,7 @@ def test_representative_task_args_uses_typed_witness_placeholders(tmp_path):
 	assert args == ("witness_rover_1", "witness_waypoint_2")
 
 
-def test_method_validation_task_args_respect_equality_bound_constants(tmp_path):
+def assert_method_validation_task_args_respect_equality_bound_constants(tmp_path):
 	domain_file = tmp_path / "domain_move.hddl"
 	domain_file.write_text(
 		"""
@@ -459,7 +463,7 @@ def test_method_validation_task_args_respect_equality_bound_constants(tmp_path):
 	assert args == ("rover0", "waypoint5")
 
 
-def test_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatch):
+def assert_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatch):
 	class FakePlan:
 		def __init__(self, task_name: str, task_args: tuple[str, ...]):
 			self.task_name = task_name
@@ -560,7 +564,7 @@ def test_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatc
 	assert execution["stage4_metadata"]["failed_method_names"] == ["m_place_on_bad"]
 
 
-def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
+def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 	method_library = HTNMethodLibrary(
 		compound_tasks=[HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",))],
 		primitive_tasks=[],
@@ -631,12 +635,12 @@ def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 	assert stage3_data["summary"]["llm_attempt_durations_seconds"] == [1.0, 2.21]
 
 
-def test_pipeline_requires_explicit_domain_file():
+def assert_pipeline_requires_explicit_domain_file():
 	with pytest.raises(ValueError, match="domain_file is required"):
 		LTL_BDI_Pipeline(domain_file=None)  # type: ignore[arg-type]
 
 
-def test_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path):
+def assert_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path):
 	domain_file = tmp_path / "domain_transport.hddl"
 	domain_file.write_text(
 		"""
@@ -705,7 +709,7 @@ def test_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path)
 	assert object_types["loc2"] == "location"
 
 
-def test_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
+def assert_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
 	domain_file = tmp_path / "domain_vehicle.hddl"
 	domain_file.write_text(
 		"""
@@ -751,7 +755,7 @@ def test_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
 		)
 
 
-def test_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
+def assert_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
 	domain_file = tmp_path / "domain_typed.hddl"
 	domain_file.write_text(
 		"""
@@ -794,7 +798,7 @@ def test_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
 		pipeline._validate_method_library_typing(method_library)
 
 
-def test_stage1_object_universe_merges_constants_from_atoms_and_formulas():
+def assert_stage1_object_universe_merges_constants_from_atoms_and_formulas():
 	generator = NLToLTLfGenerator()
 	formula = LTLFormula(
 		operator=None,
@@ -816,7 +820,7 @@ def test_stage1_object_universe_merges_constants_from_atoms_and_formulas():
 	assert objects == ["objective0", "low_res"]
 
 
-def test_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
+def assert_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
 	spec = SimpleNamespace(
 		formulas=[
 			LTLFormula(
@@ -861,7 +865,7 @@ def test_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
 	)
 
 
-def test_official_blocksworld_problem_query_case_generation_from_problem_tasks():
+def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks():
 	problem_path = (
 		Path(__file__).parent.parent
 		/ "src"
@@ -887,7 +891,7 @@ def test_official_blocksworld_problem_query_case_generation_from_problem_tasks()
 	assert case["problem_file"] == str(problem_path.resolve())
 
 
-def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
+def assert_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
 	problem_path = (
 		Path(__file__).parent.parent
 		/ "src"
@@ -926,7 +930,7 @@ def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypa
 	assert "(on b4 b2)" not in captured["instruction"]
 
 
-def test_stage6_object_type_resolution_ignores_unused_query_objects():
+def assert_stage6_object_type_resolution_ignores_unused_query_objects():
 	pipeline = LTL_BDI_Pipeline(domain_file=MARSROVER_DOMAIN_FILE)
 	method_library = HTNMethodLibrary(
 		compound_tasks=[],
@@ -947,7 +951,7 @@ def test_stage6_object_type_resolution_ignores_unused_query_objects():
 	assert "waypoint1" not in resolved
 
 
-def test_stage7_build_root_task_bridges_matches_problem_tasks_by_ground_args():
+def assert_stage7_build_root_task_bridges_matches_problem_tasks_by_ground_args():
 	problem_file = str((BLOCKSWORLD_PROBLEM_DIR / "p02.hddl").resolve())
 	pipeline = LTL_BDI_Pipeline(
 		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
@@ -1216,48 +1220,8 @@ def _run_query_case(
 	}
 
 
-def _write_action_only_blocksworld_domain(tmp_path: Path) -> str:
-	domain_file = tmp_path / "action_only_blocksworld.hddl"
-	domain_file.write_text(
-		"""
-(define (domain blocksworld_action_only)
-  (:requirements :typing :hierarchy :negative-preconditions)
-  (:types block)
-  (:predicates
-    (holding ?x - block)
-    (handempty)
-    (ontable ?x - block)
-    (on ?x - block ?y - block)
-    (clear ?x - block)
-  )
-  (:action pick-up
-    :parameters (?x - block ?y - block)
-    :precondition (and (on ?x ?y) (clear ?x) (handempty))
-    :effect (and (holding ?x) (clear ?y) (not (on ?x ?y)) (not (clear ?x)) (not (handempty)))
-  )
-  (:action pick-up-from-table
-    :parameters (?x - block)
-    :precondition (and (ontable ?x) (clear ?x) (handempty))
-    :effect (and (holding ?x) (not (ontable ?x)) (not (clear ?x)) (not (handempty)))
-  )
-  (:action put-on-block
-    :parameters (?x - block ?y - block)
-    :precondition (and (holding ?x) (clear ?y))
-    :effect (and (on ?x ?y) (clear ?x) (not (holding ?x)) (not (clear ?y)) (handempty))
-  )
-  (:action put-down
-    :parameters (?x - block)
-    :precondition (holding ?x)
-    :effect (and (ontable ?x) (clear ?x) (not (holding ?x)) (handempty))
-  )
-)
-		""".strip(),
-	)
-	return str(domain_file)
-
-
-def test_method_validation_initial_facts_are_branch_specific(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
+def assert_method_validation_initial_facts_are_branch_specific(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_hold_block_from_block",
@@ -1276,7 +1240,7 @@ def test_method_validation_initial_facts_are_branch_specific(tmp_path):
 				task_name="pick_up",
 				args=("BLOCK1", "BLOCK2"),
 				kind="primitive",
-				action_name="pick-up",
+				action_name="unstack",
 				preconditions=(
 					HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),
 				),
@@ -1309,8 +1273,8 @@ def test_method_validation_initial_facts_are_branch_specific(tmp_path):
 	assert any(fact.startswith("(on a ") for fact in facts)
 
 
-def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
+def assert_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_place_on_direct",
@@ -1335,7 +1299,7 @@ def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_p
 				task_name="put_on_block",
 				args=("BLOCK1", "BLOCK2"),
 				kind="primitive",
-				action_name="put-on-block",
+				action_name="stack",
 			),
 		),
 		ordering=(("s1", "s2"), ("s2", "s3")),
@@ -1371,8 +1335,8 @@ def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_p
 	assert "(handempty)" not in facts
 
 
-def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
+def assert_task_witness_initial_facts_merge_sibling_branches(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method_library = HTNMethodLibrary(
 		methods=[
@@ -1396,7 +1360,7 @@ def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
 						task_name="pick_up_from_table",
 						args=("BLOCK1",),
 						kind="primitive",
-						action_name="pick-up-from-table",
+						action_name="pick-up",
 					),
 				),
 			),
@@ -1416,8 +1380,8 @@ def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
 	assert "(ontable a)" in facts
 
 
-def test_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path):
-	pipeline = LTL_BDI_Pipeline(domain_file=_write_action_only_blocksworld_domain(tmp_path))
+def assert_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
 	method = HTNMethod(
 		method_name="m_remove_on_clear_first",
@@ -1530,10 +1494,17 @@ def main(argv: List[str]) -> int:
 		return 2
 
 	if len(argv) > 2:
-		print("Usage: python tests/test_pipeline.py [query_i|all]")
+		print("Usage: python tests/test_pipeline.py [query_i|all|list]")
 		return 2
 
 	selector = argv[1] if len(argv) == 2 else "query_1"
+	if selector == "list":
+		for query_id in sorted(QUERY_CASES):
+			case = QUERY_CASES[query_id]
+			print(f"{query_id}: {case['description']}")
+			print(f"Instruction: {case['instruction']}")
+			print("")
+		return 0
 	if selector == "all":
 		query_ids = sorted(QUERY_CASES)
 	else:

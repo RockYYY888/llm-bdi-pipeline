@@ -5,6 +5,9 @@ Focused tests for Stage 5 AgentSpeak rendering.
 import sys
 from pathlib import Path
 
+_tests_dir = str(Path(__file__).parent.parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
@@ -21,17 +24,13 @@ from stage4_panda_planning.panda_schema import PANDAPlanResult
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from utils.hddl_parser import HDDLParser
 
+OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
+)
+
 
 def _domain():
-	domain_path = (
-		Path(__file__).parent.parent.parent
-		/ "tests"
-		/ "fixtures"
-		/ "domains"
-		/ "minimal_blocksworld"
-		/ "domain.hddl"
-	)
-	return HDDLParser.parse_domain(str(domain_path))
+	return HDDLParser.parse_domain(str(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE))
 
 
 def _method_library() -> HTNMethodLibrary:
@@ -52,12 +51,12 @@ def _method_library() -> HTNMethodLibrary:
 		],
 		primitive_tasks=[
 			HTNTask(
-				name="pick_up_from_table",
+				name="pick_up",
 				parameters=("B1",),
 				is_primitive=True,
 			),
 			HTNTask(
-				name="put_on_block",
+				name="stack",
 				parameters=("B1", "B2"),
 				is_primitive=True,
 			),
@@ -76,10 +75,10 @@ def _method_library() -> HTNMethodLibrary:
 				subtasks=(
 					HTNMethodStep(
 						step_id="s2",
-						task_name="put_on_block",
+						task_name="stack",
 						args=("B1", "B2"),
 						kind="primitive",
-						action_name="put-on-block",
+						action_name="stack",
 					),
 					HTNMethodStep(
 						step_id="s1",
@@ -101,10 +100,10 @@ def _method_library() -> HTNMethodLibrary:
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
-						task_name="pick_up_from_table",
+						task_name="pick_up",
 						args=("B1",),
 						kind="primitive",
-						action_name="pick-up-from-table",
+						action_name="pick-up",
 					),
 				),
 			),
@@ -146,9 +145,9 @@ def test_renderer_emits_method_library_and_state_aware_wrappers():
 	assert "+!place_on(BLOCK1, BLOCK2) : on(BLOCK1, BLOCK2) <-" in code
 	assert "+!place_on(BLOCK1, BLOCK2) : clear(BLOCK2) <-" in code
 	assert "\t!hold_block(BLOCK1);" in code
-	assert "\t!put_on_block(BLOCK1, BLOCK2)." in code
+	assert "\t!stack(BLOCK1, BLOCK2)." in code
 	assert "+!hold_block(BLOCK) : ontable(BLOCK) & clear(BLOCK) <-" in code
-	assert "\t!pick_up_from_table(BLOCK)." in code
+	assert "\t!pick_up(BLOCK)." in code
 	assert "+!dfa_step_q1_q2_on_a_b : dfa_state(q1) <-" in code
 	assert "\t!place_on(a, b);" in code
 	assert "\t-dfa_state(q1);" in code
@@ -157,7 +156,7 @@ def test_renderer_emits_method_library_and_state_aware_wrappers():
 	assert "\t!dfa_step_q1_q2_on_a_b;" in code
 	assert "\t!run_dfa." in code
 	assert "+!run_dfa : dfa_state(q2) & accepting_state(q2) <-" in code
-	assert "+!put_on_block(BLOCK1, BLOCK2) :" in code
+	assert "+!stack(BLOCK1, BLOCK2) :" in code
 
 
 def test_renderer_accepts_zero_step_wrappers_when_stage4_returns_no_witness_steps():
@@ -219,7 +218,7 @@ def test_renderer_hoists_binding_preconditions_into_method_context():
 						task_name="pick_up",
 						args=("B", "SUPPORT"),
 						kind="primitive",
-						action_name="pick-up",
+						action_name="unstack",
 						preconditions=(
 							HTNLiteral("on", ("B", "SUPPORT"), True, None),
 						),
@@ -275,7 +274,7 @@ def test_renderer_hoists_branch_discriminators_from_action_schema():
 						task_name="pick_up_from_table",
 						args=("B",),
 						kind="primitive",
-						action_name="pick-up-from-table",
+						action_name="pick-up",
 					),
 				),
 				ordering=(("s1", "s2"),),
@@ -297,7 +296,7 @@ def test_renderer_hoists_branch_discriminators_from_action_schema():
 						task_name="pick_up",
 						args=("B", "SUPPORT"),
 						kind="primitive",
-						action_name="pick-up",
+						action_name="unstack",
 						preconditions=(
 							HTNLiteral("on", ("B", "SUPPORT"), True, None),
 						),

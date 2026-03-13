@@ -5,6 +5,9 @@ Focused tests for PANDA HDDL export and plan parsing.
 import sys
 from pathlib import Path
 
+_tests_dir = str(Path(__file__).parent.parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
@@ -24,17 +27,13 @@ from stage4_panda_planning.problem_builder import (
 )
 from utils.hddl_parser import HDDLParser
 
+OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
+)
+
 
 def _domain():
-	domain_path = (
-		Path(__file__).parent.parent.parent
-		/ "tests"
-		/ "fixtures"
-		/ "domains"
-		/ "minimal_blocksworld"
-		/ "domain.hddl"
-	)
-	return HDDLParser.parse_domain(str(domain_path))
+	return HDDLParser.parse_domain(str(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE))
 
 
 def _library() -> HTNMethodLibrary:
@@ -62,7 +61,7 @@ def _library() -> HTNMethodLibrary:
 						task_name="put_on_block",
 						args=("B1", "B2"),
 						kind="primitive",
-						action_name="put-on-block",
+						action_name="stack",
 					),
 				),
 				ordering=(("s1", "s2"),),
@@ -155,9 +154,9 @@ def test_panda_domain_export_uses_llm_method_library():
 	assert "(:task place_on" in domain_hddl
 	assert "(:method m_place_on_stack" in domain_hddl
 	assert ":subtasks (and" in domain_hddl
-	assert "(s2 (put-on-block ?b1 ?b2))" in domain_hddl
+	assert "(s2 (stack ?b1 ?b2))" in domain_hddl
 	assert "(< s1 s2)" in domain_hddl
-	assert "(:action put-on-block" in domain_hddl
+	assert "(:action stack" in domain_hddl
 	assert "(:method m_place_on_noop" in domain_hddl
 	assert ":precondition (and (on ?b1 ?b2))" in domain_hddl
 
@@ -232,10 +231,10 @@ def test_panda_domain_export_adds_negative_guard_for_negative_target_task():
 
 def test_panda_plan_parser_extracts_primitive_steps():
 	planner = PANDAPlanner()
-	plan_text = "0: (pick-up-from-table a)\n1: (put-on-block a b)\n"
+	plan_text = "0: (pick-up a)\n1: (stack a b)\n"
 	steps = planner._parse_plan_steps(plan_text, _domain())
 
-	assert [step.task_name for step in steps] == ["pick_up_from_table", "put_on_block"]
+	assert [step.task_name for step in steps] == ["pick_up", "stack"]
 	assert steps[0].args == ("a",)
 	assert steps[1].args == ("a", "b")
 
@@ -244,14 +243,14 @@ def test_panda_plan_parser_extracts_converted_plan_steps():
 	planner = PANDAPlanner()
 	plan_text = (
 		"==>\n"
-		"15 pick-up-from-table a\n"
-		"16 put-on-block a b\n"
+		"15 pick-up a\n"
+		"16 stack a b\n"
 		"root 2\n"
 		"2 place_on a b -> m_place_on_stack 8 3 16\n"
 	)
 	steps = planner._parse_plan_steps(plan_text, _domain())
 
-	assert [step.task_name for step in steps] == ["pick_up_from_table", "put_on_block"]
+	assert [step.task_name for step in steps] == ["pick_up", "stack"]
 	assert steps[0].args == ("a",)
 	assert steps[1].args == ("a", "b")
 
@@ -358,7 +357,7 @@ def test_domain_export_can_suppress_auto_generated_guard_for_root_task():
 							task_name="put_on_block",
 							args=("BLOCK1", "BLOCK2"),
 							kind="primitive",
-							action_name="put-on-block",
+							action_name="stack",
 						),
 					),
 				),

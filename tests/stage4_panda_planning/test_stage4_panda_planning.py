@@ -1,118 +1,102 @@
 """
-Focused live integration tests for Stage 4 PANDA planning.
+Focused integration tests for Stage 4 PANDA planning.
 """
 
 import sys
 from pathlib import Path
 
-import pytest
-
+_tests_dir = str(Path(__file__).parent.parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
-from stage1_interpretation.grounding_map import GroundingMap
-from stage1_interpretation.ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator
-from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
+from stage3_method_synthesis.htn_schema import (
+	HTNLiteral,
+	HTNMethod,
+	HTNMethodLibrary,
+	HTNMethodStep,
+	HTNTargetTaskBinding,
+	HTNTask,
+)
 from stage4_panda_planning.panda_planner import PANDAPlanner
-from utils.config import get_config
 from utils.hddl_parser import HDDLParser
+
+OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
+)
 
 
 def _domain():
-	domain_path = (
-		Path(__file__).parent.parent.parent
-		/ "tests"
-		/ "fixtures"
-		/ "domains"
-		/ "minimal_blocksworld"
-		/ "domain.hddl"
-	)
-	return HDDLParser.parse_domain(str(domain_path))
+	return HDDLParser.parse_domain(str(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE))
 
 
-def _live_stage3_kwargs() -> dict:
-	config = get_config()
-	if not config.validate():
-		pytest.skip("Stage 4 live tests require a valid OPENAI_API_KEY")
-
-	return {
-		"api_key": config.openai_api_key,
-		"model": config.openai_model,
-		"base_url": config.openai_base_url,
-		"timeout": float(config.openai_timeout),
-	}
-
-
-def _require_panda_toolchain() -> None:
-	if not PANDAPlanner().toolchain_available():
-		pytest.skip("Stage 4 live tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
-
-
-def _eventually_on_spec() -> LTLSpecification:
-	spec = LTLSpecification()
-	spec.objects = ["a", "b"]
-	spec.grounding_map = GroundingMap()
-	spec.grounding_map.add_atom("on_a_b", "on", ["a", "b"])
-	spec.formulas = [
-		LTLFormula(
-			operator=TemporalOperator.FINALLY,
-			predicate=None,
-			sub_formulas=[
-				LTLFormula(
-					operator=None,
-					predicate={"on": ["a", "b"]},
-					sub_formulas=[],
-					logical_op=None,
-				)
-			],
-			logical_op=None,
-		),
-	]
-	return spec
-
-
-def _dfa_result_for_labels(*labels: str) -> dict:
-	edges = "\n".join(f'  0 -> 1 [label="{label}"];' for label in labels)
-	return {
-		"dfa_dot": (
-			"digraph {\n"
-			"  0 [shape=circle];\n"
-			"  1 [shape=doublecircle];\n"
-			f"{edges}\n"
-			"}\n"
-		),
-	}
-
-
-def test_stage4_planner_generates_live_plan_from_synthesised_library(tmp_path):
-	_require_panda_toolchain()
+def test_stage4_planner_generates_plan_for_valid_blocksworld_library(tmp_path):
 	domain = _domain()
-	spec = _eventually_on_spec()
-	method_library, metadata = HTNMethodSynthesizer(
-		**_live_stage3_kwargs(),
-	).synthesize(
-		domain=domain,
-		grounding_map=spec.grounding_map,
-		dfa_result=_dfa_result_for_labels("on_a_b"),
-	)
-
-	assert metadata["used_llm"] is True
-
 	planner = PANDAPlanner(workspace=str(tmp_path))
-	bound_task = method_library.task_name_for_literal(method_library.target_literals[0])
-	assert bound_task is not None
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("make_on", ("X", "Y"), False, ("on",)),
+			HTNTask("make_holding", ("X",), False, ("holding",)),
+		],
+		primitive_tasks=[
+			HTNTask("pick_up", ("X",), True),
+			HTNTask("stack", ("X", "Y"), True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_make_on_already",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("on", ("X", "Y"), True, None),),
+			),
+			HTNMethod(
+				method_name="m_make_on_stack",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("clear", ("Y",), True, None),),
+				subtasks=(
+					HTNMethodStep("s1", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", action_name="stack"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+			HTNMethod(
+				method_name="m_make_holding_already",
+				task_name="make_holding",
+				parameters=("X",),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+			),
+			HTNMethod(
+				method_name="m_make_holding_from_table",
+				task_name="make_holding",
+				parameters=("X",),
+				context=(
+					HTNLiteral("ontable", ("X",), True, None),
+					HTNLiteral("clear", ("X",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep("s1", "pick_up", ("X",), "primitive", action_name="pick-up"),
+				),
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "make_on")],
+	)
+	target_literal = method_library.target_literals[0]
 	plan = planner.plan(
 		domain=domain,
 		method_library=method_library,
-		objects=spec.objects,
-		target_literal=method_library.target_literals[0],
-		task_name=bound_task,
+		objects=("a", "b"),
+		target_literal=target_literal,
+		task_name="make_on",
 		transition_name="transition_1",
+		initial_facts=("(ontable a)", "(clear a)", "(clear b)", "(handempty)"),
 	)
 
-	assert plan.task_name == bound_task
+	assert plan.task_name == "make_on"
 	assert plan.task_args == ("a", "b")
 	assert plan.steps
-	assert any(step.task_name == "put_on_block" for step in plan.steps)
-	assert f"(t1 ({bound_task} a b))" in plan.problem_hddl
+	assert [step.task_name for step in plan.steps] == ["pick_up", "stack"]
+	assert "(t1 (make_on a b))" in plan.problem_hddl

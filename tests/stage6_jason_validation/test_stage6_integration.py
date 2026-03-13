@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+_tests_dir = str(Path(__file__).parent.parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
@@ -15,16 +18,17 @@ from stage6_jason_validation.jason_runner import JasonRunner
 from utils.hddl_condition_parser import HDDLConditionParser, UnsupportedHDDLConstructError
 from utils.hddl_parser import HDDLParser
 
+OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
+)
+
 
 def _stage6_ready() -> bool:
 	return JasonRunner().toolchain_available()
 
 
 def _load_blocksworld_action_schemas():
-	domain_path = Path("tests/fixtures/domains/minimal_blocksworld/domain.hddl")
-	if not domain_path.exists():
-		pytest.skip(f"Blocksworld domain missing: {domain_path}")
-	domain = HDDLParser.parse_domain(str(domain_path))
+	domain = HDDLParser.parse_domain(str(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE))
 	parser = HDDLConditionParser()
 	schemas = []
 	for action in domain.actions:

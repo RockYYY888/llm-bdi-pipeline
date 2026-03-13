@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_tests_dir = str(Path(__file__).parent)
+if _tests_dir not in sys.path:
+	sys.path.insert(0, _tests_dir)
+
+import test_pipeline as pipeline_tests
+
+
+def test_query_relevant_task_names_starts_from_target_bindings_not_only_witnesses():
+	pipeline_tests.assert_query_relevant_task_names_starts_from_target_bindings_not_only_witnesses()
+
+
+def test_representative_task_args_uses_typed_witness_placeholders(tmp_path):
+	pipeline_tests.assert_representative_task_args_uses_typed_witness_placeholders(tmp_path)
+
+
+def test_method_validation_task_args_respect_equality_bound_constants(tmp_path):
+	pipeline_tests.assert_method_validation_task_args_respect_equality_bound_constants(tmp_path)
+
+
+def test_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatch):
+	pipeline_tests.assert_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatch)
+
+
+def test_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
+	pipeline_tests.assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch)
+
+
+def test_pipeline_requires_explicit_domain_file():
+	pipeline_tests.assert_pipeline_requires_explicit_domain_file()
+
+
+def test_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path):
+	pipeline_tests.assert_seed_validation_scope_preserves_multi_type_object_assignments(tmp_path)
+
+
+def test_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
+	pipeline_tests.assert_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path)
+
+
+def test_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
+	pipeline_tests.assert_stage3_type_validation_fails_for_untyped_method_variable(tmp_path)
+
+
+def test_stage1_object_universe_merges_constants_from_atoms_and_formulas():
+	pipeline_tests.assert_stage1_object_universe_merges_constants_from_atoms_and_formulas()
+
+
+def test_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
+	pipeline_tests.assert_ordered_literal_signatures_extracts_eventually_wrapped_atoms()
+
+
+def test_official_blocksworld_problem_query_case_generation_from_problem_tasks():
+	pipeline_tests.assert_official_blocksworld_problem_query_case_generation_from_problem_tasks()
+
+
+def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
+	pipeline_tests.assert_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch)
+
+
+def test_stage6_object_type_resolution_ignores_unused_query_objects():
+	pipeline_tests.assert_stage6_object_type_resolution_ignores_unused_query_objects()
+
+
+def test_stage7_build_root_task_bridges_matches_problem_tasks_by_ground_args():
+	pipeline_tests.assert_stage7_build_root_task_bridges_matches_problem_tasks_by_ground_args()
+
+
+def test_method_validation_initial_facts_are_branch_specific(tmp_path):
+	pipeline_tests.assert_method_validation_initial_facts_are_branch_specific(tmp_path)
+
+
+def test_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_path):
+	pipeline_tests.assert_method_validation_initial_facts_avoid_conflicting_global_defaults(tmp_path)
+
+
+def test_task_witness_initial_facts_merge_sibling_branches(tmp_path):
+	pipeline_tests.assert_task_witness_initial_facts_merge_sibling_branches(tmp_path)
+
+
+def test_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path):
+	pipeline_tests.assert_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path)
