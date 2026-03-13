@@ -90,17 +90,41 @@ def _task_invocation_to_query_clause(task_name: str, args: List[str]) -> str:
 
 
 def _typed_object_phrase(problem: Any) -> str:
-	object_types = {problem.object_types.get(obj) for obj in problem.objects}
-	object_types.discard(None)
-	if len(object_types) == 1:
-		object_type = next(iter(object_types))
-		if object_type:
-			type_phrase = object_type if object_type.endswith("s") else f"{object_type}s"
-			return f"Using {type_phrase} {_serialise_nl_list(problem.objects)}"
-	return f"Using objects {_serialise_nl_list(problem.objects)}"
+	return _typed_object_phrase_for_objects(problem, problem.objects)
 
 
-def _build_case_from_blocksworld_problem(problem_path: Path) -> Dict[str, Any] | None:
+def _typed_object_phrase_for_objects(problem: Any, objects: List[str]) -> str:
+	if not objects:
+		return "Using the task arguments"
+
+	grouped_objects: Dict[str, List[str]] = {}
+	type_order: List[str] = []
+	for obj in objects:
+		object_type = problem.object_types.get(obj) or "object"
+		if object_type not in grouped_objects:
+			grouped_objects[object_type] = []
+			type_order.append(object_type)
+		grouped_objects[object_type].append(obj)
+
+	if len(type_order) == 1 and type_order[0] != "object":
+		object_type = type_order[0]
+		type_phrase = object_type if object_type.endswith("s") else f"{object_type}s"
+		return f"Using {type_phrase} {_serialise_nl_list(grouped_objects[object_type])}"
+
+	group_phrases = []
+	for object_type in type_order:
+		members = grouped_objects[object_type]
+		if object_type == "object":
+			group_phrases.append(_serialise_nl_list(members))
+			continue
+		type_phrase = object_type if len(members) == 1 else (
+			object_type if object_type.endswith("s") else f"{object_type}s"
+		)
+		group_phrases.append(f"{type_phrase} {_serialise_nl_list(members)}")
+	return f"Using {_serialise_nl_list(group_phrases)}"
+
+
+def _build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 	problem = HDDLParser.parse_problem(str(problem_path))
 	task_clauses = [
 		_task_invocation_to_query_clause(invocation.task_name, invocation.args)
@@ -111,7 +135,7 @@ def _build_case_from_blocksworld_problem(problem_path: Path) -> Dict[str, Any] |
 
 	return {
 		"instruction": (
-			f"{_typed_object_phrase(problem)}, complete the ordered tasks "
+			f"{_typed_object_phrase(problem)}, complete the tasks "
 			f"{_serialise_nl_list(task_clauses)}."
 		),
 		"required_task_clauses": task_clauses,
@@ -127,7 +151,7 @@ def _load_blocksworld_problem_query_cases(limit: int = 3) -> Dict[str, Dict[str,
 	cases: Dict[str, Dict[str, Any]] = {}
 	problem_paths = sorted(BLOCKSWORLD_PROBLEM_DIR.glob("p*.hddl"))[:limit]
 	for index, problem_path in enumerate(problem_paths, start=1):
-		case = _build_case_from_blocksworld_problem(problem_path)
+		case = _build_case_from_problem(problem_path)
 		if case is None:
 			continue
 		cases[f"query_{index}"] = case
@@ -877,11 +901,11 @@ def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks
 	if not problem_path.exists():
 		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
 
-	case = _build_case_from_blocksworld_problem(problem_path)
+	case = _build_case_from_problem(problem_path)
 	assert case is not None
 	assert case["instruction"] == (
 		"Using blocks b1, b2, b3, b4, and b5, "
-		"complete the ordered tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1)."
+		"complete the tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1)."
 	)
 	assert case["required_task_clauses"] == [
 		"do_put_on(b4, b2)",

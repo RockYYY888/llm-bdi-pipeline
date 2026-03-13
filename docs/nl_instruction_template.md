@@ -10,15 +10,40 @@ This template serves as a **reference guide** for:
 3. Ensuring consistent NL → LTLf translation quality across different domains
 4. Debugging failed LTLf generation attempts
 
-## Current Benchmark-Backed Testing Rule
+## Recommended Query Style
+
+For the current pipeline, the most reliable user query format is a single sentence that:
+
+1. names all objects that the generated methods may need to use,
+2. keeps those object names exactly as they appear in the domain/problem vocabulary,
+3. states the desired domain tasks explicitly in task-invocation form, and
+4. does not reference `problem.hddl`, `:init`, `:goal`, or any benchmark metadata.
+
+Recommended pattern:
+
+```text
+Using <typed available objects>, complete the tasks task_1(arg1, ...), task_2(arg1, ...), and task_3(arg1, ...).
+```
+
+Examples:
+
+```text
+Using blocks b1, b2, b3, b4, and b5, complete the tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1).
+```
+
+```text
+Using mode high_res, waypoints waypoint2 and waypoint3, and objective objective1, complete the tasks get_soil_data(waypoint2), get_rock_data(waypoint3), and get_image_data(objective1, high_res).
+```
+
+## Benchmark-Backed Acceptance Rule
 
 For official benchmark-backed acceptance tests, each `problem.hddl` instance is paired with
 exactly one reverse-generated natural-language query. That query is a single sentence built
-directly from the problem's root HTN tasks, so the benchmark pair stays one-to-one and the
-query text is not manually authored per case. The HDDL `problem.hddl` file is used only for
-Stage 6 runtime initialisation and Stage 7 official verification; it is not part of the
-Stage 1 or Stage 3 LLM semantic input. In the current live acceptance setup, this rule is
-applied to the first three official IPC Blocksworld benchmark problems (`p01`-`p03`).
+directly from the problem's root HTN tasks plus the full typed object inventory available to
+the execution context, so the benchmark pair stays one-to-one and the query text is not
+manually authored per case. The HDDL `problem.hddl` file is used only for Stage 6 runtime
+initialisation and Stage 7 official verification; it is not part of the Stage 1 or Stage 3
+LLM semantic input.
 
 ## Domain Requirements
 

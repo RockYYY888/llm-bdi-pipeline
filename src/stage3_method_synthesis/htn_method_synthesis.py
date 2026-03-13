@@ -823,6 +823,25 @@ class HTNMethodSynthesizer:
 		self,
 		library: HTNMethodLibrary,
 	) -> HTNMethodLibrary:
+		def normalise_signature_text(text: Any) -> str:
+			if isinstance(text, dict):
+				predicate = text.get("predicate", "")
+				args = tuple(text.get("args", []))
+				is_positive = bool(text.get("is_positive", True))
+				text = HTNLiteral(
+					predicate=predicate,
+					args=args,
+					is_positive=is_positive,
+					negation_mode="naf",
+					source_symbol=text.get("source_symbol"),
+				).to_signature()
+			value = str(text or "").strip()
+			value = re.sub(r"\s+", " ", value)
+			value = re.sub(r"\(\s*", "(", value)
+			value = re.sub(r"\s*\)", ")", value)
+			value = re.sub(r"\s*,\s*", ",", value)
+			return value
+
 		canonical_signatures = {
 			literal.to_signature()
 			for literal in library.target_literals
@@ -830,12 +849,17 @@ class HTNMethodSynthesizer:
 		alternate_lookup: Dict[str, str] = {}
 		for signature in canonical_signatures:
 			alternate_lookup[signature] = signature
+			alternate_lookup[normalise_signature_text(signature)] = signature
 			if signature.startswith("!"):
 				alternate_lookup[f"~{signature[1:]}"] = signature
+				alternate_lookup[normalise_signature_text(f"~{signature[1:]}")] = signature
 
 		bindings = [
 			HTNTargetTaskBinding(
-				target_literal=alternate_lookup.get(binding.target_literal, binding.target_literal),
+				target_literal=alternate_lookup.get(
+					normalise_signature_text(binding.target_literal),
+					normalise_signature_text(binding.target_literal),
+				),
 				task_name=binding.task_name,
 			)
 			for binding in library.target_task_bindings
@@ -1306,6 +1330,7 @@ class HTNMethodSynthesizer:
 
 			allowed_method_names.update(method.method_name for method in guard_methods)
 			seen_signatures: set[Tuple[str, ...]] = set()
+			kept_empty_signature = False
 
 			if not has_distinguishing_context:
 				allowed_method_names.add(constructive_methods[0].method_name)
@@ -1313,7 +1338,13 @@ class HTNMethodSynthesizer:
 
 			for method in constructive_methods:
 				signature = context_signatures[method.method_name]
-				if not signature or signature in seen_signatures:
+				if not signature:
+					if kept_empty_signature:
+						continue
+					kept_empty_signature = True
+					allowed_method_names.add(method.method_name)
+					continue
+				if signature in seen_signatures:
 					continue
 				seen_signatures.add(signature)
 				allowed_method_names.add(method.method_name)
@@ -1717,6 +1748,7 @@ class HTNMethodSynthesizer:
 				continue
 
 			seen_signatures: Dict[Tuple[str, ...], str] = {}
+			empty_signature_method: Optional[str] = None
 			for method in constructive_methods:
 				promoted_context = self._promoted_method_context(
 					method,
@@ -1725,11 +1757,15 @@ class HTNMethodSynthesizer:
 					predicate_arities,
 				)
 				if not promoted_context:
-					raise ValueError(
-						f"Sibling constructive method '{method.method_name}' for task "
-						f"'{task_name}' has no distinguishing context. Constructive sibling "
-						"methods must be semantically distinguishable.",
-					)
+					if empty_signature_method is not None:
+						raise ValueError(
+							f"Sibling constructive methods '{empty_signature_method}' and "
+							f"'{method.method_name}' for task '{task_name}' are not "
+							"semantically distinguishable: both act as empty-context "
+							"fallback branches.",
+						)
+					empty_signature_method = method.method_name
+					continue
 
 				signature = tuple(sorted(literal.to_signature() for literal in promoted_context))
 				if signature in seen_signatures:

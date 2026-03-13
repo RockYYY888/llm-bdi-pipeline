@@ -548,12 +548,18 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Do not encode grounded object constants into compound task names" in system_prompt
 	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
 	assert "must be JSON literal objects, never strings" in system_prompt
-	assert "PRIORITY ORDER: validity of JSON and bindings > executability of methods > semantic alignment > branch coverage." in system_prompt
+	assert (
+		"PRIORITY ORDER: validity of JSON and bindings > executability of methods > "
+		"required support coverage > semantic alignment > optional branch breadth."
+	) in system_prompt
+	assert "Never omit a target-level support-recovery branch" in system_prompt
+	assert "reachable target-support mode uncovered" in system_prompt
 	assert "not handempty alone does not identify what is being held" in system_prompt
 	assert "identify every non-equivalent final primitive action or final helper" in system_prompt
 	assert "If several different final actions can establish the same literal" in system_prompt
 	assert "Helper coverage is not a substitute for target-task coverage" in system_prompt
 	assert "missing-first, missing-second, and missing-both" in system_prompt
+	assert "final-step support and no emitted sibling repairs that mode" in system_prompt
 	assert "Keep a missing-one-support branch only when the already-satisfied support can remain true" in system_prompt
 	assert "direct-blocker and recursively-blocked-blocker cases" in system_prompt
 	assert "recursive blocked-blocker sibling is mandatory" in system_prompt
@@ -575,6 +581,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "If a candidate sibling is not executable, omit it" in user_prompt
 	assert "Reuse one parameterized task" in user_prompt
 	assert "missing-both-support" in user_prompt
+	assert "Never drop a missing-support or missing-both sibling merely because a helper task exists elsewhere" in user_prompt
 	assert "Keep a missing-one-support branch only when the already-satisfied support can stay true" in user_prompt
 	assert "Few-shot guidance (illustrative only):" in user_prompt
 	assert "Example A: branch families for a positive target" in user_prompt
@@ -598,6 +605,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "recursive-blocker: on(BLOCKER, TARGET) & not clear(BLOCKER)" in user_prompt
 	assert "complementary-support rule" in user_prompt
 	assert "Invalid pattern: only the already-satisfied branch and the direct-blocker branch." in user_prompt
+	assert "dropping missing_holding just because a helper task hold_item(ITEM) exists elsewhere" in user_prompt
+	assert "emitting missing_holding and missing_clear but omitting missing_both" in user_prompt
 	assert "positive support literal about a blocker/support object" in user_prompt
 	assert "This is mandatory." in user_prompt
 	assert "direct blocker-removal branch requires clear(BLOCKER)" in user_prompt
@@ -617,6 +626,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "table-mode acquisition and stack-mode acquisition" in user_prompt
 	assert "multiple primitive actions can establish the same headline literal" in user_prompt
 	assert "Helper coverage does not replace target-task coverage" in user_prompt
+	assert "emit a target-level repair branch for missing S" in user_prompt
+	assert "missing_holding plus missing_clear together can replace missing_both" in user_prompt
 	assert "do not emit `holding(X) & not clear(Y) -> clear_helper(Y); final_step`" in user_prompt
 	assert "unstack(BLOCKER, TARGET); put_down(BLOCKER)" in user_prompt
 	assert "context on(B, X) & not clear(B)" in user_prompt
@@ -641,7 +652,7 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		HTNMethodSynthesizer._schema_hint(),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 22500
+	assert len(system_prompt) + len(user_prompt) < 24000
 
 
 def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
@@ -1011,10 +1022,10 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
-						task_name="pick_up",
+						task_name="unstack",
 						args=("B1", "B2"),
 						kind="primitive",
-						action_name="pick-up",
+						action_name="unstack",
 					),
 				),
 				ordering=(),
@@ -1053,6 +1064,32 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 	assert metadata["negation_resolution"]["mode_by_predicate"] == {"on/2": "naf"}
 	assert metadata["negation_resolution"]["policy"] == "all_naf"
 	assert library.target_task_bindings[0].target_literal == "!on(a, b)"
+
+
+def test_target_binding_normalisation_accepts_object_form_literal():
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[
+			HTNLiteral("on", ("a", "b"), True, None),
+		],
+		target_task_bindings=[
+			HTNTargetTaskBinding(
+				{
+					"predicate": "on",
+					"args": ["a", "b"],
+					"is_positive": True,
+				},
+				"place_on",
+			),
+		],
+	)
+
+	normalised = synthesizer._normalise_target_binding_signatures(library)
+
+	assert normalised.target_task_bindings[0].target_literal == "on(a, b)"
 
 
 def test_method_validation_rejects_unbound_free_variables_in_subtasks():
@@ -1495,6 +1532,164 @@ def test_direct_self_recursive_siblings_are_preserved_when_contexts_are_distinct
 		"m_hold_block_clear_first",
 		"m_clear_top_noop",
 	}
+
+
+def test_single_empty_context_fallback_constructive_sibling_is_preserved():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("make_on", ("X", "Y"), False, ("on",)),
+			HTNTask("make_holding", ("X",), False, ("holding",)),
+			HTNTask("make_clear", ("Y",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_make_on_already",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("on", ("X", "Y"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_on_missing_holding",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("clear", ("Y",), True, None),),
+				subtasks=(
+					HTNMethodStep("s1", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", "stack"),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_on_missing_clear",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+				subtasks=(
+					HTNMethodStep("s1", "make_clear", ("Y",), "compound"),
+					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", "stack"),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_on_missing_both",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(),
+				subtasks=(
+					HTNMethodStep("s1", "make_clear", ("Y",), "compound"),
+					HTNMethodStep("s2", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s3", "stack", ("X", "Y"), "primitive", "stack"),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_holding_noop",
+				task_name="make_holding",
+				parameters=("X",),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_clear_noop",
+				task_name="make_clear",
+				parameters=("Y",),
+				context=(HTNLiteral("clear", ("Y",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "make_on")],
+	)
+
+	pruned_library, pruned_count = synthesizer._prune_redundant_constructive_siblings(
+		library,
+		domain,
+	)
+
+	assert pruned_count == 0
+	assert {method.method_name for method in pruned_library.methods} >= {
+		"m_make_on_missing_holding",
+		"m_make_on_missing_clear",
+		"m_make_on_missing_both",
+	}
+	synthesizer._validate_library(pruned_library, domain)
+
+
+def test_multiple_empty_context_fallback_constructive_siblings_are_rejected():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("make_on", ("X", "Y"), False, ("on",)),
+			HTNTask("make_clear", ("Y",), False, ("clear",)),
+			HTNTask("make_holding", ("X",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_make_on_missing_both",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(),
+				subtasks=(
+					HTNMethodStep("s1", "make_clear", ("Y",), "compound"),
+					HTNMethodStep("s2", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s3", "stack", ("X", "Y"), "primitive", "stack"),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_on_fallback_2",
+				task_name="make_on",
+				parameters=("X", "Y"),
+				context=(),
+				subtasks=(
+					HTNMethodStep("s1", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s2", "make_clear", ("Y",), "compound"),
+					HTNMethodStep("s3", "stack", ("X", "Y"), "primitive", "stack"),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_clear_noop",
+				task_name="make_clear",
+				parameters=("Y",),
+				context=(HTNLiteral("clear", ("Y",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_make_holding_noop",
+				task_name="make_holding",
+				parameters=("X",),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="empty-context fallback branches"):
+		synthesizer._validate_library(library, domain)
 
 
 def test_method_validation_rejects_conflicting_variable_types():

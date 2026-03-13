@@ -44,6 +44,11 @@ class Config:
         return int(os.getenv('OPENAI_TIMEOUT', '30'))
 
     @property
+    def openai_stage3_max_tokens(self) -> int:
+        """Get Stage 3 response token budget clamped to the backend-supported range."""
+        return min(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '8192')), 8192)
+
+    @property
     def openai_base_url(self) -> Optional[str]:
         """Get OpenAI base URL (for custom endpoints like DeepSeek)"""
         return os.getenv('OPENAI_BASE_URL')

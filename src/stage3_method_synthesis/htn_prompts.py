@@ -32,10 +32,13 @@ def build_htn_system_prompt() -> str:
         "You generate a query-specific HTN method library for a symbolic planning domain.\n"
         "The output is compiled directly into Jason AgentSpeak.\n"
         "Return JSON only. No markdown, no comments, no prose.\n"
+        "Return compact JSON with no unnecessary whitespace or indentation.\n"
         "\n"
         "OUTPUT CONTRACT:\n"
         "- Return exactly one JSON object with exactly these top-level keys: "
         "target_task_bindings, compound_tasks, methods.\n"
+        "- Emit a compact but complete executable library.\n"
+        "- Never omit a target-level support-recovery branch when some final-step support can be false in a reachable mode.\n"
         "- Prefer reusable parameterized compound tasks over one grounded task per target instance.\n"
         "- Do not encode grounded object constants into compound task names; use parameters instead.\n"
         "- Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_. Choose semantic reusable names instead.\n"
@@ -46,8 +49,9 @@ def build_htn_system_prompt() -> str:
         "- Every compound subtask must reference a declared compound task.\n"
         "- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
         "- Do not emit duplicate bindings, duplicate compound tasks, or semantically duplicate sibling methods.\n"
-        "PRIORITY ORDER: validity of JSON and bindings > executability of methods > semantic alignment > branch coverage.\n"
-        "If branch coverage conflicts with executability, drop the invalid branch.\n"
+        "PRIORITY ORDER: validity of JSON and bindings > executability of methods > required support coverage > semantic alignment > optional branch breadth.\n"
+        "If an optional branch conflicts with executability, drop it.\n"
+        "If omitting a missing-support or missing-both branch would leave a reachable target-support mode uncovered, that omission is invalid.\n"
         "\n"
         "HIDDEN REASONING RECIPE (DO NOT OUTPUT IT):\n"
         "1. Bind each target literal to one reusable semantic target-facing task pattern; reuse the same parameterized task across same-semantic targets.\n"
@@ -56,6 +60,7 @@ def build_htn_system_prompt() -> str:
         "4. If several different final actions can establish the same literal under different source-state modes, emit distinguishable constructive siblings for those modes.\n"
         "5. Build methods least-to-most: already-satisfied, direct-prepared, then blocked branches for missing supports.\n"
         "6. If the final step needs two important supports, explicitly consider missing-first, missing-second, and missing-both.\n"
+        "6a. A positive target task is incomplete if any reachable mode can miss a final-step support and no emitted sibling repairs that mode.\n"
         "7. Helper coverage is not a substitute for target-task coverage: helper modes for support_a do not remove the need for target-level missing-support and missing-both siblings.\n"
         "8. Keep a missing-one-support branch only when the already-satisfied support can remain true while the helper establishes the missing support; otherwise drop that branch or add explicit discharge/re-establish steps.\n"
         "9. For helper tasks that remove blockers or establish clearance, cover both direct-blocker and recursively-blocked-blocker cases when relevant.\n"
@@ -157,6 +162,8 @@ If the final primitive place_item(ITEM, SLOT) needs holding(ITEM) and clear(SLOT
 - missing_both: establish both supports in an executable order, then place_item
 Invalid pattern: only {already, direct} or only one arbitrary blocked branch.
 Invalid pattern: creating one grounded task per target instance when one parameterized task would cover them all.
+Invalid pattern: dropping missing_holding just because a helper task hold_item(ITEM) exists elsewhere; the target task still needs the target-level branch that calls it.
+Invalid pattern: emitting missing_holding and missing_clear but omitting missing_both when both supports can be false together in a reachable mode.
 
 Example B: blocked-clear resource conflict
 If clear_slot(SLOT) needs handempty, this is INVALID:
@@ -299,12 +306,15 @@ Invalid pattern: only the already-satisfied branch and the direct-blocker branch
         f"{few_shots}\n\n"
         "REQUIRED CONTENT RULES:\n"
         "- Prefer declared domain task names when they match the target-facing intention, but generate fresh methods yourself; do not assume any pre-existing method body exists.\n"
+        "- Return a compact but complete executable library; do not add optional helper tasks or sibling methods after every reachable target-support mode is already covered.\n"
+        "- Never drop a missing-support or missing-both sibling merely because a helper task exists elsewhere in the library.\n"
         "- Reuse one parameterized compound task for repeated goal patterns; do not clone a new grounded task for each target literal instance.\n"
         "- Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_ in compound task names.\n"
         "- Do not invent grounded task names like achieve_p_a_b; task names must stay semantic and reusable.\n"
         "- Every target_task_bindings.task_name must match a declared compound task in compound_tasks.\n"
         "- For every target-bound task, cover reusable blocked states, not only the already-prepared endgame state.\n"
         "- For a direct branch with two important support preconditions, missing-both coverage is mandatory unless provably impossible.\n"
+        "- Do not assume missing_holding plus missing_clear together can replace missing_both; if both supports can be false simultaneously, emit missing_both or an explicit equivalent recovery chain.\n"
         "- Emit a missing-first or missing-second branch only when the support already true in that branch can remain true while the missing support is established.\n"
         "- For a place-on style target, do not emit `holding(X) & not clear(Y) -> clear_helper(Y); final_step` unless you also emit the full discharge/re-establish chain.\n"
         "- For blocker-removal helpers, do not stop at the direct-blocker case if the blocker itself may be unprepared. Add the recursive-blocker branch when relevant.\n"
@@ -316,6 +326,7 @@ Invalid pattern: only the already-satisfied branch and the direct-blocker branch
         "- If all direct acquisition modes for a helper require clear(X) or an analogous readiness literal, and some branch context can already locate X while not readiness(X), add the blocked-readiness sibling `helper_for_readiness(X); helper(X)`.\n"
         "- For make_holding-style helpers, do not stop at table-mode and stack-mode direct branches when X can be located but blocked. Add the blocked-clear recursive sibling when relevant.\n"
         "- Helper coverage does not replace target-task coverage: a rich helper library does not remove target-level missing-support and missing-both branches.\n"
+        "- If the final step needs support literal S and some reachable mode can miss S, emit a target-level repair branch for missing S unless another emitted target-level sibling already covers that same mode family.\n"
         "- If a compound helper subtask is annotated with literal p(...), the helper task itself must semantically establish p(...). Do not use an unrelated task name as a proxy for that literal.\n"
         "- Every context entry and every literal-bearing field must use object form with predicate/args/is_positive, not string shorthand.\n"
         "- Do not create clear_first / prepare_first siblings unless they have their own real applicability condition.\n"
@@ -328,6 +339,7 @@ Invalid pattern: only the already-satisfied branch and the direct-blocker branch
         "- For make_holding-style helpers, do not emit a missing_handempty sibling unless the carried object for the recovery step is already bound.\n"
         "- When a helper can preserve its headline literal and also restore a consumed resource, prefer that reusable end state over a transient end state.\n"
         "- Do not introduce free variables. Bind every variable before use.\n"
+        "- Keep the JSON compact: no explanatory text, no markdown, no pretty-printed spacing.\n"
         "- Do not output chain-of-thought. Output final JSON only.\n\n"
         "FINAL SILENT CHECKLIST:\n"
         "1. Exactly one binding per target literal.\n"

@@ -13,6 +13,10 @@
 
 ## Recent Completed Milestones
 
+- [x] Milestone 24: Keep benchmark queries as single reverse-generated sentences from official
+  `problem.hddl` root tasks plus available typed objects, update NL instruction guidance, and fix
+  Stage 3 target-binding normalisation plus constructive-sibling pruning so official blocksworld
+  `p01`-`p03` again pass together under one live `tests/test_pipeline.py all` run
 - [x] Milestone 21: Remove blocksworld-specific IPC hierarchy repair logic, replace it with
   generic method-trace-based hierarchical plan export, and make Stage 4 method validation
   respect equality-bound runtime task arguments so official blocksworld `p01`-`p03` all pass
