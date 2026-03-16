@@ -1,6 +1,7 @@
 # Stage 4 PANDA Tests
 
-Stage 4 now consumes the Stage 3 HTN method library and runs PANDA planning.
+This directory covers the current Stage 4 contract: export the generated HTN library to temporary
+HDDL artifacts, build the concrete planning problem, and ask PANDA for executability witnesses.
 
 ## Main Test Files
 
@@ -9,19 +10,23 @@ Stage 4 now consumes the Stage 3 HTN method library and runs PANDA planning.
 ./.venv/bin/pytest -q tests/stage4_panda_planning/test_stage4_panda_planning.py
 ```
 
-## What It Verifies
+## What These Tests Verify
 
-- The PANDA exporter builds a temporary HDDL domain/problem pair
-- The Stage 4 problem builder owns initial-fact construction explicitly
-- The planner uses the PANDA PI toolchain for the executable plan
-- The live planning path accepts a Stage 3 synthesised HTN library
-- PANDA returns executable primitive actions for the target task
+- temporary HDDL domain/problem export from the generated HTN library
+- explicit initial-fact construction by the Stage 4 problem builder
+- PANDA invocation and plan parsing
+- live planning against the true Stage 3 library structure
+- hard-fail witness validation for the current query-specific structure
 
-## Why These Tests Stay Small
+## What They Do Not Claim
 
-The goal is to keep Stage 4 verification fast and non-redundant:
+- global state-space completeness
+- synthetic wrapper generation
+- synthetic guard completion
+- post-synthesis method repair
 
-- no state-space explosion inside the test harness
-- real LLM API only where Stage 3 synthesis is a prerequisite
-- PANDA-backed live planning when the toolchain is installed
-- the default local PANDA install path is auto-discovered when available
+## Notes
+
+- Live tests require `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine`.
+- The default local install path under `$HOME/.local/pandaPI/bin` is auto-discovered when
+  available.

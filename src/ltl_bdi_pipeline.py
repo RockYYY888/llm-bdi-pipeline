@@ -3,6 +3,7 @@ LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
 """
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
@@ -11,7 +12,7 @@ from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage2_dfa_generation.dfa_builder import DFABuilder
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
-from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
+from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
@@ -82,14 +83,14 @@ class LTL_BDI_Pipeline:
 
     def execute(self, nl_instruction: str, mode: str = "dfa_agentspeak") -> Dict[str, Any]:
         """
-        Execute LTL-BDI pipeline (Stages 1-5: NL -> LTLf -> DFA -> AgentSpeak)
+        Execute the default Stage 1 -> Stage 7 pipeline mainline.
 
         Args:
             nl_instruction: Natural language instruction
             mode: Execution mode (only "dfa_agentspeak" is supported)
 
         Returns:
-            Results from Stage 1-5 (no execution/evaluation yet)
+            Stage-by-stage execution results and saved artifact metadata
         """
         if mode != "dfa_agentspeak":
             raise ValueError(
@@ -291,6 +292,8 @@ class LTL_BDI_Pipeline:
         try:
             grounding_map = ltl_spec.grounding_map
             ordered_literal_signatures = self._ordered_literal_signatures_from_spec(ltl_spec)
+            query_text = getattr(ltl_spec, "source_instruction", "")
+            query_task_anchors = self._extract_query_task_anchors(query_text)
             synthesizer = HTNMethodSynthesizer(
                 api_key=self.config.openai_api_key,
                 model=self.config.openai_model,
@@ -303,7 +306,8 @@ class LTL_BDI_Pipeline:
                 domain=self.domain,
                 grounding_map=grounding_map,
                 dfa_result=dfa_result,
-                query_text=getattr(ltl_spec, "source_instruction", ""),
+                query_text=query_text,
+                query_task_anchors=query_task_anchors,
                 negation_hints=getattr(ltl_spec, "negation_hints", {}),
                 ordered_literal_signatures=ordered_literal_signatures,
             )
@@ -318,7 +322,9 @@ class LTL_BDI_Pipeline:
                     "llm_attempt_durations_seconds",
                 ),
                 "target_literals": synthesis_meta["target_literals"],
+                "query_task_anchors": synthesis_meta.get("query_task_anchors", []),
                 "negation_resolution": synthesis_meta.get("negation_resolution", {}),
+                "action_analysis": synthesis_meta.get("action_analysis", {}),
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
@@ -446,6 +452,40 @@ class LTL_BDI_Pipeline:
         atom = predicate if not args else f"{predicate}({', '.join(args)})"
         return atom if is_positive else f"!{atom}"
 
+    def _extract_query_task_anchors(self, query_text: str) -> Tuple[Dict[str, Any], ...]:
+        if not query_text.strip():
+            return ()
+
+        declared_task_names = [
+            task.name
+            for task in getattr(self.domain, "tasks", [])
+            if getattr(task, "name", None)
+        ]
+        if not declared_task_names:
+            return ()
+
+        pattern = re.compile(
+            r"(?P<task_name>"
+            + "|".join(
+                re.escape(task_name)
+                for task_name in sorted(declared_task_names, key=len, reverse=True)
+            )
+            + r")\((?P<args>[^()]*)\)",
+        )
+        anchors: List[Dict[str, Any]] = []
+        for match in pattern.finditer(query_text):
+            args_text = match.group("args").strip()
+            args = [
+                part.strip()
+                for part in args_text.split(",")
+                if part.strip()
+            ]
+            anchors.append({
+                "task_name": match.group("task_name"),
+                "args": args,
+            })
+        return tuple(anchors)
+
     def _stage4_panda_planning(self, ltl_spec, method_library, transition_specs):
         """Stage 4: HTN method library -> PANDA planning."""
         print("\n[STAGE 4] PANDA Planning")
@@ -479,6 +519,10 @@ class LTL_BDI_Pipeline:
                     ltl_spec.objects,
                     object_pool=witness_objects,
                     object_types=witness_object_types,
+                )
+                witness_initial_facts = self._transition_witness_initial_facts(
+                    witness_initial_facts,
+                    literal,
                 )
                 plan = planner.plan(
                     domain=self.domain,
@@ -527,98 +571,15 @@ class LTL_BDI_Pipeline:
                         "plan": plan.to_dict(),
                     }
                 )
-
             method_validation_artifacts = []
-            relevant_task_names = self._query_relevant_task_names(method_library, plan_records)
-            for task_name in relevant_task_names:
-                representative_task_args = self._representative_task_args(
-                    task_name,
-                    method_library,
-                    ltl_spec.objects,
-                    plan_records,
-                )
-                for method in method_library.methods_for_task(task_name):
-                    validation_task_args = self._method_validation_task_args(
-                        method,
-                        representative_task_args,
-                        method_library,
-                    )
-                    validation_name = f"method_{method.method_name}"
-                    validation_objects, validation_object_types = self._seed_validation_scope(
-                        task_name,
-                        method_library,
-                        validation_task_args,
-                        ltl_spec.objects,
-                    )
-                    validation_initial_facts = self._method_validation_initial_facts(
-                        planner,
-                        method,
-                        method_library,
-                        validation_task_args,
-                        ltl_spec.objects,
-                        object_pool=validation_objects,
-                        object_types=validation_object_types,
-                    )
-                    try:
-                        validation_plan = planner.plan(
-                            domain=self.domain,
-                            method_library=method_library,
-                            objects=tuple(validation_objects),
-                            target_literal=None,
-                            task_name=task_name,
-                            transition_name=validation_name,
-                            typed_objects=self._typed_object_entries(
-                                validation_objects,
-                                validation_object_types,
-                            ),
-                            task_args=validation_task_args,
-                            root_method=method,
-                            allow_empty_plan=not method.subtasks,
-                            initial_facts=validation_initial_facts,
-                        )
-                        method_validation_artifacts.append(
-                            {
-                                "validation_name": validation_name,
-                                "task_name": task_name,
-                                "task_args": list(validation_task_args),
-                                "method_name": method.method_name,
-                                "allow_empty_plan": not method.subtasks,
-                                "objects": list(validation_objects),
-                                "initial_facts": list(validation_initial_facts),
-                                "status": "success",
-                                "plan": validation_plan.to_dict(),
-                            }
-                        )
-                    except Exception as exc:
-                        method_validation_artifacts.append(
-                            {
-                                "validation_name": validation_name,
-                                "task_name": task_name,
-                                "task_args": list(validation_task_args),
-                                "method_name": method.method_name,
-                                "allow_empty_plan": not method.subtasks,
-                                "objects": list(validation_objects),
-                                "initial_facts": list(validation_initial_facts),
-                                "status": "failed",
-                                "error": str(exc),
-                                "metadata": getattr(exc, "metadata", None),
-                            }
-                        )
 
             summary = {
                 "backend": "pandaPI",
                 "transition_count": len(transition_artifacts),
-                "validated_method_count": len(method_validation_artifacts),
-                "successful_method_validations": sum(
-                    1
-                    for item in method_validation_artifacts
-                    if item["status"] == "success"
-                ),
-                "failed_method_validations": sum(
-                    1
-                    for item in method_validation_artifacts
-                    if item["status"] == "failed"
-                ),
+                "validated_method_count": 0,
+                "successful_method_validations": 0,
+                "failed_method_validations": 0,
+                "method_validation_mode": "disabled_without_synthetic_stage4_wrappers",
                 "dfa_states": sorted(
                     {
                         transition["source_state"]
@@ -632,26 +593,6 @@ class LTL_BDI_Pipeline:
                 ),
                 "planned_tasks": [record["plan"].task_name for record in plan_records],
             }
-
-            failed_method_names = sorted(
-                item["method_name"]
-                for item in method_validation_artifacts
-                if item["status"] == "failed"
-            )
-            if failed_method_names:
-                error = RuntimeError(
-                    "Stage 4 method validation failed for query-relevant methods: "
-                    f"{failed_method_names}",
-                )
-                setattr(
-                    error,
-                    "metadata",
-                    {
-                        **summary,
-                        "failed_method_names": failed_method_names,
-                    },
-                )
-                raise error
 
             self.logger.log_stage4_panda_planning(
                 {
@@ -685,119 +626,6 @@ class LTL_BDI_Pipeline:
             import traceback
             traceback.print_exc()
             return None, None
-
-    @staticmethod
-    def _query_relevant_task_names(method_library, plan_records):
-        task_names = {
-            binding.task_name
-            for binding in method_library.target_task_bindings
-        }
-        task_names.update({
-            record["plan"].task_name
-            for record in plan_records
-        })
-        queue = list(task_names)
-
-        while queue:
-            task_name = queue.pop(0)
-            for method in method_library.methods_for_task(task_name):
-                for step in method.subtasks:
-                    if step.kind != "compound" or step.task_name in task_names:
-                        continue
-                    task_names.add(step.task_name)
-                    queue.append(step.task_name)
-
-        return sorted(task_names)
-
-    def _representative_task_args(self, task_name, method_library, objects, plan_records):
-        for record in plan_records:
-            plan = record["plan"]
-            if plan.task_name == task_name and plan.task_args:
-                return tuple(plan.task_args)
-
-        for binding in method_library.target_task_bindings:
-            if binding.task_name != task_name:
-                continue
-            for literal in method_library.target_literals:
-                if literal.to_signature() == binding.target_literal:
-                    return tuple(literal.args)
-
-        task_schema = method_library.task_for_name(task_name)
-        arity = len(task_schema.parameters) if task_schema else 0
-        if arity == 0:
-            return ()
-
-        signature = self._task_type_signature(task_name, method_library)
-        if signature and len(signature) == arity:
-            return tuple(
-                f"witness_{type_name}_{index + 1}"
-                for index, type_name in enumerate(signature)
-            )
-
-        source_objects = list(objects)
-        if not source_objects:
-            return tuple(f"obj{index + 1}" for index in range(arity))
-        if len(source_objects) >= arity:
-            return tuple(source_objects[:arity])
-
-        values = list(source_objects)
-        while len(values) < arity:
-            values.append(source_objects[(len(values)) % len(source_objects)])
-        return tuple(values[:arity])
-
-    def _method_validation_task_args(self, method, fallback_task_args, method_library):
-        task_schema = method_library.task_for_name(method.task_name)
-        task_pattern = tuple(
-            getattr(method, "task_args", ())
-            or getattr(task_schema, "parameters", ())
-            or tuple(method.parameters[: len(fallback_task_args)])
-        )
-        if not task_pattern:
-            return tuple(fallback_task_args)
-
-        constant_bindings = self._context_constant_bindings(method.context)
-        resolved_args = []
-        for index, pattern_symbol in enumerate(task_pattern):
-            fallback = fallback_task_args[index] if index < len(fallback_task_args) else pattern_symbol
-            resolved_args.append(constant_bindings.get(pattern_symbol, fallback))
-        return tuple(resolved_args)
-
-    def _context_constant_bindings(self, literals):
-        direct_constant_bindings = {}
-        pending_equalities = []
-
-        for literal in literals:
-            if not getattr(literal, "is_equality", False) or not literal.is_positive:
-                continue
-            left, right = literal.args
-            left_is_var = self._is_variable_symbol(left)
-            right_is_var = self._is_variable_symbol(right)
-            if left_is_var and not right_is_var:
-                direct_constant_bindings[left] = right
-                continue
-            if right_is_var and not left_is_var:
-                direct_constant_bindings[right] = left
-                continue
-            if left_is_var and right_is_var:
-                pending_equalities.append((left, right))
-
-        changed = True
-        while changed and pending_equalities:
-            changed = False
-            remaining = []
-            for left, right in pending_equalities:
-                if left in direct_constant_bindings and right not in direct_constant_bindings:
-                    direct_constant_bindings[right] = direct_constant_bindings[left]
-                    changed = True
-                    continue
-                if right in direct_constant_bindings and left not in direct_constant_bindings:
-                    direct_constant_bindings[left] = direct_constant_bindings[right]
-                    changed = True
-                    continue
-                remaining.append((left, right))
-            pending_equalities = remaining
-
-        return direct_constant_bindings
 
     def _seed_validation_scope(
         self,
@@ -1873,6 +1701,21 @@ class LTL_BDI_Pipeline:
 
         return tuple(facts)
 
+    @staticmethod
+    def _transition_witness_initial_facts(initial_facts, target_literal):
+        if target_literal is None or not target_literal.is_positive or target_literal.is_equality:
+            return tuple(initial_facts)
+        target_fact = (
+            f"({target_literal.predicate} {' '.join(target_literal.args)})"
+            if target_literal.args
+            else f"({target_literal.predicate})"
+        )
+        return tuple(
+            fact
+            for fact in initial_facts
+            if fact != target_fact
+        )
+
     def _stage5_agentspeak_rendering(self, ltl_spec, method_library, plan_records):
         """Stage 5: HTN methods + validated DFA wrappers -> AgentSpeak rendering."""
         print("\n[STAGE 5] AgentSpeak Rendering")
@@ -2080,21 +1923,13 @@ class LTL_BDI_Pipeline:
             return None
 
         stage6_artifacts = stage6_data.get("artifacts") or {}
-        root_task_bridges = self._stage7_build_root_task_bridges(
-            method_library,
-            stage6_artifacts.get("method_trace") or [],
-        )
-        verification_domain_file = self._stage7_build_verification_domain(
-            method_library,
-            root_task_bridges,
-        )
+        verification_domain_file = self._stage7_build_verification_domain(method_library)
         verifier_result = verifier.verify_plan(
             domain_file=verification_domain_file,
             problem_file=self.problem_file,
             action_path=stage6_artifacts.get("action_path") or [],
             method_library=method_library,
             method_trace=stage6_artifacts.get("method_trace") or [],
-            root_task_bridges=root_task_bridges,
             output_dir=self.output_dir,
         )
         artifacts = verifier_result.to_dict()
@@ -2107,7 +1942,6 @@ class LTL_BDI_Pipeline:
             "primitive_plan_executable": verifier_result.primitive_plan_executable,
             "reached_goal_state": verifier_result.reached_goal_state,
             "build_warning": verifier_result.build_warning,
-            "root_task_bridges": root_task_bridges,
             "verification_domain_file": str(verification_domain_file),
             "verification_problem_file": str(Path(self.problem_file).resolve()),
         }
@@ -2146,199 +1980,16 @@ class LTL_BDI_Pipeline:
             "artifacts": artifacts,
         }
 
-    def _stage7_build_verification_domain(self, method_library, root_task_bridges):
+    def _stage7_build_verification_domain(self, method_library):
         planner = PANDAPlanner()
-        verification_library = self._stage7_with_root_task_bridges(
-            method_library,
-            root_task_bridges,
-        )
         verification_domain_hddl = planner._build_domain_hddl(
             self.domain,
-            verification_library,
+            method_library,
             self.domain.name,
-            suppress_guard_tasks=None,
         )
         verification_domain_path = self.output_dir / "ipc_verification_domain.hddl"
         verification_domain_path.write_text(verification_domain_hddl)
         return verification_domain_path
-
-    def _stage7_build_root_task_bridges(self, method_library, method_trace):
-        if self.problem is None:
-            return []
-
-        literal_task_by_args: Dict[Tuple[str, ...], set[str]] = defaultdict(set)
-        binding_lookup = {
-            binding.target_literal: binding.task_name
-            for binding in method_library.target_task_bindings
-        }
-        for literal in method_library.target_literals:
-            task_name = binding_lookup.get(literal.to_signature())
-            if task_name is None:
-                continue
-            literal_task_by_args[tuple(literal.args)].add(task_name)
-
-        generated_task_lookup = {
-            task.name: task
-            for task in method_library.compound_tasks
-        }
-        domain_task_lookup = {
-            task.name: task
-            for task in getattr(self.domain, "tasks", [])
-        }
-
-        bridge_specs: List[Dict[str, Any]] = []
-        for root_index, task in enumerate(getattr(self.problem, "htn_tasks", []) or []):
-            source_task_name = getattr(task, "task_name", "")
-            task_args = tuple(getattr(task, "args", ()) or ())
-            generated_task_names = literal_task_by_args.get(task_args)
-            if generated_task_names is None or len(generated_task_names) != 1:
-                continue
-            generated_task_name = next(iter(generated_task_names))
-            if generated_task_name == source_task_name:
-                continue
-            generated_task = generated_task_lookup.get(generated_task_name)
-            source_task = domain_task_lookup.get(source_task_name)
-            if generated_task is None or source_task is None:
-                continue
-            source_parameters = tuple(
-                self._stage7_normalise_task_parameter(parameter)
-                for parameter in getattr(source_task, "parameters", []) or []
-            )
-            if len(source_parameters) != len(generated_task.parameters):
-                continue
-            bridge_specs.append({
-                "root_index": root_index,
-                "source_task_name": source_task_name,
-                "source_task_args": list(task_args),
-                "generated_task_name": generated_task_name,
-                "method_name": f"m_verify_bridge_{source_task_name}_{root_index + 1}_{generated_task_name}",
-                "extra_subtasks": [],
-            })
-
-        method_lookup = {
-            method.method_name: method
-            for method in method_library.methods
-        }
-        target_task_names = {
-            binding.task_name
-            for binding in method_library.target_task_bindings
-        }
-        top_level_invocations: List[Tuple[str, Tuple[str, ...]]] = []
-        for item in method_trace or []:
-            method_name = str(item.get("method_name", "")).strip()
-            method = method_lookup.get(method_name)
-            if method is None or method.task_name not in target_task_names:
-                continue
-            task_args = tuple(
-                str(value).strip()
-                for value in (item.get("task_args") or item.get("bindings") or [])
-            )
-            top_level_invocations.append((method.task_name, task_args))
-
-        if bridge_specs and len(top_level_invocations) > len(bridge_specs):
-            bridge_specs[-1]["extra_subtasks"] = [
-                {
-                    "task_name": task_name,
-                    "task_args": list(task_args),
-                }
-                for task_name, task_args in top_level_invocations[len(bridge_specs):]
-            ]
-
-        return bridge_specs
-
-    def _stage7_with_root_task_bridges(self, method_library, root_task_bridges):
-        if not root_task_bridges:
-            return method_library
-
-        existing_tasks = {
-            task.name: task
-            for task in method_library.compound_tasks
-        }
-        existing_method_names = {
-            method.method_name
-            for method in method_library.methods
-        }
-        domain_task_lookup = {
-            task.name: task
-            for task in getattr(self.domain, "tasks", [])
-        }
-
-        bridged_tasks = list(method_library.compound_tasks)
-        bridged_methods = list(method_library.methods)
-        for bridge in root_task_bridges:
-            source_task_name = bridge["source_task_name"]
-            generated_task_name = bridge["generated_task_name"]
-            method_name = bridge["method_name"]
-            if method_name in existing_method_names:
-                continue
-            source_task = domain_task_lookup.get(source_task_name)
-            generated_task = method_library.task_for_name(generated_task_name)
-            if source_task is None or generated_task is None:
-                continue
-            source_parameters = tuple(
-                self._stage7_normalise_task_parameter(parameter)
-                for parameter in getattr(source_task, "parameters", []) or []
-            )
-            if len(source_parameters) != len(generated_task.parameters):
-                continue
-            if source_task_name not in existing_tasks:
-                bridged_task = HTNTask(
-                    name=source_task_name,
-                    parameters=source_parameters,
-                    is_primitive=False,
-                    source_predicates=(),
-                    source_name=source_task_name,
-                )
-                bridged_tasks.append(bridged_task)
-                existing_tasks[source_task_name] = bridged_task
-            subtask_steps = [
-                HTNMethodStep(
-                    step_id="s1",
-                    task_name=generated_task_name,
-                    args=source_parameters,
-                    kind="compound",
-                ),
-            ]
-            for extra_index, extra in enumerate(bridge.get("extra_subtasks") or [], start=2):
-                extra_task_name = extra.get("task_name")
-                extra_task_args = tuple(extra.get("task_args") or [])
-                if not extra_task_name:
-                    continue
-                subtask_steps.append(
-                    HTNMethodStep(
-                        step_id=f"s{extra_index}",
-                        task_name=extra_task_name,
-                        args=extra_task_args,
-                        kind="compound",
-                    ),
-                )
-            bridged_methods.append(
-                HTNMethod(
-                    method_name=method_name,
-                    task_name=source_task_name,
-                    parameters=source_parameters,
-                    task_args=source_parameters,
-                    context=(),
-                    subtasks=tuple(subtask_steps),
-                    ordering=(),
-                    origin="stage7_root_bridge",
-                    source_method_name=method_name,
-                ),
-            )
-            existing_method_names.add(method_name)
-
-        return HTNMethodLibrary(
-            compound_tasks=bridged_tasks,
-            primitive_tasks=list(method_library.primitive_tasks),
-            methods=bridged_methods,
-            target_literals=list(method_library.target_literals),
-            target_task_bindings=list(method_library.target_task_bindings),
-        )
-
-    @staticmethod
-    def _stage7_normalise_task_parameter(parameter: str) -> str:
-        name = parameter.split("-", 1)[0].strip().lstrip("?")
-        return name.upper()
 
     def _stage6_runtime_seed_facts(self, plan_records, target_literals):
         if self.problem is not None:

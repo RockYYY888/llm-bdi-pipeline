@@ -1,88 +1,87 @@
 # Pipeline Assumptions and Validation Boundary
 
-This document states the assumptions required for the current Stage 1-6
-pipeline to behave as designed. It is intentionally faithful to the code path
-in `src/main.py -> LTL_BDI_Pipeline.execute(mode="dfa_agentspeak")`.
+This document states the assumptions under which the default
+`Stage 1 -> Stage 7` mainline is intended to operate. It describes the current
+runtime contract, not historical variants.
 
-## 1. Runtime and Toolchain Assumptions
+## 1. Mainline Scope
 
-1. A domain file must be explicitly provided (`--domain-file`) and must exist.
-2. Live LLM access is required (`OPENAI_API_KEY`) because Stage 1 and Stage 3
-   both depend on LLM output.
-3. Stage 2 requires `ltlf2dfa` + MONA and the BDD library (`dd`).
-4. Stage 4 requires PANDA PI binaries:
-   `pandaPIparser`, `pandaPIgrounder`, `pandaPIengine`.
-5. Stage 6 requires Java 17-23, `javac`, and a buildable local Jason source
-   tree at `src/stage6_jason_validation/jason_src`.
+The active path is `src/main.py -> LTL_BDI_Pipeline.execute(mode="dfa_agentspeak")`.
+Under that path:
 
-## 2. HDDL Language Subset Assumptions
+- Stage 1 interprets one natural-language query into predicate-grounded LTLf.
+- Stage 3 performs one single-call LLM synthesis of a query-specific HTN method library.
+- No stage is allowed to project missing methods from the gold domain, run runtime-guided repair,
+  or inject code-authored replacement methods after synthesis.
 
-The action-condition parser is sound only for a boolean subset:
+## 2. Runtime and Toolchain Assumptions
 
-1. Supported in preconditions/effects: `and`, `or`, `not`, `imply`, and
-   equality/disequality (`=`).
-2. Explicitly unsupported and fail-fast: `when`, `forall`, `exists`.
-3. Disjunctive effects are rejected (`(or ...)` in `:effect` is fail-fast).
-4. Stage 6 environment semantics are boolean symbolic state updates
-   (`add/remove` facts), not numeric fluents, temporal durations, or stochastic
-   effects.
+1. A domain file must be provided explicitly with `--domain-file`.
+2. Live LLM access is required because Stage 1 and Stage 3 both depend on model output.
+3. Stage 2 requires `ltlf2dfa`, MONA, and the `dd` BDD library.
+4. Stage 4 requires `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine`.
+5. Stage 6 requires Java 17-23 plus a buildable Jason CLI tree under
+   `src/stage6_jason_validation/jason_src`.
 
-## 3. Query-to-Domain Semantic Alignment Assumptions
+## 3. Supported HDDL Subset
 
-1. User goals must compile to literals over predicates declared in the domain
-   (plus `=` constraints).
+The current parser and runtime are designed for a typed symbolic subset of HDDL:
+
+1. Preconditions/effects may use `and`, `or`, `not`, `imply`, and equality/disequality.
+2. `when`, `forall`, and `exists` are unsupported and fail fast.
+3. Disjunctive effects (`(or ...)` inside `:effect`) are unsupported and fail fast.
+4. Runtime semantics are boolean symbolic updates over facts. Numeric fluents, durations,
+   and stochastic effects are out of scope.
+
+## 4. Information-Flow Boundary
+
+The pipeline intentionally separates domain semantics from problem-instance semantics.
+
+1. Stage 1 consumes the natural-language query plus domain signatures.
+2. Stage 3 consumes the query, Stage 2 targets, and domain signatures.
+3. `domain.methods` are not semantic input to Stage 1 or Stage 3.
+4. `problem.hddl` is not semantic input to Stage 1 or Stage 3.
+5. `problem.hddl` is used only for:
+   - Stage 6 runtime initialisation when available
+   - Stage 7 official IPC verification
+
+## 5. Query Assumptions
+
+1. Queries must be expressible over predicates declared in the domain.
 2. Predicate arity must match domain signatures.
-3. Query intents outside predicate-level symbolic semantics (for example,
-   "better", "safer", "more efficient" without formal predicates) are not
-   guaranteed to compile.
+3. For benchmark-backed acceptance, each `problem.hddl` instance is paired with exactly one
+   reverse-generated single-sentence query built from:
+   - the problem's root HTN tasks
+   - the typed object inventory available to execution
+4. Query text may mention declared task invocations, but Stage 1 must still output
+   predicate-grounded LTLf rather than task atoms.
 
-## 4. Typing Assumptions (Strict and Fail-Fast)
+## 6. Typing and Identifier Assumptions
 
-1. Every relevant object/variable must resolve to a unique legal type.
-2. Type evidence is unified from predicate signatures, action signatures, task
-   signatures, and method/task bindings.
-3. Unknown types, conflicting constraints, missing evidence, and ambiguous
-   leaf-type candidates are all hard errors.
-4. Multi-type export to Stage 4 requires explicit object->type assignments for
-   objects used in the generated problem.
+1. Relevant objects and variables must resolve to legal domain types.
+2. Type evidence is unified from predicates, actions, tasks, and method bindings.
+3. Conflicting or ambiguous type assignments are hard errors.
+4. Stage 3 task and method identifiers must remain AgentSpeak-safe:
+   `[a-z][a-z0-9_]*`.
+5. Primitive action aliases normalise HDDL names by replacing `-` with `_`.
+6. Variable detection remains uppercase-first in the Stage 3/4/5 export path.
 
-## 5. Identifier and Symbol Conventions
+## 7. Validation Boundary
 
-1. Stage 3 expects AgentSpeak-safe identifiers (`[a-z][a-z0-9_]*`) for task,
-   method, and subtask names.
-2. Variable detection is uppercase-first in Stage 3/4/5 code paths. Naming that
-   violates this convention may be interpreted incorrectly.
-3. Primitive action aliases are normalized from HDDL names by replacing `-`
-   with `_` at runtime.
+1. Stage 4 is a hard-fail existence-witness gate over the generated library and the current
+   query structure. It is not a full state-space completeness proof.
+2. Stage 4 validates the real generated library only. It does not add synthetic wrappers,
+   synthetic guards, or synthetic bridge methods.
+3. Stage 6 is a hard-fail Jason runtime execution gate for the generated AgentSpeak program.
+4. Stage 7 is a hard-fail official IPC HTN verification gate using `pandaPIparser`.
 
-## 6. Negation Assumptions (Current Policy)
+## 8. Negation Policy
 
-1. Current policy is `all_naf`: negative literals are interpreted as
-   `not p(...)` (negation-as-failure).
-2. Strong negation (`~p`) is not active in the current mainline.
+1. The current policy is `all_naf`.
+2. Negative literals are rendered as `not p(...)`.
+3. A strong-negation track (`~p`) is not active in the current mainline.
 
-## 7. Validation Boundary Assumptions
+## 9. Practical Meaning of "General"
 
-1. Stage 4 is existence-witness validation for query-relevant structure, not a
-   full state-space completeness proof.
-2. Stage 6 is a real Jason execution gate with runtime markers and environment
-   adapter checks, but still a run-level witness check, not exhaustive
-   verification.
-3. Stage 4 method-validation failures are recorded in artifacts; they are not
-   currently promoted to a hard Stage 4 failure by default.
-
-## 8. Known Interpretation Caveats
-
-1. Stage 2 summary counters (`num_states`, `num_transitions`) may under-report
-   real DFA size in some graphs due to legacy counting heuristics. Structural
-   truth should be read from `dfa_simplified.dot` and
-   `simplification_stats`.
-2. Stage 5 may generate multiple `+!run_dfa` plans for one source state when
-   multiple outgoing wrappers exist; Jason handles this as normal BDI plan
-   selection, not explicit deterministic branching encoded by us.
-
-## 9. Practical Definition of "General" for This Repository
-
-Under the assumptions above, the pipeline is general for typed symbolic HDDL
-domains within the supported subset and does not rely on blocksworld-specific
-hardcoding in core Stage 1-6 logic.
+Within the boundary above, the repository targets typed symbolic HDDL domains in the supported
+subset without domain-specific hardcoding in the core Stage 1 -> Stage 7 logic.

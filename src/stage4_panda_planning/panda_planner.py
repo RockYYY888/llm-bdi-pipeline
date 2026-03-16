@@ -19,7 +19,6 @@ from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
-	HTNTask,
 )
 from stage4_panda_planning.problem_builder import PANDAProblemBuilder
 from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
@@ -72,7 +71,6 @@ class PANDAPlanner:
 		*,
 		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
 		task_args: Optional[Sequence[str]] = None,
-		root_method: Optional[HTNMethod] = None,
 		allow_empty_plan: bool = False,
 		initial_facts: Optional[Sequence[str]] = None,
 	) -> PANDAPlanResult:
@@ -83,25 +81,17 @@ class PANDAPlanner:
 		work_dir = self._resolve_work_dir(transition_name)
 		work_dir.mkdir(parents=True, exist_ok=True)
 
-		export_library = method_library
-		planning_task_name = task_name
-		if root_method is not None:
-			export_library, planning_task_name = self._wrap_library_for_root_method(
-				method_library,
-				root_method,
-			)
 		domain_hddl = self._build_domain_hddl(
 			domain,
-			export_library,
+			method_library,
 			domain_name,
-			suppress_guard_tasks=None,
 		)
 		problem_hddl = self.problem_builder.build_problem_hddl(
 			domain=domain,
 			domain_name=domain_name,
 			objects=objects,
 			typed_objects=typed_objects,
-			task_name=planning_task_name,
+			task_name=task_name,
 			task_args=task_args_tuple,
 			initial_facts=initial_facts,
 		)
@@ -228,8 +218,6 @@ class PANDAPlanner:
 		domain: Any,
 		method_library: HTNMethodLibrary,
 		domain_name: str,
-		*,
-		suppress_guard_tasks: Optional[set[str]] = None,
 	) -> str:
 		requirements = list(domain.requirements or [])
 		if ":hierarchy" not in requirements:
@@ -248,7 +236,7 @@ class PANDAPlanner:
 		lines.append("")
 
 		for task in method_library.compound_tasks:
-			lines.append(f"  (:task {task.name}")
+			lines.append(f"  (:task {task.source_name or task.name}")
 			lines.append(
 				f"    :parameters ({self._render_typed_variables(task.parameters, domain.types)})"
 			)
@@ -257,12 +245,6 @@ class PANDAPlanner:
 
 		task_lookup = {task.name: task for task in method_library.compound_tasks}
 		for method in method_library.methods:
-			lines.extend(self._render_method(method, task_lookup, domain.types))
-			lines.append("")
-		for method in self._build_guard_completion_methods(
-			method_library,
-			suppress_tasks=suppress_guard_tasks or set(),
-		):
 			lines.extend(self._render_method(method, task_lookup, domain.types))
 			lines.append("")
 
@@ -298,7 +280,8 @@ class PANDAPlanner:
 			f"    :parameters ({self._render_typed_variables(method_parameters, domain_types)})"
 		)
 		lines.append(
-			f"    :task ({method.task_name}{self._render_invocation_tokens(task_args, variable_map)})"
+			f"    :task ({getattr(task_schema, 'source_name', None) or method.task_name}"
+			f"{self._render_invocation_tokens(task_args, variable_map)})"
 		)
 		lines.append(
 			f"    :precondition {self._render_literal_conjunction(method.context, variable_map)}"
@@ -306,7 +289,7 @@ class PANDAPlanner:
 		subtasks_keyword = ":subtasks" if method.ordering else ":ordered-subtasks"
 		lines.append(f"    {subtasks_keyword} (and")
 		for step in method.subtasks:
-			step_name = self._render_method_step_name(step)
+			step_name = self._render_method_step_name(step, task_lookup)
 			lines.append(
 				f"      ({step.step_id} ({step_name}"
 				f"{self._render_invocation_tokens(step.args, variable_map)}))"
@@ -320,152 +303,13 @@ class PANDAPlanner:
 		lines.append("  )")
 		return lines
 
-	def _render_method_step_name(self, step: Any) -> str:
+	def _render_method_step_name(self, step: Any, task_lookup: Dict[str, Any]) -> str:
 		if getattr(step, "kind", None) == "primitive":
 			if getattr(step, "action_name", None):
 				return step.action_name
 			return step.task_name.replace("_", "-")
-		return step.task_name
-
-	def _build_guard_completion_methods(
-		self,
-		method_library: HTNMethodLibrary,
-		*,
-		suppress_tasks: set[str],
-	) -> List[HTNMethod]:
-		generated: List[HTNMethod] = []
-		existing_names = {method.method_name for method in method_library.methods}
-
-		for task in method_library.compound_tasks:
-			if task.name in suppress_tasks:
-				continue
-			literal = self._guard_literal_for_task(task, method_library)
-			if literal is None:
-				continue
-			if self._has_matching_guard_method(method_library, task, literal):
-				continue
-
-			method_name = self._unique_method_name(f"m_{task.name}_noop", existing_names)
-			existing_names.add(method_name)
-			generated.append(
-				HTNMethod(
-					method_name=method_name,
-					task_name=task.name,
-					parameters=task.parameters,
-					context=(literal,),
-					subtasks=(),
-					ordering=(),
-					origin="stage4_guard_completion",
-				)
-			)
-
-		return generated
-
-	def _wrap_library_for_root_method(
-		self,
-		method_library: HTNMethodLibrary,
-		root_method: HTNMethod,
-	) -> Tuple[HTNMethodLibrary, str]:
-		task_lookup = {
-			task.name: task
-			for task in method_library.compound_tasks
-		}
-		root_task = task_lookup.get(root_method.task_name)
-		wrapper_task_name = f"validate_{root_method.method_name}"
-		existing_task_names = {
-			task.name
-			for task in method_library.compound_tasks + method_library.primitive_tasks
-		}
-		index = 2
-		while wrapper_task_name in existing_task_names:
-			wrapper_task_name = f"validate_{root_method.method_name}_{index}"
-			index += 1
-
-		wrapper_task = HTNTask(
-			name=wrapper_task_name,
-			parameters=tuple(root_task.parameters if root_task is not None else root_method.parameters),
-			is_primitive=False,
-			source_predicates=(),
-		)
-		wrapper_method = HTNMethod(
-			method_name=f"m_{wrapper_task_name}_entry",
-			task_name=wrapper_task_name,
-			parameters=tuple(root_method.parameters),
-			context=tuple(root_method.context),
-			subtasks=tuple(root_method.subtasks),
-			ordering=tuple(root_method.ordering),
-			origin="stage4_validation_wrapper",
-		)
-
-		return (
-			HTNMethodLibrary(
-				compound_tasks=[*list(method_library.compound_tasks), wrapper_task],
-				primitive_tasks=list(method_library.primitive_tasks),
-				methods=[*list(method_library.methods), wrapper_method],
-				target_literals=list(method_library.target_literals),
-				target_task_bindings=list(method_library.target_task_bindings),
-			),
-			wrapper_task_name,
-		)
-
-	def _guard_literal_for_task(
-		self,
-		task: Any,
-		method_library: HTNMethodLibrary,
-	) -> Optional[HTNLiteral]:
-		if len(getattr(task, "source_predicates", ())) != 1:
-			return None
-
-		predicate = task.source_predicates[0]
-		expected_args = tuple(task.parameters)
-		target_lookup = {
-			literal.to_signature(): literal
-			for literal in method_library.target_literals
-		}
-		bound_polarities = {
-			target_lookup[binding.target_literal].is_positive
-			for binding in method_library.target_task_bindings
-			if binding.task_name == task.name and binding.target_literal in target_lookup
-		}
-		if len(bound_polarities) > 1:
-			return None
-		if bound_polarities:
-			return HTNLiteral(
-				predicate=predicate,
-				args=expected_args,
-				is_positive=bound_polarities.pop(),
-			)
-		return HTNLiteral(predicate=predicate, args=expected_args, is_positive=True)
-
-	def _has_matching_guard_method(
-		self,
-		method_library: HTNMethodLibrary,
-		task: Any,
-		literal: HTNLiteral,
-	) -> bool:
-		for method in method_library.methods:
-			if method.task_name != task.name or method.subtasks:
-				continue
-			for context_literal in method.context:
-				if (
-					context_literal.predicate == literal.predicate
-					and context_literal.is_positive == literal.is_positive
-					and tuple(context_literal.args) == tuple(literal.args)
-				):
-					return True
-		return False
-
-	@staticmethod
-	def _unique_method_name(base_name: str, existing_names: set[str]) -> str:
-		if base_name not in existing_names:
-			return base_name
-
-		index = 2
-		while True:
-			candidate = f"{base_name}_{index}"
-			if candidate not in existing_names:
-				return candidate
-			index += 1
+		task_schema = task_lookup.get(step.task_name)
+		return getattr(task_schema, "source_name", None) or step.task_name
 
 	def _parse_plan_steps(self, plan_text: str, domain: Any) -> List[PANDAPlanStep]:
 		action_names = {action.name for action in domain.actions}

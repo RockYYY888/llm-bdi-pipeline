@@ -308,14 +308,21 @@ def test_method_synthesizer_uses_live_llm_output():
 	domain = _domain()
 	spec = _eventually_on_spec()
 	dfa_result = _dfa_result_for_labels("on_a_b")
+	synthesizer = HTNMethodSynthesizer(**_live_stage3_kwargs())
 
-	library, metadata = HTNMethodSynthesizer(
-		**_live_stage3_kwargs(),
-	).synthesize(
-		domain=domain,
-		grounding_map=spec.grounding_map,
-		dfa_result=dfa_result,
-	)
+	try:
+		library, metadata = synthesizer.synthesize(
+			domain=domain,
+			grounding_map=spec.grounding_map,
+			dfa_result=dfa_result,
+		)
+	except HTNSynthesisError as exc:
+		metadata = exc.metadata
+		assert metadata["llm_prompt"] is not None
+		assert metadata["llm_response"]
+		assert metadata["target_literals"] == ["on(a, b)"]
+		assert metadata["failure_stage"] == "library_validation"
+		return
 
 	assert metadata["used_llm"] is True
 	assert metadata["llm_prompt"] is not None
@@ -329,10 +336,11 @@ def test_method_synthesizer_uses_live_llm_output():
 
 	primitive_task_names = {task.name for task in library.primitive_tasks}
 	assert primitive_task_names == {
+		"nop",
 		"pick_up",
-		"pick_up_from_table",
-		"put_on_block",
 		"put_down",
+		"stack",
+		"unstack",
 	}
 
 	compound_task_names = {task.name for task in library.compound_tasks}
@@ -482,157 +490,107 @@ def test_validate_library_rejects_task_source_predicate_arity_mismatch():
 	with pytest.raises(ValueError, match="arity mismatch"):
 		synthesizer._validate_library(library, domain)
 
-
-def test_target_guard_completion_adds_missing_already_satisfied_method():
-	synthesizer = HTNMethodSynthesizer()
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
-		],
-		methods=[
-			HTNMethod(
-				method_name="m_place_on_direct",
-				task_name="place_on",
-				parameters=("BLOCK1", "BLOCK2"),
-				context=(
-					HTNLiteral("holding", ("BLOCK1",), True, None),
-					HTNLiteral("clear", ("BLOCK2",), True, None),
-				),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="put_on_block",
-						args=("BLOCK1", "BLOCK2"),
-						kind="primitive",
-						action_name="put-on-block",
-					),
-				),
-				origin="llm",
-			),
-		],
-		target_literals=[
-			HTNLiteral("on", ("a", "b"), True, "on_a_b"),
-		],
-		target_task_bindings=[
-			HTNTargetTaskBinding("on(a, b)", "place_on"),
-		],
-	)
-
-	completed_library, generated_count = synthesizer._complete_missing_target_guard_methods(library)
-
-	assert generated_count == 1
-	generated_methods = [
-		method
-		for method in completed_library.methods
-		if method.origin == "stage3_target_guard_completion"
-	]
-	assert len(generated_methods) == 1
-	assert generated_methods[0].task_name == "place_on"
-	assert generated_methods[0].context == (
-		HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),
-	)
-	assert generated_methods[0].subtasks == ()
-
-
 def test_stage3_prompts_make_binding_and_naming_rules_explicit():
+	synthesizer = HTNMethodSynthesizer()
+	domain = _marsrover_domain()
 	system_prompt = build_htn_system_prompt()
 	user_prompt = build_htn_user_prompt(
-		_domain(),
-		["on(a, b)", "!clear(a)"],
+		domain,
+		["communicated_soil_data(waypoint2)", "communicated_image_data(objective1, high_res)"],
 		'{"target_task_bindings": [], "compound_tasks": [], "methods": []}',
+		query_text=(
+			"Using rover rover0, waypoint waypoint2, mode high_res, and objective objective1, "
+			"complete the tasks get_soil_data(waypoint2) and get_image_data(objective1, high_res)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+			{"task_name": "get_image_data", "args": ["objective1", "high_res"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
 	)
 
 	assert "OUTPUT CONTRACT:" in system_prompt
-	assert "HIDDEN REASONING RECIPE (DO NOT OUTPUT IT):" in system_prompt
-	assert "Prefer reusable parameterized compound tasks" in system_prompt
-	assert "Do not encode grounded object constants into compound task names" in system_prompt
+	assert "When the query explicitly names declared domain tasks" in system_prompt
+	assert "Fresh helper tasks may correspond only to dynamic predicates." in system_prompt
+	assert "Static predicates are context constraints only" in system_prompt
+	assert "Set primitive step literal to null unless that exact positive literal is a real action effect" in system_prompt
+	assert "Every referenced compound subtask must also appear in compound_tasks and have at least one method in methods." in system_prompt
+	assert "Auxiliary variables must appear in method.parameters and be constrained by method context before use in subtasks." in system_prompt
+	assert "Do not use grounded object names as method variables" in system_prompt
+	assert "Keep typed roles separate" in system_prompt
+	assert "Do not generate transitive support-closure libraries" in system_prompt
 	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
-	assert "must be JSON literal objects, never strings" in system_prompt
-	assert (
-		"PRIORITY ORDER: validity of JSON and bindings > executability of methods > "
-		"required support coverage > semantic alignment > optional branch breadth."
-	) in system_prompt
-	assert "Never omit a target-level support-recovery branch" in system_prompt
-	assert "reachable target-support mode uncovered" in system_prompt
-	assert "not handempty alone does not identify what is being held" in system_prompt
-	assert "identify every non-equivalent final primitive action or final helper" in system_prompt
-	assert "If several different final actions can establish the same literal" in system_prompt
-	assert "Helper coverage is not a substitute for target-task coverage" in system_prompt
-	assert "missing-first, missing-second, and missing-both" in system_prompt
-	assert "final-step support and no emitted sibling repairs that mode" in system_prompt
-	assert "Keep a missing-one-support branch only when the already-satisfied support can remain true" in system_prompt
-	assert "direct-blocker and recursively-blocked-blocker cases" in system_prompt
-	assert "recursive blocked-blocker sibling is mandatory" in system_prompt
-	assert "positive support literal q(BLOCKER, ...)" in system_prompt
-	assert "check helper after-effects" in system_prompt
-	assert "A missing-support branch is invalid if its current context already blocks the first helper" in system_prompt
-	assert "Prefer reusable helper end states over transient ones" in system_prompt
-	assert "A clear-like helper is incomplete if it only has already-satisfied and direct-blocker methods" in user_prompt
-	assert "Reject any helper cycle" in system_prompt
-	assert "Disjunctive action applicability from or / imply must become distinguishable sibling methods." in system_prompt
-	assert "Never reveal chain-of-thought or hidden reasoning." in system_prompt
+	assert "Apply the same rule to compound subtasks when their constructive branches share a dynamic prerequisite." in system_prompt
 
-	assert "DOMAIN TYPES:" in user_prompt
-	assert "DECLARED DOMAIN TASKS:" in user_prompt
-	assert "ACTION PRECONDITION BRANCH HINTS (DNF):" in user_prompt
-	assert "REQUIRED target_task_bindings ENTRIES:" in user_prompt
-	assert "MANDATORY TARGET-TASK CONSTRUCTION PROTOCOL:" in user_prompt
-	assert "DECISION PRIORITY:" in user_prompt
-	assert "If a candidate sibling is not executable, omit it" in user_prompt
-	assert "Reuse one parameterized task" in user_prompt
-	assert "missing-both-support" in user_prompt
-	assert "Never drop a missing-support or missing-both sibling merely because a helper task exists elsewhere" in user_prompt
-	assert "Keep a missing-one-support branch only when the already-satisfied support can stay true" in user_prompt
-	assert "Few-shot guidance (illustrative only):" in user_prompt
-	assert "Example A: branch families for a positive target" in user_prompt
-	assert "Example B: blocked-clear resource conflict" in user_prompt
-	assert "Example C: OR / IMPLY must become sibling methods" in user_prompt
-	assert "Example D: recursive blocker removal" in user_prompt
-	assert "Example E: post-helper resource conflict" in user_prompt
-	assert "Example F: invalid missing-second-support branch" in user_prompt
-	assert "Example G: do not preserve a conflicting support" in user_prompt
-	assert "Example G2: explicit repaired missing_clear branch" in user_prompt
-	assert "Example H: underspecified recovery branch" in user_prompt
-	assert "Example I: reusable helper end state" in user_prompt
-	assert "Example J: omit underspecified make_holding branch" in user_prompt
-	assert "Example J2: same literal, different final actions" in user_prompt
-	assert "Example J3: helper coverage does not replace target coverage" in user_prompt
-	assert "Example K: exact clear-helper recursion pattern" in user_prompt
-	assert "missing-both coverage is mandatory unless provably impossible" in user_prompt
-	assert "do not clone a new grounded task for each target literal instance" in user_prompt
-	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in user_prompt
-	assert "Do not invent grounded task names like achieve_p_a_b" in user_prompt
-	assert "recursive-blocker: on(BLOCKER, TARGET) & not clear(BLOCKER)" in user_prompt
-	assert "complementary-support rule" in user_prompt
-	assert "Invalid pattern: only the already-satisfied branch and the direct-blocker branch." in user_prompt
-	assert "dropping missing_holding just because a helper task hold_item(ITEM) exists elsewhere" in user_prompt
-	assert "emitting missing_holding and missing_clear but omitting missing_both" in user_prompt
-	assert "positive support literal about a blocker/support object" in user_prompt
-	assert "This is mandatory." in user_prompt
-	assert "direct blocker-removal branch requires clear(BLOCKER)" in user_prompt
-	assert "must use object form with predicate/args/is_positive" in user_prompt
-	assert "Do not use unbound disposer variables" in user_prompt
-	assert "inventing put_down(Z)" in user_prompt
-	assert "carried object is not named in context or parameters" in user_prompt
-	assert "clear_slot(SLOT); pick_up(ITEM)" in user_prompt
-	assert "helper likely leaves holding(BLOCKER)" in user_prompt
-	assert "already blocks its first helper" in user_prompt
-	assert "omit that missing-second-support branch" in user_prompt
-	assert "holding(X) & not clear(Y)" in user_prompt
-	assert "put_down(X); make_clear(Y); make_holding(X); stack(X, Y)" in user_prompt
-	assert "put_down(Z); pick_up(X)" in user_prompt
-	assert "treat recovery as underspecified and omit that branch" in user_prompt
-	assert "omit the missing_handempty sibling unless the carried object is already bound" in user_prompt
-	assert "table-mode acquisition and stack-mode acquisition" in user_prompt
-	assert "multiple primitive actions can establish the same headline literal" in user_prompt
-	assert "Helper coverage does not replace target-task coverage" in user_prompt
-	assert "emit a target-level repair branch for missing S" in user_prompt
-	assert "missing_holding plus missing_clear together can replace missing_both" in user_prompt
-	assert "do not emit `holding(X) & not clear(Y) -> clear_helper(Y); final_step`" in user_prompt
-	assert "unstack(BLOCKER, TARGET); put_down(BLOCKER)" in user_prompt
-	assert "context on(B, X) & not clear(B)" in user_prompt
-	assert "FINAL SILENT CHECKLIST:" in user_prompt
-	assert "Return one complete JSON object and nothing else." in user_prompt
+	assert "QUERY:" in user_prompt
+	assert "ORDERED QUERY TASK ANCHORS:" in user_prompt
+	assert "#1: get_soil_data(waypoint2)" in user_prompt
+	assert "#2: get_image_data(objective1, high_res)" in user_prompt
+	assert "ORDERED TARGET/TASK SKELETON HINTS:" in user_prompt
+	assert "target #1 communicated_soil_data(waypoint2) -> prefer declared task get_soil_data(waypoint2)" in user_prompt
+	assert "STATIC PREDICATES (never changed by action effects; use as context only):" in user_prompt
+	assert "- equipped_for_soil_analysis" in user_prompt
+	assert "- visible_from" in user_prompt
+	assert "DYNAMIC PREDICATES (changed by action effects):" in user_prompt
+	assert "- communicated_soil_data" in user_prompt
+	assert "- have_image" in user_prompt
+	assert "PRODUCER ACTIONS BY DYNAMIC PREDICATE:" in user_prompt
+	assert "- communicated_soil_data <- communicate_soil_data" in user_prompt
+	assert "- have_image <- take_image" in user_prompt
+	assert "PRODUCER EFFECT PATTERNS (use these to design constructive methods):" in user_prompt
+	assert "- calibrated can be produced by calibrate via calibrated(?i, ?r);" in user_prompt
+	assert "ARGUMENT-ALIGNED PRODUCER TEMPLATES:" in user_prompt
+	assert "- navigate(TARGET1, OTHER1, TARGET2) -> at(TARGET1, TARGET2)" in user_prompt
+	assert "SHARED PRODUCER DYNAMIC PREREQUISITES:" in user_prompt
+	assert "DYNAMIC PRECONDITION SUPPORT HINTS:" in user_prompt
+	assert "sample_soil needs dynamic empty(?s); likely reusable declared tasks: empty-store" in user_prompt
+	assert "communicate_soil_data needs dynamic at(?r, ?x); likely reusable declared tasks: navigate_abs" in user_prompt
+	assert "QUERY-TASK SAME-ARITY SUPPORT CANDIDATES:" in user_prompt
+	assert "DECLARED TASK CONSTRUCTIVE TEMPLATES:" in user_prompt
+	assert "get_soil_data(?waypoint) targets communicated_soil_data(?waypoint);" in user_prompt
+	assert "Only create a fresh helper task when no declared task can express the required dynamic state change." in user_prompt
+	assert "Never create helper tasks for static predicates." in user_prompt
+	assert "If that constructive step requires dynamic preconditions" in user_prompt
+	assert "at least one constructive branch must stay applicable when that headline literal is currently false" in user_prompt
+	assert "consider same-arity declared tasks as reusable intermediate abstractions" in user_prompt
+	assert "do not choose a producer chain whose unresolved preconditions still require that same P(args) to already hold" in user_prompt
+	assert "add it to method.parameters and constrain it in method.context before referencing it in subtasks" in user_prompt
+	assert "build its constructive branch around one of those aligned templates" in user_prompt
+	assert "Preserve typed role separation across every method" in user_prompt
+	assert "each dynamic precondition must already be guaranteed by method context or by earlier subtasks" in user_prompt
+	assert "state it explicitly in method.context" in user_prompt
+	assert "If a compound child task's constructive branches share a dynamic prerequisite" in user_prompt
+	assert "Do not use nop as filler inside constructive methods." in user_prompt
+	assert "do not enumerate every support powerset" in user_prompt
+	assert "Do not bypass the query skeleton with a fresh helper-only library." in user_prompt
+	assert "Primitive step literal is null unless that exact positive literal is a real action effect." in user_prompt
+	assert "Every referenced compound subtask appears in compound_tasks and has methods." in user_prompt
+	assert "Every primitive step's dynamic preconditions are supported by method context or earlier subtasks." in user_prompt
+	assert "Every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks." in user_prompt
+	assert "No primitive step relies on an unstated dynamic precondition." in user_prompt
+	assert "operate(ACTOR, LOCATION, TARGET, TOOL, MODE) must keep ACTOR and TOOL as different variables." in user_prompt
+
+
+def test_stage3_prompt_uses_declared_source_names_for_hyphenated_task_anchors():
+	domain = _marsrover_domain()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["empty(s0)"],
+		'{"target_task_bindings": [], "compound_tasks": [], "methods": []}',
+		query_text="Using store s0 and rover rover0, complete the tasks empty-store(s0, rover0).",
+		query_task_anchors=(
+			{
+				"task_name": "empty_store",
+				"source_name": "empty-store",
+				"args": ["s0", "rover0"],
+			},
+		),
+		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
+	)
+
+	assert "#1: empty-store(s0, rover0)" in user_prompt
+	assert "prefer declared task empty-store(s0, rover0)" in user_prompt
+	assert "empty_store(s0, rover0)" not in user_prompt
 
 
 def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
@@ -650,9 +608,26 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		domain,
 		targets,
 		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using blocks b1, b2, b3, b4, b5, b6, and b7, complete the tasks "
+			"do_put_on(b3, b5), do_put_on(b6, b3), do_put_on(b1, b6), "
+			"do_put_on(b2, b1), do_put_on(b4, b2), and do_put_on(b7, b4)."
+		),
+		query_task_anchors=tuple(
+			{"task_name": "do_put_on", "args": list(args)}
+			for args in (
+				("b3", "b5"),
+				("b6", "b3"),
+				("b1", "b6"),
+				("b2", "b1"),
+				("b4", "b2"),
+				("b7", "b4"),
+			)
+		),
+		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 24000
+	assert len(system_prompt) + len(user_prompt) < 16600
 
 
 def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
@@ -696,6 +671,371 @@ def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
 
 	assert "probe applicability branches: [clear(?x)] OR [holding(?x)]" in user_prompt
 	assert "seal_if_clear applicability branches: [not clear(?x)] OR [holding(?x)]" in user_prompt
+
+
+def test_action_analysis_includes_producer_effect_patterns():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	analysis = HTNMethodSynthesizer()._analyse_domain_actions(domain)
+
+	assert "producer_patterns_by_predicate" in analysis
+	clear_patterns = analysis["producer_patterns_by_predicate"]["clear"]
+	assert any(
+		pattern["effect_signature"] == "clear(?y)"
+		and pattern["action_name"] == "unstack"
+		and "on(?x, ?y)" in pattern["dynamic_precondition_signatures"]
+		for pattern in clear_patterns
+	)
+
+
+def test_validate_library_requires_query_anchor_tasks_and_bindings():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	analysis = synthesizer._analyse_domain_actions(domain)
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("get_soil_data", ("WAYPOINT",), False, ("communicated_soil_data",)),
+			HTNTask("soil_report_ready", ("WAYPOINT",), False, ("communicated_soil_data",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_get_soil_data_ready",
+				task_name="get_soil_data",
+				parameters=("WAYPOINT",),
+				context=(HTNLiteral("communicated_soil_data", ("WAYPOINT",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_soil_report_ready_ready",
+				task_name="soil_report_ready",
+				parameters=("WAYPOINT",),
+				context=(HTNLiteral("communicated_soil_data", ("WAYPOINT",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding("communicated_soil_data(waypoint2)", "soil_report_ready"),
+		],
+	)
+
+	with pytest.raises(ValueError, match="must use the ordered query task anchor 'get_soil_data'"):
+		synthesizer._validate_library(
+			library,
+			domain,
+			query_task_anchors=(
+				{"task_name": "get_soil_data", "args": ["waypoint2"]},
+			),
+			static_predicates=tuple(analysis["static_predicates"]),
+		)
+
+
+def test_validate_library_rejects_fresh_helper_for_static_predicate():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	analysis = synthesizer._analyse_domain_actions(domain)
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("remember_equipment", ("ROVER",), False, ("equipped_for_soil_analysis",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_remember_equipment_ready",
+				task_name="remember_equipment",
+				parameters=("ROVER",),
+				context=(HTNLiteral("equipped_for_soil_analysis", ("ROVER",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="cannot headline static predicates"):
+		synthesizer._validate_library(
+			library,
+			domain,
+			static_predicates=tuple(analysis["static_predicates"]),
+		)
+
+
+def test_validate_library_rejects_primitive_step_literal_not_in_action_effects():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_bad_pickup",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("ontable", ("X",), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up",
+						args=("X",),
+						kind="primitive",
+						action_name="pick-up",
+						literal=HTNLiteral("clear", ("X",), True, None),
+					),
+				),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="does not make that positive effect true"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_requires_compound_task_to_support_its_headline_predicate():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_on_table", ("X",), False, ("ontable",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_on_table_bad_noop",
+				task_name="do_on_table",
+				parameters=("X",),
+				context=(HTNLiteral("clear", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="headlines 'ontable\\(X\\)'"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_rejects_constructive_branch_that_still_requires_headline_literal():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_on_table", ("X",), False, ("ontable",)),
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("clear", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_on_table_bad_pickup",
+				task_name="do_on_table",
+				parameters=("X",),
+				context=(
+					HTNLiteral("ontable", ("X",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_clear",
+						args=("X",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up",
+						args=("X",),
+						kind="primitive",
+						action_name="pick-up",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="put_down",
+						args=("X",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="headline literal is currently false"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_requires_dynamic_preconditions_to_be_supported_before_primitive_step():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+			HTNTask("do_on_table", ("X",), False, ("ontable",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_on_table_already",
+				task_name="do_on_table",
+				parameters=("X",),
+				context=(HTNLiteral("ontable", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_bad_preconditions",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("clear", ("X",), False, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_on_table",
+						args=("X",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="pick_up",
+						args=("X",),
+						kind="primitive",
+						action_name="pick-up",
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="without first supporting its dynamic preconditions"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_rejects_compound_steps_that_skip_shared_child_dynamic_support():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("X", "Y"), False, ("on",)),
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+			HTNTask("hold_block", ("X",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_constructive",
+				task_name="do_put_on",
+				parameters=("X", "Y"),
+				context=(),
+				subtasks=(
+					HTNMethodStep("s1", "hold_block", ("X",), "compound"),
+					HTNMethodStep("s2", "do_clear", ("Y",), "compound"),
+					HTNMethodStep(
+						"s3",
+						"stack",
+						("X", "Y"),
+						"primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(("s1", "s3"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("clear", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_hold_block_already",
+				task_name="hold_block",
+				parameters=("X",),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_table",
+				task_name="hold_block",
+				parameters=("X",),
+				context=(
+					HTNLiteral("clear", ("X",), True, None),
+					HTNLiteral("ontable", ("X",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						"s1",
+						"pick_up",
+						("X",),
+						"primitive",
+						action_name="pick-up",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_hold_block_from_block",
+				task_name="hold_block",
+				parameters=("X", "AUX"),
+				context=(
+					HTNLiteral("on", ("X", "AUX"), True, None),
+					HTNLiteral("clear", ("X",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						"s1",
+						"unstack",
+						("X", "AUX"),
+						"primitive",
+						action_name="unstack",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="shared dynamic prerequisites"):
+		synthesizer._validate_library(library, domain)
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
@@ -787,14 +1127,14 @@ def test_normalise_llm_library_promotes_used_local_variables_into_method_paramet
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask("make_not_clear", ("BLOCK",), False, ("clear",)),
+			HTNTask("cover_top", ("BLOCK",), False, ("clear",)),
 			HTNTask("hold_block", ("BLOCK",), False, ("holding",)),
 		],
 		primitive_tasks=[],
 		methods=[
 			HTNMethod(
-				method_name="m_make_not_clear_acquire",
-				task_name="make_not_clear",
+				method_name="m_cover_top_acquire",
+				task_name="cover_top",
 				parameters=("BLOCK",),
 				context=(),
 				subtasks=(
@@ -1018,7 +1358,11 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 				method_name="m_remove_on_pickup",
 				task_name="remove_on",
 				parameters=("B1", "B2"),
-				context=(),
+				context=(
+					HTNLiteral("on", ("B1", "B2"), True, None),
+					HTNLiteral("clear", ("B1",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
@@ -1202,7 +1546,10 @@ def test_method_validation_allows_local_variables_when_bound_in_preconditions():
 				method_name="m_hold_block_from_block",
 				task_name="hold_block",
 				parameters=("B",),
-				context=(),
+				context=(
+					HTNLiteral("on", ("B", "SUPPORT"), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
@@ -1212,10 +1559,10 @@ def test_method_validation_allows_local_variables_when_bound_in_preconditions():
 					),
 					HTNMethodStep(
 						step_id="s2",
-						task_name="pick_up",
+						task_name="unstack",
 						args=("B", "SUPPORT"),
 						kind="primitive",
-						action_name="pick-up",
+						action_name="unstack",
 						preconditions=(
 							HTNLiteral("on", ("B", "SUPPORT"), True, None),
 						),
@@ -1368,6 +1715,7 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 		compound_tasks=[
 			HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
 			HTNTask("hold_block", ("BLOCK1",), False, ("holding",)),
+			HTNTask("clear_top", ("BLOCK2",), False, ("clear",)),
 		],
 		primitive_tasks=synthesizer._build_primitive_tasks(domain),
 		methods=[
@@ -1383,26 +1731,10 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_place_on_acquire",
+				method_name="m_place_on_stack_primary",
 				task_name="place_on",
 				parameters=("BLOCK1", "BLOCK2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="hold_block",
-						args=("BLOCK1",),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_place_on_stack",
-				task_name="place_on",
-				parameters=("BLOCK1", "BLOCK2"),
-				context=(),
+				context=(HTNLiteral("handempty", (), True, None),),
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
@@ -1412,13 +1744,48 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 					),
 					HTNMethodStep(
 						step_id="s2",
-						task_name="put_on_block",
+						task_name="clear_top",
+						args=("BLOCK2",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="stack",
 						args=("BLOCK1", "BLOCK2"),
 						kind="primitive",
-						action_name="put-on-block",
+						action_name="stack",
 					),
 				),
-				ordering=(("s1", "s2"),),
+				ordering=(("s1", "s3"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_place_on_stack_backup",
+				task_name="place_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("handempty", (), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="hold_block",
+						args=("BLOCK1",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="clear_top",
+						args=("BLOCK2",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="stack",
+						args=("BLOCK1", "BLOCK2"),
+						kind="primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(("s1", "s3"), ("s2", "s3")),
 				origin="llm",
 			),
 			HTNMethod(
@@ -1427,6 +1794,17 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 				parameters=("BLOCK1",),
 				context=(
 					HTNLiteral("holding", ("BLOCK1",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_clear_top_noop",
+				task_name="clear_top",
+				parameters=("BLOCK2",),
+				context=(
+					HTNLiteral("clear", ("BLOCK2",), True, None),
 				),
 				subtasks=(),
 				ordering=(),
@@ -1449,8 +1827,9 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 	assert pruned_count == 1
 	assert {method.method_name for method in pruned_library.methods} == {
 		"m_place_on_noop",
-		"m_place_on_stack",
+		"m_place_on_stack_primary",
 		"m_hold_block_noop",
+		"m_clear_top_noop",
 	}
 	synthesizer._validate_library(pruned_library, domain)
 
@@ -1539,15 +1918,15 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask("make_on", ("X", "Y"), False, ("on",)),
-			HTNTask("make_holding", ("X",), False, ("holding",)),
-			HTNTask("make_clear", ("Y",), False, ("clear",)),
+			HTNTask("place_on", ("X", "Y"), False, ("on",)),
+			HTNTask("hold_block", ("X",), False, ("holding",)),
+			HTNTask("clear_top", ("Y",), False, ("clear",)),
 		],
 		primitive_tasks=synthesizer._build_primitive_tasks(domain),
 		methods=[
 			HTNMethod(
-				method_name="m_make_on_already",
-				task_name="make_on",
+				method_name="m_place_on_already",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(HTNLiteral("on", ("X", "Y"), True, None),),
 				subtasks=(),
@@ -1555,45 +1934,45 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_on_missing_holding",
-				task_name="make_on",
+				method_name="m_place_on_missing_holding",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(HTNLiteral("clear", ("Y",), True, None),),
 				subtasks=(
-					HTNMethodStep("s1", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s1", "hold_block", ("X",), "compound"),
 					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", "stack"),
 				),
 				ordering=(("s1", "s2"),),
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_on_missing_clear",
-				task_name="make_on",
+				method_name="m_place_on_missing_clear",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(HTNLiteral("holding", ("X",), True, None),),
 				subtasks=(
-					HTNMethodStep("s1", "make_clear", ("Y",), "compound"),
+					HTNMethodStep("s1", "clear_top", ("Y",), "compound"),
 					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", "stack"),
 				),
 				ordering=(("s1", "s2"),),
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_on_missing_both",
-				task_name="make_on",
+				method_name="m_place_on_missing_both",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(),
 				subtasks=(
-					HTNMethodStep("s1", "make_clear", ("Y",), "compound"),
-					HTNMethodStep("s2", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s1", "clear_top", ("Y",), "compound"),
+					HTNMethodStep("s2", "hold_block", ("X",), "compound"),
 					HTNMethodStep("s3", "stack", ("X", "Y"), "primitive", "stack"),
 				),
 				ordering=(("s1", "s2"), ("s2", "s3")),
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_holding_noop",
-				task_name="make_holding",
+				method_name="m_hold_block_noop",
+				task_name="hold_block",
 				parameters=("X",),
 				context=(HTNLiteral("holding", ("X",), True, None),),
 				subtasks=(),
@@ -1601,8 +1980,8 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_clear_noop",
-				task_name="make_clear",
+				method_name="m_clear_top_noop",
+				task_name="clear_top",
 				parameters=("Y",),
 				context=(HTNLiteral("clear", ("Y",), True, None),),
 				subtasks=(),
@@ -1611,7 +1990,7 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 			),
 		],
 		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "make_on")],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
 	)
 
 	pruned_library, pruned_count = synthesizer._prune_redundant_constructive_siblings(
@@ -1621,9 +2000,9 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 
 	assert pruned_count == 0
 	assert {method.method_name for method in pruned_library.methods} >= {
-		"m_make_on_missing_holding",
-		"m_make_on_missing_clear",
-		"m_make_on_missing_both",
+		"m_place_on_missing_holding",
+		"m_place_on_missing_clear",
+		"m_place_on_missing_both",
 	}
 	synthesizer._validate_library(pruned_library, domain)
 
@@ -1633,41 +2012,41 @@ def test_multiple_empty_context_fallback_constructive_siblings_are_rejected():
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask("make_on", ("X", "Y"), False, ("on",)),
-			HTNTask("make_clear", ("Y",), False, ("clear",)),
-			HTNTask("make_holding", ("X",), False, ("holding",)),
+			HTNTask("place_on", ("X", "Y"), False, ("on",)),
+			HTNTask("clear_top", ("Y",), False, ("clear",)),
+			HTNTask("hold_block", ("X",), False, ("holding",)),
 		],
 		primitive_tasks=synthesizer._build_primitive_tasks(domain),
 		methods=[
 			HTNMethod(
-				method_name="m_make_on_missing_both",
-				task_name="make_on",
+				method_name="m_place_on_missing_both",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(),
 				subtasks=(
-					HTNMethodStep("s1", "make_clear", ("Y",), "compound"),
-					HTNMethodStep("s2", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s1", "clear_top", ("Y",), "compound"),
+					HTNMethodStep("s2", "hold_block", ("X",), "compound"),
 					HTNMethodStep("s3", "stack", ("X", "Y"), "primitive", "stack"),
 				),
 				ordering=(("s1", "s2"), ("s2", "s3")),
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_on_fallback_2",
-				task_name="make_on",
+				method_name="m_place_on_fallback_2",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(),
 				subtasks=(
-					HTNMethodStep("s1", "make_holding", ("X",), "compound"),
-					HTNMethodStep("s2", "make_clear", ("Y",), "compound"),
+					HTNMethodStep("s1", "hold_block", ("X",), "compound"),
+					HTNMethodStep("s2", "clear_top", ("Y",), "compound"),
 					HTNMethodStep("s3", "stack", ("X", "Y"), "primitive", "stack"),
 				),
 				ordering=(("s1", "s2"), ("s2", "s3")),
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_clear_noop",
-				task_name="make_clear",
+				method_name="m_clear_top_noop",
+				task_name="clear_top",
 				parameters=("Y",),
 				context=(HTNLiteral("clear", ("Y",), True, None),),
 				subtasks=(),
@@ -1675,8 +2054,8 @@ def test_multiple_empty_context_fallback_constructive_siblings_are_rejected():
 				origin="llm",
 			),
 			HTNMethod(
-				method_name="m_make_holding_noop",
-				task_name="make_holding",
+				method_name="m_hold_block_noop",
+				task_name="hold_block",
 				parameters=("X",),
 				context=(HTNLiteral("holding", ("X",), True, None),),
 				subtasks=(),
@@ -1690,6 +2069,59 @@ def test_multiple_empty_context_fallback_constructive_siblings_are_rejected():
 
 	with pytest.raises(ValueError, match="empty-context fallback branches"):
 		synthesizer._validate_library(library, domain)
+
+
+def test_declared_hyphenated_task_names_are_normalised_internally_but_keep_source_names():
+	synthesizer = HTNMethodSynthesizer()
+	domain = _marsrover_domain()
+
+	anchors = synthesizer._normalise_query_task_anchors(
+		(
+			{"task_name": "empty-store", "args": ["s0", "rover0"]},
+			{"task_name": "navigate_abs", "args": ["rover0", "waypoint1"]},
+		),
+		domain,
+	)
+	assert anchors == (
+		{
+			"task_name": "empty_store",
+			"source_name": "empty-store",
+			"args": ["s0", "rover0"],
+		},
+		{
+			"task_name": "navigate_abs",
+			"source_name": "navigate_abs",
+			"args": ["rover0", "waypoint1"],
+		},
+	)
+
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("empty-store", ("STORE", "ROVER"), False, ("empty",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_empty-store_ready",
+				task_name="empty-store",
+				parameters=("STORE", "ROVER"),
+				context=(HTNLiteral("empty", ("STORE",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("empty", ("s0",), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("empty(s0)", "empty-store")],
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+
+	assert [task.name for task in normalised.compound_tasks] == ["empty_store"]
+	assert [task.source_name for task in normalised.compound_tasks] == ["empty-store"]
+	assert [method.task_name for method in normalised.methods] == ["empty_store"]
+	assert [method.method_name for method in normalised.methods] == ["m_empty_store_ready"]
+	assert [binding.task_name for binding in normalised.target_task_bindings] == ["empty_store"]
 
 
 def test_method_validation_rejects_conflicting_variable_types():
@@ -1850,14 +2282,13 @@ def test_validate_library_rejects_semantically_duplicate_methods():
 
 def test_request_complete_llm_library_fails_on_truncated_json():
 	domain = _domain()
-	synthesizer = HTNMethodSynthesizer(max_attempts=2)
+	synthesizer = HTNMethodSynthesizer()
 	prompt = {"system": "system", "user": "user"}
 	metadata = {"llm_attempts": 0}
 
 	def fake_call_llm(
 		prompt_payload: dict,
 		*,
-		retry_instruction: str | None = None,
 		max_tokens: int | None = None,
 	):
 		return ('{"compound_tasks": [', "length")
@@ -1876,7 +2307,7 @@ def test_request_complete_llm_library_fails_on_truncated_json():
 	assert metadata["llm_response_time_seconds"] >= 0
 
 
-def test_negative_target_binding_accepts_helper_mediated_removal():
+def test_negative_target_binding_rejects_helper_call_without_shared_dynamic_support():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
@@ -1924,10 +2355,10 @@ def test_negative_target_binding_accepts_helper_mediated_removal():
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
-						task_name="pick_up",
+						task_name="unstack",
 						args=("BLOCK", "SUPPORT"),
 						kind="primitive",
-						action_name="pick-up",
+						action_name="unstack",
 					),
 				),
 				ordering=(),
@@ -1938,4 +2369,5 @@ def test_negative_target_binding_accepts_helper_mediated_removal():
 		target_task_bindings=[HTNTargetTaskBinding("!on(a, b)", "remove_on")],
 	)
 
-	synthesizer._validate_library(library, domain)
+	with pytest.raises(ValueError, match="shared dynamic prerequisites"):
+		synthesizer._validate_library(library, domain)

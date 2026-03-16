@@ -37,8 +37,8 @@ def test_stage4_planner_generates_plan_for_valid_blocksworld_library(tmp_path):
 	planner = PANDAPlanner(workspace=str(tmp_path))
 	method_library = HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask("make_on", ("X", "Y"), False, ("on",)),
-			HTNTask("make_holding", ("X",), False, ("holding",)),
+			HTNTask("place_on", ("X", "Y"), False, ("on",)),
+			HTNTask("hold_block", ("X",), False, ("holding",)),
 		],
 		primitive_tasks=[
 			HTNTask("pick_up", ("X",), True),
@@ -46,31 +46,31 @@ def test_stage4_planner_generates_plan_for_valid_blocksworld_library(tmp_path):
 		],
 		methods=[
 			HTNMethod(
-				method_name="m_make_on_already",
-				task_name="make_on",
+				method_name="m_place_on_already",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(HTNLiteral("on", ("X", "Y"), True, None),),
 			),
 			HTNMethod(
-				method_name="m_make_on_stack",
-				task_name="make_on",
+				method_name="m_place_on_stack",
+				task_name="place_on",
 				parameters=("X", "Y"),
 				context=(HTNLiteral("clear", ("Y",), True, None),),
 				subtasks=(
-					HTNMethodStep("s1", "make_holding", ("X",), "compound"),
+					HTNMethodStep("s1", "hold_block", ("X",), "compound"),
 					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", action_name="stack"),
 				),
 				ordering=(("s1", "s2"),),
 			),
 			HTNMethod(
-				method_name="m_make_holding_already",
-				task_name="make_holding",
+				method_name="m_hold_block_already",
+				task_name="hold_block",
 				parameters=("X",),
 				context=(HTNLiteral("holding", ("X",), True, None),),
 			),
 			HTNMethod(
-				method_name="m_make_holding_from_table",
-				task_name="make_holding",
+				method_name="m_hold_block_from_table",
+				task_name="hold_block",
 				parameters=("X",),
 				context=(
 					HTNLiteral("ontable", ("X",), True, None),
@@ -82,7 +82,7 @@ def test_stage4_planner_generates_plan_for_valid_blocksworld_library(tmp_path):
 			),
 		],
 		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "make_on")],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
 	)
 	target_literal = method_library.target_literals[0]
 	plan = planner.plan(
@@ -90,13 +90,46 @@ def test_stage4_planner_generates_plan_for_valid_blocksworld_library(tmp_path):
 		method_library=method_library,
 		objects=("a", "b"),
 		target_literal=target_literal,
-		task_name="make_on",
+		task_name="place_on",
 		transition_name="transition_1",
 		initial_facts=("(ontable a)", "(clear a)", "(clear b)", "(handempty)"),
 	)
 
-	assert plan.task_name == "make_on"
+	assert plan.task_name == "place_on"
 	assert plan.task_args == ("a", "b")
 	assert plan.steps
 	assert [step.task_name for step in plan.steps] == ["pick_up", "stack"]
-	assert "(t1 (make_on a b))" in plan.problem_hddl
+	assert "(t1 (place_on a b))" in plan.problem_hddl
+
+
+def test_stage4_domain_export_preserves_declared_source_names_for_hyphenated_tasks(tmp_path):
+	domain = HDDLParser.parse_domain("src/domains/marsrover/domain.hddl")
+	planner = PANDAPlanner(workspace=str(tmp_path))
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(
+				"empty_store",
+				("STORE", "ROVER"),
+				False,
+				("empty",),
+				source_name="empty-store",
+			),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_empty_store_ready",
+				task_name="empty_store",
+				parameters=("STORE", "ROVER"),
+				context=(HTNLiteral("empty", ("STORE",), True, None),),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	domain_hddl = planner._build_domain_hddl(domain, method_library, "marsrover_alias_test")
+
+	assert "(:task empty-store" in domain_hddl
+	assert ":task (empty-store ?store ?rover)" in domain_hddl
+	assert "(:task empty_store" not in domain_hddl

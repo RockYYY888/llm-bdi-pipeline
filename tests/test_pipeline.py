@@ -4,8 +4,9 @@ Live end-to-end acceptance harness for reverse-generated official benchmark quer
 This file is the canonical acceptance entry point:
 - pytest uses it only for end-to-end verification
 - CLI can run `python tests/test_pipeline.py query_2`, `all`, or `list`
-- current live query cases are reverse-generated from official IPC Blocksworld
-  `p01`-`p03` into single-sentence natural-language instructions
+- current live query cases are reverse-generated from official IPC benchmark
+  problems for Blocksworld `p01`-`p03` and Marsrover `pfile01`-`pfile03`
+  into single-sentence natural-language instructions
 - non-E2E pipeline unit tests live in `tests/test_pipeline_units.py`
 """
 
@@ -21,9 +22,6 @@ from typing import Any, Dict, List
 
 import pytest
 
-_tests_dir = str(Path(__file__).parent)
-if _tests_dir not in sys.path:
-	sys.path.insert(0, _tests_dir)
 _src_dir = str(Path(__file__).parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
@@ -61,6 +59,9 @@ BLOCKSWORLD_PROBLEM_DIR = (
 )
 MARSROVER_DOMAIN_FILE = str(
 	(Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "domain.hddl").resolve(),
+)
+MARSROVER_PROBLEM_DIR = (
+	Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "problems"
 )
 
 
@@ -145,11 +146,15 @@ def _build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 	}
 
 
-def _load_blocksworld_problem_query_cases(limit: int = 3) -> Dict[str, Dict[str, Any]]:
-	if not BLOCKSWORLD_PROBLEM_DIR.exists():
+def _load_problem_query_cases(
+	problem_dir: Path,
+	*,
+	limit: int = 3,
+) -> Dict[str, Dict[str, Any]]:
+	if not problem_dir.exists():
 		return {}
 	cases: Dict[str, Dict[str, Any]] = {}
-	problem_paths = sorted(BLOCKSWORLD_PROBLEM_DIR.glob("p*.hddl"))[:limit]
+	problem_paths = sorted(problem_dir.glob("p*.hddl"))[:limit]
 	for index, problem_path in enumerate(problem_paths, start=1):
 		case = _build_case_from_problem(problem_path)
 		if case is None:
@@ -158,7 +163,27 @@ def _load_blocksworld_problem_query_cases(limit: int = 3) -> Dict[str, Dict[str,
 	return cases
 
 
-QUERY_CASES: Dict[str, Dict[str, Any]] = _load_blocksworld_problem_query_cases()
+BLOCKSWORLD_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
+	BLOCKSWORLD_PROBLEM_DIR,
+	limit=3,
+)
+MARSROVER_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
+	MARSROVER_PROBLEM_DIR,
+	limit=3,
+)
+QUERY_CASES: Dict[str, Dict[str, Any]] = BLOCKSWORLD_QUERY_CASES
+
+
+def _expected_execution_identity(
+	domain_file: str,
+	problem_file: str | None,
+) -> Dict[str, str]:
+	expected = {
+		"domain_name": HDDLParser.parse_domain(domain_file).name,
+	}
+	if problem_file:
+		expected["problem_name"] = HDDLParser.parse_problem(problem_file).name
+	return expected
 
 
 def _pytest_selected_case_ids(
@@ -166,25 +191,41 @@ def _pytest_selected_case_ids(
 	*,
 	query_env: str,
 	all_env: str,
-	default_query: str,
+	default_query: str | None,
 ) -> List[str]:
 	"""Default to a single live query; opt in to full sweep explicitly."""
 	run_all = os.getenv(all_env, "").lower() in {"1", "true", "yes"}
 	if run_all:
 		return sorted(case_map)
 
-	query_id = os.getenv(query_env, default_query)
+	if default_query is None:
+		query_id = os.getenv(query_env, "")
+		if not query_id:
+			return sorted(case_map)
+	else:
+		query_id = os.getenv(query_env, default_query)
 	if query_id not in case_map:
+		if default_query is None:
+			return sorted(case_map)
 		query_id = default_query
 	return [query_id]
 
 
 def _pytest_selected_query_ids() -> List[str]:
 	return _pytest_selected_case_ids(
-		QUERY_CASES,
+		BLOCKSWORLD_QUERY_CASES,
 		query_env="PIPELINE_TEST_QUERY",
 		all_env="PIPELINE_TEST_ALL",
-		default_query="query_1",
+		default_query=None,
+	)
+
+
+def _pytest_selected_marsrover_query_ids() -> List[str]:
+	return _pytest_selected_case_ids(
+		MARSROVER_QUERY_CASES,
+		query_env="PIPELINE_TEST_MARSROVER_QUERY",
+		all_env="PIPELINE_TEST_MARSROVER_ALL",
+		default_query=None,
 	)
 
 
@@ -276,31 +317,6 @@ def _method_free_variable_messages(stage5_code: str) -> List[str]:
 	return free_variable_messages
 
 
-def _reachable_compound_task_names(stage3_library: Dict[str, Any]) -> List[str]:
-	task_names = {
-		binding["task_name"]
-		for binding in (stage3_library.get("target_task_bindings") or [])
-	}
-	methods = stage3_library.get("methods") or []
-	queue = list(task_names)
-
-	while queue:
-		task_name = queue.pop(0)
-		for method in methods:
-			if method.get("task_name") != task_name:
-				continue
-			for step in method.get("subtasks", []):
-				if step.get("kind") != "compound":
-					continue
-				helper_name = step.get("task_name")
-				if not helper_name or helper_name in task_names:
-					continue
-				task_names.add(helper_name)
-				queue.append(helper_name)
-
-	return sorted(task_names)
-
-
 def _binding_semantic_messages(stage3_library: Dict[str, Any]) -> List[str]:
 	compound_tasks = {
 		task["name"]: task
@@ -352,242 +368,6 @@ def _binding_semantic_messages(stage3_library: Dict[str, Any]) -> List[str]:
 
 	return messages
 
-
-def assert_query_relevant_task_names_starts_from_target_bindings_not_only_witnesses():
-	method_library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("top_goal", ("BLOCK",), False, ("clear",)),
-			HTNTask("hidden_helper", ("BLOCK",), False, ("holding",)),
-		],
-		primitive_tasks=[],
-		methods=[
-			HTNMethod(
-				method_name="m_top_goal_use_helper",
-				task_name="top_goal",
-				parameters=("BLOCK",),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="hidden_helper",
-						args=("BLOCK",),
-						kind="compound",
-					),
-				),
-			),
-			HTNMethod(
-				method_name="m_hidden_helper_noop",
-				task_name="hidden_helper",
-				parameters=("BLOCK",),
-				context=(HTNLiteral("holding", ("BLOCK",), True, None),),
-			),
-		],
-		target_literals=[HTNLiteral("clear", ("a",), True, "clear_a")],
-		target_task_bindings=[
-			HTNTargetTaskBinding("clear(a)", "top_goal"),
-		],
-	)
-	plan_records = []
-
-	relevant = LTL_BDI_Pipeline._query_relevant_task_names(method_library, plan_records)
-
-	assert relevant == ["hidden_helper", "top_goal"]
-
-
-def assert_representative_task_args_uses_typed_witness_placeholders(tmp_path):
-	domain_file = tmp_path / "domain_move.hddl"
-	domain_file.write_text(
-		"""
-(define (domain move_domain)
-  (:requirements :typing :hierarchy :negative-preconditions)
-  (:types rover waypoint)
-  (:predicates
-    (at ?r - rover ?w - waypoint)
-  )
-  (:task move_to
-    :parameters (?r - rover ?w - waypoint)
-  )
-  (:action navigate
-    :parameters (?r - rover ?from - waypoint ?to - waypoint)
-    :precondition (and (at ?r ?from))
-    :effect (and (not (at ?r ?from)) (at ?r ?to))
-  )
-)
-		""".strip(),
-	)
-	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
-	method_library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("move_to", ("ROVER", "WAYPOINT"), False, ("at",)),
-		],
-		primitive_tasks=[],
-		methods=[],
-		target_literals=[],
-		target_task_bindings=[],
-	)
-
-	args = pipeline._representative_task_args(
-		"move_to",
-		method_library,
-		("rover0", "waypoint1"),
-		[],
-	)
-
-	assert args == ("witness_rover_1", "witness_waypoint_2")
-
-
-def assert_method_validation_task_args_respect_equality_bound_constants(tmp_path):
-	domain_file = tmp_path / "domain_move.hddl"
-	domain_file.write_text(
-		"""
-(define (domain move_domain)
-  (:requirements :typing :hierarchy :negative-preconditions)
-  (:types rover waypoint)
-  (:predicates
-    (at ?r - rover ?w - waypoint)
-  )
-  (:task move_to
-    :parameters (?r - rover ?w - waypoint)
-  )
-  (:action navigate
-    :parameters (?r - rover ?from - waypoint ?to - waypoint)
-    :precondition (and (at ?r ?from))
-    :effect (and (not (at ?r ?from)) (at ?r ?to))
-  )
-)
-		""".strip(),
-	)
-	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
-	method_library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("move_to", ("ROVER", "WAYPOINT"), False, ("at",)),
-		],
-		primitive_tasks=[],
-		methods=[],
-		target_literals=[],
-		target_task_bindings=[],
-	)
-	method = HTNMethod(
-		method_name="m_move_to_keep_waypoint",
-		task_name="move_to",
-		parameters=("ROVER", "WAYPOINT"),
-		task_args=("ROVER", "WAYPOINT"),
-		context=(
-			HTNLiteral("=", ("ROVER", "rover0"), True, None),
-			HTNLiteral("=", ("WAYPOINT", "waypoint5"), True, None),
-			HTNLiteral("at", ("rover0", "waypoint5"), True, None),
-		),
-	)
-
-	args = pipeline._method_validation_task_args(
-		method,
-		("witness_rover_1", "witness_waypoint_2"),
-		method_library,
-	)
-
-	assert args == ("rover0", "waypoint5")
-
-
-def assert_stage4_hard_fails_when_any_method_validation_fails(tmp_path, monkeypatch):
-	class FakePlan:
-		def __init__(self, task_name: str, task_args: tuple[str, ...]):
-			self.task_name = task_name
-			self.task_args = task_args
-
-		def to_dict(self):
-			return {
-				"task_name": self.task_name,
-				"task_args": list(self.task_args),
-				"steps": [],
-			}
-
-	class FakePlanner:
-		def __init__(self, workspace: str):
-			self.workspace = workspace
-
-		def plan(self, **kwargs):
-			root_method = kwargs.get("root_method")
-			if root_method is not None and root_method.method_name == "m_place_on_bad":
-				raise RuntimeError("simulated method validation failure")
-			task_name = kwargs["task_name"]
-			task_args = tuple(kwargs.get("task_args") or kwargs["target_literal"].args)
-			return FakePlan(task_name, task_args)
-
-	monkeypatch.setattr(pipeline_module, "PANDAPlanner", FakePlanner)
-
-	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
-	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path / "logs"))
-	pipeline.logger.start_pipeline(
-		"demo instruction",
-		mode="dfa_agentspeak",
-		domain_file=pipeline.domain_file,
-		output_dir=str(tmp_path),
-	)
-	pipeline.output_dir = pipeline.logger.current_log_dir
-
-	monkeypatch.setattr(
-		pipeline,
-		"_seed_validation_scope",
-		lambda *args, **kwargs: (("a", "b"), {"a": "block", "b": "block"}),
-	)
-	monkeypatch.setattr(
-		pipeline,
-		"_task_witness_initial_facts",
-		lambda *args, **kwargs: ("(clear a)", "(clear b)"),
-	)
-	monkeypatch.setattr(
-		pipeline,
-		"_method_validation_initial_facts",
-		lambda *args, **kwargs: ("(clear a)", "(clear b)"),
-	)
-
-	method_library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(name="place_on", parameters=("X", "Y"), is_primitive=False),
-		],
-		primitive_tasks=[],
-		methods=[
-			HTNMethod(
-				method_name="m_place_on_good",
-				task_name="place_on",
-				parameters=("X", "Y"),
-			),
-			HTNMethod(
-				method_name="m_place_on_bad",
-				task_name="place_on",
-				parameters=("X", "Y"),
-			),
-		],
-		target_literals=[HTNLiteral("on", ("a", "b"), True, None)],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
-	)
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_a_b",
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_source_state": "1",
-			"raw_target_state": "2",
-			"initial_state": "q1",
-			"accepting_states": ["q2"],
-			"literal": HTNLiteral("on", ("a", "b"), True, None),
-		},
-	]
-
-	plan_records, stage4_data = pipeline._stage4_panda_planning(
-		SimpleNamespace(objects=["a", "b"]),
-		method_library,
-		transition_specs,
-	)
-
-	assert plan_records is None
-	assert stage4_data is None
-
-	execution = json.loads((pipeline.logger.current_log_dir / "execution.json").read_text())
-	assert execution["stage4_status"] == "failed"
-	assert execution["stage4_metadata"]["failed_method_validations"] == 1
-	assert execution["stage4_metadata"]["failed_method_names"] == ["m_place_on_bad"]
-
-
 def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 	method_library = HTNMethodLibrary(
 		compound_tasks=[HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",))],
@@ -615,7 +395,9 @@ def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 			dfa_result,
 			*,
 			query_text=None,
+			query_task_anchors=None,
 			negation_hints=None,
+			ordered_literal_signatures=None,
 		):
 			return method_library, {
 				"used_llm": True,
@@ -633,7 +415,13 @@ def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 				"llm_attempt_durations_seconds": [1.0, 2.21],
 			}
 
-		def extract_progressing_transitions(self, grounding_map, dfa_result):
+		def extract_progressing_transitions(
+			self,
+			grounding_map,
+			dfa_result,
+			*,
+			ordered_literal_signatures=None,
+		):
 			return []
 
 	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
@@ -915,6 +703,68 @@ def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks
 	assert case["problem_file"] == str(problem_path.resolve())
 
 
+def assert_official_marsrover_problem_query_case_generation_from_problem_tasks():
+	problem_path = (
+		Path(__file__).parent.parent
+		/ "src"
+		/ "domains"
+		/ "marsrover"
+		/ "problems"
+		/ "pfile01.hddl"
+	)
+	if not problem_path.exists():
+		pytest.skip(f"Missing marsrover problem file: {problem_path}")
+
+	case = _build_case_from_problem(problem_path)
+	assert case is not None
+	assert case["instruction"] == (
+		"Using lander general, modes colour, high_res, and low_res, rover rover0, "
+		"store rover0store, waypoints waypoint0, waypoint1, waypoint2, and waypoint3, "
+		"camera camera0, and objectives objective0 and objective1, complete the tasks "
+		"get_soil_data(waypoint2), get_rock_data(waypoint3), and "
+		"get_image_data(objective1, high_res)."
+	)
+	assert case["required_task_clauses"] == [
+		"get_soil_data(waypoint2)",
+		"get_rock_data(waypoint3)",
+		"get_image_data(objective1, high_res)",
+	]
+	assert case["problem_file"] == str(problem_path.resolve())
+
+
+def assert_query_task_anchor_extraction_uses_declared_tasks_only():
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	anchors = pipeline._extract_query_task_anchors(
+		"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2), "
+		"invented_task(b2), and do_clear(b1).",
+	)
+
+	assert anchors == (
+		{"task_name": "do_put_on", "args": ["b1", "b2"]},
+		{"task_name": "do_clear", "args": ["b1"]},
+	)
+
+
+def assert_expected_execution_identity_is_derived_from_selected_domain_and_problem():
+	blocksworld_identity = _expected_execution_identity(
+		OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		BLOCKSWORLD_QUERY_CASES["query_1"]["problem_file"],
+	)
+	marsrover_identity = _expected_execution_identity(
+		MARSROVER_DOMAIN_FILE,
+		MARSROVER_QUERY_CASES["query_1"]["problem_file"],
+	)
+
+	assert blocksworld_identity == {
+		"domain_name": "BLOCKS",
+		"problem_name": "BW-rand-5",
+	}
+	assert marsrover_identity == {
+		"domain_name": "rover",
+		"problem_name": "roverprob1234",
+	}
+
+
 def assert_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
 	problem_path = (
 		Path(__file__).parent.parent
@@ -974,47 +824,6 @@ def assert_stage6_object_type_resolution_ignores_unused_query_objects():
 	assert resolved["waypoint5"] == "waypoint"
 	assert "waypoint1" not in resolved
 
-
-def assert_stage7_build_root_task_bridges_matches_problem_tasks_by_ground_args():
-	problem_file = str((BLOCKSWORLD_PROBLEM_DIR / "p02.hddl").resolve())
-	pipeline = LTL_BDI_Pipeline(
-		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
-		problem_file=problem_file,
-	)
-	method_library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("make_on", ("X", "Y"), False, ("on",)),
-		],
-		primitive_tasks=[],
-		methods=[],
-		target_literals=[
-			HTNLiteral("on", ("b3", "b5"), True, None),
-			HTNLiteral("on", ("b6", "b3"), True, None),
-			HTNLiteral("on", ("b1", "b6"), True, None),
-			HTNLiteral("on", ("b2", "b1"), True, None),
-			HTNLiteral("on", ("b4", "b2"), True, None),
-			HTNLiteral("on", ("b7", "b4"), True, None),
-		],
-		target_task_bindings=[
-			HTNTargetTaskBinding("on(b3, b5)", "make_on"),
-			HTNTargetTaskBinding("on(b6, b3)", "make_on"),
-			HTNTargetTaskBinding("on(b1, b6)", "make_on"),
-			HTNTargetTaskBinding("on(b2, b1)", "make_on"),
-			HTNTargetTaskBinding("on(b4, b2)", "make_on"),
-			HTNTargetTaskBinding("on(b7, b4)", "make_on"),
-		],
-	)
-
-	bridge_specs = pipeline._stage7_build_root_task_bridges(method_library, [])
-
-	assert len(bridge_specs) == 6
-	assert all(spec["source_task_name"] == "do_put_on" for spec in bridge_specs)
-	assert all(spec["generated_task_name"] == "make_on" for spec in bridge_specs)
-	assert all(spec["extra_subtasks"] == [] for spec in bridge_specs)
-	assert bridge_specs[0]["method_name"] == "m_verify_bridge_do_put_on_1_make_on"
-	assert bridge_specs[-1]["method_name"] == "m_verify_bridge_do_put_on_6_make_on"
-
-
 def _run_query_case(
 	query_id: str,
 	*,
@@ -1044,6 +853,10 @@ def _run_query_case(
 	execution_txt_path = log_dir / "execution.txt"
 	execution = json.loads(execution_json_path.read_text())
 	execution_txt = execution_txt_path.read_text()
+	expected_identity = _expected_execution_identity(
+		domain_file,
+		case.get("problem_file"),
+	)
 
 	bug_messages: List[str] = []
 
@@ -1070,15 +883,17 @@ def _run_query_case(
 		if execution.get(stage_key) != "success":
 			bug_messages.append(f"{stage_key} is not success")
 
-	if execution.get("domain_name") != "BLOCKS":
-		bug_messages.append(f"execution.json domain_name mismatch: {execution.get('domain_name')}")
-	if execution.get("problem_name") not in {"BW-rand-5", "BW-rand-7", "BW-rand-9"}:
-		bug_messages.append(
-			f"execution.json problem_name is unexpected: {execution.get('problem_name')}",
-		)
+	for key, expected_value in expected_identity.items():
+		if execution.get(key) != expected_value:
+			bug_messages.append(
+				f"execution.json {key} mismatch: expected {expected_value}, "
+				f"got {execution.get(key)}",
+			)
 	log_dir_name = log_dir.name
-	if execution.get("domain_name") and execution.get("problem_name"):
-		expected_suffix = f"_{execution['domain_name']}_{execution['problem_name']}"
+	if expected_identity.get("domain_name") and expected_identity.get("problem_name"):
+		expected_suffix = (
+			f"_{expected_identity['domain_name']}_{expected_identity['problem_name']}"
+		)
 		if not log_dir_name.endswith(expected_suffix):
 			bug_messages.append(
 				f"log directory name does not end with {expected_suffix}: {log_dir_name}",
@@ -1096,37 +911,6 @@ def _run_query_case(
 	if not target_bindings:
 		bug_messages.append("Stage 3 produced no target_task_bindings")
 	bug_messages.extend(_binding_semantic_messages(stage3_library))
-
-	stage4_artifacts = execution.get("stage4_artifacts") or {}
-	method_validations = stage4_artifacts.get("method_validations") or []
-	if not method_validations:
-		bug_messages.append("Stage 4 recorded no per-method validation artifacts")
-	if any(item.get("status") != "success" for item in method_validations):
-		failed_methods = sorted(
-			item.get("method_name")
-			for item in method_validations
-			if item.get("status") != "success"
-		)
-		bug_messages.append(
-			f"Stage 4 has failed per-method validations: {failed_methods}",
-		)
-
-	expected_method_names = {
-		method["method_name"]
-		for method in (stage3_library.get("methods") or [])
-		if method.get("task_name") in _reachable_compound_task_names(stage3_library)
-	}
-	validated_method_names = {
-		item.get("method_name")
-		for item in method_validations
-		if item.get("method_name")
-	}
-	missing_method_validations = sorted(expected_method_names - validated_method_names)
-	if missing_method_validations:
-		bug_messages.append(
-			"Stage 4 did not validate all reachable sibling methods: "
-			f"{missing_method_validations}",
-		)
 
 	stage5_code = execution.get("stage5_agentspeak") or ""
 	if "/* HTN Method Plans */" not in stage5_code:
@@ -1404,6 +1188,24 @@ def assert_task_witness_initial_facts_merge_sibling_branches(tmp_path):
 	assert "(ontable a)" in facts
 
 
+def assert_transition_witness_initial_facts_exclude_positive_target_literal(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	initial_facts = (
+		"(clear b)",
+		"(ontable a)",
+		"(on a b)",
+	)
+	filtered = pipeline._transition_witness_initial_facts(
+		initial_facts,
+		HTNLiteral("on", ("a", "b"), True, None),
+	)
+
+	assert filtered == (
+		"(clear b)",
+		"(ontable a)",
+	)
+
+
 def assert_method_validation_initial_facts_allocate_typed_witness_objects(tmp_path):
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	planner = PANDAPlanner()
@@ -1471,8 +1273,19 @@ def test_blocksworld_pipeline_query_case(query_id: str):
 	_ensure_live_dependencies()
 	report = _run_query_case(
 		query_id,
-		query_cases=QUERY_CASES,
+		query_cases=BLOCKSWORLD_QUERY_CASES,
 		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+	)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", _pytest_selected_marsrover_query_ids())
+def test_marsrover_pipeline_query_case(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_query_case(
+		query_id,
+		query_cases=MARSROVER_QUERY_CASES,
+		domain_file=MARSROVER_DOMAIN_FILE,
 	)
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 

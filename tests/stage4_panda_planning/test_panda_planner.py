@@ -157,8 +157,6 @@ def test_panda_domain_export_uses_llm_method_library():
 	assert "(s2 (stack ?b1 ?b2))" in domain_hddl
 	assert "(< s1 s2)" in domain_hddl
 	assert "(:action stack" in domain_hddl
-	assert "(:method m_place_on_noop" in domain_hddl
-	assert ":precondition (and (on ?b1 ?b2))" in domain_hddl
 
 
 def test_panda_domain_export_defaults_task_parameter_type_to_object():
@@ -188,47 +186,6 @@ def test_panda_domain_export_defaults_task_parameter_type_to_object():
 	assert "(:task navigate_to" in domain_hddl
 	assert ":parameters (?rover - object ?from - object ?to - object)" in domain_hddl
 
-
-def test_panda_domain_export_adds_positive_guard_for_non_target_helper():
-	planner = PANDAPlanner()
-	domain_hddl = planner._build_domain_hddl(
-		domain=_domain(),
-		method_library=HTNMethodLibrary(
-			compound_tasks=[
-				HTNTask("free_hand", (), False, ("handempty",)),
-			],
-			primitive_tasks=[],
-			methods=[],
-			target_literals=[],
-			target_task_bindings=[],
-		),
-		domain_name="blocksworld_transition_1",
-	)
-
-	assert "(:method m_free_hand_noop" in domain_hddl
-	assert ":precondition (and (handempty))" in domain_hddl
-
-
-def test_panda_domain_export_adds_negative_guard_for_negative_target_task():
-	planner = PANDAPlanner()
-	domain_hddl = planner._build_domain_hddl(
-		domain=_domain(),
-		method_library=HTNMethodLibrary(
-			compound_tasks=[
-				HTNTask("keep_clear", ("B",), False, ("clear",)),
-			],
-			primitive_tasks=[],
-			methods=[],
-			target_literals=[HTNLiteral("clear", ("a",), False, "clear_a")],
-			target_task_bindings=[HTNTargetTaskBinding("!clear(a)", "keep_clear")],
-		),
-		domain_name="blocksworld_transition_1",
-	)
-
-	assert "(:method m_keep_clear_noop" in domain_hddl
-	assert ":precondition (and (not (clear ?b)))" in domain_hddl
-
-
 def test_panda_plan_parser_extracts_primitive_steps():
 	planner = PANDAPlanner()
 	plan_text = "0: (pick-up a)\n1: (stack a b)\n"
@@ -254,59 +211,6 @@ def test_panda_plan_parser_extracts_converted_plan_steps():
 	assert steps[0].args == ("a",)
 	assert steps[1].args == ("a", "b")
 
-
-def test_root_method_wrapper_forces_selected_root_method_without_removing_helpers():
-	planner = PANDAPlanner()
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("hold_block", ("BLOCK",), False, ("holding",)),
-			HTNTask("clear_top", ("BLOCK",), False, ("clear",)),
-		],
-		primitive_tasks=[],
-		methods=[
-			HTNMethod(
-				method_name="m_hold_block_noop",
-				task_name="hold_block",
-				parameters=("BLOCK",),
-				context=(HTNLiteral("holding", ("BLOCK",), True, None),),
-			),
-			HTNMethod(
-				method_name="m_hold_block_from_table",
-				task_name="hold_block",
-				parameters=("BLOCK",),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="clear_top",
-						args=("BLOCK",),
-						kind="compound",
-					),
-				),
-			),
-			HTNMethod(
-				method_name="m_clear_top_noop",
-				task_name="clear_top",
-				parameters=("BLOCK",),
-				context=(HTNLiteral("clear", ("BLOCK",), True, None),),
-			),
-		],
-	)
-
-	wrapped, wrapper_task_name = planner._wrap_library_for_root_method(library, library.methods[1])
-
-	assert [method.method_name for method in wrapped.methods if method.task_name == "hold_block"] == [
-		"m_hold_block_noop",
-		"m_hold_block_from_table",
-	]
-	assert [method.method_name for method in wrapped.methods if method.task_name == "clear_top"] == [
-		"m_clear_top_noop",
-	]
-	assert wrapper_task_name.startswith("validate_m_hold_block_from_table")
-	wrapper_task = next(task for task in wrapped.compound_tasks if task.name == wrapper_task_name)
-	assert wrapper_task.parameters == ("BLOCK",)
-	assert [method.method_name for method in wrapped.methods if method.task_name == wrapper_task_name] == [
-		f"m_{wrapper_task_name}_entry",
-	]
 
 
 def test_panda_domain_export_renders_equality_constraints():
@@ -335,38 +239,3 @@ def test_panda_domain_export_renders_equality_constraints():
 	)
 
 	assert ":precondition (and (not (= ?left ?right)))" in domain_hddl
-
-
-def test_domain_export_can_suppress_auto_generated_guard_for_root_task():
-	planner = PANDAPlanner()
-	domain_hddl = planner._build_domain_hddl(
-		domain=_domain(),
-		method_library=HTNMethodLibrary(
-			compound_tasks=[
-				HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
-			],
-			primitive_tasks=[],
-			methods=[
-				HTNMethod(
-					method_name="m_place_on_stack",
-					task_name="place_on",
-					parameters=("BLOCK1", "BLOCK2"),
-					subtasks=(
-						HTNMethodStep(
-							step_id="s1",
-							task_name="put_on_block",
-							args=("BLOCK1", "BLOCK2"),
-							kind="primitive",
-							action_name="stack",
-						),
-					),
-				),
-			],
-			target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
-			target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "place_on")],
-		),
-		domain_name="blocksworld_transition_1",
-		suppress_guard_tasks={"place_on"},
-	)
-
-	assert "(:method m_place_on_noop" not in domain_hddl

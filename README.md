@@ -33,9 +33,10 @@ The repository now carries four benchmark-aligned planning domains:
 4. **Stage 4: HTN Method Library -> PANDA Validation**
    - `src/stage4_panda_planning/`
    - Input: `HTNMethodLibrary` + Stage 3 transition specs + concrete object set
-   - Does: builds temporary HDDL domain/problem files and uses PANDA PI to produce
-     existence witnesses for (a) transition-bound tasks and (b) query-relevant sibling methods;
-     any failed query-relevant method validation now hard-fails the pipeline
+   - Does: builds temporary HDDL domain/problem files from the generated library and uses
+     PANDA PI to produce existence witnesses for the current transition-bound query structure.
+     Stage 4 validates only the real generated library and does not inject synthetic wrappers,
+     guards, or bridge methods.
    - Output: PANDA validation records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
 
 5. **Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering**
@@ -62,12 +63,17 @@ The repository now carries four benchmark-aligned planning domains:
 
 ## Important Design Choices
 
-- Stage 3 is **LLM-only** and rejects missing or malformed live model output.
+- Stage 3 is **LLM-only**, runs as a single synthesis call, and rejects missing or malformed
+  live model output.
+- No stage projects domain methods, performs runtime-guided repair, or code-authors
+  replacement methods after Stage 3.
 - Stage 4 uses the PANDA PI toolchain on temporary HDDL domain/problem files.
 - Stage 4 keeps the problem-instance builder separate from the planner entrypoint. The default
   builder is explicit and configurable instead of hard-coding initial-state facts inside the planner.
 - Stage 4 is an existence-witness validation step for the current query structure, not a global
   completeness proof over the entire domain state space.
+- `problem.hddl` is excluded from Stage 1 and Stage 3 semantic input. It is used only for
+  Stage 6 runtime initialisation and Stage 7 official verification.
 - Stage 5 renders static, domain-specific AgentSpeak from the HTN method library, while Stage 4
   PANDA outputs remain validation artifacts plus DFA-edge witnesses.
 - Stage 6 is enabled by default and is a hard gate: if Jason validation fails, the full pipeline
@@ -261,11 +267,11 @@ This test requires:
 PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
 ```
 
-9. Run the full pipeline on a real blocksworld instruction:
+9. Run the full pipeline on a query in the current recommended task-anchored style:
 
 ```bash
 ./.venv/bin/python src/main.py \
-  "Using blocks a and b, arrange them so that a is on b." \
+  "Using blocks a and b, complete the tasks do_put_on(a, b)." \
   --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
@@ -294,7 +300,7 @@ The default entry point is:
 
 ```bash
 python src/main.py \
-  "Put block a on block b" \
+  "Using blocks a and b, complete the tasks do_put_on(a, b)." \
   --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
@@ -303,6 +309,8 @@ Notes:
 - Stage 1 requires an LLM API key.
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
 - `--domain-file` is required. The pipeline does not use an implicit default domain.
+- For benchmark-backed or Stage 3-sensitive runs, prefer the single-sentence task-anchored query
+  format documented in `docs/nl_instruction_template.md`.
 - `--problem-file` is optional and, when provided, Stage 6 seeds runtime facts from the
   official HDDL problem `:init` and Stage 7 verifies the generated hierarchical plan against
   the same benchmark problem.
