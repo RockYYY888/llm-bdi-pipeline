@@ -524,6 +524,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Do not generate transitive support-closure libraries" in system_prompt
 	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
 	assert "Apply the same rule to compound subtasks when their constructive branches share a dynamic prerequisite." in system_prompt
+	assert "If a same-arity declared child is chosen as packaging for the headline effect" in system_prompt
 
 	assert "QUERY:" in user_prompt
 	assert "QUERY OBJECT NAMES (grounded instances from the current query; never place them inside methods):" in user_prompt
@@ -554,6 +555,10 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "QUERY-TASK SAME-ARITY SUPPORT CANDIDATES:" in user_prompt
 	assert "DECLARED TASK CONSTRUCTIVE TEMPLATES:" in user_prompt
 	assert "get_soil_data(?waypoint) targets communicated_soil_data(?waypoint);" in user_prompt
+	assert "DECLARED SUPPORT TASK APPLICABILITY ENVELOPES:" in user_prompt
+	assert "navigate_abs(" in user_prompt
+	assert "can serve as a declared support task for at(" in user_prompt
+	assert "if a parent calls it, first provide shared prerequisites" in user_prompt
 	assert "QUERY-TASK EXTRA ROLE FRAMES:" in user_prompt
 	assert "to support have_image(?r, ?objective, ?mode), take_image(?r, WAYPOINT1, ?objective, CAMERA1, ?mode)" in user_prompt
 	assert "introduces extra roles WAYPOINT1 - WAYPOINT, CAMERA1 - CAMERA" in user_prompt
@@ -564,7 +569,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "never create helper tasks for static predicates" in lower_user_prompt
 	assert "if that constructive step requires dynamic preconditions" in lower_user_prompt
 	assert "at least one constructive branch must stay applicable when that headline literal is currently false" in user_prompt
-	assert "consider same-arity declared tasks as reusable intermediate abstractions" in user_prompt
+	assert "prefer same-arity declared tasks as reusable intermediate abstractions" in user_prompt
+	assert "that child should own the final producer for the headline effect" in user_prompt
 	assert "do not choose a producer chain whose unresolved preconditions still require that same P(args) to already hold" in user_prompt
 	assert "add it to method.parameters, constrain it in method.context before using it in subtasks" in user_prompt
 	assert "build its constructive branch around one of those aligned templates" in user_prompt
@@ -602,9 +608,13 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	)
 
 	assert "QUERY-TASK CHILD SUPPORT PREREQUISITES:" in user_prompt
+	assert "QUERY-TASK SAME-ARITY PACKAGING MODES:" in user_prompt
 	assert "before any helper or child call intended to establish holding(ARG1), first support its shared prerequisites clear(ARG1), handempty" in user_prompt
 	assert "unstack(ARG1, BLOCK1)" in user_prompt
 	assert "do_clear(?x) targets clear(?x); constructive templates: put_down(?x) [needs holding(?x)]; stack(?x, BLOCK1) [needs holding(?x)]; unstack(BLOCK1, ?x) [needs on(BLOCK1, ?x), handempty]" in user_prompt
+	assert "no declared task directly headlines holding(ARG1). Before inventing a helper, prefer same-arity declared packaging tasks do_move(ARG1, ARG2) and let those declared tasks absorb the remaining dynamic support needed for on(ARG1, ARG2)." in user_prompt
+	assert "if used as same-arity packaging for on(?x, ?y), it should itself reach the headline effect via stack(?x, ?y) [needs holding(?x), clear(?y)]" in user_prompt
+	assert "Do not call this packaging child and then repeat the same final producer again in the parent." in user_prompt
 
 
 def test_render_signature_with_mapping_does_not_cascade_replacements():
@@ -671,7 +681,7 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 16600
+	assert len(system_prompt) + len(user_prompt) < 18600
 
 
 def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
