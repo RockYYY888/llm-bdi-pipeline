@@ -308,6 +308,7 @@ class LTL_BDI_Pipeline:
                 dfa_result=dfa_result,
                 query_text=query_text,
                 query_task_anchors=query_task_anchors,
+                query_objects=tuple(getattr(ltl_spec, "objects", ()) or ()),
                 negation_hints=getattr(ltl_spec, "negation_hints", {}),
                 ordered_literal_signatures=ordered_literal_signatures,
             )
@@ -323,6 +324,7 @@ class LTL_BDI_Pipeline:
                 ),
                 "target_literals": synthesis_meta["target_literals"],
                 "query_task_anchors": synthesis_meta.get("query_task_anchors", []),
+                "query_objects": synthesis_meta.get("query_objects", []),
                 "negation_resolution": synthesis_meta.get("negation_resolution", {}),
                 "action_analysis": synthesis_meta.get("action_analysis", {}),
                 "compound_tasks": synthesis_meta["compound_tasks"],

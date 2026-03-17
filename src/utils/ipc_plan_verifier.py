@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -83,7 +84,7 @@ class IPCPlanVerifier:
 		self._last_hierarchical_build_warning: Optional[str] = None
 
 	def tool_available(self) -> bool:
-		return shutil.which(self.parser_cmd) is not None
+		return self._resolve_command_head(self.parser_cmd) is not None
 
 	def verify_plan(
 		self,
@@ -178,8 +179,9 @@ class IPCPlanVerifier:
 					build_warning = self._last_hierarchical_build_warning
 		plan_path.write_text(plan_text)
 
+		resolved_parser = self._resolve_command_head(self.parser_cmd) or self.parser_cmd
 		command = [
-			self.parser_cmd,
+			resolved_parser,
 			"-V",
 			str(Path(domain_file).resolve()),
 			str(Path(problem_file).resolve()),
@@ -236,6 +238,45 @@ class IPCPlanVerifier:
 		)
 		output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
 		return result
+
+	def _resolve_command_head(self, command: str) -> Optional[str]:
+		head = self._command_head(command)
+		if os.path.sep in head:
+			if Path(head).is_file() and os.access(head, os.X_OK):
+				return head
+			return None
+
+		resolved = shutil.which(head)
+		if resolved:
+			return resolved
+
+		for directory in self._default_command_dirs():
+			candidate = directory / head
+			if candidate.is_file() and os.access(candidate, os.X_OK):
+				return str(candidate)
+
+		return None
+
+	def _default_command_dirs(self) -> Tuple[Path, ...]:
+		directories: List[Path] = []
+		panda_home = os.getenv("PANDA_PI_HOME")
+		if panda_home:
+			directories.append(Path(panda_home) / "bin")
+		panda_bin = os.getenv("PANDA_PI_BIN")
+		if panda_bin:
+			directories.append(Path(panda_bin))
+		directories.append(Path.home() / ".local" / "pandaPI" / "bin")
+
+		unique: List[Path] = []
+		for directory in directories:
+			if directory not in unique:
+				unique.append(directory)
+		return tuple(unique)
+
+	@staticmethod
+	def _command_head(command: str) -> str:
+		parts = str(command).strip().split()
+		return parts[0] if parts else str(command)
 
 	@staticmethod
 	def render_primitive_only_plan(action_path: Sequence[str]) -> str:

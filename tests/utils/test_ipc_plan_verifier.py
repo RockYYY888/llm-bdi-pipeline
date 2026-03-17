@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,21 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTask,
 )
 from utils.ipc_plan_verifier import IPCPlanVerifier
+
+
+def test_tool_available_discovers_parser_from_panda_pi_bin(tmp_path, monkeypatch):
+	parser_dir = tmp_path / "bin"
+	parser_dir.mkdir()
+	parser_path = parser_dir / "pandaPIparser"
+	parser_path.write_text("#!/bin/sh\nexit 0\n")
+	parser_path.chmod(0o755)
+
+	monkeypatch.setenv("PANDA_PI_BIN", str(parser_dir))
+	monkeypatch.setenv("PATH", os.getenv("PATH", ""))
+
+	verifier = IPCPlanVerifier()
+
+	assert verifier.tool_available() is True
 
 
 def test_render_primitive_only_plan_uses_official_primitive_plan_format():

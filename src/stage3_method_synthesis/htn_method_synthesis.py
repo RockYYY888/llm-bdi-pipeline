@@ -85,6 +85,7 @@ class HTNMethodSynthesizer:
 		*,
 		query_text: Optional[str] = None,
 		query_task_anchors: Optional[Sequence[Dict[str, Any]]] = None,
+		query_objects: Optional[Sequence[str]] = None,
 		negation_hints: Optional[Dict[str, Any]] = None,
 		ordered_literal_signatures: Optional[Sequence[str]] = None,
 	) -> Tuple[HTNMethodLibrary, Dict[str, Any]]:
@@ -112,12 +113,18 @@ class HTNMethodSynthesizer:
 			query_task_anchors,
 			domain,
 		)
+		normalised_query_objects = tuple(
+			str(value).strip()
+			for value in (query_objects or ())
+			if str(value).strip()
+		)
 
 		metadata: Dict[str, Any] = {
 			"used_llm": False,
 			"model": self.model if self.client else None,
 			"target_literals": [literal.to_signature() for literal in target_literals],
 			"query_task_anchors": list(normalised_query_task_anchors),
+			"query_objects": list(normalised_query_objects),
 			"negation_resolution": negation_resolution.to_dict(),
 			"action_analysis": action_analysis,
 			"compound_tasks": 0,
@@ -151,6 +158,7 @@ class HTNMethodSynthesizer:
 				self._schema_hint(),
 				query_text=query_text or "",
 				query_task_anchors=normalised_query_task_anchors,
+				query_objects=normalised_query_objects,
 				action_analysis=action_analysis,
 			),
 		}
@@ -188,6 +196,7 @@ class HTNMethodSynthesizer:
 				llm_only_library,
 				domain,
 				query_task_anchors=normalised_query_task_anchors,
+				query_objects=normalised_query_objects,
 				static_predicates=tuple(action_analysis["static_predicates"]),
 			)
 		except Exception as exc:
@@ -561,8 +570,12 @@ class HTNMethodSynthesizer:
 					continue
 				dynamic_predicates.add(effect.predicate)
 
-		for parsed_action in parsed_actions:
+		for action, parsed_action in zip(domain.actions, parsed_actions):
 			action_name = self._sanitize_name(parsed_action.name)
+			action_parameter_types = [
+				self._parameter_type(parameter)
+				for parameter in action.parameters
+			]
 			precondition_signatures = [
 				literal_signature(pattern)
 				for pattern in parsed_action.preconditions
@@ -582,6 +595,7 @@ class HTNMethodSynthesizer:
 						"action_name": action_name,
 						"source_action_name": parsed_action.name,
 						"action_parameters": list(parsed_action.parameters),
+						"action_parameter_types": list(action_parameter_types),
 						"effect_args": list(effect.args),
 						"effect_signature": literal_signature(effect),
 						"precondition_signatures": list(precondition_signatures),
@@ -1070,6 +1084,7 @@ class HTNMethodSynthesizer:
 		domain: Any,
 		*,
 		query_task_anchors: Optional[Sequence[Dict[str, Any]]] = None,
+		query_objects: Sequence[str] = (),
 		static_predicates: Sequence[str] = (),
 	) -> None:
 		compound_task_names = [task.name for task in library.compound_tasks]
@@ -1101,6 +1116,7 @@ class HTNMethodSynthesizer:
 		task_lookup = {task.name: task for task in library.compound_tasks}
 		action_schemas = self._action_schema_map(domain)
 		action_types = self._action_type_map(domain)
+		task_types = self._task_type_map(domain)
 		predicate_arities = {
 			predicate.name: len(predicate.parameters)
 			for predicate in getattr(domain, "predicates", [])
@@ -1198,6 +1214,10 @@ class HTNMethodSynthesizer:
 			binding_lookup,
 			query_task_anchors or (),
 			compound_names,
+		)
+		self._validate_query_object_leakage(
+			library,
+			query_objects=query_objects,
 		)
 		self._validate_fresh_static_helper_tasks(
 			library,
@@ -1394,6 +1414,7 @@ class HTNMethodSynthesizer:
 				method,
 				task_lookup,
 				action_types,
+				task_types,
 				predicate_types,
 			)
 
@@ -1598,6 +1619,70 @@ class HTNMethodSynthesizer:
 					f"target_task_binding for '{target_signature}' must use the ordered "
 					f"query task anchor '{anchor_task_name}', not '{bound_task_name}'.",
 				)
+
+	def _validate_query_object_leakage(
+		self,
+		library: HTNMethodLibrary,
+		*,
+		query_objects: Sequence[str],
+	) -> None:
+		grounded_objects = {
+			str(value).strip()
+			for value in query_objects
+			if str(value).strip()
+		}
+		if not grounded_objects:
+			return
+
+		for task in library.compound_tasks:
+			for parameter in task.parameters:
+				if parameter in grounded_objects:
+					raise ValueError(
+						f"Compound task '{task.name}' uses grounded query object "
+						f"'{parameter}' as a task parameter. Generated tasks must remain "
+						"schematic rather than embedding query-specific object names.",
+					)
+
+		for method in library.methods:
+			for parameter in method.parameters:
+				if parameter in grounded_objects:
+					raise ValueError(
+						f"Method '{method.method_name}' uses grounded query object "
+						f"'{parameter}' as a method parameter. Methods must remain "
+						"schematic rather than embedding query-specific object names.",
+					)
+			for symbol in method.task_args:
+				if symbol in grounded_objects:
+					raise ValueError(
+						f"Method '{method.method_name}' uses grounded query object "
+						f"'{symbol}' in task_args. Methods must remain schematic.",
+					)
+			for literal in method.context:
+				for symbol in literal.args:
+					if symbol in grounded_objects:
+						raise ValueError(
+							f"Method '{method.method_name}' leaks grounded query object "
+							f"'{symbol}' into method context. Use schematic parameters "
+							"and bindings instead.",
+						)
+			for step in method.subtasks:
+				for symbol in step.args:
+					if symbol in grounded_objects:
+						raise ValueError(
+							f"Method '{method.method_name}' leaks grounded query object "
+							f"'{symbol}' into subtask '{step.step_id}'. Use schematic "
+							"parameters and bindings instead.",
+						)
+				for literal in (step.literal, *step.preconditions, *step.effects):
+					if literal is None:
+						continue
+					for symbol in literal.args:
+						if symbol in grounded_objects:
+							raise ValueError(
+								f"Method '{method.method_name}' leaks grounded query object "
+								f"'{symbol}' into subtask '{step.step_id}' metadata. Use "
+								"schematic parameters and bindings instead.",
+							)
 
 	def _validate_fresh_static_helper_tasks(
 		self,
@@ -1963,6 +2048,17 @@ class HTNMethodSynthesizer:
 			action_types[self._sanitize_name(action.name)] = type_signature
 		return action_types
 
+	def _task_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		task_types: Dict[str, Tuple[str, ...]] = {}
+		for task in getattr(domain, "tasks", []):
+			type_signature = tuple(
+				self._parameter_type(parameter)
+				for parameter in task.parameters
+			)
+			task_types[task.name] = type_signature
+			task_types[self._sanitize_name(task.name)] = type_signature
+		return task_types
+
 	def _resolve_action_schema(self, step: HTNMethodStep, action_schemas: Dict[str, Any]) -> Any:
 		if step.action_name and step.action_name in action_schemas:
 			return action_schemas[step.action_name]
@@ -2122,11 +2218,17 @@ class HTNMethodSynthesizer:
 		method: HTNMethod,
 		task_lookup: Dict[str, HTNTask],
 		action_types: Dict[str, Tuple[str, ...]],
+		task_types: Dict[str, Tuple[str, ...]],
 		predicate_types: Dict[str, Tuple[str, ...]],
 	) -> None:
 		symbol_types: Dict[str, set[str]] = {}
 		task_schema = task_lookup.get(method.task_name)
-		if task_schema and len(task_schema.source_predicates) == 1:
+		task_signature = task_types.get(method.task_name, ())
+		for index, parameter in enumerate(method.parameters):
+			if index >= len(task_signature):
+				break
+			symbol_types.setdefault(parameter, set()).add(task_signature[index])
+		if not task_signature and task_schema and len(task_schema.source_predicates) == 1:
 			predicate_signature = predicate_types.get(task_schema.source_predicates[0], ())
 			for index, parameter in enumerate(task_schema.parameters):
 				if index < len(predicate_signature):
@@ -2142,8 +2244,11 @@ class HTNMethodSynthesizer:
 					action_signature = action_types.get(step.task_name, ())
 				self._collect_argument_types(symbol_types, step.args, action_signature)
 			elif step.kind == "compound":
+				step_task_signature = task_types.get(step.task_name, ())
+				if step_task_signature:
+					self._collect_argument_types(symbol_types, step.args, step_task_signature)
 				step_task = task_lookup.get(step.task_name)
-				if step_task and len(step_task.source_predicates) == 1:
+				if not step_task_signature and step_task and len(step_task.source_predicates) == 1:
 					predicate_signature = predicate_types.get(step_task.source_predicates[0], ())
 					self._collect_argument_types(symbol_types, step.args, predicate_signature)
 
@@ -2627,19 +2732,14 @@ class HTNMethodSynthesizer:
 		return (
 			'{"target_task_bindings":[{"target_literal":"linked(A, B)","task_name":"do_link"}],'
 			'"compound_tasks":[{"name":"do_link","parameters":["A","B"],"is_primitive":false,'
-			'"source_predicates":["linked"]},{"name":"hold_item","parameters":["A"],'
-			'"is_primitive":false,"source_predicates":["holding"]}],'
-			'"methods":[{"method_name":"m_do_link_ready","task_name":"do_link","parameters":["A","B"],'
+			'"source_predicates":["linked"]}],'
+			'"methods":[{"method_name":"m_do_link_noop","task_name":"do_link","parameters":["A","B"],'
 			'"context":[{"predicate":"linked","args":["A","B"],"is_positive":true}],"subtasks":[],'
 			'"ordering":[],"origin":"llm"},{"method_name":"m_do_link_constructive","task_name":"do_link",'
 			'"parameters":["A","B"],"context":[{"predicate":"ready","args":["B"],"is_positive":true}],'
-			'"subtasks":[{"step_id":"s1","task_name":"hold_item","args":["A"],"kind":"compound",'
-			'"literal":null,"preconditions":[],"effects":[]},{"step_id":"s2","task_name":"attach",'
-			'"args":["A","B"],"kind":"primitive","action_name":"attach","literal":null,'
-			'"preconditions":[],"effects":[]}],"ordering":[["s1","s2"]],"origin":"llm"},'
-			'{"method_name":"m_hold_item_ready","task_name":"hold_item","parameters":["A"],'
-			'"context":[{"predicate":"holding","args":["A"],"is_positive":true}],"subtasks":[],'
-			'"ordering":[],"origin":"llm"}]}'
+			'"subtasks":[{"step_id":"s1","task_name":"attach","args":["A","B"],"kind":"primitive",'
+			'"action_name":"attach","literal":null,"preconditions":[],"effects":[]}],"ordering":[],'
+			'"origin":"llm"}]}'
 		)
 
 	@staticmethod

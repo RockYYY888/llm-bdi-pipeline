@@ -26,6 +26,7 @@ from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer, H
 from stage3_method_synthesis.htn_prompts import (
 	build_htn_system_prompt,
 	build_htn_user_prompt,
+	_render_signature_with_mapping,
 )
 from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
@@ -506,8 +507,10 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 			{"task_name": "get_soil_data", "args": ["waypoint2"]},
 			{"task_name": "get_image_data", "args": ["objective1", "high_res"]},
 		),
+		query_objects=("rover0", "waypoint2", "high_res", "objective1", "camera0"),
 		action_analysis=synthesizer._analyse_domain_actions(domain),
 	)
+	lower_user_prompt = user_prompt.lower()
 
 	assert "OUTPUT CONTRACT:" in system_prompt
 	assert "When the query explicitly names declared domain tasks" in system_prompt
@@ -523,6 +526,9 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Apply the same rule to compound subtasks when their constructive branches share a dynamic prerequisite." in system_prompt
 
 	assert "QUERY:" in user_prompt
+	assert "QUERY OBJECT NAMES (grounded instances from the current query; never place them inside methods):" in user_prompt
+	assert "- rover0" in user_prompt
+	assert "- camera0" in user_prompt
 	assert "ORDERED QUERY TASK ANCHORS:" in user_prompt
 	assert "#1: get_soil_data(waypoint2)" in user_prompt
 	assert "#2: get_image_data(objective1, high_res)" in user_prompt
@@ -548,27 +554,64 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "QUERY-TASK SAME-ARITY SUPPORT CANDIDATES:" in user_prompt
 	assert "DECLARED TASK CONSTRUCTIVE TEMPLATES:" in user_prompt
 	assert "get_soil_data(?waypoint) targets communicated_soil_data(?waypoint);" in user_prompt
-	assert "Only create a fresh helper task when no declared task can express the required dynamic state change." in user_prompt
-	assert "Never create helper tasks for static predicates." in user_prompt
-	assert "If that constructive step requires dynamic preconditions" in user_prompt
+	assert "QUERY-TASK EXTRA ROLE FRAMES:" in user_prompt
+	assert "to support have_image(?r, ?objective, ?mode), take_image(?r, WAYPOINT1, ?objective, CAMERA1, ?mode)" in user_prompt
+	assert "introduces extra roles WAYPOINT1 - WAYPOINT, CAMERA1 - CAMERA" in user_prompt
+	assert "sample_soil(ROVER1, STORE1, ARG1)" in user_prompt
+	assert "take_image(ROVER1, WAYPOINT1, ARG1, CAMERA1, ARG2)" in user_prompt
+	assert "get_image_data(?r, ARG1, ARG2)" not in user_prompt
+	assert "only create a fresh helper task when no declared task can express the required dynamic state change" in lower_user_prompt
+	assert "never create helper tasks for static predicates" in lower_user_prompt
+	assert "if that constructive step requires dynamic preconditions" in lower_user_prompt
 	assert "at least one constructive branch must stay applicable when that headline literal is currently false" in user_prompt
 	assert "consider same-arity declared tasks as reusable intermediate abstractions" in user_prompt
 	assert "do not choose a producer chain whose unresolved preconditions still require that same P(args) to already hold" in user_prompt
-	assert "add it to method.parameters and constrain it in method.context before referencing it in subtasks" in user_prompt
+	assert "add it to method.parameters, constrain it in method.context before using it in subtasks" in user_prompt
 	assert "build its constructive branch around one of those aligned templates" in user_prompt
 	assert "Preserve typed role separation across every method" in user_prompt
 	assert "each dynamic precondition must already be guaranteed by method context or by earlier subtasks" in user_prompt
 	assert "state it explicitly in method.context" in user_prompt
 	assert "If a compound child task's constructive branches share a dynamic prerequisite" in user_prompt
+	assert "never place grounded query object names inside methods; use schematic parameters instead" in lower_user_prompt
+	assert "when a producer needs extra roles beyond the headline arguments" in lower_user_prompt
 	assert "Do not use nop as filler inside constructive methods." in user_prompt
 	assert "do not enumerate every support powerset" in user_prompt
-	assert "Do not bypass the query skeleton with a fresh helper-only library." in user_prompt
-	assert "Primitive step literal is null unless that exact positive literal is a real action effect." in user_prompt
-	assert "Every referenced compound subtask appears in compound_tasks and has methods." in user_prompt
-	assert "Every primitive step's dynamic preconditions are supported by method context or earlier subtasks." in user_prompt
-	assert "Every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks." in user_prompt
-	assert "No primitive step relies on an unstated dynamic precondition." in user_prompt
+	assert "do not bypass the query skeleton with a fresh helper-only library" in lower_user_prompt
+	assert "primitive step literal is null unless that exact positive literal is a real action effect" in lower_user_prompt
+	assert "every referenced compound subtask appears in compound_tasks and has methods" in lower_user_prompt
+	assert "every primitive step's dynamic preconditions are supported by method context or earlier subtasks" in lower_user_prompt
+	assert "every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks" in lower_user_prompt
+	assert "no primitive step relies on an unstated dynamic precondition" in lower_user_prompt
+	assert "every auxiliary variable has an explicit typing witness" in lower_user_prompt
 	assert "operate(ACTOR, LOCATION, TARGET, TOOL, MODE) must keep ACTOR and TOOL as different variables." in user_prompt
+
+
+def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_query_tasks():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["on(a, b)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text="Using blocks a and b, complete the tasks do_put_on(a, b).",
+		query_task_anchors=(
+			{"task_name": "do_put_on", "args": ["a", "b"]},
+		),
+		query_objects=("a", "b"),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert "QUERY-TASK CHILD SUPPORT PREREQUISITES:" in user_prompt
+	assert "before any helper or child call intended to establish holding(ARG1), first support its shared prerequisites clear(ARG1), handempty" in user_prompt
+	assert "unstack(ARG1, BLOCK1)" in user_prompt
+	assert "do_clear(?x) targets clear(?x); constructive templates: put_down(?x) [needs holding(?x)]; stack(?x, BLOCK1) [needs holding(?x)]; unstack(BLOCK1, ?x) [needs on(BLOCK1, ?x), handempty]" in user_prompt
+
+
+def test_render_signature_with_mapping_does_not_cascade_replacements():
+	assert _render_signature_with_mapping(
+		"on(?x, ?y)",
+		{"?y": "?x", "?x": "BLOCK1"},
+	) == "on(BLOCK1, ?x)"
 
 
 def test_stage3_prompt_uses_declared_source_names_for_hyphenated_task_anchors():
@@ -585,6 +628,7 @@ def test_stage3_prompt_uses_declared_source_names_for_hyphenated_task_anchors():
 				"args": ["s0", "rover0"],
 			},
 		),
+		query_objects=("s0", "rover0"),
 		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
@@ -1036,6 +1080,49 @@ def test_validate_library_rejects_compound_steps_that_skip_shared_child_dynamic_
 
 	with pytest.raises(ValueError, match="shared dynamic prerequisites"):
 		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_rejects_grounded_query_object_leakage():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("get_image_data", ("OBJECTIVE", "MODE"), False, ("communicated_image_data",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_get_image_data_constructive",
+				task_name="get_image_data",
+				parameters=("OBJECTIVE", "MODE"),
+				context=(
+					HTNLiteral("on_board", ("camera0", "ROVER"), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="take_image",
+						args=("ROVER", "WAYPOINT", "OBJECTIVE", "camera0", "MODE"),
+						kind="primitive",
+						action_name="take_image",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("communicated_image_data", ("objective1", "high_res"), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding("communicated_image_data(objective1, high_res)", "get_image_data"),
+		],
+	)
+
+	with pytest.raises(ValueError, match="grounded query object 'camera0'"):
+		synthesizer._validate_library(
+			library,
+			domain,
+			query_objects=("camera0", "objective1", "high_res"),
+		)
 
 
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
@@ -2191,6 +2278,41 @@ def test_method_validation_rejects_conflicting_variable_types():
 
 	with pytest.raises(ValueError, match="conflicting inferred types"):
 		synthesizer._validate_library(library, domain)
+
+
+def test_method_type_validation_prefers_declared_task_signature_over_source_predicate_order():
+	synthesizer = HTNMethodSynthesizer()
+	task_lookup = {
+		"calibrate_abs": HTNTask(
+			"calibrate_abs",
+			("ROVER", "CAMERA"),
+			False,
+			("calibrated",),
+		),
+	}
+	method = HTNMethod(
+		method_name="m_calibrate_abs_constructive",
+		task_name="calibrate_abs",
+		parameters=("ROVER", "CAMERA"),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="calibrate",
+				args=("ROVER", "CAMERA"),
+				kind="primitive",
+				action_name="calibrate",
+			),
+		),
+		origin="llm",
+	)
+
+	synthesizer._validate_method_variable_types(
+		method,
+		task_lookup,
+		action_types={"calibrate": ("ROVER", "CAMERA")},
+		task_types={"calibrate_abs": ("ROVER", "CAMERA")},
+		predicate_types={"calibrated": ("CAMERA", "ROVER")},
+	)
 
 
 def test_method_validation_accepts_supported_equality_constraints():

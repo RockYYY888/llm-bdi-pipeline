@@ -49,6 +49,9 @@ def get_ltl_system_prompt(
             "declared tasks, primitive actions, and predicates.",
             "- The JSON output must remain predicate-grounded LTLf. Never emit task names as "
             "LTL atoms.",
+            "- If the instruction says to complete multiple task invocations, treat them as "
+            "independent eventual requirements unless the wording explicitly requires "
+            "simultaneity, ordering, or maintenance.",
             "",
             "SEMANTIC BOUNDARY:",
             "- Use only the provided predicates plus the propositional constants true and false.",
@@ -130,6 +133,9 @@ def get_ltl_system_prompt(
             "combination explicitly with conjunction/disjunction nodes.",
             "- If the instruction clearly states multiple independent formulas, multiple top-level "
             "ltl_formulas entries are allowed.",
+            '- For benchmark-style wording like "complete the tasks A(...), B(...), and C(...)", '
+            "prefer a conjunction of independent eventual goals rather than a single eventual "
+            "conjunction, unless the instruction explicitly says they must hold at the same time.",
             "- Do not use commas as LTL operators.",
             "",
             "OPERATOR-CHOICE CLARIFICATIONS:",
