@@ -511,6 +511,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 		action_analysis=synthesizer._analyse_domain_actions(domain),
 	)
 	lower_user_prompt = user_prompt.lower()
+	lower_system_prompt = system_prompt.lower()
+	lower_combined_prompt = f"{lower_system_prompt}\n{lower_user_prompt}"
 
 	assert "OUTPUT CONTRACT:" in system_prompt
 	assert "When the query explicitly names declared domain tasks" in system_prompt
@@ -524,6 +526,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Do not generate transitive support-closure libraries" in system_prompt
 	assert "Never use deprecated task prefixes achieve_, ensure_, goal_, or maintain_not_" in system_prompt
 	assert "Apply the same rule to compound subtasks when their constructive branches share a dynamic prerequisite." in system_prompt
+	assert "only rely on a prior compound child's own headline effect and explicitly shared envelope as guaranteed for later siblings" in system_prompt
 	assert "If a same-arity declared child is chosen as packaging for the headline effect" in system_prompt
 
 	assert "QUERY:" in user_prompt
@@ -568,7 +571,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "only create a fresh helper task when no declared task can express the required dynamic state change" in lower_user_prompt
 	assert "never create helper tasks for static predicates" in lower_user_prompt
 	assert "if that constructive step requires dynamic preconditions" in lower_user_prompt
-	assert "at least one constructive branch must stay applicable when that headline literal is currently false" in user_prompt
+	assert "Keep at least one constructive branch applicable when the target/stabilizer headline is still unsupported" in user_prompt
+	assert "include one already-satisfied/noop branch with the headline literal in context" in user_prompt
 	assert "prefer same-arity declared tasks as reusable intermediate abstractions" in user_prompt
 	assert "that child should own the final producer for the headline effect" in user_prompt
 	assert "do not choose a producer chain whose unresolved preconditions still require that same P(args) to already hold" in user_prompt
@@ -578,23 +582,32 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "each dynamic precondition must already be guaranteed by method context or by earlier subtasks" in user_prompt
 	assert "state it explicitly in method.context" in user_prompt
 	assert "If a compound child task's constructive branches share a dynamic prerequisite" in user_prompt
+	assert "only count the earlier support tasks' own headline literals as guaranteed afterwards." in user_prompt
 	assert "never place grounded query object names inside methods; use schematic parameters instead" in lower_user_prompt
 	assert "when a producer needs extra roles beyond the headline arguments" in lower_user_prompt
+	assert "only add cleanup when its own preconditions are genuinely established by earlier steps on that same symbol" in lower_user_prompt
 	assert "Do not use nop as filler inside constructive methods." in user_prompt
 	assert "do not enumerate every support powerset" in user_prompt
 	assert "do not bypass the query skeleton with a fresh helper-only library" in lower_user_prompt
-	assert "primitive step literal is null unless that exact positive literal is a real action effect" in lower_user_prompt
-	assert "every referenced compound subtask appears in compound_tasks and has methods" in lower_user_prompt
-	assert "every primitive step's dynamic preconditions are supported by method context or earlier subtasks" in lower_user_prompt
-	assert "every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks" in lower_user_prompt
-	assert "no primitive step relies on an unstated dynamic precondition" in lower_user_prompt
-	assert "every auxiliary variable has an explicit typing witness" in lower_user_prompt
+	assert "emit the shortest valid json you can" in lower_combined_prompt
+	assert "primitive step literal metadata is usually omitted" in lower_combined_prompt
+	assert "omit empty/default fields when possible so the json stays compact" in lower_combined_prompt
+	assert "never omit required structural fields" in lower_combined_prompt
+	assert "every subtask still needs step_id, task_name, args, and kind" in lower_combined_prompt
+	assert "ordering only for empty or single-step methods" in lower_combined_prompt
+	assert "every target-bound task includes an already-satisfied/noop method with the headline literal in context" in lower_combined_prompt
+	assert "every referenced compound subtask appears in compound_tasks and has methods" in lower_combined_prompt
+	assert "every primitive step's dynamic preconditions are supported by method context or earlier subtasks" in lower_combined_prompt
+	assert "every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks" in lower_combined_prompt
+	assert "no primitive step relies on an unstated dynamic precondition" in lower_combined_prompt
+	assert "every auxiliary variable has an explicit typing witness" in lower_combined_prompt
 	assert "operate(ACTOR, LOCATION, TARGET, TOOL, MODE) must keep ACTOR and TOOL as different variables." in user_prompt
 
 
 def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_query_tasks():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
+	system_prompt = build_htn_system_prompt()
 	user_prompt = build_htn_user_prompt(
 		domain,
 		["on(a, b)"],
@@ -608,13 +621,70 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	)
 
 	assert "QUERY-TASK CHILD SUPPORT PREREQUISITES:" in user_prompt
+	assert "QUERY-TASK SAME-ARITY CHILD PREREQUISITES:" in user_prompt
+	assert "QUERY-TASK SAME-ARITY CHILD CONTEXT OBLIGATIONS:" in user_prompt
+	assert "QUERY-TASK ZERO-ARY PARENT CONTEXT:" in user_prompt
+	assert "QUERY-TASK PACKAGING SKELETONS:" in user_prompt
 	assert "QUERY-TASK SAME-ARITY PACKAGING MODES:" in user_prompt
+	assert "QUERY-TASK SAME-ARITY PACKAGING HINTS:" in user_prompt
 	assert "before any helper or child call intended to establish holding(ARG1), first support its shared prerequisites clear(ARG1), handempty" in user_prompt
+	assert "if you invoke do_move(?x, ?y) as same-arity packaging for on(?x, ?y), first support child shared prerequisites clear(?x) via do_clear(?x); clear(?y) via do_clear(?y); handempty explicitly in parent context unless an earlier parent subtask establishes it." in user_prompt
+	assert "when used as same-arity packaging for on(?x, ?y), every constructive sibling should keep clear(?x), clear(?y), handempty explicit in method.context unless that sibling establishes one of them earlier internally." in user_prompt
+	assert "before do_move(?x, ?y), place handempty explicitly in parent context unless an earlier parent subtask establishes it." in user_prompt
+	assert "once you choose do_move(?x, ?y) as same-arity packaging for on(?x, ?y), use a parent skeleton" in user_prompt
 	assert "unstack(ARG1, BLOCK1)" in user_prompt
 	assert "do_clear(?x) targets clear(?x); constructive templates: put_down(?x) [needs holding(?x)]; stack(?x, BLOCK1) [needs holding(?x)]; unstack(BLOCK1, ?x) [needs on(BLOCK1, ?x), handempty]" in user_prompt
+	assert "RELEVANT SUPPORT TASK ROLE-ALIGNMENT WARNINGS:" in user_prompt
+	assert "if you use unstack(BLOCK1, ?x), keep ?x in the effect-aligned position shown above. Do not swap it to unstack(?x, BLOCK1), because that would support clear(BLOCK1) instead of clear(?x)." in user_prompt
+	assert "RELEVANT SUPPORT TASK RECURSIVE MODES:" in user_prompt
+	assert "recursive support is valid. If unstack(BLOCK1, ?x) needs clear(BLOCK1), call do_clear(BLOCK1) before the primitive step." in user_prompt
+	assert "RELEVANT SUPPORT TASK RECURSIVE TEMPLATES:" in user_prompt
+	assert "recursive template for unstack(BLOCK1, ?x). Keep mode context on(BLOCK1, ?x); handempty and use subtasks do_clear(BLOCK1); unstack(BLOCK1, ?x)." in user_prompt
+	assert "RELEVANT SUPPORT TASK CLEANUP TEMPLATES:" in user_prompt
+	assert "cleanup template after unstack(BLOCK1, ?x). If this branch should return with handempty restored, append put_down(BLOCK1) before returning." in user_prompt
+	assert "RELEVANT SUPPORT TASK INTERNAL OBLIGATIONS:" in user_prompt
+	assert "if a constructive sibling uses unstack(BLOCK1, ?x) to make clear(?x), support on(BLOCK1, ?x) explicit in method.context as the selected producer mode condition; clear(BLOCK1) via do_clear(BLOCK1) before unstack(BLOCK1, ?x); handempty explicit in method.context as the selected producer mode condition; declare extra roles BLOCK1 in method.parameters. Prefer simpler modes with fewer extra roles when they remain suitable." in user_prompt
 	assert "no declared task directly headlines holding(ARG1). Before inventing a helper, prefer same-arity declared packaging tasks do_move(ARG1, ARG2) and let those declared tasks absorb the remaining dynamic support needed for on(ARG1, ARG2)." in user_prompt
-	assert "if used as same-arity packaging for on(?x, ?y), it should itself reach the headline effect via stack(?x, ?y) [needs holding(?x), clear(?y)]" in user_prompt
+	assert "if you delegate do_move(?x, ?y), first support likely shared prerequisites clear(?x), clear(?y), handempty via parent context or earlier parent subtasks" in user_prompt
+	assert "earlier support tasks do_clear(?x) for clear(?x), do_clear(?y) for clear(?y) only guarantee those headline literals; keep handempty explicit in parent context unless another earlier parent step itself headlines handempty." in user_prompt
+	assert "if used as same-arity packaging for on(?x, ?y), its own constructive branch must internally close the headline effect via stack(?x, ?y) [needs holding(?x), clear(?y)]" in user_prompt
+	assert "Inside this task, support holding(?x) before the final producer using one of the real producer modes" in user_prompt
+	assert "If every real producer mode for holding(?x) still needs clear(?x), handempty, keep those literals explicit in each constructive sibling context of this packaging task instead of re-establishing them with an extra support subtask inside every sibling" in user_prompt
+	assert "No declared task directly headlines holding(?x), so keep that obligation inside this packaging task and, because its producer modes differ, prefer separate constructive sibling methods instead of exposing a mode-specific prerequisite to the parent" in user_prompt
+	assert "For generic coverage, implement one constructive sibling per supported producer mode instead of keeping only a single narrow mode branch" in user_prompt
+	assert "If one of those support modes produces holding(?x), hand that same literal directly to the final producer stack(?x, ?y) [needs holding(?x), clear(?y)]. Do not insert cleanup on extra-role symbols unless later steps really establish the cleanup precondition for that same symbol" in user_prompt
+	assert "If you choose mode unstack(?x, BLOCK1) to make holding(?x), the next relevant step should be the final producer stack(?x, ?y) [needs holding(?x), clear(?y)]; do not add support or cleanup on extra roles BLOCK1 unless the chosen producer or a later step explicitly needs that same headline literal" in user_prompt
+	assert "Parent methods should not have to provide unresolved internal support merely because this packaging task was chosen." in user_prompt
 	assert "Do not call this packaging child and then repeat the same final producer again in the parent." in user_prompt
+	assert "If a remaining shared dynamic prerequisite has arity 0 and no earlier parent subtask establishes it, usually state it explicitly in the parent method context before the child call." in system_prompt
+	assert "task_args is optional; if omitted, the first declared-task-arity entries of method.parameters are treated as the task arguments in order" in system_prompt
+	assert "STEP-BY-STEP INSTRUCTIONS:" in user_prompt
+	assert "INPUT/OUTPUT EXAMPLES:" in user_prompt
+	assert "COMMON EDGE CASES:" in user_prompt
+	assert "every constructive child sibling either keeps ready(ARG2) in method.context or establishes it internally before the final producer." in user_prompt
+	assert "prefer release(ARG2) when suitable; if detach(AUX1, ARG2) is used, declare AUX1 and support ready(AUX1) explicitly." in user_prompt
+	assert "a recursive constructive method first calls clear_item(AUX1), then executes detach(AUX1, ARG1)." in user_prompt
+	assert "\"method_name\":\"m_clear_item_recursive\"" in user_prompt
+	assert "\"subtasks\":[{\"step_id\":\"s1\",\"task_name\":\"clear_item\",\"args\":[\"AUX1\"],\"kind\":\"compound\"},{\"step_id\":\"s2\",\"task_name\":\"detach\",\"args\":[\"AUX1\",\"ARG1\"],\"kind\":\"primitive\"}]" in user_prompt
+	assert "clear_item(AUX1); detach(AUX1, ARG1); store(AUX1), so the method returns with free_hand restored." in user_prompt
+	assert "keep linked(ARG1, AUX1) in context until detach(ARG1, AUX1); do not call a support task on AUX1 first if it could remove linked(ARG1, AUX1)." in user_prompt
+	assert "Input: stabilize(ARG1) uses producer detach(ARG1, AUX1), and detach(ARG1, AUX1) needs linked(ARG1, AUX1) plus ready(ARG1) but does not need clear(AUX1)." in user_prompt
+	assert "keep linked(ARG1, AUX1) explicit, support ready(ARG1) if needed, and do not insert clear_task(AUX1) before detach(ARG1, AUX1)." in user_prompt
+	assert "Input: parent(ARG1, ARG2) calls support(AUX1) before producer(ARG1, AUX1), but no later step needs support(AUX1)'s headline literal and AUX1 is not a reused role that must be stabilized. Output pattern: omit that detour." in user_prompt
+	assert "Output pattern: child has separate constructive sibling methods for the grab and lift modes instead of one generic branch that assumes only base(ARG1)." in user_prompt
+	assert "Input: a same-arity child still needs a shared 0-ary literal like resource_free. Output pattern: place resource_free explicitly in the parent context unless an earlier parent subtask establishes it." in user_prompt
+	assert "Input: support(ARG1) and support(ARG2) run before same-arity child(ARG1, ARG2), and the child still shares resource_free. Output pattern: keep resource_free explicit in the parent context unless an earlier parent step itself headlines resource_free; do not rely on incidental side effects of support(ARG1) or support(ARG2)." in user_prompt
+	assert "Parent-supported child envelope silently omitted: if the caller is expected to provide clear(ARG1), ready(ARG2), or another shared prerequisite, keep that literal explicit in each constructive child context unless the child establishes it internally." in user_prompt
+	assert "Earlier compound support subtasks only guarantee their own headline literals" in user_prompt
+	assert "Complex extra-role mode chosen when a simpler mode exists: if release(ARG2) and detach(AUX1, ARG2) both achieve free(ARG2), do not choose detach(AUX1, ARG2) unless the method really needs that extra-role mode and its extra support." in user_prompt
+	assert "Recursive blocker support skipped: if clear_item(AUX1) is available for the blocker of detach(AUX1, ARG1), do not leave clear_item(AUX1) as an unsupported assumption when the task is meant to be generic." in user_prompt
+	assert "Recursive branch ends without cleanup: if detach(AUX1, ARG1) leaves carrying(AUX1) or consumes free_hand, do not return immediately when a real cleanup step can restore the shared resource." in user_prompt
+	assert "Input: settle(ARG2) headlines base(ARG2), but the later packaging child only needs clear(ARG2) and clear(ARG2) already holds. Output pattern: use a stable/noop settle(ARG2) sibling; do not destructively force base(ARG2) if that would undo earlier structure built under ARG2." in user_prompt
+	assert "Over-eager stabilizer constructivization: if a later child already only needs clear(ARG2), ready(ARG2), or another reusable role condition that currently holds, do not force a unary stabilizer to make base(ARG2) or another headline literal true first when that would dismantle earlier progress." in user_prompt
+	assert "Consumed mode selector destroyed too early: if detach(ARG1, AUX1) needs linked(ARG1, AUX1), do not run a support task on AUX1 first when that task can remove linked(ARG1, AUX1) before detach executes." in user_prompt
+	assert "Extra-role precondition drift: if ACTION(ARG1, AUX1) only needs linked(ARG1, AUX1) and ready(ARG1), do not insert support(AUX1) whose headline is clear(AUX1) or another unrelated literal before ACTION." in user_prompt
+	assert "Unjustified detour: if support(AUX1) neither feeds a later requirement nor stabilizes a reused/non-leading role, remove it." in user_prompt
+	assert "Single narrow mode mistaken for a generic task: if one internal producer mode needs base(ARG1) and another needs attached(ARG1, AUX1), do not keep only the base(ARG1) branch unless the task is intentionally partial." in user_prompt
 
 
 def test_render_signature_with_mapping_does_not_cascade_replacements():
@@ -681,7 +751,241 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 18600
+	assert len(system_prompt) + len(user_prompt) < 35000
+	assert "If task_args is omitted, keep the first task-arity method.parameters aligned with the task signature in order." in user_prompt
+	assert "include one already-satisfied/noop branch with the headline literal in context" in user_prompt
+	assert "move(ARG1, ARG2) uses a support mode lift(ARG1, AUX1) to make holding(ARG1), and the final producer place(ARG1, ARG2) immediately consumes holding(ARG1)." in user_prompt
+	assert "Support-mode handoff interrupted: if a support mode already produced the literal the final producer consumes, continue to that final producer instead of inserting unrelated cleanup or detours." in user_prompt
+	assert "clear_item(TARGET) is implemented with detach(BLOCKER, TARGET), and clear_item(BLOCKER) is the same declared support task." in user_prompt
+	assert "clear_item(BLOCKER); detach(BLOCKER, TARGET); store(BLOCKER)." in user_prompt
+	assert "settle(ARG2) headlines base(ARG2), but the later packaging child only needs clear(ARG2) and clear(ARG2) already holds. Output pattern: use a stable/noop settle(ARG2) sibling; do not destructively force base(ARG2) if that would undo earlier structure built under ARG2." in user_prompt
+	assert "Recursive blocker support skipped: if the same declared support task can clear the blocker role of an extra-role producer, recurse on that blocker before the primitive step." in user_prompt
+	assert "Impossible cleanup: do not add store(AUX) or put_down(AUX) unless earlier steps really leave carrying(AUX) or holding(AUX) true on that same symbol." in user_prompt
+	assert "Over-eager stabilizer constructivization: if a later child already only needs clear(ARG2), ready(ARG2), or another reusable role condition that currently holds, do not force a unary stabilizer to make base(ARG2) or another headline literal true first when that would dismantle earlier progress." in user_prompt
+	assert "Omitted task_args: keep the first task-arity method.parameters in the same order as the task signature." in user_prompt
+	assert "RELEVANT SUPPORT TASK ROLE-ALIGNMENT WARNINGS:" in user_prompt
+	assert "RELEVANT SUPPORT TASK RECURSIVE TEMPLATES:" in user_prompt
+	assert "QUERY-TASK ROLE STABILIZATION:" in user_prompt
+	assert "QUERY-TASK ROLE STABILIZER INTERNAL SUPPORT:" in user_prompt
+	assert "QUERY-SPECIFIC PRIORITY OBLIGATIONS:" in user_prompt
+	assert "do_put_on(ARG1, ARG2): ARG2 acts as a non-leading support/base role in the repeated query skeleton" in user_prompt
+	assert "do_on_table(ARG2)" in user_prompt
+	assert "high-priority query skeleton is support ?y, then do_on_table(?y), then do_move(?x, ?y). Do not omit do_on_table(?y)." in user_prompt
+	assert "prefer it before same-arity packaging child do_move(ARG1, ARG2)" in user_prompt
+	assert "holding(ARG2) via" in user_prompt
+	assert "include a stable/noop sibling with clear(ARG2) in method.context instead of requiring ontable(ARG2)" in user_prompt
+	assert "For the false-ontable(ARG2) constructive case, do not rely on self-requiring modes pick_up(ARG2)" in user_prompt
+	assert "Parent tasks should not provide those internal stabilizer prerequisites" in user_prompt
+
+
+def test_common_child_constructive_requirements_ignore_extra_role_blockers():
+	synthesizer = HTNMethodSynthesizer()
+	domain = _domain()
+	action_schemas = synthesizer._action_schema_map(domain)
+	predicate_arities = {
+		predicate.name: len(predicate.parameters)
+		for predicate in domain.predicates
+	}
+	dynamic_predicates = set(
+		synthesizer._analyse_domain_actions(domain)["dynamic_predicates"]
+	)
+	task_lookup = {
+		"do_on_table": HTNTask("do_on_table", ("X",), False, ("ontable",)),
+	}
+	step = HTNMethodStep(
+		step_id="s1",
+		task_name="do_on_table",
+		args=("Y",),
+		kind="compound",
+	)
+	child_methods = [
+		HTNMethod(
+			method_name="m_do_on_table_noop",
+			task_name="do_on_table",
+			parameters=("X",),
+			context=(HTNLiteral("ontable", ("X",), True, None),),
+			subtasks=(),
+			ordering=(),
+			origin="llm",
+		),
+		HTNMethod(
+			method_name="m_do_on_table_constructive",
+			task_name="do_on_table",
+			parameters=("X", "Z"),
+			context=(
+				HTNLiteral("on", ("X", "Z"), True, None),
+				HTNLiteral("clear", ("X",), True, None),
+				HTNLiteral("handempty", (), True, None),
+			),
+			subtasks=(
+				HTNMethodStep(
+					step_id="s1",
+					task_name="do_clear",
+					args=("Z",),
+					kind="compound",
+				),
+				HTNMethodStep(
+					step_id="s2",
+					task_name="unstack",
+					args=("X", "Z"),
+					kind="primitive",
+					action_name="unstack",
+				),
+				HTNMethodStep(
+					step_id="s3",
+					task_name="put_down",
+					args=("X",),
+					kind="primitive",
+					action_name="put_down",
+				),
+			),
+			ordering=(("s1", "s2"), ("s2", "s3")),
+			origin="llm",
+		),
+	]
+
+	requirements = synthesizer._common_child_constructive_requirements(
+		step,
+		child_methods,
+		task_lookup,
+		action_schemas,
+		predicate_arities,
+		dynamic_predicates=dynamic_predicates,
+	)
+
+	assert "clear(Y)" in requirements
+	assert "handempty" in requirements
+	assert "on(Y, Z)" not in requirements
+
+
+def test_constructive_validator_rejects_compound_prep_that_does_not_feed_later_requirements():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_on_table", ("X",), False, ("ontable",)),
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_on_table_noop",
+				task_name="do_on_table",
+				parameters=("X",),
+				context=(
+					HTNLiteral("ontable", ("X",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_on_table_constructive",
+				task_name="do_on_table",
+				parameters=("X", "Z"),
+				context=(
+					HTNLiteral("on", ("X", "Z"), True, None),
+					HTNLiteral("clear", ("X",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_clear",
+						args=("Z",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="unstack",
+						args=("X", "Z"),
+						kind="primitive",
+						action_name="unstack",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="put_down",
+						args=("X",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_noop",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(
+					HTNLiteral("clear", ("X",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_unstack",
+				task_name="do_clear",
+				parameters=("X", "SUPPORT"),
+				context=(
+					HTNLiteral("on", ("SUPPORT", "X"), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_clear",
+						args=("SUPPORT",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="unstack",
+						args=("SUPPORT", "X"),
+						kind="primitive",
+						action_name="unstack",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="put_down",
+						args=("SUPPORT",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_putdown",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(
+					HTNLiteral("holding", ("X",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="put_down",
+						args=("X",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(
+		ValueError,
+		match=r"does not supply any unresolved later dynamic requirement",
+	):
+		synthesizer._validate_library(library, domain)
 
 
 def test_stage3_user_prompt_includes_disjunctive_action_branch_hints():
@@ -1676,6 +1980,311 @@ def test_method_validation_allows_local_variables_when_bound_in_preconditions():
 	synthesizer._validate_library(library, domain)
 
 
+def test_method_validation_allows_auxiliary_method_parameters_constrained_in_context():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_clear_top_stack_elsewhere",
+				task_name="clear_top",
+				parameters=("B", "SUPPORT"),
+				context=(
+					HTNLiteral("holding", ("B",), True, None),
+					HTNLiteral("clear", ("SUPPORT",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("B", "SUPPORT"),
+						kind="primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_rejects_auxiliary_method_parameters_used_before_constraint():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("clear_top", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_clear_top_stack_elsewhere",
+				task_name="clear_top",
+				parameters=("B", "SUPPORT"),
+				context=(
+					HTNLiteral("holding", ("B",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("B", "SUPPORT"),
+						kind="primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(ValueError, match="uses auxiliary parameter 'SUPPORT'"):
+		synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_rejects_constructive_branch_that_does_not_support_headline_literal():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_bad_put_support_down",
+				task_name="do_clear",
+				parameters=("B", "SUPPORT"),
+				context=(
+					HTNLiteral("holding", ("SUPPORT",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="put_down",
+						args=("SUPPORT",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(
+		ValueError,
+		match=r"do not make 'clear\(B\)' true via real subtask effects",
+	):
+		synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_accepts_renamed_task_parameters_without_explicit_task_args():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("TARGET",),
+				context=(
+					HTNLiteral("clear", ("TARGET",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_constructive",
+				task_name="do_clear",
+				parameters=("TARGET",),
+				context=(
+					HTNLiteral("holding", ("TARGET",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="put_down",
+						args=("TARGET",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_rejects_extra_role_support_left_only_in_context():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_bad_unstack_context_only",
+				task_name="do_clear",
+				parameters=("B", "SUPPORT"),
+				context=(
+					HTNLiteral("on", ("SUPPORT", "B"), True, None),
+					HTNLiteral("clear", ("SUPPORT",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="unstack",
+						args=("SUPPORT", "B"),
+						kind="primitive",
+						action_name="unstack",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(
+		ValueError,
+		match=r"leaves extra-role dynamic prerequisite 'clear\(SUPPORT\)' only as context",
+	):
+		synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_allows_consumed_mode_selector_to_stay_in_context():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_putdown",
+				task_name="do_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("holding", ("B",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s0",
+						task_name="put_down",
+						args=("B",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_unstack_recursive",
+				task_name="do_clear",
+				parameters=("B", "SUPPORT"),
+				context=(
+					HTNLiteral("on", ("SUPPORT", "B"), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_clear",
+						args=("SUPPORT",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="unstack",
+						args=("SUPPORT", "B"),
+						kind="primitive",
+						action_name="unstack",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="put_down",
+						args=("SUPPORT",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)
+
+
 def test_primitive_alias_cannot_use_non_primitive_subtask_kind():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -2010,6 +2619,76 @@ def test_direct_self_recursive_siblings_are_preserved_when_contexts_are_distinct
 	}
 
 
+def test_pruning_removes_more_specific_constructive_sibling_when_simpler_one_dominates():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("clear", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_putdown",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="put_down",
+						args=("X",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_stack",
+				task_name="do_clear",
+				parameters=("X", "SUPPORT"),
+				context=(
+					HTNLiteral("holding", ("X",), True, None),
+					HTNLiteral("clear", ("SUPPORT",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("X", "SUPPORT"),
+						kind="primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+	)
+
+	pruned_library, pruned_count = synthesizer._prune_redundant_constructive_siblings(
+		library,
+		domain,
+	)
+
+	assert pruned_count == 1
+	assert {method.method_name for method in pruned_library.methods} == {
+		"m_do_clear_already",
+		"m_do_clear_putdown",
+	}
+
+
 def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -2095,10 +2774,8 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 		domain,
 	)
 
-	assert pruned_count == 0
+	assert pruned_count == 2
 	assert {method.method_name for method in pruned_library.methods} >= {
-		"m_place_on_missing_holding",
-		"m_place_on_missing_clear",
 		"m_place_on_missing_both",
 	}
 	synthesizer._validate_library(pruned_library, domain)
@@ -2439,7 +3116,7 @@ def test_request_complete_llm_library_fails_on_truncated_json():
 	assert metadata["llm_response_time_seconds"] >= 0
 
 
-def test_negative_target_binding_rejects_helper_call_without_shared_dynamic_support():
+def test_negative_target_binding_rejects_helper_call_with_hidden_support_role():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	library = HTNMethodLibrary(
@@ -2501,5 +3178,5 @@ def test_negative_target_binding_rejects_helper_call_without_shared_dynamic_supp
 		target_task_bindings=[HTNTargetTaskBinding("!on(a, b)", "remove_on")],
 	)
 
-	with pytest.raises(ValueError, match="shared dynamic prerequisites"):
+	with pytest.raises(ValueError, match="none of its constructive methods makes '!on\\(BLOCK1, BLOCK2\\)' true"):
 		synthesizer._validate_library(library, domain)

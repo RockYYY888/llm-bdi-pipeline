@@ -980,6 +980,7 @@ class LTL_BDI_Pipeline:
             signature=task_signature,
             scope=f"Method '{method.method_name}' task parameter typing",
         )
+        schematic_symbols = set(method.parameters) | set(task_binding_args)
 
         def collect_literal(literal: Optional[HTNLiteral]) -> None:
             if literal is None or literal.is_equality:
@@ -1034,33 +1035,30 @@ class LTL_BDI_Pipeline:
                 ),
             )
 
-        variable_symbols: Set[str] = set()
-        for token in method.parameters:
-            if self._is_variable_symbol(token):
-                variable_symbols.add(token)
+        variable_symbols: Set[str] = set(schematic_symbols)
         for literal in method.context:
             variable_symbols.update(
                 arg
                 for arg in literal.args
-                if self._is_variable_symbol(arg)
+                if arg in schematic_symbols or self._is_variable_symbol(arg)
             )
         for step in method.subtasks:
             variable_symbols.update(
                 arg
                 for arg in step.args
-                if self._is_variable_symbol(arg)
+                if arg in schematic_symbols or self._is_variable_symbol(arg)
             )
             if step.literal:
                 variable_symbols.update(
                     arg
                     for arg in step.literal.args
-                    if self._is_variable_symbol(arg)
+                    if arg in schematic_symbols or self._is_variable_symbol(arg)
                 )
             for literal in (*step.preconditions, *step.effects):
                 variable_symbols.update(
                     arg
                     for arg in literal.args
-                    if self._is_variable_symbol(arg)
+                    if arg in schematic_symbols or self._is_variable_symbol(arg)
                 )
 
         return {
@@ -1108,12 +1106,13 @@ class LTL_BDI_Pipeline:
 
         for method in method_library.methods_for_task(task_name):
             variable_types = self._method_variable_type_hints(method, method_library)
+            schematic_symbols = set(method.parameters) | set(method.task_args)
             for parameter, arg in zip(method.parameters, task_args):
                 self._add_type_candidate(candidates, arg, variable_types.get(parameter))
             for literal in method.context:
                 literal_candidates = self._literal_type_candidates(literal)
                 for symbol, type_names in literal_candidates.items():
-                    if self._is_variable_symbol(symbol):
+                    if symbol in schematic_symbols or self._is_variable_symbol(symbol):
                         continue
                     self._merge_type_candidates(candidates, {symbol: type_names})
 
@@ -1227,7 +1226,9 @@ class LTL_BDI_Pipeline:
         def bind_symbol(symbol):
             if not symbol:
                 return symbol
-            if symbol[0].islower():
+            if symbol in bindings:
+                return bindings[symbol]
+            if symbol not in method_variable_types:
                 return symbol
             if symbol not in bindings:
                 expected_type = method_variable_types.get(symbol)
@@ -1546,6 +1547,9 @@ class LTL_BDI_Pipeline:
         object_types,
         variable_type_hints,
     ):
+        def is_schematic(token):
+            return bool(token) and (token in local_bindings or token in variable_type_hints or token[0].isupper())
+
         for candidate in parsed_known_signatures:
             if candidate["predicate"] != literal.predicate:
                 continue
@@ -1559,7 +1563,7 @@ class LTL_BDI_Pipeline:
                 if not token:
                     grounded_args.append(actual)
                     continue
-                if token[0].islower():
+                if not is_schematic(token):
                     if token != actual:
                         matches = False
                         break
@@ -1591,7 +1595,7 @@ class LTL_BDI_Pipeline:
             if not token:
                 grounded_args.append(token)
                 continue
-            if token[0].islower():
+            if not is_schematic(token):
                 grounded_args.append(token)
                 continue
             if token not in local_bindings:
@@ -1926,14 +1930,21 @@ class LTL_BDI_Pipeline:
 
         stage6_artifacts = stage6_data.get("artifacts") or {}
         verification_domain_file = self._stage7_build_verification_domain(method_library)
-        verifier_result = verifier.verify_plan(
-            domain_file=verification_domain_file,
-            problem_file=self.problem_file,
-            action_path=stage6_artifacts.get("action_path") or [],
-            method_library=method_library,
-            method_trace=stage6_artifacts.get("method_trace") or [],
-            output_dir=self.output_dir,
-        )
+        if verifier.planning_toolchain_available():
+            verifier_result = verifier.verify_planned_hierarchical_plan(
+                domain_file=verification_domain_file,
+                problem_file=self.problem_file,
+                output_dir=self.output_dir,
+            )
+        else:
+            verifier_result = verifier.verify_plan(
+                domain_file=verification_domain_file,
+                problem_file=self.problem_file,
+                action_path=stage6_artifacts.get("action_path") or [],
+                method_library=method_library,
+                method_trace=stage6_artifacts.get("method_trace") or [],
+                output_dir=self.output_dir,
+            )
         artifacts = verifier_result.to_dict()
         summary = {
             "backend": "pandaPIparser",

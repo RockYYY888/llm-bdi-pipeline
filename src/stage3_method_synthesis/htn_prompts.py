@@ -185,6 +185,10 @@ def _token_overlap_score(left: Sequence[str], right: Sequence[str]) -> int:
 	return score
 
 
+def _compact_name_tokens(name: str) -> str:
+	return "".join(_name_tokens(name))
+
+
 def _candidate_support_task_names(
 	domain: Any,
 	predicate_name: str,
@@ -297,16 +301,27 @@ def _same_arity_declared_task_candidates(
 
 def _query_task_same_arity_packaging_lines(
 	domain: Any,
+	target_literals: Sequence[str],
 	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Optional[Dict[str, Any]] = None,
 ) -> list[str]:
 	task_schemas = _declared_task_schema_map(domain)
 	lines: list[str] = []
 	seen: set[str] = set()
-	for anchor in query_task_anchors:
+	analysis = action_analysis or {}
+	if query_task_anchors and len(query_task_anchors) != len(target_literals):
+		return []
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
 		task_schema = task_schemas.get(task_name)
 		if task_schema is None:
+			continue
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
 			continue
 		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
 		candidates = _same_arity_declared_task_candidates(
@@ -322,11 +337,551 @@ def _query_task_same_arity_packaging_lines(
 			f"{', '.join(_task_invocation_signature(candidate, task_parameters) for candidate in candidates)} "
 			"before inventing a fresh helper."
 		)
+		parent_obligation_fragments: list[str] = []
+		for candidate in candidates:
+			exposed_requirements = _same_arity_packaging_parent_requirements(
+				domain,
+				predicate_name,
+				task_parameters,
+				analysis,
+			)
+			if not exposed_requirements:
+				continue
+			parent_obligation_fragments.append(
+				f"if you delegate {_task_invocation_signature(candidate, task_parameters)}, "
+				f"first support likely shared prerequisites {', '.join(exposed_requirements)} "
+				"via parent context or earlier parent subtasks"
+			)
+			headline_only_fragment = _same_arity_packaging_headline_only_fragment(
+				domain,
+				candidate,
+				predicate_name,
+				task_parameters,
+				analysis,
+			)
+			if headline_only_fragment:
+				parent_obligation_fragments.append(headline_only_fragment)
+		if parent_obligation_fragments:
+			line += " " + "; ".join(parent_obligation_fragments) + "."
 		if line in seen:
 			continue
 		seen.add(line)
 		lines.append(line)
 	return lines
+
+
+def _same_arity_packaging_parent_requirements(
+	domain: Any,
+	predicate_name: str,
+	task_parameters: Sequence[str],
+	action_analysis: Dict[str, Any],
+) -> tuple[str, ...]:
+	exposed_requirements: set[str] = set()
+	for requirement in _shared_dynamic_requirements_for_predicate(
+		predicate_name,
+		task_parameters,
+		action_analysis,
+	):
+		parsed_requirement = _parse_literal_signature(requirement)
+		if parsed_requirement is None:
+			continue
+		requirement_predicate, requirement_args, requirement_positive = parsed_requirement
+		if not requirement_positive:
+			continue
+		if requirement_args and not all(arg in task_parameters for arg in requirement_args):
+			continue
+
+		support_task_candidates = _candidate_support_task_names(
+			domain,
+			requirement_predicate,
+			requirement_args,
+			action_analysis.get("producer_actions_by_predicate", {}).get(
+				requirement_predicate,
+				[],
+			),
+		)
+		if support_task_candidates:
+			exposed_requirements.add(requirement)
+			continue
+
+		for transitive_requirement in _shared_dynamic_requirements_for_predicate(
+			requirement_predicate,
+			requirement_args,
+			action_analysis,
+		):
+			parsed_transitive = _parse_literal_signature(transitive_requirement)
+			if parsed_transitive is None:
+				continue
+			_, transitive_args, transitive_positive = parsed_transitive
+			if not transitive_positive:
+				continue
+			if transitive_args and not all(arg in task_parameters for arg in transitive_args):
+				continue
+			exposed_requirements.add(transitive_requirement)
+
+	return tuple(sorted(exposed_requirements))
+
+
+def _same_arity_packaging_headline_only_fragment(
+	domain: Any,
+	packaging_task_name: str,
+	predicate_name: str,
+	task_parameters: Sequence[str],
+	action_analysis: Dict[str, Any],
+) -> str:
+	exposed_requirements = _same_arity_packaging_parent_requirements(
+		domain,
+		predicate_name,
+		task_parameters,
+		action_analysis,
+	)
+	if len(exposed_requirements) < 2:
+		return ""
+
+	task_schemas = _declared_task_schema_map(domain)
+	headline_support_pairs: list[tuple[str, str]] = []
+	remaining_requirements: list[str] = []
+
+	for requirement in exposed_requirements:
+		parsed_requirement = _parse_literal_signature(requirement)
+		if parsed_requirement is None:
+			continue
+		requirement_predicate, requirement_args, requirement_positive = parsed_requirement
+		if not requirement_positive:
+			continue
+		candidate_tasks = [
+			candidate
+			for candidate in _candidate_support_task_names(
+				domain,
+				requirement_predicate,
+				requirement_args,
+				action_analysis.get("producer_actions_by_predicate", {}).get(
+					requirement_predicate,
+					[],
+				),
+			)
+			if candidate != packaging_task_name
+		]
+		selected_task: Optional[str] = None
+		for candidate_task in candidate_tasks:
+			candidate_schema = task_schemas.get(candidate_task)
+			if candidate_schema is None:
+				continue
+			if len(candidate_schema.parameters) != len(requirement_args):
+				continue
+			selected_task = candidate_task
+			break
+
+		if selected_task is None:
+			remaining_requirements.append(requirement)
+			continue
+
+		headline_support_pairs.append(
+			(
+				_task_invocation_signature(selected_task, requirement_args),
+				requirement,
+			)
+		)
+
+	if not headline_support_pairs or not remaining_requirements:
+		return ""
+
+	support_descriptions = ", ".join(
+		f"{task_signature} for {headline_literal}"
+		for task_signature, headline_literal in headline_support_pairs
+	)
+	remaining_text = ", ".join(remaining_requirements)
+	return (
+		f"earlier support tasks {support_descriptions} only guarantee those headline literals; "
+		f"keep {remaining_text} explicit in parent context unless another earlier parent step "
+		f"itself headlines {remaining_text}"
+	)
+
+
+def _query_task_same_arity_child_support_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		if task_schema is None:
+			continue
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		candidates = _same_arity_declared_task_candidates(
+			domain,
+			task_name,
+			task_schemas,
+		)
+		for candidate in candidates:
+			exposed_requirements = _same_arity_packaging_parent_requirements(
+				domain,
+				predicate_name,
+				task_parameters,
+				action_analysis,
+			)
+			if not exposed_requirements:
+				continue
+			requirement_plans = [
+				_same_arity_parent_requirement_plan(
+					domain,
+					requirement,
+					action_analysis,
+				)
+				for requirement in exposed_requirements
+			]
+			line = (
+				f"- {_task_invocation_signature(display_name, task_parameters)}: "
+				f"if you invoke {_task_invocation_signature(candidate, task_parameters)} as same-arity "
+				f"packaging for {predicate_name}({', '.join(task_parameters)}), first support "
+				f"child shared prerequisites {'; '.join(requirement_plans)}."
+			)
+			if line in seen:
+				continue
+			seen.add(line)
+			lines.append(line)
+	return lines
+
+
+def _query_task_zero_ary_parent_context_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		if task_schema is None:
+			continue
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		candidates = _same_arity_declared_task_candidates(
+			domain,
+			task_name,
+			task_schemas,
+		)
+		for candidate in candidates:
+			exposed_requirements = _same_arity_packaging_parent_requirements(
+				domain,
+				predicate_name,
+				task_parameters,
+				action_analysis,
+			)
+			for requirement in exposed_requirements:
+				parsed_requirement = _parse_literal_signature(requirement)
+				if parsed_requirement is None:
+					continue
+				_, requirement_args, requirement_positive = parsed_requirement
+				if not requirement_positive or requirement_args:
+					continue
+				line = (
+					f"- {_task_invocation_signature(display_name, task_parameters)}: before "
+					f"{_task_invocation_signature(candidate, task_parameters)}, place "
+					f"{requirement} explicitly in parent context unless an earlier parent "
+					"subtask establishes it."
+				)
+				if line in seen:
+					continue
+				seen.add(line)
+				lines.append(line)
+	return lines
+
+
+def _query_task_same_arity_child_context_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		candidates = _same_arity_declared_task_candidates(
+			domain,
+			task_name,
+			task_schemas,
+		)
+		for candidate in candidates[:2]:
+			exposed_requirements = _same_arity_packaging_parent_requirements(
+				domain,
+				predicate_name,
+				task_parameters,
+				action_analysis,
+			)
+			if not exposed_requirements:
+				continue
+			line = (
+				f"- {_task_invocation_signature(candidate, task_parameters)}: when used as same-arity "
+				f"packaging for {predicate_name}({', '.join(task_parameters)}), every constructive "
+				f"sibling should keep {', '.join(exposed_requirements)} explicit in method.context "
+				"unless that sibling establishes one of them earlier internally."
+			)
+			if line in seen:
+				continue
+			seen.add(line)
+			lines.append(line)
+	return lines
+
+
+def _query_task_packaging_skeleton_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		if task_schema is None:
+			continue
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		candidates = _same_arity_declared_task_candidates(
+			domain,
+			task_name,
+			task_schemas,
+		)
+		for candidate in candidates[:2]:
+			exposed_requirements = _same_arity_packaging_parent_requirements(
+				domain,
+				predicate_name,
+				task_parameters,
+				action_analysis,
+			)
+			if not exposed_requirements:
+				continue
+			requirement_plans = [
+				_same_arity_parent_requirement_plan(
+					domain,
+					requirement,
+					action_analysis,
+				)
+				for requirement in exposed_requirements
+			]
+			requirement_plans.extend(
+				_query_task_non_leading_role_stabilizer_plans(
+					domain,
+					task_schema,
+					bound_occurrences=[
+						tuple(str(arg) for arg in occurrence.get("args", ()))
+						for occurrence in query_task_anchors
+						if str(occurrence.get("task_name", "")).strip() == task_name
+						and len(tuple(occurrence.get("args", ()))) == len(task_parameters)
+					],
+					predicate_name=predicate_name,
+					action_analysis=action_analysis,
+				)
+			)
+			line = (
+				f"- {_task_invocation_signature(display_name, task_parameters)}: once you choose "
+				f"{_task_invocation_signature(candidate, task_parameters)} as same-arity packaging "
+				f"for {predicate_name}({', '.join(task_parameters)}), use a parent skeleton that first "
+				f"supports {'; '.join(requirement_plans)} and only then calls "
+				f"{_task_invocation_signature(candidate, task_parameters)}. Do not compress away any "
+				"declared unary stabilizer in that skeleton; keep it as a real compound task with "
+				"methods. Any unary stabilizer in that skeleton must internally close its own "
+				"headline effect and absorb its remaining shared prerequisites inside its own "
+				"methods; the parent should not provide those internal stabilizer prerequisites. "
+				"Do not keep planning from the parent task's direct headline producer after selecting "
+				"the packaging child."
+			)
+			if line in seen:
+				continue
+			seen.add(line)
+			lines.append(line)
+	return lines
+
+
+def _query_task_non_leading_role_stabilizer_plans(
+	domain: Any,
+	task_schema: Any,
+	*,
+	bound_occurrences: Sequence[Sequence[str]],
+	predicate_name: str,
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+	if len(task_parameters) < 2 or len(bound_occurrences) < 2:
+		return []
+
+	direct_role_requirements: Dict[int, set[str]] = {
+		index: set()
+		for index in range(1, len(task_parameters))
+	}
+	for headline_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+		predicate_name,
+		[],
+	):
+		effect_args = list(headline_pattern.get("effect_args") or [])
+		if len(effect_args) != len(task_parameters):
+			continue
+		token_mapping = {
+			token: task_parameter
+			for token, task_parameter in zip(effect_args, task_parameters)
+		}
+		for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+			rendered_signature = _render_signature_with_mapping(
+				precondition_signature,
+				token_mapping,
+			)
+			parsed_precondition = _parse_literal_signature(rendered_signature)
+			if parsed_precondition is None:
+				continue
+			_, precondition_args, precondition_positive = parsed_precondition
+			if not precondition_positive or len(precondition_args) != 1:
+				continue
+			for role_index in range(1, len(task_parameters)):
+				if precondition_args[0] == task_parameters[role_index]:
+					direct_role_requirements[role_index].add(rendered_signature)
+
+	task_schemas = _declared_task_schema_map(domain)
+	primary_values = {occurrence[0] for occurrence in bound_occurrences}
+	stabilizer_plans: list[str] = []
+	seen_plans: set[str] = set()
+	for role_index in range(1, len(task_parameters)):
+		role_parameter = task_parameters[role_index]
+		role_type = _parameter_type(task_schema.parameters[role_index])
+		role_values = {
+			occurrence[role_index]
+			for occurrence in bound_occurrences
+			if len(occurrence) == len(task_parameters)
+		}
+		reused_values = {value for value in role_values if value in primary_values}
+		terminal_values = {value for value in role_values if value not in primary_values}
+		if not reused_values and not terminal_values:
+			continue
+
+		for candidate_task in getattr(domain, "tasks", []):
+			candidate_name = str(candidate_task.name)
+			if len(candidate_task.parameters) != 1:
+				continue
+			if _parameter_type(candidate_task.parameters[0]) != role_type:
+				continue
+			if candidate_name == str(task_schema.name):
+				continue
+			for candidate_predicate in _candidate_headline_predicates_for_task(
+				candidate_name,
+				1,
+				action_analysis,
+			):
+				candidate_signature = f"{candidate_predicate}({role_parameter})"
+				if candidate_signature in direct_role_requirements[role_index]:
+					continue
+				if _constructive_template_summary_for_task(
+					candidate_name,
+					(role_parameter,),
+					candidate_predicate,
+					action_analysis,
+				) is None:
+					continue
+				plan = _task_invocation_signature(candidate_name, (role_parameter,))
+				if plan in seen_plans:
+					break
+				seen_plans.add(plan)
+				stabilizer_plans.append(plan)
+				break
+			if stabilizer_plans and stabilizer_plans[-1].endswith(f"({role_parameter})"):
+				break
+	return stabilizer_plans
+
+
+def _same_arity_parent_requirement_plan(
+	domain: Any,
+	requirement_signature: str,
+	action_analysis: Dict[str, Any],
+) -> str:
+	parsed_requirement = _parse_literal_signature(requirement_signature)
+	if parsed_requirement is None:
+		return f"{requirement_signature} via parent context or earlier parent subtasks"
+
+	predicate_name, requirement_args, requirement_positive = parsed_requirement
+	if not requirement_positive:
+		return f"{requirement_signature} via parent context or earlier parent subtasks"
+	if not requirement_args:
+		return (
+			f"{requirement_signature} explicitly in parent context unless an earlier "
+			"parent subtask establishes it"
+		)
+
+	task_schemas = _declared_task_schema_map(domain)
+	task_candidates = _candidate_support_task_names(
+		domain,
+		predicate_name,
+		requirement_args,
+		action_analysis.get("producer_actions_by_predicate", {}).get(
+			predicate_name,
+			[],
+		),
+	)
+	task_candidates = [
+		candidate
+		for candidate in task_candidates
+		if len(getattr(task_schemas.get(candidate), "parameters", ())) == len(requirement_args)
+	]
+	if task_candidates:
+		return (
+			f"{requirement_signature} via "
+			f"{' or '.join(_task_invocation_signature(candidate, requirement_args) for candidate in task_candidates[:2])}"
+		)
+
+	return f"{requirement_signature} via parent context or earlier parent subtasks"
 
 
 def _task_shared_and_transitive_requirements(
@@ -420,6 +975,8 @@ def _query_task_same_arity_transitive_requirement_lines(
 		)
 		mode_fragments: list[str] = []
 		mode_seen: set[str] = set()
+		specific_mode_fragments: list[str] = []
+		specific_mode_seen: set[str] = set()
 		for headline_pattern in headline_patterns:
 			effect_args = list(headline_pattern.get("effect_args") or [])
 			if len(effect_args) != len(task_parameters):
@@ -447,7 +1004,95 @@ def _query_task_same_arity_transitive_requirement_lines(
 					support_predicate,
 					[],
 				)
-				if len(support_patterns) < 2:
+				later_required_signatures = {
+					_render_signature_with_mapping(signature, token_mapping)
+					for signature in (headline_pattern.get("dynamic_precondition_signatures") or [])
+				}
+				if not support_patterns:
+					continue
+				specific_handoff_fragments: list[str] = []
+				for support_pattern in support_patterns[:2]:
+					support_effect_args = list(support_pattern.get("effect_args") or [])
+					if len(support_effect_args) != len(support_args):
+						continue
+					support_mapping = {
+						token: arg
+						for token, arg in zip(support_effect_args, support_args)
+					}
+					rendered_support_action_args = _extend_mapping_with_action_parameters(
+						support_mapping,
+						support_pattern.get("action_parameters") or [],
+						action_parameter_types=support_pattern.get("action_parameter_types") or [],
+					)
+					extra_role_args = [
+						arg
+						for arg in rendered_support_action_args
+						if arg not in support_args
+					]
+					if not extra_role_args:
+						continue
+					specific_handoff_fragments.append(
+						f"If you choose mode "
+						f"{_task_invocation_signature(support_pattern['action_name'], rendered_support_action_args)} "
+						f"to make {support_predicate}({', '.join(support_args)}), the next relevant "
+						f"step should be the final producer {headline_summary}; do not add support "
+						f"or cleanup on extra roles {', '.join(extra_role_args)} unless the chosen "
+						"producer or a later step explicitly needs that same headline literal"
+					)
+					for positive_effect_signature in (
+						support_pattern.get("positive_effect_signatures") or []
+					):
+						rendered_effect_signature = _render_signature_with_mapping(
+							positive_effect_signature,
+							support_mapping,
+						)
+						parsed_effect = _parse_literal_signature(rendered_effect_signature)
+						if parsed_effect is None:
+							continue
+						_, effect_args, effect_positive = parsed_effect
+						if not effect_positive:
+							continue
+						if rendered_effect_signature == (
+							f"{support_predicate}({', '.join(support_args)})"
+							if support_args
+							else support_predicate
+						):
+							continue
+						if not any(arg in extra_role_args for arg in effect_args):
+							continue
+						if rendered_effect_signature in later_required_signatures:
+							continue
+						specific_handoff_fragments.append(
+							f"If you choose mode "
+							f"{_task_invocation_signature(support_pattern['action_name'], rendered_support_action_args)} "
+							f"to make {support_predicate}({', '.join(support_args)}), do not try "
+							f"to establish {rendered_effect_signature} before that step unless a "
+							f"later step explicitly consumes {rendered_effect_signature}; this "
+							f"mode already makes {rendered_effect_signature} as a side effect after it runs"
+						)
+				support_task_candidates = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						support_predicate,
+						support_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							support_predicate,
+							[],
+						),
+					)
+					if len(getattr(task_schemas.get(candidate), "parameters", ())) == len(support_args)
+				]
+				if support_task_candidates:
+					fragment = (
+						f"Inside this task, support {support_predicate}({', '.join(support_args)}) "
+						f"via declared tasks "
+						f"{' or '.join(_task_invocation_signature(candidate, support_args) for candidate in support_task_candidates[:2])} "
+						"before the final producer"
+					)
+					if fragment not in mode_seen:
+						mode_seen.add(fragment)
+						mode_fragments.append(fragment)
 					continue
 				support_summary = _constructive_template_summary_for_task(
 					support_predicate,
@@ -458,30 +1103,116 @@ def _query_task_same_arity_transitive_requirement_lines(
 				if support_summary is None:
 					continue
 				fragment = (
-					f"To supply {support_predicate}({', '.join(support_args)}), cover real producer modes "
-					f"{support_summary}"
+					f"Inside this task, support {support_predicate}({', '.join(support_args)}) "
+					f"before the final producer using one of the real producer modes {support_summary}"
 				)
 				if fragment in mode_seen:
 					continue
 				mode_seen.add(fragment)
 				mode_fragments.append(fragment)
+				common_mode_requirements: Optional[set[str]] = None
+				for support_pattern in support_patterns:
+					rendered_requirements = {
+						_render_signature_with_mapping(signature, support_mapping)
+						for signature in (
+							support_pattern.get("dynamic_precondition_signatures") or []
+						)
+					}
+					filtered_requirements = {
+						signature
+						for signature in rendered_requirements
+						if (
+							(parsed_signature := _parse_literal_signature(signature)) is not None
+							and parsed_signature[2]
+							and (
+								not parsed_signature[1]
+								or set(parsed_signature[1]).issubset(set(task_parameters))
+							)
+						)
+					}
+					if common_mode_requirements is None:
+						common_mode_requirements = filtered_requirements
+					else:
+						common_mode_requirements &= filtered_requirements
+				if common_mode_requirements:
+					common_mode_text = ", ".join(sorted(common_mode_requirements))
+					shared_mode_fragment = (
+						f"If every real producer mode for {support_predicate}({', '.join(support_args)}) "
+						f"still needs {common_mode_text}, keep those literals explicit in each "
+						"constructive sibling context of this packaging task instead of "
+						"re-establishing them with an extra support subtask inside every sibling"
+					)
+					if shared_mode_fragment not in mode_seen:
+						mode_seen.add(shared_mode_fragment)
+						mode_fragments.append(shared_mode_fragment)
+				if not support_task_candidates:
+					if len(support_patterns) >= 2:
+						no_declared_fragment = (
+							f"No declared task directly headlines {support_predicate}({', '.join(support_args)}), "
+							f"so keep that obligation inside this packaging task and, because its "
+							"producer modes differ, prefer separate constructive sibling methods "
+							"instead of exposing a mode-specific prerequisite to the parent"
+						)
+					else:
+						no_declared_fragment = (
+							f"No declared task directly headlines {support_predicate}({', '.join(support_args)}), "
+							"so keep that obligation inside this same-arity packaging task instead of "
+							"pushing it back to the parent as an exposed prerequisite"
+						)
+					if no_declared_fragment not in mode_seen:
+						mode_seen.add(no_declared_fragment)
+						mode_fragments.append(no_declared_fragment)
+					if len(support_patterns) >= 2:
+						sibling_fragment = (
+							"For generic coverage, implement one constructive sibling per supported "
+							"producer mode instead of keeping only a single narrow mode branch"
+						)
+						if sibling_fragment not in mode_seen:
+							mode_seen.add(sibling_fragment)
+							mode_fragments.append(sibling_fragment)
+				handoff_fragment = (
+					f"If one of those support modes produces {support_predicate}({', '.join(support_args)}), "
+					f"hand that same literal directly to the final producer {headline_summary}. "
+					"Do not insert cleanup on extra-role symbols unless later steps really establish "
+					"the cleanup precondition for that same symbol"
+				)
+				if handoff_fragment not in mode_seen:
+					mode_seen.add(handoff_fragment)
+					mode_fragments.append(handoff_fragment)
+				for handoff_fragment in specific_handoff_fragments:
+					if handoff_fragment in mode_seen:
+						continue
+					mode_seen.add(handoff_fragment)
+					mode_fragments.append(handoff_fragment)
+					if handoff_fragment not in specific_mode_seen:
+						specific_mode_seen.add(handoff_fragment)
+						specific_mode_fragments.append(handoff_fragment)
 
 		for candidate in packaging_candidates:
 			line = (
 				f"- {_task_invocation_signature(candidate, task_parameters)}: if used as same-arity "
-				f"packaging for {predicate_name}({', '.join(task_parameters)}), it should itself reach "
-				f"the headline effect via {headline_summary}."
+				f"packaging for {predicate_name}({', '.join(task_parameters)}), its own constructive "
+				f"branch must internally close the headline effect via {headline_summary}."
 			)
 			if mode_fragments:
-				line += f" {' '.join(mode_fragments[:2])}."
+				line += f" {' '.join(mode_fragments[:7])}."
 			line += (
-				" Do not call this packaging child and then repeat the same final producer "
-				"again in the parent."
+				" Parent methods should not have to provide unresolved internal support merely "
+				"because this packaging task was chosen. Do not call this packaging child and "
+				"then repeat the same final producer again in the parent."
 			)
 			if line in seen:
 				continue
 			seen.add(line)
 			lines.append(line)
+			for fragment in specific_mode_fragments[:3]:
+				specific_line = (
+					f"- {_task_invocation_signature(candidate, task_parameters)}: {fragment}."
+				)
+				if specific_line in seen:
+					continue
+				seen.add(specific_line)
+				lines.append(specific_line)
 	return lines
 
 
@@ -844,6 +1575,151 @@ def _relevant_support_task_template_lines(
 	return lines
 
 
+def _alignment_warning_lines_for_task(
+	display_name: str,
+	task_parameters: Sequence[str],
+	predicate_name: str,
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(predicate_name, [])
+	lines: list[str] = []
+	seen: set[str] = set()
+	for pattern in patterns:
+		effect_args = list(pattern.get("effect_args") or [])
+		if len(effect_args) != len(task_parameters):
+			continue
+
+		token_mapping = {
+			token: task_parameter
+			for token, task_parameter in zip(effect_args, task_parameters)
+		}
+		rendered_action_args = _extend_mapping_with_action_parameters(
+			token_mapping,
+			pattern.get("action_parameters") or [],
+			action_parameter_types=pattern.get("action_parameter_types") or [],
+		)
+		extra_roles = [
+			arg
+			for arg in rendered_action_args
+			if arg not in task_parameters
+		]
+		if not extra_roles:
+			continue
+
+		rendered_call = _task_invocation_signature(
+			pattern["action_name"],
+			rendered_action_args,
+		)
+		if len(task_parameters) == 1 and len(rendered_action_args) == 2:
+			target_arg = task_parameters[0]
+			extra_role = next((arg for arg in rendered_action_args if arg != target_arg), extra_roles[0])
+			swapped_call = _task_invocation_signature(
+				pattern["action_name"],
+				(target_arg, extra_role),
+			)
+			line = (
+				f"- {_task_invocation_signature(display_name, task_parameters)}: if you use "
+				f"{rendered_call}, keep {target_arg} in the effect-aligned position shown above. "
+				f"Do not swap it to {swapped_call}, because that would support "
+				f"{predicate_name}({extra_role}) instead of {predicate_name}({target_arg})."
+			)
+		else:
+			line = (
+				f"- {_task_invocation_signature(display_name, task_parameters)}: keep task-target "
+				f"arguments in the effect-aligned positions shown by {rendered_call}. Do not swap "
+				"task targets with extra roles."
+			)
+		if line in seen:
+			continue
+		seen.add(line)
+		lines.append(line)
+	return lines
+
+
+def _relevant_support_task_alignment_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		anchor_task_name = str(anchor.get("task_name", "")).strip()
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		headline_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		for headline_pattern in headline_patterns:
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(target_args):
+				continue
+
+			headline_mapping = {
+				token: f"ARG{index}"
+				for index, token in enumerate(effect_args, start=1)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				parsed_precondition = _parse_literal_signature(
+					_render_signature_with_mapping(precondition_signature, headline_mapping)
+				)
+				if parsed_precondition is None:
+					continue
+				precondition_predicate, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive:
+					continue
+				if not set(precondition_args) & set(headline_mapping.values()):
+					continue
+
+				candidate_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if candidate != anchor_task_name
+					and (
+						len(getattr(task_schemas.get(candidate), "parameters", ()))
+						== len(precondition_args)
+					)
+				]
+				for candidate_task in candidate_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					for line in _alignment_warning_lines_for_task(
+						candidate_task,
+						candidate_parameters,
+						precondition_predicate,
+						action_analysis,
+					):
+						if line in seen:
+							continue
+						seen.add(line)
+						lines.append(line)
+	return lines
+
+
 def _declared_support_task_applicability_lines(
 	domain: Any,
 	target_literals: Sequence[str],
@@ -983,6 +1859,642 @@ def _declared_support_task_applicability_lines(
 	return lines
 
 
+def _relevant_support_task_internal_obligation_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		anchor_task_name = str(anchor.get("task_name", "")).strip()
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		headline_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		for headline_pattern in headline_patterns:
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(target_args):
+				continue
+
+			headline_mapping = {
+				token: f"ARG{index}"
+				for index, token in enumerate(effect_args, start=1)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				parsed_precondition = _parse_literal_signature(
+					_render_signature_with_mapping(precondition_signature, headline_mapping)
+				)
+				if parsed_precondition is None:
+					continue
+				precondition_predicate, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive:
+					continue
+				if not set(precondition_args) & set(headline_mapping.values()):
+					continue
+
+				candidate_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if candidate != anchor_task_name
+					and (
+						len(getattr(task_schemas.get(candidate), "parameters", ()))
+						== len(precondition_args)
+					)
+				]
+				for candidate_task in candidate_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					for support_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+						precondition_predicate,
+						[],
+					):
+						support_effect_args = list(support_pattern.get("effect_args") or [])
+						if len(support_effect_args) != len(candidate_parameters):
+							continue
+
+						support_mapping = {
+							token: arg
+							for token, arg in zip(support_effect_args, candidate_parameters)
+						}
+						rendered_action_args = _extend_mapping_with_action_parameters(
+							support_mapping,
+							support_pattern.get("action_parameters") or [],
+							action_parameter_types=support_pattern.get("action_parameter_types") or [],
+						)
+						rendered_consumed_requirements: set[str] = set()
+						for signature in (support_pattern.get("negative_effect_signatures") or []):
+							rendered_signature = _render_signature_with_mapping(
+								signature,
+								support_mapping,
+							)
+							if rendered_signature.startswith("not "):
+								rendered_consumed_requirements.add(rendered_signature[4:].strip())
+						rendered_requirements: list[str] = []
+						for requirement_signature in (
+							support_pattern.get("dynamic_precondition_signatures") or []
+						):
+							rendered_requirement = _render_signature_with_mapping(
+								requirement_signature,
+								support_mapping,
+							)
+							parsed_requirement = _parse_literal_signature(rendered_requirement)
+							if parsed_requirement is None:
+								continue
+							_, _, requirement_positive = parsed_requirement
+							if not requirement_positive:
+								continue
+							rendered_requirements.append(rendered_requirement)
+						if not rendered_requirements:
+							continue
+
+						extra_roles = [
+							arg
+							for arg in rendered_action_args
+							if arg not in candidate_parameters
+						]
+						requirement_fragments: list[str] = []
+						task_parameter_set = set(candidate_parameters)
+						extra_role_set = set(extra_roles)
+						for rendered_requirement in rendered_requirements:
+							parsed_requirement = _parse_literal_signature(rendered_requirement)
+							if parsed_requirement is None:
+								continue
+							req_predicate, req_args, req_positive = parsed_requirement
+							if not req_positive:
+								continue
+							requirement_task_candidates = [
+								candidate
+								for candidate in _candidate_support_task_names(
+									domain,
+									req_predicate,
+									req_args,
+									action_analysis.get("producer_actions_by_predicate", {}).get(
+										req_predicate,
+										[],
+									),
+								)
+								if len(getattr(task_schemas.get(candidate), "parameters", ()))
+								== len(req_args)
+							]
+							has_task_parameter = any(arg in task_parameter_set for arg in req_args)
+							has_extra_role = any(arg in extra_role_set for arg in req_args)
+							if requirement_task_candidates and not has_task_parameter:
+								requirement_fragments.append(
+									f"{rendered_requirement} via "
+									f"{' or '.join(_task_invocation_signature(candidate, req_args) for candidate in requirement_task_candidates[:2])} "
+									f"before {_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}"
+								)
+							elif rendered_requirement in rendered_consumed_requirements:
+								requirement_fragments.append(
+									f"{rendered_requirement} explicit in method.context as the selected producer mode condition"
+								)
+							elif requirement_task_candidates:
+								requirement_fragments.append(
+									f"{rendered_requirement} via "
+									f"{' or '.join(_task_invocation_signature(candidate, req_args) for candidate in requirement_task_candidates[:2])} "
+									f"before {_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}"
+								)
+							elif req_args:
+								requirement_fragments.append(
+									f"{rendered_requirement} in method.context or earlier subtasks"
+								)
+							else:
+								requirement_fragments.append(
+									f"{rendered_requirement} explicit in method.context or earlier subtasks"
+								)
+						if not requirement_fragments:
+							continue
+						line = (
+							f"- {_task_invocation_signature(candidate_task, candidate_parameters)}: if a "
+							f"constructive sibling uses "
+							f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)} "
+							f"to make {precondition_predicate}({', '.join(candidate_parameters)}), support "
+							f"{'; '.join(requirement_fragments)}"
+						)
+						if extra_roles:
+							line += (
+								f"; declare extra roles {', '.join(extra_roles)} in method.parameters"
+							)
+						line += ". Prefer simpler modes with fewer extra roles when they remain suitable."
+						if line in seen:
+							continue
+						seen.add(line)
+						lines.append(line)
+	return lines
+
+
+def _relevant_support_task_recursive_mode_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		anchor_task_name = str(anchor.get("task_name", "")).strip()
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		headline_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		for headline_pattern in headline_patterns:
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(target_args):
+				continue
+
+			headline_mapping = {
+				token: f"ARG{index}"
+				for index, token in enumerate(effect_args, start=1)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				parsed_precondition = _parse_literal_signature(
+					_render_signature_with_mapping(precondition_signature, headline_mapping)
+				)
+				if parsed_precondition is None:
+					continue
+				precondition_predicate, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive:
+					continue
+				if not set(precondition_args) & set(headline_mapping.values()):
+					continue
+
+				candidate_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if candidate != anchor_task_name
+					and (
+						len(getattr(task_schemas.get(candidate), "parameters", ()))
+						== len(precondition_args)
+					)
+				]
+				for candidate_task in candidate_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					for support_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+						precondition_predicate,
+						[],
+					):
+						support_effect_args = list(support_pattern.get("effect_args") or [])
+						if len(support_effect_args) != len(candidate_parameters):
+							continue
+
+						support_mapping = {
+							token: arg
+							for token, arg in zip(support_effect_args, candidate_parameters)
+						}
+						rendered_action_args = _extend_mapping_with_action_parameters(
+							support_mapping,
+							support_pattern.get("action_parameters") or [],
+							action_parameter_types=support_pattern.get("action_parameter_types") or [],
+						)
+						extra_roles = [
+							arg
+							for arg in rendered_action_args
+							if arg not in candidate_parameters
+						]
+						if not extra_roles:
+							continue
+						for requirement_signature in (
+							support_pattern.get("dynamic_precondition_signatures") or []
+						):
+							rendered_requirement = _render_signature_with_mapping(
+								requirement_signature,
+								support_mapping,
+							)
+							parsed_requirement = _parse_literal_signature(rendered_requirement)
+							if parsed_requirement is None:
+								continue
+							req_predicate, req_args, req_positive = parsed_requirement
+							if not req_positive:
+								continue
+							requirement_task_candidates = [
+								candidate
+								for candidate in _candidate_support_task_names(
+									domain,
+									req_predicate,
+									req_args,
+									action_analysis.get("producer_actions_by_predicate", {}).get(
+										req_predicate,
+										[],
+									),
+								)
+								if len(getattr(task_schemas.get(candidate), "parameters", ()))
+								== len(req_args)
+							]
+							if candidate_task not in requirement_task_candidates:
+								continue
+							if any(arg in candidate_parameters for arg in req_args):
+								continue
+							line = (
+								f"- {_task_invocation_signature(candidate_task, candidate_parameters)}: "
+								f"recursive support is valid. If "
+								f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)} "
+								f"needs {rendered_requirement}, call "
+								f"{_task_invocation_signature(candidate_task, req_args)} before the primitive step."
+							)
+							if line in seen:
+								continue
+							seen.add(line)
+							lines.append(line)
+	return lines
+
+
+def _relevant_support_task_recursive_template_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		anchor_task_name = str(anchor.get("task_name", "")).strip()
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		headline_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		for headline_pattern in headline_patterns:
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(target_args):
+				continue
+
+			headline_mapping = {
+				token: f"ARG{index}"
+				for index, token in enumerate(effect_args, start=1)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				parsed_precondition = _parse_literal_signature(
+					_render_signature_with_mapping(precondition_signature, headline_mapping)
+				)
+				if parsed_precondition is None:
+					continue
+				precondition_predicate, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive:
+					continue
+				if not set(precondition_args) & set(headline_mapping.values()):
+					continue
+
+				candidate_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if candidate != anchor_task_name
+					and (
+						len(getattr(task_schemas.get(candidate), "parameters", ()))
+						== len(precondition_args)
+					)
+				]
+				for candidate_task in candidate_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					for support_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+						precondition_predicate,
+						[],
+					):
+						support_effect_args = list(support_pattern.get("effect_args") or [])
+						if len(support_effect_args) != len(candidate_parameters):
+							continue
+
+						support_mapping = {
+							token: arg
+							for token, arg in zip(support_effect_args, candidate_parameters)
+						}
+						rendered_action_args = _extend_mapping_with_action_parameters(
+							support_mapping,
+							support_pattern.get("action_parameters") or [],
+							action_parameter_types=support_pattern.get("action_parameter_types") or [],
+						)
+						extra_roles = [
+							arg
+							for arg in rendered_action_args
+							if arg not in candidate_parameters
+						]
+						if not extra_roles:
+							continue
+
+						recursive_requirements: list[str] = []
+						mode_context_requirements: list[str] = []
+						for requirement_signature in (
+							support_pattern.get("dynamic_precondition_signatures") or []
+						):
+							rendered_requirement = _render_signature_with_mapping(
+								requirement_signature,
+								support_mapping,
+							)
+							parsed_requirement = _parse_literal_signature(rendered_requirement)
+							if parsed_requirement is None:
+								continue
+							req_predicate, req_args, req_positive = parsed_requirement
+							if not req_positive:
+								continue
+							requirement_task_candidates = [
+								candidate
+								for candidate in _candidate_support_task_names(
+									domain,
+									req_predicate,
+									req_args,
+									action_analysis.get("producer_actions_by_predicate", {}).get(
+										req_predicate,
+										[],
+									),
+								)
+								if len(getattr(task_schemas.get(candidate), "parameters", ()))
+								== len(req_args)
+							]
+							if candidate_task in requirement_task_candidates and not any(
+								arg in candidate_parameters for arg in req_args
+							):
+								recursive_requirements.append(rendered_requirement)
+							else:
+								mode_context_requirements.append(rendered_requirement)
+						if not recursive_requirements:
+							continue
+						line = (
+							f"- {_task_invocation_signature(candidate_task, candidate_parameters)}: "
+							f"recursive template for {_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}. "
+							f"Keep mode context {'; '.join(mode_context_requirements)} and use subtasks "
+							f"{'; '.join(_task_invocation_signature(candidate_task, _parse_literal_signature(requirement)[1]) for requirement in recursive_requirements)}; "
+							f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}."
+						)
+						if line in seen:
+							continue
+						seen.add(line)
+						lines.append(line)
+	return lines
+
+
+def _relevant_support_task_cleanup_template_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		anchor_task_name = str(anchor.get("task_name", "")).strip()
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		headline_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		for headline_pattern in headline_patterns:
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(target_args):
+				continue
+
+			headline_mapping = {
+				token: f"ARG{index}"
+				for index, token in enumerate(effect_args, start=1)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				parsed_precondition = _parse_literal_signature(
+					_render_signature_with_mapping(precondition_signature, headline_mapping)
+				)
+				if parsed_precondition is None:
+					continue
+				precondition_predicate, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive:
+					continue
+				if not set(precondition_args) & set(headline_mapping.values()):
+					continue
+
+				candidate_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if candidate != anchor_task_name
+					and (
+						len(getattr(task_schemas.get(candidate), "parameters", ()))
+						== len(precondition_args)
+					)
+				]
+				for candidate_task in candidate_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					for support_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+						precondition_predicate,
+						[],
+					):
+						support_effect_args = list(support_pattern.get("effect_args") or [])
+						if len(support_effect_args) != len(candidate_parameters):
+							continue
+
+						support_mapping = {
+							token: arg
+							for token, arg in zip(support_effect_args, candidate_parameters)
+						}
+						rendered_action_args = _extend_mapping_with_action_parameters(
+							support_mapping,
+							support_pattern.get("action_parameters") or [],
+							action_parameter_types=support_pattern.get("action_parameter_types") or [],
+						)
+						extra_roles = [
+							arg
+							for arg in rendered_action_args
+							if arg not in candidate_parameters
+						]
+						if len(extra_roles) != 1:
+							continue
+						extra_role = extra_roles[0]
+
+						rendered_negative_zeroary: list[str] = []
+						for signature in (support_pattern.get("negative_effect_signatures") or []):
+							rendered_signature = _render_signature_with_mapping(
+								signature,
+								support_mapping,
+							)
+							if not rendered_signature.startswith("not "):
+								continue
+							positive_signature = rendered_signature[4:].strip()
+							parsed_signature = _parse_literal_signature(positive_signature)
+							if parsed_signature is None:
+								continue
+							_, args, positive = parsed_signature
+							if positive and not args:
+								rendered_negative_zeroary.append(positive_signature)
+
+						rendered_positive_effects: set[str] = set()
+						for signature in (support_pattern.get("positive_effect_signatures") or []):
+							rendered_signature = _render_signature_with_mapping(
+								signature,
+								support_mapping,
+							)
+							rendered_positive_effects.add(rendered_signature)
+
+						for lost_zeroary in rendered_negative_zeroary:
+							for cleanup_pattern in action_analysis.get(
+								"producer_patterns_by_predicate",
+								{},
+							).get(lost_zeroary, []):
+								action_parameters = list(cleanup_pattern.get("action_parameters") or [])
+								if len(action_parameters) != 1:
+									continue
+								cleanup_mapping = {
+									_parameter_token(action_parameters[0]): extra_role,
+								}
+								rendered_cleanup_args = _extend_mapping_with_action_parameters(
+									cleanup_mapping,
+									action_parameters,
+									action_parameter_types=cleanup_pattern.get("action_parameter_types") or [],
+								)
+								rendered_cleanup_preconditions = {
+									_render_signature_with_mapping(signature, cleanup_mapping)
+									for signature in (
+										cleanup_pattern.get("dynamic_precondition_signatures") or []
+									)
+								}
+								if not rendered_cleanup_preconditions & rendered_positive_effects:
+									continue
+								line = (
+									f"- {_task_invocation_signature(candidate_task, candidate_parameters)}: "
+									f"cleanup template after {_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}. "
+									f"If this branch should return with {lost_zeroary} restored, append "
+									f"{_task_invocation_signature(cleanup_pattern['action_name'], rendered_cleanup_args)} "
+									"before returning."
+								)
+								if line in seen:
+									continue
+								seen.add(line)
+								lines.append(line)
+	return lines
+
+
 def _query_task_role_frame_lines(
 	domain: Any,
 	target_literals: Sequence[str],
@@ -1107,6 +2619,182 @@ def _query_task_role_frame_lines(
 	return lines
 
 
+def _candidate_headline_predicates_for_task(
+	task_name: str,
+	task_arity: int,
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	task_tokens = _name_tokens(task_name)
+	task_compact = _compact_name_tokens(task_name)
+	scored_predicates: list[tuple[int, str]] = []
+	for predicate_name, patterns in action_analysis.get("producer_patterns_by_predicate", {}).items():
+		if not any(len(pattern.get("effect_args") or []) == task_arity for pattern in patterns):
+			continue
+		score = _token_overlap_score(task_tokens, _name_tokens(predicate_name))
+		predicate_compact = _compact_name_tokens(predicate_name)
+		if task_compact and predicate_compact:
+			if task_compact == predicate_compact:
+				score += 6
+			elif task_compact.endswith(predicate_compact) or predicate_compact.endswith(task_compact):
+				score += 4
+			elif predicate_compact in task_compact or task_compact in predicate_compact:
+				score += 2
+		for pattern in patterns:
+			score += _token_overlap_score(
+				task_tokens,
+				_name_tokens(str(pattern.get("action_name") or "")),
+			)
+		if score <= 0:
+			continue
+		scored_predicates.append((score, predicate_name))
+	scored_predicates.sort(key=lambda item: (-item[0], item[1]))
+	return [predicate_name for _, predicate_name in scored_predicates]
+
+
+def _query_task_role_stabilization_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	anchors_by_task_name: Dict[str, list[Dict[str, Any]]] = {}
+	for anchor in query_task_anchors:
+		task_name = str(anchor.get("task_name", "")).strip()
+		if not task_name:
+			continue
+		anchors_by_task_name.setdefault(task_name, []).append(anchor)
+
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		if len(task_parameters) < 2:
+			continue
+
+		bound_occurrences = [
+			tuple(str(arg) for arg in occurrence.get("args", ()))
+			for occurrence in anchors_by_task_name.get(task_name, [])
+			if len(tuple(occurrence.get("args", ()))) == len(task_parameters)
+		]
+		if len(bound_occurrences) < 2:
+			continue
+
+		role_labels = tuple(f"ARG{index}" for index in range(1, len(task_parameters) + 1))
+		headline_mapping = {
+			token: role_label
+			for token, role_label in zip(task_parameters, role_labels)
+		}
+		direct_role_requirements: Dict[int, set[str]] = {
+			index: set()
+			for index in range(1, len(task_parameters))
+		}
+		for headline_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		):
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(task_parameters):
+				continue
+			token_mapping = {
+				token: role_label
+				for token, role_label in zip(effect_args, role_labels)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				rendered_signature = _render_signature_with_mapping(
+					precondition_signature,
+					token_mapping,
+				)
+				parsed_precondition = _parse_literal_signature(rendered_signature)
+				if parsed_precondition is None:
+					continue
+				_, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive or len(precondition_args) != 1:
+					continue
+				for role_index in range(1, len(task_parameters)):
+					if precondition_args[0] == role_labels[role_index]:
+						direct_role_requirements[role_index].add(rendered_signature)
+
+		same_arity_candidates = _same_arity_declared_task_candidates(
+			domain,
+			task_name,
+			task_schemas,
+		)
+		child_description = (
+			f"same-arity packaging child "
+			f"{_task_invocation_signature(same_arity_candidates[0], role_labels)}"
+			if same_arity_candidates
+			else "the final producer"
+		)
+
+		primary_values = {occurrence[0] for occurrence in bound_occurrences}
+		for role_index in range(1, len(task_parameters)):
+			role_label = role_labels[role_index]
+			role_type = _parameter_type(task_schema.parameters[role_index])
+			role_values = {occurrence[role_index] for occurrence in bound_occurrences}
+			reused_values = sorted(value for value in role_values if value in primary_values)
+			terminal_values = sorted(value for value in role_values if value not in primary_values)
+			if not reused_values and not terminal_values:
+				continue
+
+			candidate_stabilizers: list[str] = []
+			for candidate_task in getattr(domain, "tasks", []):
+				candidate_name = str(candidate_task.name)
+				if candidate_name == task_name or len(candidate_task.parameters) != 1:
+					continue
+				if _parameter_type(candidate_task.parameters[0]) != role_type:
+					continue
+				for candidate_predicate in _candidate_headline_predicates_for_task(
+					candidate_name,
+					1,
+					action_analysis,
+				):
+					candidate_signature = f"{candidate_predicate}({role_label})"
+					if candidate_signature in direct_role_requirements[role_index]:
+						continue
+					if _constructive_template_summary_for_task(
+						candidate_name,
+						(role_label,),
+						candidate_predicate,
+						action_analysis,
+					) is None:
+						continue
+					candidate_stabilizers.append(
+						_task_invocation_signature(candidate_name, (role_label,))
+					)
+					break
+			if not candidate_stabilizers:
+				continue
+
+			line = (
+				f"- {_task_invocation_signature(display_name, role_labels)}: {role_label} acts as a "
+				f"non-leading support/base role in the repeated query skeleton. If a unary "
+				f"declared task such as {' or '.join(candidate_stabilizers[:2])} can stabilize "
+				f"{role_label} beyond the headline producer's direct prerequisites, prefer it "
+				f"before {child_description}. The stabilizer task itself must internally close its "
+				"headline effect and absorb any remaining shared prerequisites inside its own "
+				"methods; parent methods should not provide those internal stabilizer "
+				"prerequisites merely because the stabilizer was chosen."
+			)
+			if line in seen:
+				continue
+			seen.add(line)
+			lines.append(line)
+	return lines
+
+
 def _query_task_child_support_requirement_lines(
 	domain: Any,
 	target_literals: Sequence[str],
@@ -1211,6 +2899,331 @@ def _query_task_child_support_requirement_lines(
 	return lines
 
 
+def _query_task_role_stabilizer_support_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	anchors_by_task_name: Dict[str, list[Dict[str, Any]]] = {}
+	for anchor in query_task_anchors:
+		task_name = str(anchor.get("task_name", "")).strip()
+		if not task_name:
+			continue
+		anchors_by_task_name.setdefault(task_name, []).append(anchor)
+
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		if len(task_parameters) < 2:
+			continue
+		bound_occurrences = [
+			tuple(str(arg) for arg in occurrence.get("args", ()))
+			for occurrence in anchors_by_task_name.get(task_name, [])
+			if len(tuple(occurrence.get("args", ()))) == len(task_parameters)
+		]
+		if len(bound_occurrences) < 2:
+			continue
+
+		role_labels = tuple(f"ARG{index}" for index in range(1, len(task_parameters) + 1))
+		direct_role_requirements: Dict[int, set[str]] = {
+			index: set()
+			for index in range(1, len(task_parameters))
+		}
+		for headline_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		):
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(task_parameters):
+				continue
+			token_mapping = {
+				token: role_label
+				for token, role_label in zip(effect_args, role_labels)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				rendered_signature = _render_signature_with_mapping(
+					precondition_signature,
+					token_mapping,
+				)
+				parsed_precondition = _parse_literal_signature(rendered_signature)
+				if parsed_precondition is None:
+					continue
+				_, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive or len(precondition_args) != 1:
+					continue
+				for role_index in range(1, len(task_parameters)):
+					if precondition_args[0] == role_labels[role_index]:
+						direct_role_requirements[role_index].add(rendered_signature)
+
+		primary_values = {occurrence[0] for occurrence in bound_occurrences}
+		for role_index in range(1, len(task_parameters)):
+			role_label = role_labels[role_index]
+			role_type = _parameter_type(task_schema.parameters[role_index])
+			role_values = {
+				occurrence[role_index]
+				for occurrence in bound_occurrences
+				if len(occurrence) == len(task_parameters)
+			}
+			reused_values = {value for value in role_values if value in primary_values}
+			terminal_values = {value for value in role_values if value not in primary_values}
+			if not reused_values and not terminal_values:
+				continue
+
+			for candidate_task in getattr(domain, "tasks", []):
+				candidate_name = str(candidate_task.name)
+				if candidate_name == task_name or len(candidate_task.parameters) != 1:
+					continue
+				if _parameter_type(candidate_task.parameters[0]) != role_type:
+					continue
+				for candidate_predicate in _candidate_headline_predicates_for_task(
+					candidate_name,
+					1,
+					action_analysis,
+				):
+					candidate_signature = f"{candidate_predicate}({role_label})"
+					if candidate_signature in direct_role_requirements[role_index]:
+						continue
+					template_summary = _constructive_template_summary_for_task(
+						candidate_name,
+						(role_label,),
+						candidate_predicate,
+						action_analysis,
+					)
+					if template_summary is None:
+						continue
+					shared_requirements = _shared_dynamic_requirements_for_predicate(
+						candidate_predicate,
+						(role_label,),
+						action_analysis,
+					)
+					support_option_fragments: list[str] = []
+					self_requiring_modes: list[str] = []
+					compatible_modes: list[str] = []
+					compatible_mode_binding_hints: list[str] = []
+					compatible_mode_antidetour_hints: list[str] = []
+					if shared_requirements:
+						for shared_requirement in shared_requirements:
+							parsed_requirement = _parse_literal_signature(shared_requirement)
+							if parsed_requirement is None:
+								continue
+							req_predicate, req_args, req_positive = parsed_requirement
+							if not req_positive:
+								continue
+							rendered_options: list[str] = []
+							for support_pattern in action_analysis.get(
+								"producer_patterns_by_predicate",
+								{},
+							).get(req_predicate, [])[:3]:
+								support_effect_args = list(support_pattern.get("effect_args") or [])
+								if len(support_effect_args) != len(req_args):
+									continue
+								support_mapping = {
+									token: arg
+									for token, arg in zip(support_effect_args, req_args)
+								}
+								rendered_action_args = _extend_mapping_with_action_parameters(
+									support_mapping,
+									support_pattern.get("action_parameters") or [],
+									action_parameter_types=support_pattern.get("action_parameter_types")
+									or [],
+								)
+								rendered_requirements = [
+									_render_signature_with_mapping(signature, support_mapping)
+									for signature in (
+										support_pattern.get("dynamic_precondition_signatures") or []
+									)
+								]
+								suffix = (
+									f" [needs {', '.join(rendered_requirements)}]"
+									if rendered_requirements
+									else ""
+								)
+								rendered_options.append(
+									f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}{suffix}"
+								)
+								action_parameter_types = list(
+									support_pattern.get("action_parameter_types") or []
+								)
+								headline_signature = f"{candidate_predicate}({role_label})"
+								if headline_signature in rendered_requirements:
+									self_requiring_modes.append(
+										_task_invocation_signature(
+											support_pattern["action_name"],
+											rendered_action_args,
+										)
+									)
+								else:
+									compatible_modes.append(
+										_task_invocation_signature(
+											support_pattern["action_name"],
+											rendered_action_args,
+										)
+									)
+									extra_roles = [
+										arg
+										for arg in rendered_action_args
+										if arg not in req_args
+									]
+									mode_selector_requirements = [
+										requirement
+										for requirement in rendered_requirements
+										if requirement != headline_signature
+									]
+									if extra_roles:
+										binding_hint = (
+											f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}: "
+											f"declare extra roles {', '.join(extra_roles)} in method.parameters"
+										)
+										if mode_selector_requirements:
+											binding_hint += (
+												f" and keep {'; '.join(mode_selector_requirements)} "
+												"in method.context before that step"
+											)
+										compatible_mode_binding_hints.append(binding_hint)
+										for extra_role in extra_roles:
+											generic_antidetour_hint = (
+												f"before "
+												f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}, "
+												f"do not insert unary support on extra role {extra_role} "
+												f"unless its headline literal is one of that mode's real "
+												f"dynamic prerequisites {'; '.join(rendered_requirements)}"
+											)
+											if generic_antidetour_hint not in compatible_mode_antidetour_hints:
+												compatible_mode_antidetour_hints.append(
+													generic_antidetour_hint
+												)
+											extra_role_type = None
+											for parameter_arg, parameter_type in zip(
+												rendered_action_args,
+												action_parameter_types,
+											):
+												if parameter_arg == extra_role:
+													extra_role_type = parameter_type
+													break
+											unrelated_support_tasks: list[str] = []
+											for extra_role_task in getattr(domain, "tasks", []):
+												if len(extra_role_task.parameters) != 1:
+													continue
+												extra_role_task_name = str(extra_role_task.name)
+												if extra_role_task_name == candidate_name:
+													continue
+												if (
+													extra_role_type is not None
+													and _parameter_type(extra_role_task.parameters[0])
+													!= extra_role_type
+												):
+													continue
+												for extra_role_predicate in _candidate_headline_predicates_for_task(
+													extra_role_task_name,
+													1,
+													action_analysis,
+												):
+													extra_role_signature = (
+														f"{extra_role_predicate}({extra_role})"
+													)
+													if extra_role_signature in rendered_requirements:
+														continue
+													unrelated_support_tasks.append(
+														_task_invocation_signature(
+															extra_role_task_name,
+															(extra_role,),
+														)
+													)
+													break
+											if not unrelated_support_tasks:
+												unrelated_support_tasks = [
+													_task_invocation_signature(
+														str(extra_role_task.name),
+														(extra_role,),
+													)
+													for extra_role_task in getattr(domain, "tasks", [])
+													if (
+														len(extra_role_task.parameters) == 1
+														and str(extra_role_task.name) != candidate_name
+													)
+												]
+											if unrelated_support_tasks:
+												specific_antidetour_hint = (
+													f"before "
+													f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}, "
+													f"do not insert {' or '.join(unrelated_support_tasks[:2])} "
+													f"unless its headline literal is one of that mode's real "
+													f"dynamic prerequisites {'; '.join(rendered_requirements)}"
+												)
+												if (
+													specific_antidetour_hint
+													not in compatible_mode_antidetour_hints
+												):
+													compatible_mode_antidetour_hints.append(
+														specific_antidetour_hint
+													)
+							if rendered_options:
+								support_option_fragments.append(
+									f"{shared_requirement} via {'; '.join(rendered_options)}"
+								)
+					line = (
+						f"- {_task_invocation_signature(candidate_name, (role_label,))}: if used as a "
+						f"role stabilizer, its constructive branch must internally close "
+						f"{candidate_predicate}({role_label}); constructive template {template_summary}"
+					)
+					downstream_reusable_conditions = sorted(
+						requirement
+						for requirement in direct_role_requirements[role_index]
+						if requirement != candidate_signature
+					)
+					if downstream_reusable_conditions:
+						joined_conditions = "; ".join(downstream_reusable_conditions)
+						line += (
+							f". For already-stable cases where a later child or producer only "
+							f"reuses {joined_conditions} on {role_label}, include a stable/noop "
+							f"sibling with {joined_conditions} in method.context instead of "
+							f"requiring {candidate_predicate}({role_label})"
+						)
+					if support_option_fragments:
+						line += f". Support remaining prerequisites via {'; '.join(support_option_fragments)}"
+					if self_requiring_modes:
+						line += (
+							f". For the false-{candidate_predicate}({role_label}) constructive case, "
+							f"do not rely on self-requiring modes {'; '.join(self_requiring_modes)}"
+						)
+						if compatible_modes:
+							line += f"; prefer compatible modes {'; '.join(compatible_modes)}"
+					if compatible_mode_binding_hints:
+						line += (
+							f". If you use a compatible extra-role mode, "
+							f"{'; '.join(compatible_mode_binding_hints)}"
+						)
+					if compatible_mode_antidetour_hints:
+						line += f". Also, {'; '.join(compatible_mode_antidetour_hints)}"
+					if shared_requirements:
+						line += (
+							". Parent tasks should not provide those internal stabilizer "
+							"prerequisites"
+						)
+					line += "."
+					if line in seen:
+						continue
+					seen.add(line)
+					lines.append(line)
+					break
+	return lines
+
+
 def _query_task_support_obligation_lines(
 	domain: Any,
 	target_literals: Sequence[str],
@@ -1279,6 +3292,207 @@ def _query_task_support_obligation_lines(
 				continue
 			seen.add(line)
 			lines.append(line)
+	return lines
+
+
+def _query_priority_obligation_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	anchors_by_task_name: Dict[str, list[Dict[str, Any]]] = {}
+	for anchor in query_task_anchors:
+		task_name = str(anchor.get("task_name", "")).strip()
+		if task_name:
+			anchors_by_task_name.setdefault(task_name, []).append(anchor)
+
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		if len(task_parameters) < 2:
+			continue
+		bound_occurrences = [
+			tuple(str(arg) for arg in occurrence.get("args", ()))
+			for occurrence in anchors_by_task_name.get(task_name, [])
+			if len(tuple(occurrence.get("args", ()))) == len(task_parameters)
+		]
+		if len(bound_occurrences) < 2:
+			continue
+
+		primary_values = {occurrence[0] for occurrence in bound_occurrences}
+		same_arity_candidates = _same_arity_declared_task_candidates(
+			domain,
+			task_name,
+			task_schemas,
+		)
+		if not same_arity_candidates:
+			continue
+		packaging_child = _task_invocation_signature(same_arity_candidates[0], task_parameters)
+
+		direct_role_requirements: Dict[int, list[str]] = {
+			index: []
+			for index in range(1, len(task_parameters))
+		}
+		for headline_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		):
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(task_parameters):
+				continue
+			token_mapping = {
+				token: role_label
+				for token, role_label in zip(effect_args, task_parameters)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				rendered_signature = _render_signature_with_mapping(
+					precondition_signature,
+					token_mapping,
+				)
+				parsed_precondition = _parse_literal_signature(rendered_signature)
+				if parsed_precondition is None:
+					continue
+				_, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive or len(precondition_args) != 1:
+					continue
+				for role_index in range(1, len(task_parameters)):
+					if precondition_args[0] != task_parameters[role_index]:
+						continue
+					if rendered_signature in direct_role_requirements[role_index]:
+						continue
+					direct_role_requirements[role_index].append(rendered_signature)
+
+		for role_index in range(1, len(task_parameters)):
+			role_parameter = task_parameters[role_index]
+			role_type = _parameter_type(task_schema.parameters[role_index])
+			role_values = {
+				occurrence[role_index]
+				for occurrence in bound_occurrences
+				if len(occurrence) == len(task_parameters)
+			}
+			if not role_values:
+				continue
+			if not any(value in primary_values for value in role_values) and not any(
+				value not in primary_values for value in role_values
+			):
+				continue
+
+			for candidate_task in getattr(domain, "tasks", []):
+				candidate_name = str(candidate_task.name)
+				if candidate_name == task_name or len(candidate_task.parameters) != 1:
+					continue
+				if _parameter_type(candidate_task.parameters[0]) != role_type:
+					continue
+				for candidate_predicate in _candidate_headline_predicates_for_task(
+					candidate_name,
+					1,
+					action_analysis,
+				):
+					template_summary = _constructive_template_summary_for_task(
+						candidate_name,
+						(role_parameter,),
+						candidate_predicate,
+						action_analysis,
+					)
+					if template_summary is None:
+						continue
+					stabilizer_call = _task_invocation_signature(candidate_name, (role_parameter,))
+					line = (
+						f"- {_task_invocation_signature(display_name, task_parameters)}: high-priority "
+						f"query skeleton is support {role_parameter}, then {stabilizer_call}, then "
+						f"{packaging_child}. Do not omit {stabilizer_call}."
+					)
+					if line not in seen:
+						seen.add(line)
+						lines.append(line)
+					role_stable_requirements = direct_role_requirements.get(role_index, [])
+					if role_stable_requirements:
+						stable_line = (
+							f"- {stabilizer_call}: if {role_parameter} already satisfies downstream "
+							f"support-role conditions {', '.join(role_stable_requirements)}, prefer "
+							"a stable/noop sibling instead of a destructive constructive branch, "
+							f"even when {candidate_predicate}({role_parameter}) is still false."
+						)
+						if stable_line not in seen:
+							seen.add(stable_line)
+							lines.append(stable_line)
+
+					shared_requirements = _shared_dynamic_requirements_for_predicate(
+						candidate_predicate,
+						(role_parameter,),
+						action_analysis,
+					)
+					if not shared_requirements:
+						break
+					for shared_requirement in shared_requirements:
+						parsed_requirement = _parse_literal_signature(shared_requirement)
+						if parsed_requirement is None:
+							continue
+						req_predicate, req_args, req_positive = parsed_requirement
+						if not req_positive:
+							continue
+						self_requiring_modes: list[str] = []
+						compatible_modes: list[str] = []
+						for support_pattern in action_analysis.get(
+							"producer_patterns_by_predicate",
+							{},
+						).get(req_predicate, [])[:3]:
+							support_effect_args = list(support_pattern.get("effect_args") or [])
+							if len(support_effect_args) != len(req_args):
+								continue
+							support_mapping = {
+								token: arg
+								for token, arg in zip(support_effect_args, req_args)
+							}
+							rendered_action_args = _extend_mapping_with_action_parameters(
+								support_mapping,
+								support_pattern.get("action_parameters") or [],
+								action_parameter_types=support_pattern.get("action_parameter_types")
+								or [],
+							)
+							rendered_requirements = {
+								_render_signature_with_mapping(signature, support_mapping)
+								for signature in (
+									support_pattern.get("dynamic_precondition_signatures") or []
+								)
+							}
+							rendered_call = _task_invocation_signature(
+								support_pattern["action_name"],
+								rendered_action_args,
+							)
+							headline_signature = f"{candidate_predicate}({role_parameter})"
+							if headline_signature in rendered_requirements:
+								self_requiring_modes.append(rendered_call)
+							else:
+								compatible_modes.append(rendered_call)
+						if self_requiring_modes:
+							mode_line = (
+								f"- {stabilizer_call}: for the false-{candidate_predicate}({role_parameter}) "
+								f"constructive case, do not use self-requiring modes "
+								f"{'; '.join(self_requiring_modes)}"
+							)
+							if compatible_modes:
+								mode_line += f"; prefer {'; '.join(compatible_modes)}"
+							mode_line += "."
+							if mode_line not in seen:
+								seen.add(mode_line)
+								lines.append(mode_line)
+					break
 	return lines
 
 
@@ -1454,11 +3668,14 @@ def build_htn_system_prompt() -> str:
 		"target_task_bindings, compound_tasks, methods.\n"
 		"\n"
 		"OUTPUT CONTRACT:\n"
+		"- Emit the shortest valid JSON you can. Prefer compact formatting over pretty-printing.\n"
 		"- task_name and method_name must match [a-z][a-z0-9_]*.\n"
 		"- method_name must be exactly m_{task_name}_{strategy}.\n"
+		"- task_args is optional; if omitted, the first declared-task-arity entries of method.parameters are treated as the task arguments in order, so keep those leading parameters aligned with the task signature.\n"
 		"- Primitive subtasks must use the provided runtime primitive aliases.\n"
-		"- Set primitive step literal to null unless that exact positive literal is a real action effect of that primitive step.\n"
-		"- Primitive step literal is optional metadata; most primitive steps should set literal to null.\n"
+		"- Set primitive step literal to null unless that exact positive literal is a real action effect.\n"
+		"- Omit optional empty/default fields whenever possible: task_args when implied by leading parameters, origin when it would just be llm/default, source_method_name, literal when null, preconditions/effects when empty, and ordering only for empty or single-step methods.\n"
+		"- Never omit required structural fields. compound_tasks still need name, parameters, is_primitive, and source_predicates. Every subtask still needs step_id, task_name, args, and kind. Primitive subtasks also need action_name.\n"
 		"- Every compound subtask must reference a declared compound task from the same JSON.\n"
 		"- Every referenced compound subtask must also appear in compound_tasks and have at least one method in methods.\n"
 		"- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
@@ -1479,13 +3696,18 @@ def build_htn_system_prompt() -> str:
 		"- Fresh helper tasks may correspond only to dynamic predicates.\n"
 		"- Static predicates are context constraints only; never create helper tasks to establish them.\n"
 		"- Bind each target literal to one top-level compound task. If an ordered query-task anchor is supplied for that target, prefer that exact task name.\n"
+		"- For every target-bound task, include an already-satisfied/noop method whose context contains the target headline literal and whose subtask list is empty. For declared support/stabilizer tasks, an already-stable/noop branch may instead use the downstream support-role condition when that already makes the role reusable.\n"
 		"- Keep the library compact after executability is satisfied. Emit sibling methods only for genuine mode differences, producer-action alternatives, or already-satisfied cases.\n"
 		"- Do not generate transitive support-closure libraries or exhaustive missing-support powersets.\n"
 		"- Keep static resources, capabilities, topology, and immutable relations in method context when possible.\n"
 		"- Every primitive step's dynamic preconditions must be guaranteed by earlier subtasks or method context.\n"
 		"- If a primitive dynamic precondition is not achieved earlier, include it positively in method context.\n"
 		"- Apply the same rule to compound subtasks when their constructive branches share a dynamic prerequisite.\n"
+		"- When sequencing compound subtasks, only rely on a prior compound child's own headline effect and explicitly shared envelope as guaranteed for later siblings; do not rely on incidental internal side effects or cleanup from that child.\n"
 		"- If a same-arity declared child is chosen as packaging for the headline effect, let that child own the full constructive path; do not immediately repeat the same final producer in the parent.\n"
+		"- If that packaging child still needs an internal support predicate with multiple real producer modes and no declared support task directly headlines it, keep those modes inside the child as separate constructive sibling methods instead of choosing one narrow mode as the only constructive branch.\n"
+		"- If a support task can recursively establish an extra-role prerequisite for one of its own producer modes, recursion is allowed and often necessary; place the recursive support-task call before the primitive producer instead of leaving that blocker as an unsupported context assumption.\n"
+		"- If a remaining shared dynamic prerequisite has arity 0 and no earlier parent subtask establishes it, usually state it explicitly in the parent method context before the child call.\n"
 		"- No free variables; respect declared types and role distinctions.\n"
 	)
 
@@ -1560,6 +3782,14 @@ def build_htn_user_prompt(
 				start=1,
 			)
 		)
+	query_priority_obligation_lines = "\n".join(
+		_query_priority_obligation_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
 
 	dynamic_predicate_lines = "\n".join(
 		f"- {predicate_name}"
@@ -1593,7 +3823,12 @@ def build_htn_user_prompt(
 		_same_arity_task_hint_lines(domain, query_task_anchors)
 	) or "- none"
 	query_task_same_arity_packaging_lines = "\n".join(
-		_query_task_same_arity_packaging_lines(domain, query_task_anchors)
+		_query_task_same_arity_packaging_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
 	) or "- none"
 	query_task_same_arity_transitive_lines = "\n".join(
 		_query_task_same_arity_transitive_requirement_lines(
@@ -1619,8 +3854,48 @@ def build_htn_user_prompt(
 			analysis,
 		)
 	) or "- none"
+	relevant_support_task_alignment_lines = "\n".join(
+		_relevant_support_task_alignment_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
 	declared_support_task_applicability_lines = "\n".join(
 		_declared_support_task_applicability_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	relevant_support_task_internal_obligation_lines = "\n".join(
+		_relevant_support_task_internal_obligation_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	relevant_support_task_recursive_mode_lines = "\n".join(
+		_relevant_support_task_recursive_mode_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	relevant_support_task_recursive_template_lines = "\n".join(
+		_relevant_support_task_recursive_template_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	relevant_support_task_cleanup_template_lines = "\n".join(
+		_relevant_support_task_cleanup_template_lines(
 			domain,
 			targets,
 			query_task_anchors,
@@ -1651,8 +3926,56 @@ def build_htn_user_prompt(
 			analysis,
 		)
 	) or "- none"
+	query_task_role_stabilization_lines = "\n".join(
+		_query_task_role_stabilization_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	query_task_role_stabilizer_support_lines = "\n".join(
+		_query_task_role_stabilizer_support_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
 	query_task_child_support_lines = "\n".join(
 		_query_task_child_support_requirement_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	query_task_same_arity_child_support_lines = "\n".join(
+		_query_task_same_arity_child_support_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	query_task_zero_ary_parent_context_lines = "\n".join(
+		_query_task_zero_ary_parent_context_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	query_task_same_arity_child_context_lines = "\n".join(
+		_query_task_same_arity_child_context_lines(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	) or "- none"
+	query_task_packaging_skeleton_lines = "\n".join(
+		_query_task_packaging_skeleton_lines(
 			domain,
 			targets,
 			query_task_anchors,
@@ -1669,22 +3992,70 @@ def build_htn_user_prompt(
 			"QUERY OBJECT NAMES (grounded instances from the current query; never place them inside methods):\n"
 			f"{query_object_lines}\n\n"
 		)
+	query_priority_section = ""
+	if query_priority_obligation_lines != "- none":
+		query_priority_section = (
+			"QUERY-SPECIFIC PRIORITY OBLIGATIONS:\n"
+			f"{query_priority_obligation_lines}\n\n"
+		)
 	role_frame_section = ""
 	if len(targets) <= 4 and query_task_role_frame_lines != "- none":
 		role_frame_section = (
 			f"QUERY-TASK EXTRA ROLE FRAMES:\n{query_task_role_frame_lines}\n\n"
 		)
+	role_stabilization_section = ""
+	if query_task_role_stabilization_lines != "- none":
+		role_stabilization_section = (
+			"QUERY-TASK ROLE STABILIZATION:\n"
+			f"{query_task_role_stabilization_lines}\n\n"
+		)
+	role_stabilizer_support_section = ""
+	if query_task_role_stabilizer_support_lines != "- none":
+		role_stabilizer_support_section = (
+			"QUERY-TASK ROLE STABILIZER INTERNAL SUPPORT:\n"
+			f"{query_task_role_stabilizer_support_lines}\n\n"
+		)
 	relevant_support_task_section = ""
-	if len(targets) <= 4 and relevant_support_task_template_lines != "- none":
+	if relevant_support_task_template_lines != "- none":
 		relevant_support_task_section = (
 			"RELEVANT SUPPORT TASK CONSTRUCTIVE TEMPLATES:\n"
 			f"{relevant_support_task_template_lines}\n\n"
 		)
+	relevant_support_task_alignment_section = ""
+	if relevant_support_task_alignment_lines != "- none":
+		relevant_support_task_alignment_section = (
+			"RELEVANT SUPPORT TASK ROLE-ALIGNMENT WARNINGS:\n"
+			f"{relevant_support_task_alignment_lines}\n\n"
+		)
 	declared_support_task_applicability_section = ""
-	if len(targets) <= 4 and declared_support_task_applicability_lines != "- none":
+	if declared_support_task_applicability_lines != "- none":
 		declared_support_task_applicability_section = (
 			"DECLARED SUPPORT TASK APPLICABILITY ENVELOPES:\n"
 			f"{declared_support_task_applicability_lines}\n\n"
+		)
+	relevant_support_task_internal_obligation_section = ""
+	if relevant_support_task_internal_obligation_lines != "- none":
+		relevant_support_task_internal_obligation_section = (
+			"RELEVANT SUPPORT TASK INTERNAL OBLIGATIONS:\n"
+			f"{relevant_support_task_internal_obligation_lines}\n\n"
+		)
+	relevant_support_task_recursive_mode_section = ""
+	if relevant_support_task_recursive_mode_lines != "- none":
+		relevant_support_task_recursive_mode_section = (
+			"RELEVANT SUPPORT TASK RECURSIVE MODES:\n"
+			f"{relevant_support_task_recursive_mode_lines}\n\n"
+		)
+	relevant_support_task_recursive_template_section = ""
+	if relevant_support_task_recursive_template_lines != "- none":
+		relevant_support_task_recursive_template_section = (
+			"RELEVANT SUPPORT TASK RECURSIVE TEMPLATES:\n"
+			f"{relevant_support_task_recursive_template_lines}\n\n"
+		)
+	relevant_support_task_cleanup_template_section = ""
+	if relevant_support_task_cleanup_template_lines != "- none":
+		relevant_support_task_cleanup_template_section = (
+			"RELEVANT SUPPORT TASK CLEANUP TEMPLATES:\n"
+			f"{relevant_support_task_cleanup_template_lines}\n\n"
 		)
 	same_arity_transitive_section = ""
 	if query_task_same_arity_transitive_lines != "- none":
@@ -1697,10 +4068,168 @@ def build_htn_user_prompt(
 		child_support_section = (
 			f"QUERY-TASK CHILD SUPPORT PREREQUISITES:\n{query_task_child_support_lines}\n\n"
 		)
+	same_arity_child_support_section = ""
+	if query_task_same_arity_child_support_lines != "- none":
+		same_arity_child_support_section = (
+			"QUERY-TASK SAME-ARITY CHILD PREREQUISITES:\n"
+			f"{query_task_same_arity_child_support_lines}\n\n"
+		)
+	same_arity_child_context_section = ""
+	if query_task_same_arity_child_context_lines != "- none":
+		same_arity_child_context_section = (
+			"QUERY-TASK SAME-ARITY CHILD CONTEXT OBLIGATIONS:\n"
+			f"{query_task_same_arity_child_context_lines}\n\n"
+		)
+	zero_ary_parent_context_section = ""
+	if query_task_zero_ary_parent_context_lines != "- none":
+		zero_ary_parent_context_section = (
+			"QUERY-TASK ZERO-ARY PARENT CONTEXT:\n"
+			f"{query_task_zero_ary_parent_context_lines}\n\n"
+		)
+	packaging_skeleton_section = ""
+	if query_task_packaging_skeleton_lines != "- none":
+		packaging_skeleton_section = (
+			"QUERY-TASK PACKAGING SKELETONS:\n"
+			f"{query_task_packaging_skeleton_lines}\n\n"
+		)
 	branch_hint_section = ""
 	if branch_hints != "- none":
 		branch_hint_section = (
 			f"ACTION PRECONDITION BRANCH HINTS (DNF):\n{branch_hints}\n\n"
+		)
+	if len(targets) > 4:
+		step_instructions_section = (
+			"STEP-BY-STEP INSTRUCTIONS:\n"
+			"1. Preserve query-mentioned declared tasks as the top-level skeleton, prefer declared support tasks, and only create a fresh helper when no declared task or same-arity packaging task can express the needed dynamic change; never create helpers for static predicates.\n"
+			"2. For each constructive method, choose an aligned final producer or same-arity packaging child for the headline effect and recursively support its dynamic prerequisites instead of leaving them implicit.\n"
+			"3. For every target-bound task, include one already-satisfied/noop branch with the headline literal in context. For declared support/stabilizer tasks, a stable/noop branch may instead use the downstream support-role condition when that already makes the role reusable. At least one constructive branch must then make progress when the target/stabilizer headline remains unsupported.\n"
+			"4. Respect producer-effect argument alignment exactly; do not use a chain for !P(args) if unresolved support still requires P(args) to already hold.\n"
+			"5. If a same-arity packaging child is chosen, let that child own the final producer. Keep unsupported internal predicates inside that child, and if such a predicate has multiple real producer modes with different dynamic prerequisites, encode those modes as separate constructive sibling methods inside the child.\n"
+			"6. Auxiliary variables must appear in method.parameters, be constrained before use, keep typed roles separate, and never reuse grounded query object names inside methods. If task_args is omitted, keep the first task-arity method.parameters aligned with the task signature in order.\n"
+			"7. Every primitive dynamic precondition and every shared compound-child prerequisite must be supported by method context or earlier subtasks. If the parent is expected to provide a child's shared envelope, restate those assumed literals in each constructive child context unless that child establishes them internally.\n"
+			"8. If an extra-role producer mode needs a blocker role that the same declared support task can clear recursively, recurse on that blocker before the primitive producer, and append a real cleanup step before returning only when that cleanup's own preconditions are truly established by earlier steps on the same symbol.\n"
+			"8b. If every real producer mode for an internal support literal still needs the same dynamic prerequisite on task arguments or a shared 0-ary resource, keep that requirement explicit in each constructive sibling context of the reusable task instead of re-establishing it with an extra support subtask inside every sibling.\n"
+			"9. Every ordered compound support step must justify itself by contributing a headline literal that a later step or the parent headline actually consumes. Do not insert orphan support subtasks whose headline literal is never used downstream.\n"
+			"10. Keep static capabilities, topology, visibility, equipment, and immutable relations in context; do not use nop as constructive filler.\n"
+			"11. If a method has two or more subtasks, include explicit ordering edges; never rely on subtask array order alone.\n"
+			"12. Use sibling methods only for real mode differences or already-satisfied cases, keep the library compact, and do not bypass the query skeleton with a fresh helper-only library.\n"
+			"13. Keep the JSON structurally simple: omit empty/default fields and unnecessary literal metadata so the response stays short and well-formed.\n\n"
+		)
+	else:
+		step_instructions_section = (
+			"STEP-BY-STEP INSTRUCTIONS:\n"
+			"1. If the query explicitly names declared tasks, preserve those task names in the generated library, use query-mentioned declared tasks as top-level bindings whenever they semantically match the ordered target literals, prefer declared supporting tasks over fresh helper tasks, only create a fresh helper task when no declared task can express the required dynamic state change, and never create helper tasks for static predicates.\n"
+			"2. For each constructive method, inspect the final producer action or child task that achieves the intended dynamic effect. If that constructive step requires dynamic preconditions, normally establish them via supporting declared tasks or sibling mode branches instead of assuming them in context.\n"
+			"3. For a target-bound task that headlines a positive dynamic predicate, include one already-satisfied/noop branch with the headline literal in context. For declared support/stabilizer tasks, a stable/noop branch may instead use the downstream support-role condition when that already makes the role reusable. Keep at least one constructive branch applicable when the target/stabilizer headline is still unsupported; non-empty branches should make progress from states where that literal is false.\n"
+			"4. Respect producer-effect argument alignment exactly: only treat an action or subtask as supporting P(args) when its positive effect can instantiate to that same P(args). If a constructive branch is intended for !P(args), do not choose a producer chain whose unresolved preconditions still require that same P(args) to already hold.\n"
+			"5. If a query task still has unresolved dynamic preconditions after obvious support tasks, prefer same-arity declared tasks as reusable intermediate abstractions before inventing a fresh helper. Only fall back to a fresh helper when no declared support task or packaging task can responsibly absorb that obligation. If you choose a same-arity declared packaging task, that child should own the final producer for the headline effect instead of being followed by the same final producer again in the parent.\n"
+			"5b. If a same-arity packaging task's final producer still needs a dynamic prerequisite that no declared task directly headlines, keep that support obligation inside the packaging task via one of the real producer modes instead of pushing it back to the parent.\n"
+			"5c. If that internal support predicate has multiple real producer modes with different dynamic prerequisites, encode those supported modes as separate constructive sibling methods inside the task that owns the final producer. Do not keep only one narrow mode as the sole constructive branch of a reusable generic task.\n"
+			"6. If you introduce an auxiliary blocker/intermediate variable, add it to method.parameters, constrain it in method.context before using it in subtasks, and give it explicit typed evidence.\n"
+			"7. If a declared task has a constructive producer template, build its constructive branch around one of those aligned templates instead of operating on a different object role. Preserve typed role separation across every method: do not reuse one symbol for incompatible declared types or semantic roles. Never place grounded query object names inside methods; use schematic parameters instead. When a producer needs extra roles beyond the headline arguments, add fresh schematic parameters for those roles.\n"
+			"7b. When several real producer modes can achieve the same headline effect, prefer the mode with fewer extra roles and less extra support unless a more complex mode is genuinely needed. If you use an extra-role mode, declare those roles and support their dynamic prerequisites explicitly.\n"
+			"8. For every primitive step, each dynamic precondition must already be guaranteed by method context or by earlier subtasks in the ordering. Do not stop after choosing a final producer step if that producer still has unresolved dynamic preconditions; recursively decompose those obligations first. If you intentionally leave a primitive step's dynamic precondition to method applicability instead of earlier subtasks, state it explicitly in method.context. If such a context literal introduces an auxiliary variable, declare that variable in method.parameters and constrain it in method.context. If a compound child task's constructive branches share a dynamic prerequisite, provide that prerequisite in the parent method context or earlier parent subtasks before invoking the child.\n"
+			"8b. Apply the same rule to same-arity packaging children: if the packaging child still has a shared applicability envelope, support that envelope in the parent before the child call. For any remaining 0-ary shared prerequisite, prefer explicit parent context unless an earlier parent subtask establishes it.\n"
+			"8c. If the parent is expected to supply a same-arity packaging child's shared envelope, every constructive sibling of that child must restate those assumed shared literals in method.context unless that sibling establishes them earlier internally.\n"
+			"8c2. If a non-leading task argument is a reused or terminal support/base role and a unary declared task can stabilize it beyond the final producer's direct prerequisites, prefer that unary task before the packaging child or final producer and keep it as a real declared compound task instead of compressing it away.\n"
+			"8c2b. For such a unary stabilizer, if the downstream child already only needs a reusable role condition that currently holds, prefer a stable/noop sibling over forcing the stabilizer headline literally true when that constructive branch would destructively rewrite the support role.\n"
+			"8c3. When such a unary stabilizer is chosen, its own constructive methods must internally close the stabilizer headline and absorb remaining shared prerequisites; parent methods should not provide those internal stabilizer prerequisites merely because the stabilizer was chosen.\n"
+			"8c4. If every real producer mode for an internal support literal still needs the same dynamic prerequisite on task arguments or a shared 0-ary resource, keep that requirement explicit in each constructive sibling context of the reusable task instead of re-establishing it with an extra support subtask inside every sibling.\n"
+			"8d. If an extra-role producer mode needs a dynamic prerequisite that itself has a declared support task, prefer supporting that prerequisite via the declared task before the primitive step instead of leaving it only as an assumed context literal.\n"
+			"8e. If that declared support task is the same task you are currently defining, recursive support is allowed: call the task on the blocker role first, then execute the primitive producer once the blocker is ready.\n"
+			"8f. If a recursive or extra-role producer achieves the headline effect but leaves a transient extra-role predicate or shared resource unusable for the caller, append a real cleanup step before returning so the method finishes in a reusable stable state. Only add cleanup when its own preconditions are genuinely established by earlier steps on that same symbol.\n"
+			"8g. Do not insert a support subtask that can invalidate a consumed mode-selector literal before the producer that needs it executes. Keep mode-selector relations explicit in context until the consuming producer runs.\n"
+			"8g2. Before an extra-role producer mode ACTION(ARG1, AUX1, ...), only add earlier support for the dynamic prerequisites that ACTION itself actually needs. Do not insert a preparatory task on AUX1 just because AUX1 appears in the mode if that task's headline literal is not one of ACTION's unresolved dynamic prerequisites.\n"
+			"8h. When a parent orders compound support tasks before another compound child, only count the earlier support tasks' own headline literals as guaranteed afterwards. If a later child still shares resource_free, handempty, or another prerequisite outside those headline literals, keep it explicit in parent context unless an earlier parent step itself headlines that same prerequisite.\n"
+			"8i. Every ordered compound support step must justify itself either by contributing a later-consumed literal or by stabilizing a reused/non-leading role before a later packaging child or producer. Do not insert detours that neither support later requirements nor stabilize such a reused role.\n"
+			"9. Do not use nop as filler inside constructive methods. Keep static capabilities, topology, visibility, equipment, and immutable relations in method context unless a declared task genuinely changes them.\n"
+			"10. If a method has two or more subtasks, include explicit ordering edges; never rely on subtask array order alone.\n"
+			"11. Use action producer alternatives or genuine already-satisfied cases to justify sibling methods; do not enumerate every support powerset. Keep the library compact: only include tasks and methods needed for the target bindings and executable support. Prefer semantic task names and reusable parameterization; do not clone grounded tasks per target literal. Do not bypass the query skeleton with a fresh helper-only library.\n"
+			"12. Keep the JSON structurally simple: omit empty/default fields and unnecessary literal metadata so the response stays short and well-formed.\n\n"
+		)
+	if len(targets) > 4:
+		examples_section = (
+			"INPUT/OUTPUT EXAMPLES:\n"
+			"- Input: parent(ARG1, ARG2) chooses same-arity child(ARG1, ARG2). Output pattern: parent supports the child's shared envelope, then calls child(ARG1, ARG2), and child owns the final producer.\n"
+			"- Input: a method has subtasks s1 then s2. Output pattern: include ordering [[\"s1\", \"s2\"]]; do not rely on list position alone.\n"
+			"- Input: child(ARG1, ARG2) reaches attach(ARG1, ARG2), mid(ARG1) has producer modes grab(ARG1) [needs free_hand, base(ARG1)] and lift(ARG1, AUX1) [needs attached(ARG1, AUX1), free_hand], and no declared task headlines mid(ARG1). Output pattern: child uses separate constructive sibling methods for the grab and lift modes instead of one narrow branch.\n"
+			"- Input: move(ARG1, ARG2) uses a support mode lift(ARG1, AUX1) to make holding(ARG1), and the final producer place(ARG1, ARG2) immediately consumes holding(ARG1). Output pattern: after lift(ARG1, AUX1), continue directly to place(ARG1, ARG2); do not add cleanup on AUX1 unless earlier steps really establish carrying(AUX1) or holding(AUX1).\n"
+			"- Input: move(ARG1, ARG2) will later use a producer consume(ARG1, AUX1), and consume(ARG1, AUX1) needs linked(ARG1, AUX1) as the mode selector. Output pattern: do not call a prior support task on AUX1 if that task can remove linked(ARG1, AUX1) before consume(ARG1, AUX1) executes.\n"
+			"- Input: stabilize(ARG1) uses producer detach(ARG1, AUX1), and detach(ARG1, AUX1) needs linked(ARG1, AUX1) plus ready(ARG1) but does not need clear(AUX1). Output pattern: keep linked(ARG1, AUX1) explicit, support ready(ARG1) if needed, and do not insert clear_task(AUX1) before detach(ARG1, AUX1).\n"
+			"- Input: parent(ARG1, ARG2) calls support(AUX1) before producer(ARG1, AUX1), but no later step needs support(AUX1)'s headline literal and AUX1 is not a reused role that must be stabilized. Output pattern: omit that detour.\n"
+			"- Input: attach(ARG1, ARG2) is repeated across the query skeleton, ARG2 is a reused or terminal support/base role, and settle(ARG2) can stabilize ARG2 beyond the final producer's direct prerequisites. Output pattern: perform settle(ARG2) before the same-arity packaging child or final producer.\n"
+			"- Input: settle(ARG2) headlines base(ARG2), but the later packaging child only needs clear(ARG2) and clear(ARG2) already holds. Output pattern: use a stable/noop settle(ARG2) sibling; do not destructively force base(ARG2) if that would undo earlier structure built under ARG2.\n"
+			"- Input: holding(ARG1) has real producer modes grab(ARG1) [needs clear(ARG1), free_hand] and lift(ARG1, AUX1) [needs clear(ARG1), linked(ARG1, AUX1), free_hand]. Output pattern: keep clear(ARG1) and free_hand explicit in each constructive sibling context of the reusable packaging task instead of calling clear_task(ARG1) inside every sibling.\n"
+			"- Input: clear_item(TARGET) is implemented with detach(BLOCKER, TARGET), and clear_item(BLOCKER) is the same declared support task. Output pattern: declare BLOCKER in method.parameters, call clear_item(BLOCKER), then execute detach(BLOCKER, TARGET).\n"
+			"- Input: detach(BLOCKER, TARGET) achieves clear_item(TARGET) but leaves carrying(BLOCKER) and not free_hand. Output pattern: clear_item(BLOCKER); detach(BLOCKER, TARGET); store(BLOCKER).\n\n"
+		)
+		edge_cases_section = (
+			"COMMON EDGE CASES:\n"
+			"- Multi-step method without ordering: invalid. If there is more than one subtask, add explicit ordering edges.\n"
+			"- Shared 0-ary dynamic prerequisites: keep them explicit in parent context when no earlier parent subtask establishes them.\n"
+			"- Producer modes differ: keep mode-specific prerequisites inside sibling methods of the packaging child instead of exposing one mode-specific literal to the parent.\n"
+			"- Support-mode handoff interrupted: if a support mode already produced the literal the final producer consumes, continue to that final producer instead of inserting unrelated cleanup or detours.\n"
+			"- Consumed mode selector destroyed too early: if a later producer needs linked(ARG1, AUX1) or another mode-selector relation, do not run a prior support task on AUX1 when that task can remove the relation before the producer executes.\n"
+			"- Extra-role precondition drift: if ACTION(ARG1, AUX1) only needs linked(ARG1, AUX1) and ready(ARG1), do not insert support(AUX1) whose headline is clear(AUX1) or another unrelated literal before ACTION.\n"
+			"- Unjustified detour: if support(AUX1) neither feeds a later requirement nor stabilizes a reused/non-leading role, remove it.\n"
+			"- Support/base role left unstable: if ARG2 is a reused or terminal support role and a unary declared task can stabilize ARG2 beyond the final producer's direct prerequisites, prefer that unary task before building on ARG2.\n"
+			"- Over-eager stabilizer constructivization: if a later child already only needs clear(ARG2), ready(ARG2), or another reusable role condition that currently holds, do not force a unary stabilizer to make base(ARG2) or another headline literal true first when that would dismantle earlier progress.\n"
+			"- Shared envelope rebuilt inside every sibling: if all real producer modes for an internal support literal still need clear(ARG1), free_hand, or another same requirement, keep it explicit in constructive sibling context instead of inserting the same support task inside every sibling.\n"
+			"- Recursive blocker support skipped: if the same declared support task can clear the blocker role of an extra-role producer, recurse on that blocker before the primitive step.\n"
+			"- Recursive branch ends without cleanup: if the extra-role producer leaves a shared resource unavailable, append a real cleanup step before returning.\n"
+			"- Impossible cleanup: do not add store(AUX) or put_down(AUX) unless earlier steps really leave carrying(AUX) or holding(AUX) true on that same symbol.\n"
+			"- Omitted task_args: keep the first task-arity method.parameters in the same order as the task signature.\n"
+			"- Auxiliary variables: do not introduce an extra variable unless it appears in method.parameters and is constrained before use.\n"
+			"- Typed role separation: operate(ACTOR, LOCATION, TARGET, TOOL, MODE) must keep ACTOR and TOOL as different variables.\n\n"
+		)
+	else:
+		examples_section = (
+			"INPUT/OUTPUT EXAMPLES:\n"
+			"- Input: parent(ARG1, ARG2) still needs linked(ARG1, ARG2) and a same-arity child(ARG1, ARG2) is available. Output pattern: parent first supports the child's shared envelope, then calls child(ARG1, ARG2), and the child owns the final producer.\n"
+			"- Input: a method has subtasks s1 then s2. Output pattern: include ordering [[\"s1\", \"s2\"]]; do not rely on list position alone.\n"
+			"- Input: child(ARG1, ARG2) reaches attach(ARG1, ARG2), and attach needs holding(ARG1) plus ready(ARG2). Output pattern: child supports holding(ARG1) and ready(ARG2) before attach(ARG1, ARG2) instead of leaving them implicit.\n"
+			"- Input: no declared task clearly covers holding(ARG1). Output pattern: either keep that support inside a same-arity packaging task via real producer modes, or add one minimal dynamic helper as a last resort.\n"
+			"- Input: child(ARG1, ARG2) reaches attach(ARG1, ARG2), holding(ARG1) has producer modes grab(ARG1) [needs free_hand, base(ARG1)] and lift(ARG1, AUX1) [needs attached(ARG1, AUX1), free_hand], and no declared task directly headlines holding(ARG1). Output pattern: child has separate constructive sibling methods for the grab and lift modes instead of one generic branch that assumes only base(ARG1).\n"
+			"- Input: a same-arity child still needs a shared 0-ary literal like resource_free. Output pattern: place resource_free explicitly in the parent context unless an earlier parent subtask establishes it.\n"
+			"- Input: support(ARG1) and support(ARG2) run before same-arity child(ARG1, ARG2), and the child still shares resource_free. Output pattern: keep resource_free explicit in the parent context unless an earlier parent step itself headlines resource_free; do not rely on incidental side effects of support(ARG1) or support(ARG2).\n"
+			"- Input: parent supplies ready(ARG2) before child(ARG1, ARG2). Output pattern: every constructive child sibling either keeps ready(ARG2) in method.context or establishes it internally before the final producer.\n"
+			"- Input: free(ARG2) can be produced by release(ARG2) [needs holding(ARG2)] or detach(AUX1, ARG2) [needs attached(AUX1, ARG2), ready(AUX1), free_hand]. Output pattern: prefer release(ARG2) when suitable; if detach(AUX1, ARG2) is used, declare AUX1 and support ready(AUX1) explicitly.\n"
+			"- Input: free(ARG2) is produced by detach(AUX1, ARG2), and ready(AUX1) itself has a declared support task prepare(AUX1). Output pattern: support ready(AUX1) via prepare(AUX1) before detach(AUX1, ARG2) instead of only assuming ready(AUX1) in context.\n"
+			"- Input: attach(ARG1, ARG2) is repeated across the query skeleton, ARG2 is a reused or terminal support/base role, and settle(ARG2) can stabilize ARG2 beyond the final producer's direct prerequisites. Output pattern: perform settle(ARG2) before the same-arity packaging child or final producer.\n"
+			"- Input: settle(ARG2) headlines base(ARG2), but the later packaging child only needs clear(ARG2) and clear(ARG2) already holds. Output pattern: use a stable/noop settle(ARG2) sibling; do not destructively force base(ARG2) if that would undo earlier structure built under ARG2.\n"
+			"- Input: holding(ARG1) has real producer modes grab(ARG1) [needs clear(ARG1), free_hand] and lift(ARG1, AUX1) [needs clear(ARG1), linked(ARG1, AUX1), free_hand]. Output pattern: keep clear(ARG1) and free_hand explicit in each constructive sibling context of the reusable packaging task instead of calling clear_task(ARG1) inside every sibling.\n"
+			"- Input: clear_item(ARG1) is implemented with detach(AUX1, ARG1), detach(AUX1, ARG1) needs clear_item(AUX1), and clear_item is the same declared support task. Output pattern: a recursive constructive method first calls clear_item(AUX1), then executes detach(AUX1, ARG1).\n"
+			"- Input: same recursive-support case as above. Output snippet: {\"method_name\":\"m_clear_item_recursive\",\"task_name\":\"clear_item\",\"parameters\":[\"ARG1\",\"AUX1\"],\"context\":[{\"predicate\":\"attached\",\"args\":[\"AUX1\",\"ARG1\"],\"is_positive\":true},{\"predicate\":\"free_hand\",\"args\":[],\"is_positive\":true}],\"subtasks\":[{\"step_id\":\"s1\",\"task_name\":\"clear_item\",\"args\":[\"AUX1\"],\"kind\":\"compound\"},{\"step_id\":\"s2\",\"task_name\":\"detach\",\"args\":[\"AUX1\",\"ARG1\"],\"kind\":\"primitive\"}],\"ordering\":[[\"s1\",\"s2\"]]}.\n"
+			"- Input: detach(AUX1, ARG1) makes clear_item(ARG1) but leaves carrying(AUX1) and not free_hand. Output pattern: clear_item(AUX1); detach(AUX1, ARG1); store(AUX1), so the method returns with free_hand restored.\n"
+			"- Input: detach(ARG1, AUX1) needs linked(ARG1, AUX1) as the mode selector. Output pattern: keep linked(ARG1, AUX1) in context until detach(ARG1, AUX1); do not call a support task on AUX1 first if it could remove linked(ARG1, AUX1).\n"
+			"- Input: stabilize(ARG1) uses producer detach(ARG1, AUX1), and detach(ARG1, AUX1) needs linked(ARG1, AUX1) plus ready(ARG1) but does not need clear(AUX1). Output pattern: keep linked(ARG1, AUX1) explicit, support ready(ARG1) if needed, and do not insert clear_task(AUX1) before detach(ARG1, AUX1).\n"
+			"- Input: parent(ARG1, ARG2) calls support(AUX1) before producer(ARG1, AUX1), but no later step needs support(AUX1)'s headline literal and AUX1 is not a reused role that must be stabilized. Output pattern: omit that detour.\n"
+			"- Input: detach(AUX1, ARG2) is used to achieve clear(ARG2). Output pattern: AUX1 appears in method.parameters and is constrained in method.context before the detach step.\n\n"
+		)
+		edge_cases_section = (
+			"COMMON EDGE CASES:\n"
+			"- Same-arity packaging chosen: stop planning from the parent task's direct headline producer and switch to supporting the packaging child's shared envelope plus the child call.\n"
+			"- Multi-step method without ordering: invalid. If there is more than one subtask, add explicit ordering edges.\n"
+			"- Shared 0-ary dynamic prerequisites: keep them explicit in parent context when no earlier parent subtask establishes them.\n"
+			"- Earlier compound support subtasks only guarantee their own headline literals: if support(ARG1) and support(ARG2) run before child(ARG1, ARG2), do not assume they also preserve resource_free unless one of those earlier parent steps itself headlines resource_free.\n"
+			"- Producer modes differ: keep mode-specific prerequisites inside sibling methods of the packaging child instead of exposing one mode-specific literal to the parent.\n"
+			"- Parent-supported child envelope silently omitted: if the caller is expected to provide clear(ARG1), ready(ARG2), or another shared prerequisite, keep that literal explicit in each constructive child context unless the child establishes it internally.\n"
+			"- Single narrow mode mistaken for a generic task: if one internal producer mode needs base(ARG1) and another needs attached(ARG1, AUX1), do not keep only the base(ARG1) branch unless the task is intentionally partial.\n"
+			"- Complex extra-role mode chosen when a simpler mode exists: if release(ARG2) and detach(AUX1, ARG2) both achieve free(ARG2), do not choose detach(AUX1, ARG2) unless the method really needs that extra-role mode and its extra support.\n"
+			"- Support/base role left unstable: if ARG2 is a reused or terminal support role and a unary declared task can stabilize ARG2 beyond the final producer's direct prerequisites, prefer that unary task before building on ARG2.\n"
+			"- Over-eager stabilizer constructivization: if a later child already only needs clear(ARG2), ready(ARG2), or another reusable role condition that currently holds, do not force a unary stabilizer to make base(ARG2) or another headline literal true first when that would dismantle earlier progress.\n"
+			"- Shared envelope rebuilt inside every sibling: if all real producer modes for an internal support literal still need clear(ARG1), free_hand, or another same requirement, keep it explicit in constructive sibling context instead of inserting the same support task inside every sibling.\n"
+			"- Extra-role prerequisite with a declared support task left implicit: if ready(AUX1) has a task prepare(AUX1), prefer prepare(AUX1) before detach(AUX1, ARG2) rather than assuming ready(AUX1) without support.\n"
+			"- Recursive blocker support skipped: if clear_item(AUX1) is available for the blocker of detach(AUX1, ARG1), do not leave clear_item(AUX1) as an unsupported assumption when the task is meant to be generic.\n"
+			"- Recursive branch ends without cleanup: if detach(AUX1, ARG1) leaves carrying(AUX1) or consumes free_hand, do not return immediately when a real cleanup step can restore the shared resource.\n"
+			"- Impossible cleanup: do not add store(AUX1) or put_down(AUX1) unless earlier steps really leave carrying(AUX1) or holding(AUX1) true on that same symbol.\n"
+			"- Consumed mode selector destroyed too early: if detach(ARG1, AUX1) needs linked(ARG1, AUX1), do not run a support task on AUX1 first when that task can remove linked(ARG1, AUX1) before detach executes.\n"
+			"- Extra-role precondition drift: if ACTION(ARG1, AUX1) only needs linked(ARG1, AUX1) and ready(ARG1), do not insert support(AUX1) whose headline is clear(AUX1) or another unrelated literal before ACTION.\n"
+			"- Unjustified detour: if support(AUX1) neither feeds a later requirement nor stabilizes a reused/non-leading role, remove it.\n"
+			"- Auxiliary variables: do not introduce an extra variable unless it appears in method.parameters and is constrained before use.\n"
+			"- Typed role separation: operate(ACTOR, LOCATION, TARGET, TOOL, MODE) must keep ACTOR and TOOL as different variables.\n"
+			"- Declared support task exists: prefer it over raw primitive producer modes for the same dynamic predicate.\n"
+			"- Negative or already-satisfied cases: keep them as separate noop/already-satisfied branches instead of mixing them into constructive fallbacks.\n\n"
 		)
 
 	return (
@@ -1710,6 +4239,7 @@ def build_htn_user_prompt(
 		f"{query_object_section}"
 		f"ORDERED QUERY TASK ANCHORS:\n{query_anchor_lines}\n\n"
 		f"ORDERED TARGET/TASK SKELETON HINTS:\n{anchor_binding_lines}\n\n"
+		f"{query_priority_section}"
 		f"DOMAIN:\n{domain.name}\n\n"
 		f"DOMAIN TYPES:\n{chr(10).join(type_lines) if type_lines else '- object'}\n\n"
 		f"DECLARED DOMAIN TASKS:\n{chr(10).join(task_lines) if task_lines else '- none declared'}\n\n"
@@ -1726,42 +4256,41 @@ def build_htn_user_prompt(
 		f"{same_arity_transitive_section}"
 		f"DECLARED TASK CONSTRUCTIVE TEMPLATES:\n{declared_task_template_lines}\n\n"
 		f"{relevant_support_task_section}"
+		f"{relevant_support_task_alignment_section}"
 		f"{declared_support_task_applicability_section}"
+		f"{relevant_support_task_recursive_mode_section}"
+		f"{relevant_support_task_recursive_template_section}"
+		f"{relevant_support_task_cleanup_template_section}"
+		f"{relevant_support_task_internal_obligation_section}"
 		f"{role_frame_section}"
+		f"{role_stabilization_section}"
+		f"{role_stabilizer_support_section}"
 		f"QUERY-TASK SUPPORT OBLIGATIONS:\n{query_task_support_lines}\n\n"
 		f"QUERY-TASK SUPPORT PRODUCERS:\n{query_task_support_producer_lines}\n\n"
 		f"{child_support_section}"
+		f"{same_arity_child_support_section}"
+		f"{same_arity_child_context_section}"
+		f"{zero_ary_parent_context_section}"
+		f"{packaging_skeleton_section}"
 		f"RUNTIME PRIMITIVE ACTION ALIASES:\n{chr(10).join(action_lines)}\n\n"
 		f"{branch_hint_section}"
 		f"ORDERED TARGET LITERALS:\n{target_lines}\n\n"
 		f"REQUIRED target_task_bindings ENTRIES:\n{binding_hints}\n\n"
-		"CONSTRUCTION RULES:\n"
-		"1. If the query explicitly names declared tasks, preserve those task names in the generated library, use query-mentioned declared tasks as top-level bindings whenever they semantically match the ordered target literals, prefer declared supporting tasks over fresh helper tasks, only create a fresh helper task when no declared task can express the required dynamic state change, and never create helper tasks for static predicates.\n"
-		"2. For each constructive method, inspect the final producer action or child task that achieves the intended dynamic effect. If that constructive step requires dynamic preconditions, normally establish them via supporting declared tasks or sibling mode branches instead of assuming them in context.\n"
-		"3. For a task that headlines a positive dynamic predicate, at least one constructive branch must stay applicable when that headline literal is currently false. The already-satisfied branch should be the only branch that assumes the headline literal itself; non-empty branches should make progress from states where that literal is false.\n"
-		"4. Respect producer-effect argument alignment exactly: only treat an action or subtask as supporting P(args) when its positive effect can instantiate to that same P(args). If a constructive branch is intended for !P(args), do not choose a producer chain whose unresolved preconditions still require that same P(args) to already hold.\n"
-		"5. If a query task still has unresolved dynamic preconditions after obvious support tasks, prefer same-arity declared tasks as reusable intermediate abstractions before inventing a fresh helper. Only fall back to a fresh helper when no declared support task or packaging task can responsibly absorb that obligation. If you choose a same-arity declared packaging task, that child should own the final producer for the headline effect instead of being followed by the same final producer again in the parent.\n"
-		"6. If you introduce an auxiliary blocker/intermediate variable, add it to method.parameters, constrain it in method.context before using it in subtasks, and give it explicit typed evidence.\n"
-		"7. If a declared task has a constructive producer template, build its constructive branch around one of those aligned templates instead of operating on a different object role. Preserve typed role separation across every method: do not reuse one symbol for incompatible declared types or semantic roles. Never place grounded query object names inside methods; use schematic parameters instead. When a producer needs extra roles beyond the headline arguments, add fresh schematic parameters for those roles.\n"
-		"8. For every primitive step, each dynamic precondition must already be guaranteed by method context or by earlier subtasks in the ordering. Do not stop after choosing a final producer step if that producer still has unresolved dynamic preconditions; recursively decompose those obligations first. If you intentionally leave a primitive step's dynamic precondition to method applicability instead of earlier subtasks, state it explicitly in method.context. If such a context literal introduces an auxiliary variable, declare that variable in method.parameters and constrain it in method.context. If a compound child task's constructive branches share a dynamic prerequisite, provide that prerequisite in the parent method context or earlier parent subtasks before invoking the child.\n"
-		"9. Do not use nop as filler inside constructive methods. Keep static capabilities, topology, visibility, equipment, and immutable relations in method context unless a declared task genuinely changes them.\n"
-		"10. Use action producer alternatives or genuine already-satisfied cases to justify sibling methods; do not enumerate every support powerset. Keep the library compact: only include tasks and methods needed for the target bindings and executable support. Prefer semantic task names and reusable parameterization; do not clone grounded tasks per target literal. Do not bypass the query skeleton with a fresh helper-only library.\n\n"
-		"MICRO-EXAMPLES:\n"
-		"- Valid: if attach(ARG1, ARG2) needs holding(ARG1) and ready(ARG2), support both before attach(ARG1, ARG2).\n"
-		"- Invalid recursion: if clear_top(AUX1) is followed by detach(AUX1, ARG1), do not assume detach's resource_free precondition was satisfied unless context or earlier subtasks make it true.\n"
-		"- Valid fallback: if no declared task or reusable same-arity packaging task clearly covers holding(ARG1), add one minimal helper for that dynamic predicate instead of omitting it.\n"
-		"- Valid same-arity packaging: if parent(ARG1, ARG2) delegates to child(ARG1, ARG2) as a same-arity packaging task for linked(ARG1, ARG2), let child own the final attach(ARG1, ARG2) rather than calling child(ARG1, ARG2) and then attach(ARG1, ARG2) again in the parent.\n"
-		"- Parent-child obligation: if parent(ARG1, ARG2) calls child(ARG1) and every constructive branch of child(ARG1) needs ready(ARG1) and resource_free, parent must provide both before the child call.\n"
-		"- Valid auxiliary binding: detach(AUX1, ARG2) for clear(ARG2) requires AUX1 in method.parameters and method.context.\n"
-		"- Valid typed roles: operate(ACTOR, LOCATION, TARGET, TOOL, MODE) must keep ACTOR and TOOL as different variables.\n\n"
+		f"{step_instructions_section}"
+		f"{examples_section}"
+		f"{edge_cases_section}"
 		"TOP-LEVEL JSON SHAPE:\n"
 		"Only define target_task_bindings, compound_tasks, and methods; primitive tasks are injected automatically.\n"
 		f"{schema_hint}\n\n"
 		"FINAL CHECKLIST:\n"
 		"- Each target literal has exactly one binding, and query-mentioned declared tasks appear in the library when provided.\n"
-		"- Primitive step literal is null unless that exact positive literal is a real action effect, and every referenced compound subtask appears in compound_tasks and has methods.\n"
+		"- Every target-bound task includes an already-satisfied/noop method with the headline literal in context; support/stabilizer tasks may use a downstream role-stable condition for their noop branch when appropriate.\n"
+		"- Compactness never removes required structure: keep source_predicates on compound tasks, kind on every subtask, action_name on primitive subtasks, and explicit ordering edges on every multi-step method.\n"
+		"- If a query-task packaging skeleton or role-stabilization hint names a declared unary stabilizer, keep that stabilizer in compound_tasks with methods instead of omitting it for compactness.\n"
+		"- Primitive step literal metadata is usually omitted; if present, it must name an exact positive real action effect. Every referenced compound subtask appears in compound_tasks and has methods.\n"
 		"- Fresh helper tasks, if any, correspond only to dynamic predicates. Static predicates appear only as context/preconditions, not helper-task headlines.\n"
 		"- Every primitive step's dynamic preconditions are supported by method context or earlier subtasks. Every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks. No primitive step relies on an unstated dynamic precondition.\n"
 		"- No free variables. No undefined compound subtasks. Every auxiliary variable has an explicit typing witness.\n"
+		"- Omit empty/default fields when possible so the JSON stays compact and less error-prone.\n"
 		"- Return one complete JSON object and nothing else.\n"
 	)

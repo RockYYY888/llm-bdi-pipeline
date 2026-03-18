@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -32,6 +33,79 @@ def test_tool_available_discovers_parser_from_panda_pi_bin(tmp_path, monkeypatch
 	verifier = IPCPlanVerifier()
 
 	assert verifier.tool_available() is True
+
+
+def test_planning_toolchain_available_discovers_all_tools_from_panda_pi_bin(tmp_path, monkeypatch):
+	parser_dir = tmp_path / "bin"
+	parser_dir.mkdir()
+	for tool_name in ("pandaPIparser", "pandaPIgrounder", "pandaPIengine"):
+		tool_path = parser_dir / tool_name
+		tool_path.write_text("#!/bin/sh\nexit 0\n")
+		tool_path.chmod(0o755)
+
+	monkeypatch.setenv("PANDA_PI_BIN", str(parser_dir))
+	monkeypatch.setenv("PATH", os.getenv("PATH", ""))
+
+	verifier = IPCPlanVerifier()
+
+	assert verifier.planning_toolchain_available() is True
+
+
+def test_verify_planned_hierarchical_plan_converts_planner_output_before_verifying(
+	tmp_path,
+	monkeypatch,
+):
+	domain_file = tmp_path / "domain.hddl"
+	problem_file = tmp_path / "problem.hddl"
+	domain_file.write_text("(define (domain TEST))\n")
+	problem_file.write_text("(define (problem test) (:domain TEST))\n")
+
+	converted_plan = "\n".join(
+		[
+			"==>",
+			"0 move a b",
+			"root 1",
+			"1 do_move a b -> m_do_move",
+		],
+	) + "\n"
+	raw_plan = "raw planner output\n"
+	verify_stdout = "\n".join(
+		[
+			"Plan is executable: true",
+			"Plan verification result: true",
+		],
+	)
+
+	def fake_run(command, text, capture_output, check):
+		if command[1:2] == ["-c"]:
+			Path(command[3]).write_text(converted_plan)
+			return subprocess.CompletedProcess(command, 0, "", "")
+		if command[1:2] == ["-V"]:
+			assert Path(command[4]).read_text() == converted_plan
+			return subprocess.CompletedProcess(command, 0, verify_stdout, "")
+		if command[0] == "/fake/parser":
+			return subprocess.CompletedProcess(command, 0, "", "")
+		if command[0] == "/fake/grounder":
+			return subprocess.CompletedProcess(command, 0, "", "")
+		if command[0] == "/fake/engine":
+			return subprocess.CompletedProcess(command, 0, raw_plan, "")
+		raise AssertionError(f"unexpected command: {command}")
+
+	verifier = IPCPlanVerifier()
+	monkeypatch.setattr(verifier, "_resolve_command_head", lambda command: f"/fake/{command[7:].lower()}" if command.startswith("pandaPI") else None)
+	monkeypatch.setattr("utils.ipc_plan_verifier.subprocess.run", fake_run)
+
+	result = verifier.verify_planned_hierarchical_plan(
+		domain_file=domain_file,
+		problem_file=problem_file,
+		output_dir=tmp_path,
+	)
+
+	assert result.tool_available is True
+	assert result.plan_kind == "hierarchical"
+	assert result.verification_result is True
+	assert result.primitive_plan_executable is True
+	assert Path(result.plan_file).read_text() == converted_plan
 
 
 def test_render_primitive_only_plan_uses_official_primitive_plan_format():
@@ -80,6 +154,19 @@ def test_parse_verifier_summary_accepts_hierarchical_executability_marker():
 
 	assert IPCPlanVerifier._extract_executability(output) is True
 	assert IPCPlanVerifier._infer_goal_reached(output) is True
+
+
+def test_default_task_args_uses_leading_method_parameters_when_task_args_omitted():
+	method = HTNMethod(
+		method_name="m_clear_top_put_down",
+		task_name="clear_top",
+		parameters=("TARGET", "BLOCKER"),
+	)
+	task_lookup = {
+		"clear_top": HTNTask("clear_top", ("B",), False, ("clear",)),
+	}
+
+	assert IPCPlanVerifier._default_task_args(method, task_lookup) == ("TARGET",)
 
 
 def test_render_supported_hierarchical_plan_contains_root_and_decompositions(tmp_path):

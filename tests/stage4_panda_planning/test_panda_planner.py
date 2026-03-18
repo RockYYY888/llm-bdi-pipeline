@@ -186,6 +186,43 @@ def test_panda_domain_export_defaults_task_parameter_type_to_object():
 	assert "(:task navigate_to" in domain_hddl
 	assert ":parameters (?rover - object ?from - object ?to - object)" in domain_hddl
 
+
+def test_panda_domain_export_uses_leading_method_parameters_when_task_args_omitted():
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=_domain(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("clear_top", ("B",), False, ("clear",)),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m_clear_top_put_down",
+					task_name="clear_top",
+					parameters=("TARGET",),
+					context=(HTNLiteral("holding", ("TARGET",), True, None),),
+					subtasks=(
+						HTNMethodStep(
+							"s1",
+							"put_down",
+							("TARGET",),
+							"primitive",
+							action_name="put-down",
+						),
+					),
+					ordering=(),
+					origin="llm",
+				),
+			],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="blocksworld_transition_rename",
+	)
+
+	assert ":task (clear_top ?target)" in domain_hddl
+
 def test_panda_plan_parser_extracts_primitive_steps():
 	planner = PANDAPlanner()
 	plan_text = "0: (pick-up a)\n1: (stack a b)\n"
@@ -239,3 +276,55 @@ def test_panda_domain_export_renders_equality_constraints():
 	)
 
 	assert ":precondition (and (not (= ?left ?right)))" in domain_hddl
+
+
+def test_panda_domain_export_preserves_lowercase_method_schema_variables():
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=_domain(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("do_move", ("x", "y"), False, ()),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m_do_move_constructive_unstack",
+					task_name="do_move",
+					parameters=("x", "y", "aux"),
+					task_args=("x", "y"),
+					context=(
+						HTNLiteral("on", ("x", "aux"), True, None),
+						HTNLiteral("clear", ("x",), True, None),
+						HTNLiteral("handempty", (), True, None),
+						HTNLiteral("clear", ("y",), True, None),
+					),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="unstack",
+							args=("x", "aux"),
+							kind="primitive",
+							action_name="unstack",
+						),
+						HTNMethodStep(
+							step_id="s2",
+							task_name="stack",
+							args=("x", "y"),
+							kind="primitive",
+							action_name="stack",
+						),
+					),
+					ordering=(("s1", "s2"),),
+				),
+			],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="blocksworld_transition_1",
+	)
+
+	assert ":parameters (?x - block ?y - block ?aux - block)" in domain_hddl
+	assert ":task (do_move ?x ?y)" in domain_hddl
+	assert ":precondition (and (on ?x ?aux) (clear ?x) (handempty) (clear ?y))" in domain_hddl
+	assert "(s1 (unstack ?x ?aux))" in domain_hddl

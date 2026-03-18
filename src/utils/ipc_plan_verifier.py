@@ -79,12 +79,25 @@ class _MethodTraceEntry:
 class IPCPlanVerifier:
 	"""Run the PANDA HTN verifier with best-effort hierarchical plan export."""
 
-	def __init__(self, parser_cmd: str = "pandaPIparser") -> None:
+	def __init__(
+		self,
+		parser_cmd: str = "pandaPIparser",
+		grounder_cmd: str = "pandaPIgrounder",
+		engine_cmd: str = "pandaPIengine",
+	) -> None:
 		self.parser_cmd = parser_cmd
+		self.grounder_cmd = grounder_cmd
+		self.engine_cmd = engine_cmd
 		self._last_hierarchical_build_warning: Optional[str] = None
 
 	def tool_available(self) -> bool:
 		return self._resolve_command_head(self.parser_cmd) is not None
+
+	def planning_toolchain_available(self) -> bool:
+		return all(
+			self._resolve_command_head(command) is not None
+			for command in (self.parser_cmd, self.grounder_cmd, self.engine_cmd)
+		)
 
 	def verify_plan(
 		self,
@@ -135,6 +148,164 @@ class IPCPlanVerifier:
 			json_filename=json_filename,
 			prefer_hierarchical=False,
 		)
+
+	def verify_planned_hierarchical_plan(
+		self,
+		*,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		output_dir: str | Path,
+		plan_filename: str = "ipc_official_plan.txt",
+		output_filename: str = "ipc_official_verifier.txt",
+		json_filename: str = "ipc_official_verification.json",
+		raw_plan_filename: str = "ipc_official_plan.raw.txt",
+	) -> IPCPrimitivePlanVerificationResult:
+		output_path = Path(output_dir).resolve()
+		output_path.mkdir(parents=True, exist_ok=True)
+		plan_path = output_path / plan_filename
+		raw_plan_path = output_path / raw_plan_filename
+		output_text_path = output_path / output_filename
+		output_json_path = output_path / json_filename
+		parsed_problem_path = output_path / "ipc_official_problem.psas"
+		grounded_problem_path = output_path / "ipc_official_problem.psas.grounded"
+
+		parser_head = self._resolve_command_head(self.parser_cmd)
+		grounder_head = self._resolve_command_head(self.grounder_cmd)
+		engine_head = self._resolve_command_head(self.engine_cmd)
+		verify_command = [
+			parser_head or self.parser_cmd,
+			"-V",
+			str(Path(domain_file).resolve()),
+			str(Path(problem_file).resolve()),
+			str(plan_path),
+		]
+		if not all((parser_head, grounder_head, engine_head)):
+			result = IPCPrimitivePlanVerificationResult(
+				tool_available=False,
+				command=verify_command,
+				plan_file=str(plan_path),
+				output_file=str(output_text_path),
+				stdout="",
+				stderr="",
+				primitive_plan_only=None,
+				primitive_plan_executable=None,
+				verification_result=None,
+				reached_goal_state=None,
+				plan_kind="hierarchical",
+				build_warning="planner toolchain unavailable",
+				error=(
+					"planner toolchain unavailable: "
+					f"{self.parser_cmd}, {self.grounder_cmd}, or {self.engine_cmd}"
+				),
+			)
+			output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
+			return result
+
+		build_warning: Optional[str] = None
+		try:
+			subprocess.run(
+				[
+					parser_head,
+					str(Path(domain_file).resolve()),
+					str(Path(problem_file).resolve()),
+					str(parsed_problem_path),
+				],
+				text=True,
+				capture_output=True,
+				check=True,
+			)
+			subprocess.run(
+				[
+					grounder_head,
+					str(parsed_problem_path),
+					str(grounded_problem_path),
+				],
+				text=True,
+				capture_output=True,
+				check=True,
+			)
+			engine_run = subprocess.run(
+				[
+					engine_head,
+					str(grounded_problem_path),
+				],
+				text=True,
+				capture_output=True,
+				check=True,
+			)
+		except subprocess.CalledProcessError as exc:
+			combined = self._combine_output(
+				self.strip_ansi(exc.stdout or ""),
+				self.strip_ansi(exc.stderr or ""),
+			)
+			output_text_path.write_text(combined)
+			result = IPCPrimitivePlanVerificationResult(
+				tool_available=True,
+				command=verify_command,
+				plan_file=str(plan_path),
+				output_file=str(output_text_path),
+				stdout=self.strip_ansi(exc.stdout or ""),
+				stderr=self.strip_ansi(exc.stderr or ""),
+				primitive_plan_only=None,
+				primitive_plan_executable=None,
+				verification_result=None,
+				reached_goal_state=None,
+				plan_kind="hierarchical",
+				build_warning="planner failed before verification",
+				error=f"planner exited with code {exc.returncode}",
+			)
+			output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
+			return result
+
+		raw_plan_text = self.strip_ansi(engine_run.stdout)
+		raw_plan_path.write_text(raw_plan_text)
+
+		conversion_result = subprocess.run(
+			[
+				parser_head,
+				"-c",
+				str(raw_plan_path),
+				str(plan_path),
+			],
+			text=True,
+			capture_output=True,
+			check=False,
+		)
+		if conversion_result.returncode != 0 or not plan_path.exists():
+			plan_path.write_text(raw_plan_text)
+			build_warning = "planner plan conversion failed; verifying raw PANDA plan"
+
+		completed = subprocess.run(
+			verify_command,
+			text=True,
+			capture_output=True,
+			check=False,
+		)
+		stdout = self.strip_ansi(completed.stdout)
+		stderr = self.strip_ansi(completed.stderr)
+		combined = self._combine_output(stdout, stderr)
+		output_text_path.write_text(combined)
+
+		result = IPCPrimitivePlanVerificationResult(
+			tool_available=True,
+			command=verify_command,
+			plan_file=str(plan_path),
+			output_file=str(output_text_path),
+			stdout=stdout,
+			stderr=stderr,
+			primitive_plan_only="Primitive plan only" in combined,
+			primitive_plan_executable=self._extract_executability(combined),
+			verification_result=self._extract_bool(
+				combined,
+				"Plan verification result",
+			),
+			reached_goal_state=self._infer_goal_reached(combined),
+			plan_kind="hierarchical",
+			build_warning=build_warning,
+			error=None if completed.returncode == 0 else f"verifier exited with code {completed.returncode}",
+		)
+		output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
+		return result
 
 	def _verify(
 		self,
@@ -544,10 +715,18 @@ class IPCPlanVerifier:
 		method: HTNMethod,
 		task_lookup: Dict[str, Any],
 	) -> Tuple[str, ...]:
+		if method.task_args:
+			return tuple(method.task_args)
 		task_schema = task_lookup.get(method.task_name)
 		if task_schema is None:
 			return tuple(method.parameters)
-		return tuple(getattr(task_schema, "parameters", ()) or method.parameters)
+		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+		if not declared_parameters:
+			return tuple(method.parameters)
+		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
+		if len(leading_parameters) == len(declared_parameters):
+			return leading_parameters
+		return declared_parameters
 
 	@staticmethod
 	def _ordered_method_steps(method: HTNMethod) -> List[Any]:

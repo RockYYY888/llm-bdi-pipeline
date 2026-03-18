@@ -398,6 +398,7 @@ def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 			query_task_anchors=None,
 			negation_hints=None,
 			ordered_literal_signatures=None,
+			query_objects=None,
 		):
 			return method_library, {
 				"used_llm": True,
@@ -1266,6 +1267,141 @@ def assert_method_validation_initial_facts_allocate_typed_witness_objects(tmp_pa
 	assert holding_facts
 	holding_obj = holding_facts[0].split()[1].rstrip(")")
 	assert holding_obj in object_pool
+
+
+def assert_stage7_prefers_planned_hierarchical_verification(tmp_path, monkeypatch):
+	calls: list[str] = []
+
+	class FakeResult:
+		def __init__(self):
+			self.tool_available = True
+			self.command = ["planned"]
+			self.plan_file = str(tmp_path / "ipc_official_plan.txt")
+			self.output_file = str(tmp_path / "ipc_official_verifier.txt")
+			self.stdout = "Plan is executable: true\nPlan verification result: true\n"
+			self.stderr = ""
+			self.primitive_plan_only = False
+			self.primitive_plan_executable = True
+			self.verification_result = True
+			self.reached_goal_state = True
+			self.plan_kind = "hierarchical"
+			self.build_warning = None
+			self.error = None
+
+		def to_dict(self):
+			return {
+				"tool_available": self.tool_available,
+				"command": list(self.command),
+				"plan_file": self.plan_file,
+				"output_file": self.output_file,
+				"stdout": self.stdout,
+				"stderr": self.stderr,
+				"primitive_plan_only": self.primitive_plan_only,
+				"primitive_plan_executable": self.primitive_plan_executable,
+				"verification_result": self.verification_result,
+				"reached_goal_state": self.reached_goal_state,
+				"plan_kind": self.plan_kind,
+				"build_warning": self.build_warning,
+				"error": self.error,
+			}
+
+	class FakeVerifier:
+		def tool_available(self):
+			return True
+
+		def planning_toolchain_available(self):
+			return True
+
+		def verify_planned_hierarchical_plan(self, **kwargs):
+			calls.append("planned")
+			return FakeResult()
+
+		def verify_plan(self, **kwargs):
+			raise AssertionError(
+				"trace-based verification should not run when the planner toolchain is available"
+			)
+
+	monkeypatch.setattr(pipeline_module, "IPCPlanVerifier", FakeVerifier)
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str((BLOCKSWORLD_PROBLEM_DIR / "p01.hddl").resolve()),
+	)
+	pipeline.output_dir = Path(tmp_path)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("do_put_on", ("X", "Y"), False, ("on",))],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	result = pipeline._stage7_official_verification(
+		ltl_spec=None,
+		method_library=method_library,
+		stage6_data={"artifacts": {"action_path": [], "method_trace": []}},
+	)
+
+	assert calls == ["planned"]
+	assert result is not None
+	assert result["summary"]["status"] == "success"
+	assert result["artifacts"]["plan_kind"] == "hierarchical"
+
+
+def assert_method_validation_initial_facts_ground_lowercase_schema_variables(tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	planner = PANDAPlanner()
+	method = HTNMethod(
+		method_name="m_do_move_unstack",
+		task_name="do_move",
+		parameters=("x", "y", "aux"),
+		task_args=("x", "y"),
+		context=(
+			HTNLiteral("on", ("x", "aux"), True, None),
+			HTNLiteral("clear", ("x",), True, None),
+			HTNLiteral("handempty", (), True, None),
+			HTNLiteral("clear", ("y",), True, None),
+		),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="unstack",
+				args=("x", "aux"),
+				kind="primitive",
+				action_name="unstack",
+			),
+			HTNMethodStep(
+				step_id="s2",
+				task_name="stack",
+				args=("x", "y"),
+				kind="primitive",
+				action_name="stack",
+			),
+		),
+		ordering=(("s1", "s2"),),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_move", ("x", "y"), False, ("on",)),
+		],
+		methods=[method],
+	)
+
+	facts = pipeline._method_validation_initial_facts(
+		planner,
+		method,
+		method_library,
+		("a", "b"),
+		("a", "b", "c"),
+		object_pool=["a", "b", "c"],
+		object_types={"a": "block", "b": "block", "c": "block"},
+	)
+
+	assert "(on a c)" in facts
+	assert "(clear a)" in facts
+	assert "(clear b)" in facts
+	assert "(handempty)" in facts
+	assert all(" x" not in fact and " y" not in fact and " aux" not in fact for fact in facts)
 
 
 @pytest.mark.parametrize("query_id", _pytest_selected_query_ids())

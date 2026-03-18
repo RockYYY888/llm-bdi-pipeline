@@ -93,6 +93,42 @@ def test_runner_asl_forces_negative_targets_to_naf_notation():
 	assert "~clear(b)" not in asl
 
 
+def test_runner_asl_uses_seen_target_observations_when_dfa_edge_labels_match_targets():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q2).",
+				'dfa_edge_label(dfa_step_q1_q2_on_a_b, "on(a, b)").',
+				"",
+				"/* DFA Transition Wrappers */",
+				"+!dfa_step_q1_q2_on_a_b : dfa_state(q1) <-",
+				"\t!place_on(a, b);",
+				"\t-dfa_state(q1);",
+				"\t+dfa_state(q2).",
+				"",
+				"/* DFA Control Plans */",
+				"+!run_dfa : dfa_state(q2) & accepting_state(q2) <-",
+				"\ttrue.",
+				"",
+				"+!run_dfa : dfa_state(q1) <-",
+				"\t!dfa_step_q1_q2_on_a_b;",
+				"\t!run_dfa.",
+			],
+		),
+		[
+			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
+		],
+	)
+
+	assert "+!verify_targets : target_seen(t1) <-" in asl
+	assert "+!mark_target_t1 : on(a, b) <-" in asl
+	assert "\t+target_seen(t1)." in asl
+	assert "\t!mark_target_t1;" in asl
+
+
 def test_extract_initial_dfa_state_reads_header_belief():
 	runner = JasonRunner()
 

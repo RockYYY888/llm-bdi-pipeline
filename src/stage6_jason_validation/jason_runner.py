@@ -292,11 +292,24 @@ class JasonRunner:
 			environment_ready_code,
 			method_library,
 		)
-		target_context = self._target_context_expression(target_literals)
+		target_observations = self._extract_transition_target_observations(
+			trace_ready_code,
+			target_literals,
+		)
+		observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
+			trace_ready_code,
+			target_observations,
+		)
+		target_context = (
+			self._observed_target_context_expression(target_observations)
+			or self._target_context_expression(target_literals)
+		)
 		initial_dfa_state = self._extract_initial_dfa_state(trace_ready_code) or "q1"
 		max_execution_passes = max(2, len(target_literals) + 1)
 		lines = [
-			trace_ready_code.rstrip(),
+			observation_ready_code.rstrip(),
+			"",
+			*self._render_target_observation_plans(target_observations),
 			"",
 			*self._render_failure_handlers(method_library),
 			"",
@@ -376,6 +389,128 @@ class JasonRunner:
 		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
+
+	def _extract_transition_target_observations(
+		self,
+		agentspeak_code: str,
+		target_literals: Sequence[HTNLiteral],
+	) -> List[Dict[str, Any]]:
+		if not target_literals:
+			return []
+		targets_by_signature = {
+			literal.to_signature(): literal
+			for literal in target_literals
+		}
+		observations: List[Dict[str, Any]] = []
+		seen_transitions: set[str] = set()
+		for match in re.finditer(
+			r'dfa_edge_label\(([^,]+),\s*"([^"]*)"\)\.',
+			agentspeak_code,
+		):
+			transition_name = match.group(1).strip()
+			label = match.group(2).strip()
+			target_literal = targets_by_signature.get(label)
+			if target_literal is None or transition_name in seen_transitions:
+				continue
+			seen_transitions.add(transition_name)
+			observations.append(
+				{
+					"transition_name": transition_name,
+					"target_id": f"t{len(observations) + 1}",
+					"literal": target_literal,
+				},
+			)
+		return observations
+
+	def _instrument_transition_wrappers_for_target_observations(
+		self,
+		agentspeak_code: str,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> str:
+		if not target_observations:
+			return agentspeak_code
+
+		observation_by_transition = {
+			str(item["transition_name"]): str(item["target_id"])
+			for item in target_observations
+		}
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		instrumented_chunks: List[str] = []
+		for chunk in chunks:
+			head_line = chunk[0]
+			body_lines = list(chunk[1:])
+			match = re.match(r"^\s*\+!([^\s(:]+)", head_line)
+			if match is None or not body_lines:
+				instrumented_chunks.append("\n".join(chunk))
+				continue
+			transition_name = match.group(1).strip()
+			target_id = observation_by_transition.get(transition_name)
+			if target_id is None:
+				instrumented_chunks.append("\n".join(chunk))
+				continue
+			instrumented_body = [body_lines[0], f"\t!mark_target_{target_id};", *body_lines[1:]]
+			instrumented_chunks.append("\n".join([head_line, *instrumented_body]))
+
+		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{instrumented_section}{suffix}"
+
+	def _render_target_observation_plans(
+		self,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> List[str]:
+		if not target_observations:
+			return []
+
+		lines = ["/* Target Observation Plans */"]
+		for observation in target_observations:
+			target_id = str(observation["target_id"])
+			literal = observation["literal"]
+			context = self._literal_to_context_expression(literal)
+			lines.append(f"+!mark_target_{target_id} : target_seen({target_id}) <-")
+			lines.extend(self._indent_body(["true"]))
+			lines.append("")
+			lines.append(f"+!mark_target_{target_id} : {context} <-")
+			lines.extend(self._indent_body([f"+target_seen({target_id})"]))
+			lines.append("")
+		return lines
+
+	def _observed_target_context_expression(
+		self,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> str:
+		if not target_observations:
+			return ""
+		return " & ".join(
+			f"target_seen({item['target_id']})"
+			for item in target_observations
+		)
 
 	def _extract_initial_dfa_state(self, agentspeak_code: str) -> Optional[str]:
 		match = re.search(r"^\s*dfa_state\(([^)]+)\)\.\s*$", agentspeak_code, re.MULTILINE)

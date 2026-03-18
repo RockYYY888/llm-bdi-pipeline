@@ -273,7 +273,7 @@ class PANDAPlanner:
 			for name in method_parameters
 		}
 		task_schema = task_lookup.get(method.task_name)
-		task_args = task_schema.parameters if task_schema else method.parameters
+		task_args = method.task_args or self._default_method_task_args(method, task_schema)
 
 		lines = [f"  (:method {method.method_name}"]
 		lines.append(
@@ -302,6 +302,23 @@ class PANDAPlanner:
 			lines.append("    )")
 		lines.append("  )")
 		return lines
+
+	@staticmethod
+	def _default_method_task_args(
+		method: HTNMethod,
+		task_schema: Any,
+	) -> Tuple[str, ...]:
+		if method.task_args:
+			return tuple(method.task_args)
+		if task_schema is None:
+			return tuple(method.parameters)
+		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+		if not declared_parameters:
+			return tuple(method.parameters)
+		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
+		if len(leading_parameters) == len(declared_parameters):
+			return leading_parameters
+		return declared_parameters
 
 	def _render_method_step_name(self, step: Any, task_lookup: Dict[str, Any]) -> str:
 		if getattr(step, "kind", None) == "primitive":
@@ -455,10 +472,19 @@ class PANDAPlanner:
 			seen.add(canonical)
 			ordered.append(canonical)
 
+		def add_schema_token(token: str) -> None:
+			if not token:
+				return
+			canonical = token.lstrip("?")
+			if canonical in seen:
+				return
+			seen.add(canonical)
+			ordered.append(canonical)
+
 		for token in (task_schema.parameters if task_schema else ()):
-			add(token)
+			add_schema_token(token)
 		for token in method.parameters:
-			add(token)
+			add_schema_token(token)
 		for literal in method.context:
 			for token in literal.args:
 				add(token)

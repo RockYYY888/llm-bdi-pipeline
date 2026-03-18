@@ -50,6 +50,8 @@ def test_stage1_system_prompt_preserves_schema_and_boundary_rules():
     assert "Do not add unstated support predicates" in prompt
     assert "complete the tasks A(...), B(...), and C(...)" in prompt
     assert "prefer a conjunction of independent eventual goals" in prompt
+    assert '"A": ["a"]' in prompt
+    assert 'do not collapse this into one {"type": "temporal", "operator": "F"' in prompt
 
 
 def test_stage1_system_prompt_keeps_high_risk_operator_disambiguation_examples():

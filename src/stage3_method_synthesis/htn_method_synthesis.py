@@ -12,7 +12,7 @@ import json
 import re
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
 from stage3_method_synthesis.htn_prompts import (
@@ -581,6 +581,16 @@ class HTNMethodSynthesizer:
 				for pattern in parsed_action.preconditions
 				if pattern.predicate != "="
 			]
+			positive_effect_signatures = [
+				literal_signature(pattern)
+				for pattern in parsed_action.effects
+				if pattern.predicate != "=" and pattern.is_positive
+			]
+			negative_effect_signatures = [
+				literal_signature(pattern)
+				for pattern in parsed_action.effects
+				if pattern.predicate != "=" and not pattern.is_positive
+			]
 			dynamic_precondition_signatures = [
 				literal_signature(pattern)
 				for pattern in parsed_action.preconditions
@@ -600,6 +610,8 @@ class HTNMethodSynthesizer:
 						"effect_signature": literal_signature(effect),
 						"precondition_signatures": list(precondition_signatures),
 						"dynamic_precondition_signatures": list(dynamic_precondition_signatures),
+						"positive_effect_signatures": list(positive_effect_signatures),
+						"negative_effect_signatures": list(negative_effect_signatures),
 					},
 				)
 
@@ -1436,6 +1448,7 @@ class HTNMethodSynthesizer:
 			task_lookup,
 			action_schemas,
 			predicate_arities,
+			dynamic_predicates=dynamic_predicates,
 			declared_task_names={
 				task.name
 				for task in getattr(domain, "tasks", [])
@@ -1572,6 +1585,10 @@ class HTNMethodSynthesizer:
 				literal.to_signature()
 				for literal in grounded_literals
 				if literal.is_positive and literal.predicate in dynamic_predicates
+				and (
+					not literal.args
+					or set(literal.args).issubset(set(step.args))
+				)
 			}
 			if headline_signature:
 				required_signatures.discard(headline_signature)
@@ -1727,6 +1744,7 @@ class HTNMethodSynthesizer:
 
 		allowed_method_names: set[str] = set()
 		for task_name, methods in methods_by_task.items():
+			task_schema = task_lookup.get(task_name)
 			guard_methods = [method for method in methods if not method.subtasks]
 			constructive_methods = [method for method in methods if method.subtasks]
 			if len(constructive_methods) <= 1:
@@ -1737,6 +1755,16 @@ class HTNMethodSynthesizer:
 				continue
 
 			context_signatures: Dict[str, Tuple[str, ...]] = {}
+			context_signature_sets: Dict[str, set[str]] = {}
+			supportive_constructive_names: set[str] = set()
+			expected_literal: Optional[HTNLiteral] = None
+			if task_schema is not None and len(task_schema.source_predicates) == 1:
+				expected_literal = HTNLiteral(
+					predicate=task_schema.source_predicates[0],
+					args=tuple(task_schema.parameters),
+					is_positive=True,
+					source_symbol=None,
+				)
 			has_distinguishing_context = False
 			for method in constructive_methods:
 				promoted_context = self._promoted_method_context(
@@ -1747,8 +1775,21 @@ class HTNMethodSynthesizer:
 				)
 				signature = tuple(sorted(literal.to_signature() for literal in promoted_context))
 				context_signatures[method.method_name] = signature
+				context_signature_sets[method.method_name] = set(signature)
 				if signature:
 					has_distinguishing_context = True
+				if (
+					expected_literal is not None
+					and self._method_constructively_supports_literal(
+						method,
+						expected_literal,
+						methods_by_task,
+						task_lookup,
+						action_schemas,
+						predicate_arities,
+					)
+				):
+					supportive_constructive_names.add(method.method_name)
 
 			allowed_method_names.update(method.method_name for method in guard_methods)
 			seen_signatures: set[Tuple[str, ...]] = set()
@@ -1760,6 +1801,15 @@ class HTNMethodSynthesizer:
 
 			for method in constructive_methods:
 				signature = context_signatures[method.method_name]
+				if method.method_name in supportive_constructive_names:
+					if any(
+						other.method_name != method.method_name
+						and other.method_name in supportive_constructive_names
+						and context_signature_sets[other.method_name]
+						< context_signature_sets[method.method_name]
+						for other in constructive_methods
+					):
+						continue
 				if not signature:
 					if kept_empty_signature:
 						continue
@@ -1839,7 +1889,11 @@ class HTNMethodSynthesizer:
 			bound_methods = methods_by_task.get(task_name, [])
 
 			if not any(
-				self._method_context_supports_literal(method, expected_literal)
+				self._method_context_supports_literal(
+					method,
+					expected_literal,
+					task,
+				)
 				for method in bound_methods
 			):
 				raise ValueError(
@@ -1886,6 +1940,7 @@ class HTNMethodSynthesizer:
 		action_schemas: Dict[str, Any],
 		predicate_arities: Dict[str, int],
 		*,
+		dynamic_predicates: set[str],
 		declared_task_names: set[str],
 		positive_target_task_names: set[str],
 	) -> None:
@@ -1911,7 +1966,11 @@ class HTNMethodSynthesizer:
 			if not task_methods:
 				continue
 			already_supported = any(
-				self._method_context_supports_literal(method, expected_literal)
+				self._method_context_supports_literal(
+					method,
+					expected_literal,
+					task,
+				)
 				for method in task_methods
 			)
 			constructive_methods = [
@@ -1919,6 +1978,36 @@ class HTNMethodSynthesizer:
 				for method in task_methods
 				if method.subtasks
 			]
+			unsupported_constructive_methods = [
+				method
+				for method in constructive_methods
+				if not self._method_constructively_supports_literal(
+					method,
+					expected_literal,
+					methods_by_task,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+				)
+			]
+			if unsupported_constructive_methods:
+				raise ValueError(
+					f"Compound task '{task.name}' has constructive method(s) "
+					f"{', '.join(method.method_name for method in unsupported_constructive_methods)} "
+					f"that do not make '{expected_literal.to_signature()}' true via real "
+					"subtask effects.",
+				)
+			for method in constructive_methods:
+				self._validate_headline_extra_role_support(
+					method,
+					task,
+					expected_literal,
+					methods_by_task,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+					dynamic_predicates=dynamic_predicates,
+				)
 			supportive_constructive_methods = [
 				method
 				for method in constructive_methods
@@ -1934,16 +2023,16 @@ class HTNMethodSynthesizer:
 			if supportive_constructive_methods:
 				expected_signature = expected_literal.to_signature()
 				if any(
-					expected_signature
-					not in {
-						literal.to_signature()
-						for literal in self._promoted_method_context(
+					not self._literals_support_expected_literal(
+						self._promoted_method_context(
 							method,
 							task_lookup,
 							action_schemas,
 							predicate_arities,
-						)
-					}
+						),
+						expected_literal,
+						self._method_parameter_bindings(method, task),
+					)
 					for method in supportive_constructive_methods
 				):
 					continue
@@ -1960,6 +2049,310 @@ class HTNMethodSynthesizer:
 				"but none of its methods exposes that literal in context or constructively "
 				"supports it via real subtask effects.",
 			)
+
+	def _validate_headline_extra_role_support(
+		self,
+		method: HTNMethod,
+		task: HTNTask,
+		expected_literal: HTNLiteral,
+		methods_by_task: Dict[str, List[HTNMethod]],
+		task_lookup: Dict[str, HTNTask],
+		action_schemas: Dict[str, Any],
+		predicate_arities: Dict[str, int],
+		*,
+		dynamic_predicates: set[str],
+	) -> None:
+		if not dynamic_predicates:
+			return
+
+		task_parameter_set = set(self._default_method_task_args(method, task))
+		method_bindings = self._method_parameter_bindings(method, task)
+		supportable_predicates = {
+			(candidate_task.source_predicates[0], len(candidate_task.parameters))
+			for candidate_task in task_lookup.values()
+			if len(candidate_task.source_predicates) == 1
+		}
+		available_positive = {
+			literal.to_signature()
+			for literal in method.context
+			if literal.is_positive and literal.predicate in dynamic_predicates
+		}
+		established_by_steps: set[str] = set()
+		headline_producer_index: Optional[int] = None
+		ordered_steps = self._ordered_method_steps(method)
+
+		for index, step in enumerate(ordered_steps):
+			step_effects = self._step_effect_literals(
+				step,
+				task_lookup,
+				action_schemas,
+				predicate_arities,
+			)
+			if any(
+				self._literal_matches_expected_signature(
+					literal,
+					expected_literal,
+					method_bindings,
+				)
+				for literal in step_effects
+				if literal.is_positive
+			):
+				headline_producer_index = index
+				break
+
+		if headline_producer_index is not None:
+			for index, step in enumerate(ordered_steps[:headline_producer_index]):
+				if step.kind != "compound":
+					for effect in self._step_effect_literals(
+						step,
+						task_lookup,
+						action_schemas,
+						predicate_arities,
+					):
+						if effect.predicate not in dynamic_predicates:
+							continue
+						signature = HTNLiteral(
+							predicate=effect.predicate,
+							args=effect.args,
+							is_positive=True,
+							source_symbol=None,
+						).to_signature()
+						if effect.is_positive:
+							available_positive.add(signature)
+						else:
+							available_positive.discard(signature)
+					continue
+
+				later_requirements = self._later_dynamic_requirement_signatures(
+					ordered_steps[index + 1:headline_producer_index + 1],
+					methods_by_task,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+					dynamic_predicates=dynamic_predicates,
+				)
+				unresolved_later_requirements = later_requirements - available_positive
+				if unresolved_later_requirements:
+					possible_effects = {
+						literal.to_signature()
+						for literal in self._possible_positive_step_effect_literals(
+							step,
+							methods_by_task,
+							task_lookup,
+							action_schemas,
+							predicate_arities,
+							dynamic_predicates=dynamic_predicates,
+						)
+					}
+					if not possible_effects & unresolved_later_requirements:
+						raise ValueError(
+							f"Method '{method.method_name}' inserts compound step "
+							f"'{step.step_id}' ({step.task_name}) before the headline "
+							f"producer, but that step does not supply any unresolved later "
+							f"dynamic requirement in this branch. Later unresolved "
+							f"requirements are {sorted(unresolved_later_requirements)}; "
+							f"possible effects of '{step.task_name}' here are "
+							f"{sorted(possible_effects)}.",
+						)
+
+				for literal in self._possible_positive_step_effect_literals(
+					step,
+					methods_by_task,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+					dynamic_predicates=dynamic_predicates,
+				):
+					available_positive.add(literal.to_signature())
+
+		for step in ordered_steps:
+			step_effects = self._step_effect_literals(
+				step,
+				task_lookup,
+				action_schemas,
+				predicate_arities,
+			)
+			if step.kind == "primitive":
+				deleted_signatures = {
+					HTNLiteral(
+						predicate=literal.predicate,
+						args=literal.args,
+						is_positive=True,
+						source_symbol=None,
+					).to_signature()
+					for literal in step_effects
+					if not literal.is_positive
+				}
+				produces_headline = any(
+					self._literal_matches_expected_signature(
+						literal,
+						expected_literal,
+						method_bindings,
+					)
+					for literal in step_effects
+					if literal.is_positive
+				)
+				if produces_headline:
+					for literal in self._step_precondition_literals(step, action_schemas):
+						signature = literal.to_signature()
+						if (
+							not literal.is_positive
+							or literal.predicate not in dynamic_predicates
+							or signature not in available_positive
+							or signature in established_by_steps
+							or (
+								signature in deleted_signatures
+								and any(arg in task_parameter_set for arg in literal.args)
+								and any(arg not in task_parameter_set for arg in literal.args)
+							)
+							or not any(arg not in task_parameter_set for arg in literal.args)
+							or (literal.predicate, len(literal.args)) not in supportable_predicates
+						):
+							continue
+						raise ValueError(
+							f"Method '{method.method_name}' uses producer step '{step.step_id}' "
+							f"to make '{expected_literal.to_signature()}', but leaves extra-role "
+							f"dynamic prerequisite '{signature}' only as context even though a "
+							"declared support task can establish it. Support that prerequisite "
+							"earlier instead of assuming it.",
+						)
+
+			for effect in step_effects:
+				if effect.predicate not in dynamic_predicates:
+					continue
+				signature = HTNLiteral(
+					predicate=effect.predicate,
+					args=effect.args,
+					is_positive=True,
+					source_symbol=None,
+				).to_signature()
+				if effect.is_positive:
+					available_positive.add(signature)
+					established_by_steps.add(signature)
+				else:
+					available_positive.discard(signature)
+
+	def _later_dynamic_requirement_signatures(
+		self,
+		steps: Sequence[HTNMethodStep],
+		methods_by_task: Dict[str, List[HTNMethod]],
+		task_lookup: Dict[str, HTNTask],
+		action_schemas: Dict[str, Any],
+		predicate_arities: Dict[str, int],
+		*,
+		dynamic_predicates: set[str],
+	) -> set[str]:
+		requirement_signatures: set[str] = set()
+		for step in steps:
+			if step.kind == "primitive":
+				requirement_signatures.update(
+					literal.to_signature()
+					for literal in self._step_precondition_literals(step, action_schemas)
+					if literal.is_positive and literal.predicate in dynamic_predicates
+				)
+				continue
+
+			requirement_signatures.update(
+				self._common_child_constructive_requirements(
+					step,
+					methods_by_task.get(step.task_name, ()),
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+					dynamic_predicates=dynamic_predicates,
+				),
+			)
+		return requirement_signatures
+
+	def _possible_positive_step_effect_literals(
+		self,
+		step: HTNMethodStep,
+		methods_by_task: Dict[str, List[HTNMethod]],
+		task_lookup: Dict[str, HTNTask],
+		action_schemas: Dict[str, Any],
+		predicate_arities: Dict[str, int],
+		*,
+		dynamic_predicates: set[str],
+		visited_tasks: Optional[frozenset[str]] = None,
+	) -> Tuple[HTNLiteral, ...]:
+		visited = visited_tasks or frozenset()
+		if step.kind == "primitive":
+			return tuple(
+				literal
+				for literal in self._step_effect_literals(
+					step,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+				)
+				if literal.is_positive and literal.predicate in dynamic_predicates
+			)
+
+		positive_literals: list[HTNLiteral] = [
+			literal
+			for literal in self._step_effect_literals(
+				step,
+				task_lookup,
+				action_schemas,
+				predicate_arities,
+			)
+			if literal.is_positive and literal.predicate in dynamic_predicates
+		]
+		task_schema = task_lookup.get(step.task_name)
+		if task_schema is None or step.task_name in visited:
+			return tuple(positive_literals)
+
+		for method in methods_by_task.get(step.task_name, ()):
+			task_args = self._default_method_task_args(method, task_schema)
+			for child_step in self._ordered_method_steps(method):
+				materialised_step = HTNMethodStep(
+					step_id=child_step.step_id,
+					task_name=child_step.task_name,
+					args=tuple(
+						{
+							parameter: arg
+							for parameter, arg in zip(task_args, step.args)
+						}.get(arg, arg)
+						for arg in child_step.args
+					),
+					kind=child_step.kind,
+					action_name=child_step.action_name,
+					literal=(
+						self._materialise_method_literals(
+							(child_step.literal,),
+							task_args,
+							step.args,
+						)[0]
+						if child_step.literal is not None
+						else None
+					),
+					preconditions=self._materialise_method_literals(
+						child_step.preconditions,
+						task_args,
+						step.args,
+					),
+					effects=self._materialise_method_literals(
+						child_step.effects,
+						task_args,
+						step.args,
+					),
+				)
+				for literal in self._possible_positive_step_effect_literals(
+					materialised_step,
+					methods_by_task,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+					dynamic_predicates=dynamic_predicates,
+					visited_tasks=visited | {step.task_name},
+				):
+					if any(
+						existing.to_signature() == literal.to_signature()
+						for existing in positive_literals
+					):
+						continue
+					positive_literals.append(literal)
+		return tuple(positive_literals)
 
 	def _validate_primitive_step_semantics(
 		self,
@@ -2174,11 +2567,13 @@ class HTNMethodSynthesizer:
 		task_lookup: Dict[str, HTNTask],
 	) -> None:
 		task_schema = task_lookup.get(method.task_name)
-		if method.origin == "domain" or task_schema is None:
-			bound_variables = set(method.parameters)
-		else:
-			bound_variables = set(method.parameters[: len(task_schema.parameters)])
+		bound_variables = set(method.parameters)
 		ordered_steps = self._ordered_method_steps(method)
+		self._validate_auxiliary_parameters_are_constrained_before_use(
+			method,
+			task_schema,
+			ordered_steps,
+		)
 		bound_variables = self._extend_bound_variables_from_literals(
 			bound_variables,
 			method.context,
@@ -2212,6 +2607,44 @@ class HTNMethodSynthesizer:
 					bound_variables,
 					f"subtask '{step.step_id}'",
 					)
+
+	def _validate_auxiliary_parameters_are_constrained_before_use(
+		self,
+		method: HTNMethod,
+		task_schema: Optional[HTNTask],
+		ordered_steps: Sequence[HTNMethodStep],
+	) -> None:
+		if method.origin == "domain" or task_schema is None:
+			return
+
+		declared_arity = len(task_schema.parameters)
+		if len(method.parameters) <= declared_arity:
+			return
+
+		auxiliary_parameters = tuple(method.parameters[declared_arity:])
+		constrained_variables = {
+			variable
+			for literal in method.context
+			for variable in self._literal_variables(literal)
+			if variable in auxiliary_parameters
+		}
+
+		for step in ordered_steps:
+			for literal in step.preconditions:
+				for variable in self._literal_variables(literal):
+					if variable in auxiliary_parameters:
+						constrained_variables.add(variable)
+
+			for variable in auxiliary_parameters:
+				if variable in constrained_variables:
+					continue
+				if variable not in step.args:
+					continue
+				raise ValueError(
+					f"Method '{method.method_name}' uses auxiliary parameter '{variable}' in "
+					f"subtask '{step.step_id}' before constraining it in method.context or "
+					"earlier step preconditions.",
+				)
 
 	def _validate_method_variable_types(
 		self,
@@ -2427,14 +2860,69 @@ class HTNMethodSynthesizer:
 				seen_signatures[signature] = method.method_name
 
 	@staticmethod
+	def _default_method_task_args(
+		method: HTNMethod,
+		task_schema: Optional[HTNTask],
+	) -> Tuple[str, ...]:
+		if method.task_args:
+			return tuple(method.task_args)
+		if task_schema is None:
+			return tuple(method.parameters)
+		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+		if not declared_parameters:
+			return tuple(method.parameters)
+		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
+		if len(leading_parameters) == len(declared_parameters):
+			return leading_parameters
+		return declared_parameters
+
+	def _method_parameter_bindings(
+		self,
+		method: HTNMethod,
+		task_schema: Optional[HTNTask],
+		parameter_bindings: Optional[Dict[str, str]] = None,
+	) -> Dict[str, str]:
+		bindings = dict(parameter_bindings or {})
+		if task_schema is None:
+			return bindings
+		for method_arg, task_parameter in zip(
+			self._default_method_task_args(method, task_schema),
+			task_schema.parameters,
+		):
+			bindings[method_arg] = bindings.get(task_parameter, task_parameter)
+		return bindings
+
+	@classmethod
+	def _literals_support_expected_literal(
+		cls,
+		literals: Iterable[HTNLiteral],
+		expected_literal: HTNLiteral,
+		parameter_bindings: Dict[str, str],
+	) -> bool:
+		return any(
+			cls._literal_matches_expected_signature(
+				literal,
+				expected_literal,
+				parameter_bindings,
+			)
+			for literal in literals
+		)
+
 	def _method_context_supports_literal(
+		self,
 		method: HTNMethod,
 		expected_literal: HTNLiteral,
+		task_schema: Optional[HTNTask] = None,
+		parameter_bindings: Optional[Dict[str, str]] = None,
 	) -> bool:
-		expected_signature = expected_literal.to_signature()
-		return any(
-			literal.to_signature() == expected_signature
-			for literal in method.context
+		return self._literals_support_expected_literal(
+			method.context,
+			expected_literal,
+			self._method_parameter_bindings(
+				method,
+				task_schema,
+				parameter_bindings,
+			),
 		)
 
 	def _method_constructively_supports_literal(
@@ -2449,7 +2937,12 @@ class HTNMethodSynthesizer:
 		visiting: Optional[set[Tuple[str, str]]] = None,
 	) -> bool:
 		expected_signature = expected_literal.to_signature()
-		parameter_bindings = dict(parameter_bindings or {})
+		task_schema = task_lookup.get(method.task_name)
+		parameter_bindings = self._method_parameter_bindings(
+			method,
+			task_schema,
+			parameter_bindings,
+		)
 		visiting = set() if visiting is None else visiting
 		visit_key = (method.method_name, expected_signature)
 		if visit_key in visiting:
@@ -2644,20 +3137,11 @@ class HTNMethodSynthesizer:
 		if len(candidate.args) != len(expected.args):
 			return False
 
-		local_bindings: Dict[str, str] = {}
 		for raw_candidate_arg, expected_arg in zip(candidate.args, expected.args):
 			is_bound_from_parent = raw_candidate_arg in parameter_bindings
 			candidate_arg = parameter_bindings.get(raw_candidate_arg, raw_candidate_arg)
 			if is_bound_from_parent:
 				if candidate_arg != expected_arg:
-					return False
-				continue
-			if cls._looks_like_variable(candidate_arg):
-				bound_value = local_bindings.get(candidate_arg)
-				if bound_value is None:
-					local_bindings[candidate_arg] = expected_arg
-					continue
-				if bound_value != expected_arg:
 					return False
 				continue
 			if candidate_arg != expected_arg:
@@ -2734,12 +3218,10 @@ class HTNMethodSynthesizer:
 			'"compound_tasks":[{"name":"do_link","parameters":["A","B"],"is_primitive":false,'
 			'"source_predicates":["linked"]}],'
 			'"methods":[{"method_name":"m_do_link_noop","task_name":"do_link","parameters":["A","B"],'
-			'"context":[{"predicate":"linked","args":["A","B"],"is_positive":true}],"subtasks":[],'
-			'"ordering":[],"origin":"llm"},{"method_name":"m_do_link_constructive","task_name":"do_link",'
+			'"context":[{"predicate":"linked","args":["A","B"],"is_positive":true}]},{"method_name":"m_do_link_constructive","task_name":"do_link",'
 			'"parameters":["A","B"],"context":[{"predicate":"ready","args":["B"],"is_positive":true}],'
 			'"subtasks":[{"step_id":"s1","task_name":"attach","args":["A","B"],"kind":"primitive",'
-			'"action_name":"attach","literal":null,"preconditions":[],"effects":[]}],"ordering":[],'
-			'"origin":"llm"}]}'
+			'"action_name":"attach"}]}]}'
 		)
 
 	@staticmethod

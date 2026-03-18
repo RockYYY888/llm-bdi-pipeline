@@ -136,6 +136,13 @@ def get_ltl_system_prompt(
             '- For benchmark-style wording like "complete the tasks A(...), B(...), and C(...)", '
             "prefer a conjunction of independent eventual goals rather than a single eventual "
             "conjunction, unless the instruction explicitly says they must hold at the same time.",
+            '- Example: "complete the tasks A(a), B(b), and C(c)" -> '
+            '{"type": "conjunction", "formulas": [{"type": "temporal", "operator": "F", '
+            '"formula": {"A": ["a"]}}, {"type": "temporal", "operator": "F", '
+            '"formula": {"B": ["b"]}}, {"type": "temporal", "operator": "F", '
+            '"formula": {"C": ["c"]}}]}; do not collapse this into one '
+            '{"type": "temporal", "operator": "F", "formula": {"type": "conjunction", ...}} '
+            'unless the instruction explicitly says "simultaneously" or "at the same time".',
             "- Do not use commas as LTL operators.",
             "",
             "OPERATOR-CHOICE CLARIFICATIONS:",
