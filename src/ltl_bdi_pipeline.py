@@ -216,6 +216,8 @@ class LTL_BDI_Pipeline:
 
         try:
             ltl_spec, prompt_dict, response_text = generator.generate(nl_instruction)
+            query_object_inventory = self._extract_query_object_inventory(nl_instruction)
+            ltl_spec.query_object_inventory = list(query_object_inventory)
             self.logger.log_stage1(
                 nl_instruction,
                 ltl_spec,
@@ -294,6 +296,17 @@ class LTL_BDI_Pipeline:
             ordered_literal_signatures = self._ordered_literal_signatures_from_spec(ltl_spec)
             query_text = getattr(ltl_spec, "source_instruction", "")
             query_task_anchors = self._extract_query_task_anchors(query_text)
+            semantic_objects = tuple(getattr(ltl_spec, "objects", ()) or ())
+            query_object_inventory = tuple(
+                getattr(ltl_spec, "query_object_inventory", ()) or (),
+            )
+            if not query_object_inventory:
+                query_object_inventory = self._extract_query_object_inventory(query_text)
+            query_objects = tuple(
+                object_name
+                for entry in query_object_inventory
+                for object_name in entry.get("objects", ())
+            )
             synthesizer = HTNMethodSynthesizer(
                 api_key=self.config.openai_api_key,
                 model=self.config.openai_model,
@@ -308,7 +321,9 @@ class LTL_BDI_Pipeline:
                 dfa_result=dfa_result,
                 query_text=query_text,
                 query_task_anchors=query_task_anchors,
-                query_objects=tuple(getattr(ltl_spec, "objects", ()) or ()),
+                semantic_objects=semantic_objects,
+                query_object_inventory=query_object_inventory,
+                query_objects=query_objects,
                 negation_hints=getattr(ltl_spec, "negation_hints", {}),
                 ordered_literal_signatures=ordered_literal_signatures,
             )
@@ -324,9 +339,13 @@ class LTL_BDI_Pipeline:
                 ),
                 "target_literals": synthesis_meta["target_literals"],
                 "query_task_anchors": synthesis_meta.get("query_task_anchors", []),
+                "semantic_objects": synthesis_meta.get("semantic_objects", []),
+                "query_object_inventory": synthesis_meta.get("query_object_inventory", []),
                 "query_objects": synthesis_meta.get("query_objects", []),
                 "negation_resolution": synthesis_meta.get("negation_resolution", {}),
                 "action_analysis": synthesis_meta.get("action_analysis", {}),
+                "derived_analysis": synthesis_meta.get("derived_analysis", {}),
+                "failure_class": synthesis_meta.get("failure_class"),
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
@@ -487,6 +506,71 @@ class LTL_BDI_Pipeline:
                 "args": args,
             })
         return tuple(anchors)
+
+    @staticmethod
+    def _plural_query_type_label(type_name: str) -> str:
+        text = str(type_name).strip()
+        if not text:
+            return "objects"
+        return text if text.endswith("s") else f"{text}s"
+
+    def _extract_query_object_inventory(
+        self,
+        query_text: str,
+    ) -> Tuple[Dict[str, Any], ...]:
+        text = (query_text or "").strip()
+        if not text.lower().startswith("using "):
+            return ()
+
+        complete_marker = re.search(r",?\s+complete the tasks\s+", text, re.IGNORECASE)
+        if complete_marker is None:
+            return ()
+
+        inventory_text = text[len("Using "):complete_marker.start()].strip().rstrip(",")
+        if not inventory_text or inventory_text == "the task arguments":
+            return ()
+
+        label_to_type: Dict[str, str] = {}
+        for type_name in sorted(self.domain_type_names, key=len, reverse=True):
+            singular = str(type_name).strip()
+            if not singular:
+                continue
+            plural = self._plural_query_type_label(singular)
+            label_to_type.setdefault(plural, singular)
+            label_to_type.setdefault(singular, singular)
+        if not label_to_type:
+            return ()
+
+        type_labels = sorted(label_to_type, key=len, reverse=True)
+        label_pattern = "|".join(re.escape(label) for label in type_labels)
+        group_pattern = re.compile(
+            rf"(?P<prefix>^|,\s+|,\s+and\s+| and\s+)"
+            rf"(?P<label>{label_pattern})\s+"
+            rf"(?P<objects>.*?)(?=(?:,\s+|,\s+and\s+| and\s+)(?:{label_pattern})\s+|$)",
+        )
+        inventory: List[Dict[str, Any]] = []
+        for match in group_pattern.finditer(inventory_text):
+            label = match.group("label").strip()
+            object_text = match.group("objects").strip().rstrip(",")
+            if not object_text:
+                continue
+            normalised_object_text = re.sub(r",\s+and\s+", ", ", object_text)
+            normalised_object_text = re.sub(r"\s+and\s+", ", ", normalised_object_text)
+            object_names = [
+                item.strip()
+                for item in normalised_object_text.split(",")
+                if item.strip()
+            ]
+            if not object_names:
+                continue
+            inventory.append(
+                {
+                    "type": label_to_type[label],
+                    "label": label,
+                    "objects": object_names,
+                },
+            )
+        return tuple(inventory)
 
     def _stage4_panda_planning(self, ltl_spec, method_library, transition_specs):
         """Stage 4: HTN method library -> PANDA planning."""
@@ -1804,6 +1888,7 @@ class LTL_BDI_Pipeline:
                 action_schemas=action_schemas,
                 seed_facts=seed_facts,
                 domain_name=self.domain.name,
+                problem_file=self.problem_file,
                 output_dir=self.output_dir,
             )
             summary = {
@@ -1825,6 +1910,8 @@ class LTL_BDI_Pipeline:
                 "resolved_object_types": stage6_object_types,
                 "action_schema_count": len(action_schemas),
                 "environment_adapter": result.environment_adapter,
+                "failure_class": result.failure_class,
+                "consistency_checks": result.consistency_checks,
             }
             artifacts = result.to_dict()
             self.logger.log_stage6_jason_validation(
@@ -1860,6 +1947,8 @@ class LTL_BDI_Pipeline:
                     "jason_jar": metadata.get("jason_jar"),
                     "exit_code": metadata.get("exit_code"),
                     "timed_out": metadata.get("timed_out"),
+                    "failure_class": metadata.get("failure_class"),
+                    "consistency_checks": metadata.get("consistency_checks"),
                 })
             self.logger.log_stage6_jason_validation(
                 metadata if metadata else None,

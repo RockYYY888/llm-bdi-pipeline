@@ -49,6 +49,10 @@ def test_query_task_anchor_extraction_uses_declared_tasks_only():
 	pipeline_tests.assert_query_task_anchor_extraction_uses_declared_tasks_only()
 
 
+def test_query_object_inventory_extraction_preserves_full_benchmark_inventory():
+	pipeline_tests.assert_query_object_inventory_extraction_preserves_full_benchmark_inventory()
+
+
 def test_expected_execution_identity_is_derived_from_selected_domain_and_problem():
 	pipeline_tests.assert_expected_execution_identity_is_derived_from_selected_domain_and_problem()
 
@@ -59,6 +63,21 @@ def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypa
 
 def test_stage6_object_type_resolution_ignores_unused_query_objects():
 	pipeline_tests.assert_stage6_object_type_resolution_ignores_unused_query_objects()
+
+
+def test_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_are_partial(
+	tmp_path,
+	monkeypatch,
+):
+	pipeline_tests.assert_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_are_partial(
+		tmp_path,
+		monkeypatch,
+	)
+
+
+def test_stage6_problem_seed_facts_ignore_stage4_witness_facts():
+	pipeline_tests.assert_stage6_problem_seed_facts_ignore_stage4_witness_facts()
+
 
 def test_method_validation_initial_facts_are_branch_specific(tmp_path):
 	pipeline_tests.assert_method_validation_initial_facts_are_branch_specific(tmp_path)

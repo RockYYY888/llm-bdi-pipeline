@@ -229,6 +229,7 @@ class LTLSpecification:
         self.grounding_map: Optional['GroundingMap'] = None
         self.source_instruction: str = ""
         self.negation_hints: Dict[str, Any] = {}
+        self.query_object_inventory: List[Dict[str, Any]] = []
 
     def add_formula(self, formula: LTLFormula):
         """Add an LTL formula to the specification"""
@@ -240,6 +241,7 @@ class LTLSpecification:
             "formulas": [f.to_dict() for f in self.formulas],
             "formulas_string": [f.to_string() for f in self.formulas],
             "objects": self.objects,
+            "semantic_objects": self.objects,
             "initial_state": self.initial_state,
         }
 
@@ -250,5 +252,7 @@ class LTLSpecification:
             result["source_instruction"] = self.source_instruction
         if self.negation_hints:
             result["negation_hints"] = dict(self.negation_hints)
+        if self.query_object_inventory:
+            result["query_object_inventory"] = list(self.query_object_inventory)
 
         return result

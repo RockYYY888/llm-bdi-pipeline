@@ -59,6 +59,8 @@ def _allocate_placeholder_label(
 	type_name: Optional[str] = None,
 ) -> str:
 	stem = _placeholder_stem(type_name)
+	if not stem.startswith("AUX_"):
+		stem = f"AUX_{stem}"
 	index = 1
 	while True:
 		candidate = f"{stem}{index}"
@@ -120,29 +122,52 @@ def _normalise_action_analysis(
 			"producer_patterns_by_predicate": dict(
 				action_analysis.get("producer_patterns_by_predicate", {}),
 			),
+			"consumer_actions_by_predicate": dict(
+				action_analysis.get("consumer_actions_by_predicate", {}),
+			),
+			"consumer_patterns_by_predicate": dict(
+				action_analysis.get("consumer_patterns_by_predicate", {}),
+			),
 		}
 
 	parser = HDDLConditionParser()
 	dynamic_predicates: set[str] = set()
 	producer_actions_by_predicate: Dict[str, list[str]] = {}
+	consumer_actions_by_predicate: Dict[str, list[str]] = {}
+	parsed_actions: list[Any] = []
 
 	for action in getattr(domain, "actions", []):
 		try:
 			parsed_action = parser.parse_action(action)
 		except Exception:
 			continue
+		parsed_actions.append(parsed_action)
 		for effect in parsed_action.effects:
 			if effect.predicate == "=":
 				continue
 			dynamic_predicates.add(effect.predicate)
-			if not effect.is_positive:
+
+	for parsed_action in parsed_actions:
+		action_name = _sanitize_name(parsed_action.name)
+		for effect in parsed_action.effects:
+			if effect.predicate == "=" or not effect.is_positive:
 				continue
 			producer_actions_by_predicate.setdefault(effect.predicate, []).append(
-				_sanitize_name(parsed_action.name),
+				action_name,
+			)
+		for precondition in parsed_action.preconditions:
+			if precondition.predicate == "=":
+				continue
+			if precondition.predicate not in dynamic_predicates or not precondition.is_positive:
+				continue
+			consumer_actions_by_predicate.setdefault(precondition.predicate, []).append(
+				action_name,
 			)
 
 	for predicate_name, producer_actions in list(producer_actions_by_predicate.items()):
 		producer_actions_by_predicate[predicate_name] = sorted(dict.fromkeys(producer_actions))
+	for predicate_name, consumer_actions in list(consumer_actions_by_predicate.items()):
+		consumer_actions_by_predicate[predicate_name] = sorted(dict.fromkeys(consumer_actions))
 
 	all_predicates = {
 		predicate.name
@@ -159,6 +184,235 @@ def _normalise_action_analysis(
 			predicate_name: []
 			for predicate_name in sorted(dynamic_predicates)
 		},
+		"consumer_actions_by_predicate": {
+			predicate_name: consumer_actions_by_predicate.get(predicate_name, [])
+			for predicate_name in sorted(dynamic_predicates)
+		},
+		"consumer_patterns_by_predicate": {
+			predicate_name: []
+			for predicate_name in sorted(dynamic_predicates)
+		},
+	}
+
+
+def _normalise_query_object_inventory(
+	query_object_inventory: Optional[Sequence[Dict[str, Any]]],
+) -> tuple[Dict[str, Any], ...]:
+	if not query_object_inventory:
+		return ()
+
+	entries: list[Dict[str, Any]] = []
+	for entry in query_object_inventory:
+		type_name = str(entry.get("type", "")).strip() or "object"
+		label = str(entry.get("label", "")).strip() or type_name
+		objects = [
+			str(item).strip()
+			for item in (entry.get("objects") or [])
+			if str(item).strip()
+		]
+		if not objects:
+			continue
+		entries.append(
+			{
+				"type": type_name,
+				"label": label,
+				"objects": objects,
+			},
+		)
+	return tuple(entries)
+
+
+def _query_object_names_from_inventory(
+	query_object_inventory: Sequence[Dict[str, Any]],
+) -> tuple[str, ...]:
+	ordered_names: list[str] = []
+	seen: set[str] = set()
+	for entry in query_object_inventory:
+		for item in entry.get("objects", []):
+			object_name = str(item).strip()
+			if not object_name or object_name in seen:
+				continue
+			seen.add(object_name)
+			ordered_names.append(object_name)
+	return tuple(ordered_names)
+
+
+def _render_consumer_template_summary_for_task(
+	display_name: str,
+	task_parameters: Sequence[str],
+	predicate_name: str,
+	action_analysis: Dict[str, Any],
+) -> Optional[str]:
+	patterns = action_analysis.get("consumer_patterns_by_predicate", {}).get(predicate_name, [])
+	if not patterns:
+		return None
+
+	rendered_patterns: list[str] = []
+	for pattern in patterns:
+		precondition_args = list(pattern.get("precondition_args") or [])
+		if len(precondition_args) != len(task_parameters):
+			continue
+		token_mapping = {
+			token: task_parameter
+			for token, task_parameter in zip(precondition_args, task_parameters)
+		}
+		rendered_action_args = _extend_mapping_with_action_parameters(
+			token_mapping,
+			pattern.get("action_parameters") or [],
+			action_parameter_types=pattern.get("action_parameter_types") or [],
+		)
+		rendered_signature = _render_signature_with_mapping(
+			pattern.get("precondition_signature") or predicate_name,
+			token_mapping,
+		)
+		other_dynamic_preconditions = [
+			_render_signature_with_mapping(signature, token_mapping)
+			for signature in (pattern.get("other_dynamic_precondition_signatures") or [])
+			if not str(signature).startswith("not ")
+		]
+		rendered_patterns.append(
+			f"{_task_invocation_signature(pattern['action_name'], rendered_action_args)} consumes "
+			f"{rendered_signature}; sibling dynamic preconditions: "
+			f"{', '.join(other_dynamic_preconditions) if other_dynamic_preconditions else 'none'}"
+		)
+
+	if not rendered_patterns:
+		return None
+	return (
+		f"{_task_invocation_signature(display_name, task_parameters)} consumer templates: "
+		f"{'; '.join(rendered_patterns)}"
+	)
+
+
+def _reusable_dynamic_resource_payloads(action_analysis: Dict[str, Any]) -> list[Dict[str, Any]]:
+	resource_payloads: list[Dict[str, Any]] = []
+	for predicate_name in action_analysis.get("dynamic_predicates", []):
+		producer_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		consumer_patterns = action_analysis.get("consumer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		if not producer_patterns or not consumer_patterns:
+			continue
+		toggled_by_consumers = any(
+			any(
+				str(signature).startswith(f"not {predicate_name}")
+				or str(signature) == f"not {predicate_name}"
+				for signature in (pattern.get("negative_effect_signatures") or [])
+			)
+			for pattern in consumer_patterns
+		)
+		has_zero_ary_mode = any(
+			not list(pattern.get("effect_args") or [])
+			for pattern in producer_patterns
+		) or any(
+			not list(pattern.get("precondition_args") or [])
+			for pattern in consumer_patterns
+		)
+		if not toggled_by_consumers and not has_zero_ary_mode:
+			continue
+		resource_payloads.append(
+			{
+				"predicate": predicate_name,
+				"producer_actions": list(
+					action_analysis.get("producer_actions_by_predicate", {}).get(
+						predicate_name,
+						[],
+					),
+				),
+				"consumer_actions": list(
+					action_analysis.get("consumer_actions_by_predicate", {}).get(
+						predicate_name,
+						[],
+					),
+				),
+			},
+		)
+	return resource_payloads
+
+
+def build_prompt_analysis_payload(
+	domain: Any,
+	*,
+	target_literals: Sequence[str] = (),
+	query_task_anchors: Sequence[Dict[str, Any]] = (),
+	action_analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+	analysis = _normalise_action_analysis(domain, action_analysis)
+	shared_dynamic_prerequisites_by_task: Dict[str, list[str]] = {}
+	producer_consumer_templates_by_task: Dict[str, list[str]] = {}
+	task_headline_candidates = _task_headline_candidate_map(domain, analysis)
+
+	for task in getattr(domain, "tasks", []):
+		task_name = _sanitize_name(str(task.name))
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task.parameters)
+		source_predicates = tuple(
+			dict.fromkeys(
+				(
+					str(predicate_name)
+					for predicate_name in (getattr(task, "source_predicates", ()) or ())
+					if str(predicate_name).strip()
+				)
+			)
+		) or tuple(task_headline_candidates.get(task_name, ())[:2])
+		if not task_parameters or not source_predicates:
+			continue
+
+		shared_requirements: list[str] = []
+		template_summaries: list[str] = []
+		for predicate_name in source_predicates:
+			shared_requirements.extend(
+				requirement
+				for requirement in _shared_dynamic_requirements_for_predicate(
+					predicate_name,
+					task_parameters,
+					analysis,
+				)
+				if requirement not in shared_requirements
+			)
+			constructive_template = _constructive_template_summary_for_task(
+				task.name,
+				task_parameters,
+				predicate_name,
+				analysis,
+			)
+			if constructive_template and constructive_template not in template_summaries:
+				template_summaries.append(constructive_template)
+			consumer_template = _render_consumer_template_summary_for_task(
+				task.name,
+				task_parameters,
+				predicate_name,
+				analysis,
+			)
+			if consumer_template and consumer_template not in template_summaries:
+				template_summaries.append(consumer_template)
+
+		if shared_requirements:
+			shared_dynamic_prerequisites_by_task[task_name] = shared_requirements
+		if template_summaries:
+			producer_consumer_templates_by_task[task_name] = template_summaries
+
+	return {
+		"ordered_query_task_anchors": [dict(anchor) for anchor in query_task_anchors],
+		"shared_dynamic_prerequisites_by_task": shared_dynamic_prerequisites_by_task,
+		"producer_consumer_templates_by_task": producer_consumer_templates_by_task,
+		"task_headline_candidates": task_headline_candidates,
+		"query_task_contracts": _build_query_task_contract_payloads(
+			domain,
+			target_literals,
+			query_task_anchors,
+			analysis,
+		),
+		"support_task_contracts": _build_support_task_contract_payloads(
+			domain,
+			target_literals,
+			query_task_anchors,
+			analysis,
+		),
+		"reusable_dynamic_resource_predicates": _reusable_dynamic_resource_payloads(analysis),
 	}
 
 
@@ -291,12 +545,85 @@ def _same_arity_declared_task_candidates(
 	task_schema = task_schemas.get(task_name)
 	if task_schema is None:
 		return []
+	task_parameter_types = [
+		_parameter_type(parameter)
+		for parameter in getattr(task_schema, "parameters", ()) or ()
+	]
 	return [
 		other_task.name
 		for other_task in getattr(domain, "tasks", [])
 		if other_task.name != task_name
 		and len(other_task.parameters) == len(task_schema.parameters)
+		and [
+			_parameter_type(parameter)
+			for parameter in getattr(other_task, "parameters", ()) or ()
+		] == task_parameter_types
 	]
+
+
+def _same_arity_packaging_candidates_for_query_task(
+	domain: Any,
+	task_name: str,
+	predicate_name: str,
+	task_parameters: Sequence[str],
+	task_schemas: Dict[str, Any],
+	action_analysis: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+	headline_candidates_by_task = _task_headline_candidate_map(domain, action_analysis)
+	packaging_candidates: list[Dict[str, Any]] = []
+	for candidate in _same_arity_declared_task_candidates(
+		domain,
+		task_name,
+		task_schemas,
+	):
+		candidate_schema = task_schemas.get(candidate)
+		if candidate_schema is None:
+			continue
+		candidate_parameters = tuple(
+			_parameter_token(parameter)
+			for parameter in getattr(candidate_schema, "parameters", ()) or ()
+		)
+		if len(candidate_parameters) != len(task_parameters):
+			continue
+		constructive_template = _constructive_template_summary_for_task(
+			candidate,
+			candidate_parameters,
+			predicate_name,
+			action_analysis,
+		)
+		explicit_source_predicates = {
+			str(value).strip()
+			for value in (getattr(candidate_schema, "source_predicates", ()) or ())
+			if str(value).strip()
+		}
+		inferred_headlines = set(
+			headline_candidates_by_task.get(_sanitize_name(candidate), []),
+		)
+		if (
+			predicate_name not in explicit_source_predicates
+			and predicate_name not in inferred_headlines
+			and constructive_template is None
+		):
+			continue
+		if constructive_template is None:
+			continue
+		shared_requirements = _support_task_precise_shared_requirements(
+			domain,
+			candidate,
+			predicate_name,
+			candidate_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		packaging_candidates.append(
+			{
+				"candidate": candidate,
+				"parameters": candidate_parameters,
+				"constructive_template": constructive_template,
+				"shared_requirements": shared_requirements,
+			},
+		)
+	return packaging_candidates
 
 
 def _query_task_same_arity_packaging_lines(
@@ -324,49 +651,37 @@ def _query_task_same_arity_packaging_lines(
 		if not is_positive:
 			continue
 		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
-		candidates = _same_arity_declared_task_candidates(
+		candidates = _same_arity_packaging_candidates_for_query_task(
 			domain,
 			task_name,
+			predicate_name,
+			task_parameters,
 			task_schemas,
+			analysis,
 		)
 		if not candidates:
 			continue
-		line = (
-			f"- {_task_invocation_signature(display_name, task_parameters)}: if the final producer "
-			f"still leaves unresolved dynamic support, prefer same-arity declared tasks "
-			f"{', '.join(_task_invocation_signature(candidate, task_parameters) for candidate in candidates)} "
-			"before inventing a fresh helper."
-		)
-		parent_obligation_fragments: list[str] = []
 		for candidate in candidates:
-			exposed_requirements = _same_arity_packaging_parent_requirements(
-				domain,
-				predicate_name,
-				task_parameters,
-				analysis,
+			candidate_name = str(candidate.get("candidate", "")).strip()
+			candidate_parameters = tuple(candidate.get("parameters", ()))
+			shared_requirements = tuple(candidate.get("shared_requirements", ()))
+			requirement_text = (
+				", ".join(shared_requirements)
+				if shared_requirements
+				else "none"
 			)
-			if not exposed_requirements:
+			line = (
+				f"- {_task_invocation_signature(display_name, task_parameters)}: exact same-arity "
+				f"packaging contract for {predicate_name}({', '.join(task_parameters)}) is "
+				f"{_task_invocation_signature(candidate_name, candidate_parameters)}. Support "
+				f"caller-shared prerequisites {requirement_text} before the child call, then let "
+				f"{_task_invocation_signature(candidate_name, candidate_parameters)} own the final "
+				f"producer for {predicate_name}({', '.join(task_parameters)})."
+			)
+			if line in seen:
 				continue
-			parent_obligation_fragments.append(
-				f"if you delegate {_task_invocation_signature(candidate, task_parameters)}, "
-				f"first support likely shared prerequisites {', '.join(exposed_requirements)} "
-				"via parent context or earlier parent subtasks"
-			)
-			headline_only_fragment = _same_arity_packaging_headline_only_fragment(
-				domain,
-				candidate,
-				predicate_name,
-				task_parameters,
-				analysis,
-			)
-			if headline_only_fragment:
-				parent_obligation_fragments.append(headline_only_fragment)
-		if parent_obligation_fragments:
-			line += " " + "; ".join(parent_obligation_fragments) + "."
-		if line in seen:
-			continue
-		seen.add(line)
-		lines.append(line)
+			seen.add(line)
+			lines.append(line)
 	return lines
 
 
@@ -2049,6 +2364,180 @@ def _relevant_support_task_internal_obligation_lines(
 	return lines
 
 
+def _support_task_precise_shared_requirements(
+	domain: Any,
+	candidate_task: str,
+	support_predicate: str,
+	candidate_args: Sequence[str],
+	task_schemas: Dict[str, Any],
+	action_analysis: Dict[str, Any],
+) -> tuple[str, ...]:
+	candidate_schema = task_schemas.get(candidate_task)
+	if candidate_schema is None:
+		return ()
+	headline_candidates_by_task = _task_headline_candidate_map(domain, action_analysis)
+	candidate_parameters = tuple(
+		_parameter_token(parameter)
+		for parameter in getattr(candidate_schema, "parameters", ()) or ()
+	)
+	if len(candidate_parameters) != len(candidate_args):
+		return ()
+
+	pattern_shared_sets: list[set[str]] = []
+	for support_pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+		support_predicate,
+		[],
+	):
+		support_effect_args = list(support_pattern.get("effect_args") or [])
+		if len(support_effect_args) != len(candidate_parameters):
+			continue
+
+		support_mapping = {
+			token: arg
+			for token, arg in zip(support_effect_args, candidate_parameters)
+		}
+		rendered_action_args = _extend_mapping_with_action_parameters(
+			support_mapping,
+			support_pattern.get("action_parameters") or [],
+			action_parameter_types=support_pattern.get("action_parameter_types") or [],
+		)
+		extra_roles = {
+			arg
+			for arg in rendered_action_args
+			if arg not in candidate_parameters
+		}
+		pattern_requirements: set[str] = set()
+		for requirement_signature in support_pattern.get("dynamic_precondition_signatures") or []:
+			rendered_requirement = _render_signature_with_mapping(
+				requirement_signature,
+				support_mapping,
+			)
+			parsed_requirement = _parse_literal_signature(rendered_requirement)
+			if parsed_requirement is None:
+				continue
+			req_predicate, req_args, req_positive = parsed_requirement
+			if not req_positive:
+				continue
+			if not req_args or any(arg in extra_roles for arg in req_args):
+				continue
+			if not all(arg in candidate_parameters for arg in req_args):
+				continue
+			requirement_task_candidates = [
+				candidate
+				for candidate in _candidate_support_task_names(
+					domain,
+					req_predicate,
+					req_args,
+					action_analysis.get("producer_actions_by_predicate", {}).get(
+						req_predicate,
+						[],
+					),
+				)
+				if candidate != candidate_task
+				if len(getattr(task_schemas.get(candidate), "parameters", ())) == len(req_args)
+				and req_predicate in headline_candidates_by_task.get(_sanitize_name(candidate), [])
+			]
+			if requirement_task_candidates:
+				continue
+			pattern_requirements.add(rendered_requirement)
+		pattern_shared_sets.append(pattern_requirements)
+
+	if not pattern_shared_sets:
+		return ()
+	shared_requirements = set.intersection(*pattern_shared_sets)
+	return tuple(sorted(shared_requirements))
+
+
+def _support_task_caller_shared_prerequisite_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		anchor_task_name = str(anchor.get("task_name", "")).strip()
+		parsed_target = _parse_literal_signature(target_signature)
+		if parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		headline_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		)
+		for headline_pattern in headline_patterns:
+			effect_args = list(headline_pattern.get("effect_args") or [])
+			if len(effect_args) != len(target_args):
+				continue
+			headline_mapping = {
+				token: f"ARG{index}"
+				for index, token in enumerate(effect_args, start=1)
+			}
+			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				parsed_precondition = _parse_literal_signature(
+					_render_signature_with_mapping(precondition_signature, headline_mapping)
+				)
+				if parsed_precondition is None:
+					continue
+				precondition_predicate, precondition_args, precondition_positive = parsed_precondition
+				if not precondition_positive:
+					continue
+				if not set(precondition_args) & set(headline_mapping.values()):
+					continue
+
+				candidate_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if candidate != anchor_task_name
+					and len(getattr(task_schemas.get(candidate), "parameters", ())) == len(precondition_args)
+				]
+				for candidate_task in candidate_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					shared_requirements = _support_task_precise_shared_requirements(
+						domain,
+						candidate_task,
+						precondition_predicate,
+						candidate_parameters,
+						task_schemas,
+						action_analysis,
+					)
+					if not shared_requirements:
+						continue
+					line = (
+						f"- {_task_invocation_signature(candidate_task, candidate_parameters)}: caller-shared "
+						f"dynamic prerequisites {', '.join(shared_requirements)}. If a parent calls "
+						f"{_task_invocation_signature(candidate_task, candidate_parameters)}, support "
+						"them before the child call."
+					)
+					if line in seen:
+						continue
+					seen.add(line)
+					lines.append(line)
+	return lines
+
+
 def _relevant_support_task_recursive_mode_lines(
 	domain: Any,
 	target_literals: Sequence[str],
@@ -2885,11 +3374,23 @@ def _query_task_child_support_requirement_lines(
 						_parameter_token(parameter)
 						for parameter in candidate_schema.parameters
 					)
+					precise_shared_requirements = _support_task_precise_shared_requirements(
+						domain,
+						candidate_task,
+						precondition_predicate,
+						candidate_args,
+						task_schemas,
+						action_analysis,
+					)
+					rendered_shared_requirements = (
+						precise_shared_requirements
+						or shared_requirements
+					)
 					line = (
 						f"- {_task_invocation_signature(display_name, tuple(f'ARG{index}' for index in range(1, len(target_args) + 1)))}: "
 						f"if you use {_task_invocation_signature(candidate_task, candidate_args)} "
 						f"to support {precondition_predicate}({', '.join(precondition_args)}), "
-						f"first support its shared prerequisites {', '.join(shared_requirements)} "
+						f"first support its shared prerequisites {', '.join(rendered_shared_requirements)} "
 						"via parent context or earlier parent subtasks."
 					)
 					if line in seen:
@@ -3511,17 +4012,24 @@ def _query_task_support_producer_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
-		same_arity_candidates = _same_arity_declared_task_candidates(
-			domain,
-			task_name,
-			task_schemas,
-		)
 		parsed_target = _parse_literal_signature(target_signature)
 		if parsed_target is None:
 			continue
 		predicate_name, target_args, is_positive = parsed_target
 		if not is_positive:
 			continue
+		task_signature_parameters = tuple(
+			_parameter_token(parameter)
+			for parameter in getattr(task_schemas.get(task_name), "parameters", ()) or ()
+		)
+		same_arity_candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			task_signature_parameters,
+			task_schemas,
+			action_analysis,
+		)
 
 		task_args = tuple(f"ARG{index}" for index in range(1, len(target_args) + 1))
 		if anchor.get("args") and len(anchor.get("args", [])) == len(target_args):
@@ -3621,28 +4129,7 @@ def _query_task_support_producer_lines(
 				)
 				if candidate_declared_tasks:
 					continue
-				remaining_requirements = _task_shared_and_transitive_requirements(
-					predicate_name,
-					task_args,
-					action_analysis,
-				)
 				if same_arity_candidates:
-					packaging_line = (
-						f"- {_task_invocation_signature(display_name, task_args)}: no declared task "
-						f"directly headlines {precondition_predicate}({', '.join(precondition_args)}). "
-						f"Before inventing a helper, prefer same-arity declared packaging tasks "
-						f"{', '.join(_task_invocation_signature(candidate, task_args) for candidate in same_arity_candidates)}"
-					)
-					if remaining_requirements:
-						packaging_line += (
-							f" and let those declared tasks absorb the remaining dynamic support "
-							f"needed for {predicate_name}({', '.join(task_args)})"
-						)
-					packaging_line += "."
-					if packaging_line in seen:
-						continue
-					seen.add(packaging_line)
-					lines.append(packaging_line)
 					continue
 				helper_line = (
 					f"- {_task_invocation_signature(display_name, task_args)}: no declared task "
@@ -3680,6 +4167,7 @@ def build_htn_system_prompt() -> str:
 		"- Every referenced compound subtask must also appear in compound_tasks and have at least one method in methods.\n"
 		"- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
 		"- Reuse parameterized tasks; never encode grounded constants into task names.\n"
+		"- If both Stage 1 semantic-object hints and a query object inventory are supplied, the query inventory is authoritative for grounded instances; the semantic hints may be partial.\n"
 		"- Do not use grounded object names as method variables; method.parameters must remain schematic.\n"
 		"- Auxiliary variables must appear in method.parameters and be constrained by method context before use in subtasks.\n"
 		"- Every auxiliary variable needs typed evidence before reuse.\n"
@@ -3719,11 +4207,30 @@ def build_htn_user_prompt(
 	*,
 	query_text: str = "",
 	query_task_anchors: Sequence[Dict[str, Any]] = (),
+	semantic_objects: Sequence[str] = (),
+	query_object_inventory: Sequence[Dict[str, Any]] = (),
 	query_objects: Sequence[str] = (),
 	action_analysis: Optional[Dict[str, Any]] = None,
+	derived_analysis: Optional[Dict[str, Any]] = None,
 ) -> str:
 	parser = HDDLConditionParser()
 	analysis = _normalise_action_analysis(domain, action_analysis)
+	prompt_analysis = dict(
+		derived_analysis
+		or build_prompt_analysis_payload(
+			domain,
+			query_task_anchors=query_task_anchors,
+			action_analysis=analysis,
+		),
+	)
+	query_task_anchors = tuple(
+		prompt_analysis.get("ordered_query_task_anchors") or query_task_anchors,
+	)
+	query_object_inventory = _normalise_query_object_inventory(query_object_inventory)
+	query_objects = tuple(
+		query_objects
+		or _query_object_names_from_inventory(query_object_inventory)
+	)
 
 	action_lines = []
 	action_branch_hint_lines = []
@@ -3750,6 +4257,7 @@ def build_htn_user_prompt(
 	predicate_lines = [f"- {predicate.to_signature()}" for predicate in domain.predicates]
 	task_lines = [f"- {task.to_signature()}" for task in getattr(domain, "tasks", [])]
 	type_lines = [f"- {type_name}" for type_name in domain.types]
+	task_schemas = _declared_task_schema_map(domain)
 	targets = list(target_literals)
 	target_lines = "\n".join(
 		f"- #{index}: {item}"
@@ -3772,6 +4280,18 @@ def build_htn_user_prompt(
 			if str(value).strip()
 		)
 	) or "- none detected"
+	semantic_object_lines = "\n".join(
+		f"- {item}"
+		for item in dict.fromkeys(
+			str(value).strip()
+			for value in semantic_objects
+			if str(value).strip()
+		)
+	) or "- none detected"
+	query_object_inventory_lines = "\n".join(
+		f"- {entry['type']}: {', '.join(entry['objects'])}"
+		for entry in query_object_inventory
+	) or "- none detected"
 	anchor_binding_lines = "- no ordered target/task hint available"
 	if query_task_anchors and len(query_task_anchors) == len(targets):
 		anchor_binding_lines = "\n".join(
@@ -3782,6 +4302,13 @@ def build_htn_user_prompt(
 				start=1,
 			)
 		)
+	query_task_parameter_alignment_lines = "\n".join(
+		f"- {_task_invocation_signature(_anchor_display_name(anchor), tuple(_parameter_token(parameter) for parameter in task_schemas[anchor['task_name']].parameters))}: "
+		"if task_args is omitted, keep these task-argument roles as the first "
+		"method.parameters in exactly this order before adding support-role variables."
+		for anchor in query_task_anchors
+		if anchor.get("task_name") in task_schemas
+	) or "- none"
 	query_priority_obligation_lines = "\n".join(
 		_query_priority_obligation_lines(
 			domain,
@@ -3982,15 +4509,78 @@ def build_htn_user_prompt(
 			analysis,
 		)
 	) or "- none"
+	declared_task_shared_prerequisite_lines = "\n".join(
+		f"- {_task_invocation_signature(task_name, tuple(_parameter_token(parameter) for parameter in _declared_task_schema_map(domain)[task_name].parameters))}: "
+		f"{', '.join(requirements)}"
+		for task_name, requirements in (
+			prompt_analysis.get("shared_dynamic_prerequisites_by_task", {}) or {}
+		).items()
+		if task_name in _declared_task_schema_map(domain)
+	) or "- none"
+	producer_consumer_template_lines = "\n".join(
+		f"- {summary}"
+		for summaries in (
+			prompt_analysis.get("producer_consumer_templates_by_task", {}) or {}
+		).values()
+		for summary in summaries
+	) or "- none"
+	reusable_dynamic_resource_lines = "\n".join(
+		f"- {item['predicate']} <- produced by "
+		f"{', '.join(item.get('producer_actions', [])) or 'none'}; consumed by "
+		f"{', '.join(item.get('consumer_actions', [])) or 'none'}"
+		for item in (
+			prompt_analysis.get("reusable_dynamic_resource_predicates", ()) or ()
+		)
+	) or "- none"
 	binding_hints = "\n".join(
 		f'- {{"target_literal": "{literal}", "task_name": "<top_level_declared_or_minimal_dynamic_task>"}}'
 		for literal in targets
 	)
+	semantic_object_section = ""
+	if semantic_object_lines != "- none detected":
+		semantic_object_section = (
+			"STAGE 1 SEMANTIC OBJECT HINTS (goal-semantics only; may be partial and are not authoritative for grounding):\n"
+			f"{semantic_object_lines}\n\n"
+		)
+	query_object_inventory_section = ""
+	if query_object_inventory_lines != "- none detected":
+		query_object_inventory_section = (
+			"QUERY OBJECT INVENTORY BY TYPE (authoritative grounded inventory from the query text):\n"
+			f"{query_object_inventory_lines}\n\n"
+		)
 	query_object_section = ""
 	if query_object_lines != "- none detected":
 		query_object_section = (
 			"QUERY OBJECT NAMES (grounded instances from the current query; never place them inside methods):\n"
 			f"{query_object_lines}\n\n"
+		)
+	declared_task_shared_prerequisite_section = ""
+	if len(targets) <= 4 or declared_task_shared_prerequisite_lines != "- none":
+		declared_task_shared_prerequisite_section = (
+			"DECLARED TASK SHARED DYNAMIC PREREQUISITES:\n"
+			f"{declared_task_shared_prerequisite_lines}\n\n"
+		)
+	query_task_parameter_alignment_section = ""
+	if len(targets) <= 4:
+		query_task_parameter_alignment_section = (
+			"QUERY-TASK PARAMETER ALIGNMENT:\n"
+			f"{query_task_parameter_alignment_lines}\n\n"
+		)
+	query_task_alignment_checklist_line = ""
+	if len(targets) <= 4:
+		query_task_alignment_checklist_line = (
+			"- If task_args is omitted, the leading method.parameters for every query-task method stay aligned with the declared task signature in order; do not start a query-task method with support-role variables.\n"
+		)
+	producer_consumer_template_section = ""
+	reusable_dynamic_resource_section = ""
+	if len(targets) <= 4:
+		producer_consumer_template_section = (
+			"DECLARED TASK PRODUCER/CONSUMER TEMPLATES:\n"
+			f"{producer_consumer_template_lines}\n\n"
+		)
+		reusable_dynamic_resource_section = (
+			"REUSABLE DYNAMIC RESOURCE PREDICATES:\n"
+			f"{reusable_dynamic_resource_lines}\n\n"
 		)
 	query_priority_section = ""
 	if query_priority_obligation_lines != "- none":
@@ -4236,10 +4826,21 @@ def build_htn_user_prompt(
 		"TASK:\n"
 		"Generate one compact but executable JSON HTN library that compiles into valid AgentSpeak.\n\n"
 		f"QUERY:\n{query_text or '- none provided'}\n\n"
+		f"{semantic_object_section}"
+		f"{query_object_inventory_section}"
 		f"{query_object_section}"
 		f"ORDERED QUERY TASK ANCHORS:\n{query_anchor_lines}\n\n"
 		f"ORDERED TARGET/TASK SKELETON HINTS:\n{anchor_binding_lines}\n\n"
 		f"{query_priority_section}"
+		f"{query_task_parameter_alignment_section}"
+		f"QUERY-TASK SUPPORT OBLIGATIONS:\n{query_task_support_lines}\n\n"
+		f"QUERY-TASK SUPPORT PRODUCERS:\n{query_task_support_producer_lines}\n\n"
+		f"{child_support_section}"
+		f"{same_arity_child_support_section}"
+		f"{same_arity_child_context_section}"
+		f"{zero_ary_parent_context_section}"
+		f"{packaging_skeleton_section}"
+		f"{role_frame_section}"
 		f"DOMAIN:\n{domain.name}\n\n"
 		f"DOMAIN TYPES:\n{chr(10).join(type_lines) if type_lines else '- object'}\n\n"
 		f"DECLARED DOMAIN TASKS:\n{chr(10).join(task_lines) if task_lines else '- none declared'}\n\n"
@@ -4250,6 +4851,9 @@ def build_htn_user_prompt(
 		f"PRODUCER EFFECT PATTERNS (use these to design constructive methods):\n{producer_pattern_lines}\n\n"
 		f"ARGUMENT-ALIGNED PRODUCER TEMPLATES:\n{aligned_producer_lines}\n\n"
 		f"SHARED PRODUCER DYNAMIC PREREQUISITES:\n{shared_producer_requirement_lines}\n\n"
+		f"{declared_task_shared_prerequisite_section}"
+		f"{producer_consumer_template_section}"
+		f"{reusable_dynamic_resource_section}"
 		f"DYNAMIC PRECONDITION SUPPORT HINTS:\n{dynamic_support_lines}\n\n"
 		f"QUERY-TASK SAME-ARITY SUPPORT CANDIDATES:\n{same_arity_task_lines}\n\n"
 		f"QUERY-TASK SAME-ARITY PACKAGING HINTS:\n{query_task_same_arity_packaging_lines}\n\n"
@@ -4262,16 +4866,8 @@ def build_htn_user_prompt(
 		f"{relevant_support_task_recursive_template_section}"
 		f"{relevant_support_task_cleanup_template_section}"
 		f"{relevant_support_task_internal_obligation_section}"
-		f"{role_frame_section}"
 		f"{role_stabilization_section}"
 		f"{role_stabilizer_support_section}"
-		f"QUERY-TASK SUPPORT OBLIGATIONS:\n{query_task_support_lines}\n\n"
-		f"QUERY-TASK SUPPORT PRODUCERS:\n{query_task_support_producer_lines}\n\n"
-		f"{child_support_section}"
-		f"{same_arity_child_support_section}"
-		f"{same_arity_child_context_section}"
-		f"{zero_ary_parent_context_section}"
-		f"{packaging_skeleton_section}"
 		f"RUNTIME PRIMITIVE ACTION ALIASES:\n{chr(10).join(action_lines)}\n\n"
 		f"{branch_hint_section}"
 		f"ORDERED TARGET LITERALS:\n{target_lines}\n\n"
@@ -4289,8 +4885,704 @@ def build_htn_user_prompt(
 		"- If a query-task packaging skeleton or role-stabilization hint names a declared unary stabilizer, keep that stabilizer in compound_tasks with methods instead of omitting it for compactness.\n"
 		"- Primitive step literal metadata is usually omitted; if present, it must name an exact positive real action effect. Every referenced compound subtask appears in compound_tasks and has methods.\n"
 		"- Fresh helper tasks, if any, correspond only to dynamic predicates. Static predicates appear only as context/preconditions, not helper-task headlines.\n"
+		f"{query_task_alignment_checklist_line}"
 		"- Every primitive step's dynamic preconditions are supported by method context or earlier subtasks. Every compound step's shared dynamic prerequisites are supported by method context or earlier subtasks. No primitive step relies on an unstated dynamic precondition.\n"
 		"- No free variables. No undefined compound subtasks. Every auxiliary variable has an explicit typing witness.\n"
 		"- Omit empty/default fields when possible so the JSON stays compact and less error-prone.\n"
 		"- Return one complete JSON object and nothing else.\n"
 	)
+
+
+def _unique_preserve_order(values: Iterable[str]) -> list[str]:
+	seen: set[str] = set()
+	ordered: list[str] = []
+	for value in values:
+		text = str(value).strip()
+		if not text or text in seen:
+			continue
+		seen.add(text)
+		ordered.append(text)
+	return ordered
+
+
+def _task_headline_candidate_map(
+	domain: Any,
+	action_analysis: Dict[str, Any],
+) -> Dict[str, list[str]]:
+	mapping: Dict[str, list[str]] = {}
+	for task in getattr(domain, "tasks", []):
+		task_name = _sanitize_name(str(task.name))
+		source_predicates = [
+			str(predicate_name).strip()
+			for predicate_name in (getattr(task, "source_predicates", ()) or ())
+			if str(predicate_name).strip()
+		]
+		candidates = source_predicates or _candidate_headline_predicates_for_task(
+			str(task.name),
+			len(getattr(task, "parameters", ()) or ()),
+			action_analysis,
+		)
+		mapping[task_name] = _unique_preserve_order(candidates)[:3]
+	return mapping
+
+
+def _group_contract_lines_by_task(
+	lines: Sequence[str],
+	task_names: Sequence[str],
+) -> Dict[str, list[str]]:
+	grouped = {
+		task_name: []
+		for task_name in _unique_preserve_order(task_names)
+	}
+	for line in lines:
+		text = str(line).strip()
+		if not text:
+			continue
+		for task_name in grouped:
+			if text.startswith(f"- {task_name}("):
+				payload = text[2:].strip()
+				if payload not in grouped[task_name]:
+					grouped[task_name].append(payload)
+				break
+	return {
+		task_name: entries
+		for task_name, entries in grouped.items()
+		if entries
+	}
+
+
+def _build_query_task_contract_payloads(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	query_task_names = [
+		_anchor_display_name(anchor)
+		for anchor in query_task_anchors
+		if _anchor_display_name(anchor)
+	]
+	if not query_task_names:
+		return []
+
+	line_sources = [
+		_query_task_support_obligation_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_query_task_support_producer_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_query_task_child_support_requirement_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_query_task_same_arity_packaging_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_query_task_role_frame_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_query_task_role_stabilization_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_query_task_role_stabilizer_support_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_declared_task_producer_template_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+	]
+	grouped: Dict[str, list[str]] = {}
+	for lines in line_sources:
+		for task_name, entries in _group_contract_lines_by_task(lines, query_task_names).items():
+			grouped.setdefault(task_name, [])
+			for entry in entries:
+				if entry not in grouped[task_name]:
+					grouped[task_name].append(entry)
+
+	task_schemas = _declared_task_schema_map(domain)
+	payloads: list[Dict[str, Any]] = []
+	seen_query_tasks: set[str] = set()
+	for index, (target_literal, anchor) in enumerate(zip(target_literals, query_task_anchors), start=1):
+		display_name = _anchor_display_name(anchor)
+		task_name = str(anchor.get("task_name", "")).strip()
+		if not display_name or display_name in seen_query_tasks:
+			continue
+		seen_query_tasks.add(display_name)
+		task_schema = task_schemas.get(task_name)
+		task_signature = (
+			task_schema.to_signature()
+			if task_schema is not None and hasattr(task_schema, "to_signature")
+			else _task_invocation_signature(
+				display_name,
+				tuple(str(arg) for arg in anchor.get("args", ())),
+			)
+		)
+		payloads.append(
+			{
+				"task_name": task_name,
+				"display_name": display_name,
+				"ordered_binding": {
+					"index": index,
+					"target_literal": str(target_literal),
+					"task_signature": _task_invocation_signature(
+						display_name,
+						tuple(str(arg) for arg in anchor.get("args", ())),
+					),
+				},
+				"task_signature": task_signature,
+				"contract_lines": grouped.get(display_name, []),
+			},
+		)
+	return payloads
+
+
+def _support_task_summary_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	if len(query_task_anchors) != len(target_literals):
+		return lines
+
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, _, is_positive = parsed_target
+		if not is_positive:
+			continue
+		parent_parameters = tuple(
+			_parameter_token(parameter)
+			for parameter in task_schema.parameters
+		)
+		candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			parent_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		if not candidates:
+			continue
+		for candidate in candidates:
+			candidate_name = str(candidate.get("candidate", "")).strip()
+			child_parameters = tuple(candidate.get("parameters", ()))
+			shared_requirements = tuple(candidate.get("shared_requirements", ()))
+			requirement_text = ", ".join(shared_requirements) if shared_requirements else "none"
+			line = (
+				f"- {_task_invocation_signature(candidate_name, child_parameters)}: exact same-arity "
+				f"packaging child for {predicate_name}({', '.join(parent_parameters)}) when called by "
+				f"{_task_invocation_signature(display_name, parent_parameters)}. Parent-side "
+				f"caller-shared prerequisites: {requirement_text}. This child must own the final "
+				f"producer for {predicate_name}({', '.join(parent_parameters)})."
+			)
+			if line not in seen:
+				seen.add(line)
+				lines.append(line)
+	return lines
+
+
+def _build_support_task_contract_payloads(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[Dict[str, Any]]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	query_task_names = {
+		_anchor_display_name(anchor)
+		for anchor in query_task_anchors
+		if _anchor_display_name(anchor)
+	}
+	support_task_names = [
+		str(task.name)
+		for task in getattr(domain, "tasks", [])
+		if str(task.name) not in query_task_names
+	]
+	if not support_task_names:
+		return []
+
+	line_sources = [
+		_support_task_summary_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_support_task_caller_shared_prerequisite_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_relevant_support_task_template_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_declared_support_task_applicability_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_relevant_support_task_internal_obligation_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_relevant_support_task_recursive_mode_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_relevant_support_task_recursive_template_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_relevant_support_task_cleanup_template_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+	]
+	grouped: Dict[str, list[str]] = {}
+	for lines in line_sources:
+		for task_name, entries in _group_contract_lines_by_task(lines, support_task_names).items():
+			grouped.setdefault(task_name, [])
+			for entry in entries:
+				if entry not in grouped[task_name]:
+					grouped[task_name].append(entry)
+
+	payloads: list[Dict[str, Any]] = []
+	for task in getattr(domain, "tasks", []):
+		task_name = str(task.name)
+		entries = grouped.get(task_name)
+		if not entries:
+			continue
+		payloads.append(
+			{
+				"task_name": _sanitize_name(task_name),
+				"display_name": task_name,
+				"task_signature": task.to_signature() if hasattr(task, "to_signature") else task_name,
+				"contract_lines": entries,
+			},
+		)
+	return payloads
+
+
+def _format_tagged_block(tag_name: str, body: str) -> str:
+	content = body.strip()
+	if not content:
+		return ""
+	return f"<{tag_name}>\n{content}\n</{tag_name}>"
+
+
+def _render_contract_blocks(
+	tag_name: str,
+	payloads: Sequence[Dict[str, Any]],
+) -> str:
+	blocks: list[str] = []
+	for payload in payloads:
+		lines = [str(line).strip() for line in payload.get("contract_lines", ()) if str(line).strip()]
+		if not lines and tag_name != "query_task_contract":
+			continue
+		header_lines = []
+		task_signature = str(payload.get("task_signature", "")).strip()
+		if task_signature:
+			header_lines.append(f"signature: {task_signature}")
+		ordered_binding = payload.get("ordered_binding") or {}
+		if ordered_binding:
+			header_lines.append(
+				f"ordered_binding #{ordered_binding.get('index')}: "
+				f"{ordered_binding.get('target_literal')} -> {ordered_binding.get('task_signature')}"
+			)
+		body = "\n".join(
+			[f"- {line}" for line in header_lines]
+			+ [f"- {line}" for line in lines]
+		)
+		blocks.append(
+			f"<{tag_name} name=\"{payload.get('display_name')}\">\n{body}\n</{tag_name}>"
+		)
+	return "\n".join(blocks) if blocks else f"<{tag_name}s>\n- none\n</{tag_name}s>"
+
+
+def _target_predicate_names(target_literals: Sequence[str]) -> tuple[str, ...]:
+	predicate_names: list[str] = []
+	seen: set[str] = set()
+	for signature in target_literals:
+		parsed_literal = _parse_literal_signature(signature)
+		if parsed_literal is None:
+			continue
+		predicate_name, _, is_positive = parsed_literal
+		if not is_positive or predicate_name in seen:
+			continue
+		seen.add(predicate_name)
+		predicate_names.append(predicate_name)
+	return tuple(predicate_names)
+
+
+def _relevant_dynamic_predicates_for_prompt(
+	target_literals: Sequence[str],
+	action_analysis: Dict[str, Any],
+) -> tuple[str, ...]:
+	relevant: set[str] = set()
+	pending = list(_target_predicate_names(target_literals))
+	while pending:
+		predicate_name = pending.pop()
+		if predicate_name in relevant:
+			continue
+		relevant.add(predicate_name)
+		for pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+			predicate_name,
+			[],
+		):
+			for requirement_signature in pattern.get("dynamic_precondition_signatures") or []:
+				parsed_requirement = _parse_literal_signature(requirement_signature)
+				if parsed_requirement is None:
+					continue
+				requirement_predicate, _, is_positive = parsed_requirement
+				if not is_positive or requirement_predicate in relevant:
+					continue
+				pending.append(requirement_predicate)
+	return tuple(sorted(relevant))
+
+
+def _relevant_action_names_for_prompt(
+	relevant_predicates: Sequence[str],
+	action_analysis: Dict[str, Any],
+) -> tuple[str, ...]:
+	action_names: set[str] = set()
+	for predicate_name in relevant_predicates:
+		for patterns_key in (
+			"producer_patterns_by_predicate",
+			"consumer_patterns_by_predicate",
+		):
+			for pattern in action_analysis.get(patterns_key, {}).get(predicate_name, []):
+				action_name = _sanitize_name(str(pattern.get("action_name") or "").strip())
+				if action_name:
+					action_names.add(action_name)
+		for actions_key in (
+			"producer_actions_by_predicate",
+			"consumer_actions_by_predicate",
+		):
+			for action_name in action_analysis.get(actions_key, {}).get(predicate_name, []):
+				sanitized = _sanitize_name(str(action_name).strip())
+				if sanitized:
+					action_names.add(sanitized)
+	return tuple(sorted(action_names))
+
+
+def _render_relevant_action_lines(
+	domain: Any,
+	relevant_action_names: Sequence[str],
+) -> list[str]:
+	selected_names = set(relevant_action_names)
+	lines: list[str] = []
+	for action in getattr(domain, "actions", []):
+		action_name = _sanitize_name(str(getattr(action, "name", "")).strip())
+		if selected_names and action_name not in selected_names:
+			continue
+		if hasattr(action, "to_description"):
+			lines.append(f"- {action.to_description()}")
+			continue
+		lines.append(
+			"- "
+			f"{getattr(action, 'name', 'unknown')}({', '.join(getattr(action, 'parameters', []) or []) or 'none'})\n"
+			f"    Pre: {getattr(action, 'preconditions', '()')}\n"
+			f"    Eff: {getattr(action, 'effects', '()')}"
+		)
+	if lines:
+		return lines
+	for action in getattr(domain, "actions", []):
+		if hasattr(action, "to_description"):
+			lines.append(f"- {action.to_description()}")
+			continue
+		lines.append(
+			"- "
+			f"{getattr(action, 'name', 'unknown')}({', '.join(getattr(action, 'parameters', []) or []) or 'none'})\n"
+			f"    Pre: {getattr(action, 'preconditions', '()')}\n"
+			f"    Eff: {getattr(action, 'effects', '()')}"
+		)
+	return lines or ["- none"]
+
+
+def build_htn_system_prompt() -> str:
+	return (
+		"You synthesize one compact, executable HTN method library from the query, declared tasks, "
+		"predicates, and primitive action schemas only.\n"
+		"No second pass exists. No repair pass exists. No hidden methods exist.\n"
+		"Return JSON only. No markdown, no prose, no comments.\n"
+		"Return exactly one object with top-level keys target_task_bindings, compound_tasks, methods.\n"
+		"\n"
+		"GLOBAL RULES:\n"
+		"1. Preserve query-mentioned declared tasks as the top-level skeleton whenever they match the ordered targets.\n"
+		"2. Prefer declared support tasks over fresh helpers. Create a fresh helper only for a dynamic predicate that no declared task can responsibly cover.\n"
+		"3. Static predicates are context constraints only; never create helpers for them.\n"
+		"4. For every target-bound task, include an already-satisfied/noop method with the headline literal in context and empty subtasks.\n"
+		"5. Every primitive dynamic precondition must be supported by method context or earlier subtasks.\n"
+		"6. Every compound child call must satisfy the child's shared dynamic prerequisites before the child is called.\n"
+		"7. Only rely on a previous compound child's own headline effect and explicitly shared envelope. Never rely on incidental internal side effects.\n"
+		"8. Use same-arity packaging only when the user prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or new caller-shared envelopes on your own.\n"
+		"9. Auxiliary variables must remain schematic, appear in method.parameters, and be constrained before use by declared predicates, equality constraints, or earlier subtask bindings. Types come from parameter declarations and predicate positions; never invent type predicates such as block(X) or rover(R) unless the domain explicitly declares them.\n"
+		"10. Grounded query objects may appear in target literals and ordered top-level bindings only. Never copy grounded query object names into method.parameters, method.context, or subtask arguments. If query inventory and Stage 1 semantic hints conflict, the query inventory is authoritative for top-level grounding only.\n"
+		"11. When a method chooses one producer mode or primitive branch, it must support the full listed dynamic preconditions of that selected mode before the step. Do not keep only the shared subset and silently drop mode-specific requirements.\n"
+		"12. If an AUX_* variable appears in a subtask or primitive step, it must already be constrained by a positive context literal, equality constraint, or earlier step interface in the same method before that use.\n"
+		"\n"
+		"OUTPUT CONTRACT:\n"
+		"- task_name and method_name must match [a-z][a-z0-9_]*.\n"
+		"- method_name must be exactly m_{task_name}_{strategy}.\n"
+		"- task_args is optional; if omitted, the leading declared-task-arity method.parameters are the task arguments in order.\n"
+		"- Primitive subtasks must use the provided runtime primitive aliases.\n"
+		"- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
+		"- If a method has two or more subtasks, ordering must be explicit pairwise edges such as [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]].\n"
+		"- Omit optional empty/default fields when possible, but never omit required structural fields.\n"
+		"- Every literal-bearing field must use JSON object form with predicate/args/is_positive.\n"
+	)
+
+
+def build_htn_user_prompt(
+	domain: Any,
+	target_literals: Iterable[str],
+	schema_hint: str,
+	*,
+	query_text: str = "",
+	query_task_anchors: Sequence[Dict[str, Any]] = (),
+	semantic_objects: Sequence[str] = (),
+	query_object_inventory: Sequence[Dict[str, Any]] = (),
+	query_objects: Sequence[str] = (),
+	action_analysis: Optional[Dict[str, Any]] = None,
+	derived_analysis: Optional[Dict[str, Any]] = None,
+) -> str:
+	targets = [str(target).strip() for target in target_literals if str(target).strip()]
+	analysis = _normalise_action_analysis(domain, action_analysis)
+	prompt_analysis = dict(
+		derived_analysis
+		or build_prompt_analysis_payload(
+			domain,
+			target_literals=targets,
+			query_task_anchors=query_task_anchors,
+			action_analysis=analysis,
+		)
+	)
+	query_task_anchors = tuple(
+		prompt_analysis.get("ordered_query_task_anchors") or query_task_anchors,
+	)
+	query_task_contracts = list(
+		prompt_analysis.get("query_task_contracts")
+		or _build_query_task_contract_payloads(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	)
+	support_task_contracts = list(
+		prompt_analysis.get("support_task_contracts")
+		or _build_support_task_contract_payloads(
+			domain,
+			targets,
+			query_task_anchors,
+			analysis,
+		)
+	)
+	semantic_objects = tuple(
+		str(value).strip()
+		for value in semantic_objects
+		if str(value).strip()
+	)
+	query_object_inventory = _normalise_query_object_inventory(query_object_inventory)
+	query_objects = tuple(
+		str(value).strip()
+		for value in (
+			query_objects
+			or _query_object_names_from_inventory(query_object_inventory)
+		)
+		if str(value).strip()
+	)
+
+	query_binding_lines = _unique_preserve_order(
+		[
+			f"target #{index}: {target} -> {_task_invocation_signature(_anchor_display_name(anchor), tuple(str(arg) for arg in anchor.get('args', ()) ))}"
+			for index, (target, anchor) in enumerate(zip(targets, query_task_anchors), start=1)
+			if _anchor_display_name(anchor)
+		]
+	)
+	query_anchor_lines = _unique_preserve_order(
+		[
+			f"#{index}: {_task_invocation_signature(_anchor_display_name(anchor), tuple(str(arg) for arg in anchor.get('args', ()) ))}"
+			for index, anchor in enumerate(query_task_anchors, start=1)
+			if _anchor_display_name(anchor)
+		]
+	)
+	semantic_object_lines = [f"- {value}" for value in semantic_objects] or ["- none"]
+	query_inventory_lines = [
+		f"- {entry['type']}: {', '.join(entry['objects'])}"
+		for entry in query_object_inventory
+	] or ["- none"]
+	query_inventory_summary_lines = [
+		f"- {entry['type']}: {len(entry['objects'])} object(s)"
+		for entry in query_object_inventory
+	] or ["- none"]
+	task_scope_signatures = _unique_preserve_order(
+		[
+			str(payload.get("task_signature", "")).strip()
+			for payload in query_task_contracts + support_task_contracts
+			if str(payload.get("task_signature", "")).strip()
+		]
+	)
+	relevant_dynamic_predicates = _relevant_dynamic_predicates_for_prompt(targets, analysis)
+	dynamic_predicate_lines = [
+		f"- {predicate_name}"
+		for predicate_name in relevant_dynamic_predicates
+	] or ["- none"]
+	action_lines = _render_relevant_action_lines(
+		domain,
+		_relevant_action_names_for_prompt(relevant_dynamic_predicates, analysis),
+	)
+
+	grounding_block = "\n".join(
+		[
+			"query_type_inventory:",
+			*query_inventory_summary_lines,
+			"",
+			"grounding_rules:",
+			"- Ordered target bindings below are the authoritative grounded binding source for Stage 3.",
+			"- This typed inventory is summary-only. It tells you which types exist and how many objects were named in the query, not which grounded constants to reuse in methods.",
+			"- Do not copy grounded object names into methods; methods must stay schematic.",
+		]
+	)
+	ordered_query_anchor_entries = [f"- {line}" for line in query_anchor_lines] or ["- none"]
+	ordered_target_binding_entries = [f"- {line}" for line in query_binding_lines] or ["- none"]
+	task_scope_entries = [f"- {line}" for line in task_scope_signatures] or ["- none"]
+	ordered_bindings_block = "\n".join(
+		[
+			"ordered_query_task_anchors:",
+			*ordered_query_anchor_entries,
+			"",
+			"ordered_target_bindings:",
+			*ordered_target_binding_entries,
+		]
+	)
+	query_task_contract_block = _render_contract_blocks(
+		"query_task_contract",
+		query_task_contracts,
+	)
+	support_task_contract_block = _render_contract_blocks(
+		"support_task_contract",
+		support_task_contracts,
+	)
+	domain_summary_block = "\n".join(
+		[
+			f"domain: {domain.name}",
+			"tasks_in_scope:",
+			*task_scope_entries,
+			"",
+			"relevant_dynamic_predicates:",
+			*dynamic_predicate_lines,
+			"",
+			"primitive_actions:",
+			*action_lines,
+		]
+	)
+	instructions_block = "\n".join(
+		[
+			"1. Read query_task_contracts first. They are the canonical synthesis skeleton.",
+			"2. Read support_task_contracts second. If a parent calls a support child, satisfy every listed caller-shared prerequisite before the child call, and keep the child's internal support inside that child.",
+			"3. Preserve ordered query task names in target_task_bindings and as top-level compound tasks when they are supplied.",
+			"4. Prefer declared support tasks over fresh helpers. Fresh helpers are allowed only when no declared task can responsibly own the dynamic predicate.",
+			"5. Same-arity packaging is allowed only when an exact packaging contract is listed. If selected, support its listed caller-shared prerequisites first and then let that child own the final producer.",
+			"6. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Grounded query object names may appear only in target_task_bindings and ordered top-level bindings, never inside methods. Type names are not predicates.",
+			"7. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support all of p, q, and r before ACTION. Multi-step methods require explicit pairwise ordering edges. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient.",
+		]
+	)
+	examples_block = "\n".join(
+		[
+			"- shared_child_contract: parent(ARG1) calls child(ARG1). If every constructive child method still needs ready(ARG1), parent must support ready(ARG1) before child(ARG1).",
+			"- packaging_envelope: if child(ARG1, ARG2) has constructive siblings with contexts {ready(ARG1), clear(ARG2)} and {ready(ARG1), linked(ARG2)}, then the caller-shared envelope is ready(ARG1) only. The parent must support ready(ARG1) before child(ARG1, ARG2).",
+			"- ordering_edges: for subtasks s1 then s2 then s3, emit ordering [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit [[\"s1\",\"s2\",\"s3\"]].",
+			"- producer_mode_completeness: if a chosen support mode is act(ARG1) [needs p(ARG1), q(ARG1)], the method must support both p(ARG1) and q(ARG1) before act(ARG1).",
+			"- aux_binding_before_use: if a method calls child(AUX_T1, ARG1), include a declared positive context literal or equality that constrains AUX_T1 before that child call.",
+		]
+	)
+	final_checklist_block = "\n".join(
+		[
+			"- Each target literal has exactly one binding.",
+			"- Query-mentioned declared tasks appear in the library when supplied.",
+			"- Every target-bound task has an already-satisfied/noop method.",
+			"- Every referenced compound subtask appears in compound_tasks and has methods.",
+			"- Every primitive dynamic precondition is supported by context or earlier subtasks.",
+			"- Every compound child shared dynamic prerequisite is supported by caller context or earlier caller subtasks.",
+			"- No free variables. Every auxiliary variable is typed by method.parameters and constrained by declared predicates, equality, or earlier subtask bindings. Never invent type predicates.",
+			"- Return one compact JSON object and nothing else.",
+		]
+	)
+
+	sections = [
+		_format_tagged_block(
+			"task",
+			"Generate one compact but executable JSON HTN library that compiles into valid AgentSpeak.",
+		),
+		_format_tagged_block(
+			"query_summary",
+			"Use the ordered query bindings below as the canonical query decomposition. "
+			"Do not copy grounded constants from the original sentence into methods.",
+		),
+		_format_tagged_block("grounding", grounding_block),
+		_format_tagged_block("ordered_query_bindings", ordered_bindings_block),
+		_format_tagged_block("query_task_contracts", query_task_contract_block),
+		_format_tagged_block("support_task_contracts", support_task_contract_block),
+		_format_tagged_block("domain_summary", domain_summary_block),
+		_format_tagged_block("instructions", instructions_block),
+		_format_tagged_block("examples", examples_block),
+		_format_tagged_block(
+			"output_schema",
+			"Only define target_task_bindings, compound_tasks, and methods; primitive tasks are injected automatically.\n"
+			f"{schema_hint}",
+		),
+		_format_tagged_block("final_checklist", final_checklist_block),
+	]
+	return "\n\n".join(section for section in sections if section).strip() + "\n"

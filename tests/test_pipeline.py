@@ -172,6 +172,14 @@ MARSROVER_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
 	limit=3,
 )
 QUERY_CASES: Dict[str, Dict[str, Any]] = BLOCKSWORLD_QUERY_CASES
+CLI_QUERY_CASE_GROUPS: Dict[str, Dict[str, Dict[str, Any]]] = {
+	"blocksworld": BLOCKSWORLD_QUERY_CASES,
+	"marsrover": MARSROVER_QUERY_CASES,
+}
+CLI_DOMAIN_FILES: Dict[str, str] = {
+	"blocksworld": OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+	"marsrover": MARSROVER_DOMAIN_FILE,
+}
 
 
 def _expected_execution_identity(
@@ -227,6 +235,31 @@ def _pytest_selected_marsrover_query_ids() -> List[str]:
 		all_env="PIPELINE_TEST_MARSROVER_ALL",
 		default_query=None,
 	)
+
+
+def _resolve_cli_selection(argv: List[str]) -> tuple[str, Dict[str, Dict[str, Any]], str]:
+	if len(argv) > 3:
+		raise ValueError(
+			"Usage: python tests/test_pipeline.py "
+			"[blocksworld|marsrover] [query_i|all|list] or "
+			"[blocksworld:query_i|marsrover:all|list]",
+		)
+
+	if len(argv) == 1:
+		return "blocksworld", BLOCKSWORLD_QUERY_CASES, "query_1"
+
+	first_arg = argv[1]
+	if first_arg == "list":
+		return "blocksworld", BLOCKSWORLD_QUERY_CASES, "list"
+	if ":" in first_arg:
+		domain_key, selector = first_arg.split(":", 1)
+		if domain_key not in CLI_QUERY_CASE_GROUPS:
+			raise ValueError(f"Unknown domain '{domain_key}'. Available: {sorted(CLI_QUERY_CASE_GROUPS)}")
+		return domain_key, CLI_QUERY_CASE_GROUPS[domain_key], selector or "query_1"
+	if first_arg in CLI_QUERY_CASE_GROUPS:
+		selector = argv[2] if len(argv) == 3 else "all"
+		return first_arg, CLI_QUERY_CASE_GROUPS[first_arg], selector
+	return "blocksworld", BLOCKSWORLD_QUERY_CASES, first_arg
 
 
 def _ensure_live_dependencies() -> None:
@@ -396,9 +429,12 @@ def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 			*,
 			query_text=None,
 			query_task_anchors=None,
+			semantic_objects=None,
+			query_object_inventory=None,
 			negation_hints=None,
 			ordered_literal_signatures=None,
 			query_objects=None,
+			derived_analysis=None,
 		):
 			return method_library, {
 				"used_llm": True,
@@ -746,6 +782,158 @@ def assert_query_task_anchor_extraction_uses_declared_tasks_only():
 	)
 
 
+def assert_query_object_inventory_extraction_preserves_full_benchmark_inventory():
+	pipeline = LTL_BDI_Pipeline(domain_file=MARSROVER_DOMAIN_FILE)
+	inventory = pipeline._extract_query_object_inventory(
+		MARSROVER_QUERY_CASES["query_3"]["instruction"],
+	)
+
+	assert inventory == (
+		{"type": "lander", "label": "lander", "objects": ["general"]},
+		{"type": "mode", "label": "modes", "objects": ["colour", "high_res", "low_res"]},
+		{"type": "rover", "label": "rovers", "objects": ["rover0", "rover1"]},
+		{"type": "store", "label": "stores", "objects": ["rover0store", "rover1store"]},
+		{
+			"type": "waypoint",
+			"label": "waypoints",
+			"objects": ["waypoint0", "waypoint1", "waypoint2", "waypoint3"],
+		},
+		{"type": "camera", "label": "cameras", "objects": ["camera0", "camera1"]},
+		{"type": "objective", "label": "objectives", "objects": ["objective0", "objective1"]},
+	)
+
+
+def assert_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_are_partial(
+	tmp_path,
+	monkeypatch,
+):
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("get_soil_data", ("WAYPOINT",), False, ("communicated_soil_data",))],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_get_soil_data_noop",
+				task_name="get_soil_data",
+				parameters=("WAYPOINT",),
+				context=(
+					HTNLiteral("communicated_soil_data", ("WAYPOINT",), True, None),
+				),
+			),
+		],
+		target_literals=[HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding("communicated_soil_data(waypoint2)", "get_soil_data"),
+		],
+	)
+	captured: Dict[str, Any] = {}
+
+	class FakeSynthesizer:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def synthesize(
+			self,
+			domain,
+			grounding_map,
+			dfa_result,
+			*,
+			query_text=None,
+			query_task_anchors=None,
+			semantic_objects=None,
+			query_object_inventory=None,
+			query_objects=None,
+			derived_analysis=None,
+			negation_hints=None,
+			ordered_literal_signatures=None,
+		):
+			captured["semantic_objects"] = semantic_objects
+			captured["query_object_inventory"] = query_object_inventory
+			captured["query_objects"] = query_objects
+			captured["derived_analysis"] = derived_analysis
+			return method_library, {
+				"used_llm": True,
+				"model": "deepseek-chat",
+				"target_literals": ["communicated_soil_data(waypoint2)"],
+				"query_task_anchors": list(query_task_anchors or ()),
+				"semantic_objects": list(semantic_objects or ()),
+				"query_object_inventory": list(query_object_inventory or ()),
+				"query_objects": list(query_objects or ()),
+				"derived_analysis": dict(derived_analysis or {}),
+				"negation_resolution": {"predicates": [], "mode_by_predicate": {}},
+				"action_analysis": {},
+				"compound_tasks": 1,
+				"primitive_tasks": 0,
+				"methods": 1,
+				"llm_prompt": {"system": "SYSTEM", "user": "USER"},
+				"llm_response": '{"ok": true}',
+				"llm_finish_reason": "stop",
+				"llm_attempts": 1,
+				"llm_response_time_seconds": 1.0,
+				"llm_attempt_durations_seconds": [1.0],
+				"failure_class": None,
+			}
+
+		def extract_progressing_transitions(
+			self,
+			grounding_map,
+			dfa_result,
+			*,
+			ordered_literal_signatures=None,
+		):
+			return []
+
+	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
+
+	pipeline = LTL_BDI_Pipeline(domain_file=MARSROVER_DOMAIN_FILE)
+	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path))
+	pipeline.logger.start_pipeline(
+		"demo instruction",
+		mode="dfa_agentspeak",
+		domain_file=pipeline.domain_file,
+		output_dir=str(tmp_path),
+	)
+	pipeline.output_dir = pipeline.logger.current_log_dir
+
+	ltl_spec = SimpleNamespace(
+		grounding_map=None,
+		objects=["waypoint2", "waypoint0", "objective0", "colour"],
+		query_object_inventory=[],
+		source_instruction=MARSROVER_QUERY_CASES["query_3"]["instruction"],
+		negation_hints={},
+		formulas=[],
+	)
+	_, stage3_data = pipeline._stage3_method_synthesis(
+		ltl_spec,
+		{"dfa_dot": 'digraph MONA_DFA { 0 -> 1 [label="communicated_soil_data_waypoint2"]; }'},
+	)
+
+	assert stage3_data is not None
+	assert captured["semantic_objects"] == ("waypoint2", "waypoint0", "objective0", "colour")
+	assert captured["query_objects"] == (
+		"general",
+		"colour",
+		"high_res",
+		"low_res",
+		"rover0",
+		"rover1",
+		"rover0store",
+		"rover1store",
+		"waypoint0",
+		"waypoint1",
+		"waypoint2",
+		"waypoint3",
+		"camera0",
+		"camera1",
+		"objective0",
+		"objective1",
+	)
+	assert captured["query_object_inventory"][2] == {
+		"type": "rover",
+		"label": "rovers",
+		"objects": ["rover0", "rover1"],
+	}
+
+
 def assert_expected_execution_identity_is_derived_from_selected_domain_and_problem():
 	blocksworld_identity = _expected_execution_identity(
 		OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
@@ -824,6 +1012,30 @@ def assert_stage6_object_type_resolution_ignores_unused_query_objects():
 	assert resolved["rover0"] == "rover"
 	assert resolved["waypoint5"] == "waypoint"
 	assert "waypoint1" not in resolved
+
+
+def assert_stage6_problem_seed_facts_ignore_stage4_witness_facts():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	seed_facts, seed_source = pipeline._stage6_runtime_seed_facts(
+		plan_records=[
+			{
+				"transition_name": "dfa_step_q1_q2",
+				"initial_facts": ["(witness_fact bogus)"],
+			},
+		],
+		target_literals=(),
+	)
+
+	assert seed_source == "problem_init:p01.hddl"
+	assert "(witness_fact bogus)" not in seed_facts
+	assert tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts) == seed_facts
 
 def _run_query_case(
 	query_id: str,
@@ -1466,31 +1678,36 @@ def main(argv: List[str]) -> int:
 		print("Live pipeline CLI requires the official pandaPIparser verifier on PATH.")
 		return 2
 
-	if len(argv) > 2:
-		print("Usage: python tests/test_pipeline.py [query_i|all|list]")
+	try:
+		domain_key, query_cases, selector = _resolve_cli_selection(argv)
+	except ValueError as exc:
+		print(str(exc))
 		return 2
-
-	selector = argv[1] if len(argv) == 2 else "query_1"
 	if selector == "list":
-		for query_id in sorted(QUERY_CASES):
-			case = QUERY_CASES[query_id]
-			print(f"{query_id}: {case['description']}")
-			print(f"Instruction: {case['instruction']}")
-			print("")
+		for cli_domain_key, case_map in CLI_QUERY_CASE_GROUPS.items():
+			print(f"[{cli_domain_key}]")
+			for query_id in sorted(case_map):
+				case = case_map[query_id]
+				print(f"{query_id}: {case['description']}")
+				print(f"Instruction: {case['instruction']}")
+				print("")
 		return 0
 	if selector == "all":
-		query_ids = sorted(QUERY_CASES)
+		query_ids = sorted(query_cases)
 	else:
-		if selector not in QUERY_CASES:
-			print(f"Unknown query id '{selector}'. Available: {sorted(QUERY_CASES)} or 'all'")
+		if selector not in query_cases:
+			print(
+				f"Unknown query id '{selector}' for domain '{domain_key}'. "
+				f"Available: {sorted(query_cases)} or 'all'",
+			)
 			return 2
 		query_ids = [selector]
 
 	reports = [
 		_run_query_case(
 			query_id,
-			query_cases=QUERY_CASES,
-			domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+			query_cases=query_cases,
+			domain_file=CLI_DOMAIN_FILES[domain_key],
 		)
 		for query_id in query_ids
 	]

@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from stage1_interpretation.grounding_map import GroundingMap
 from stage3_method_synthesis.htn_prompts import (
+	build_prompt_analysis_payload,
 	build_htn_system_prompt,
 	build_htn_user_prompt,
 )
@@ -85,7 +86,10 @@ class HTNMethodSynthesizer:
 		*,
 		query_text: Optional[str] = None,
 		query_task_anchors: Optional[Sequence[Dict[str, Any]]] = None,
+		semantic_objects: Optional[Sequence[str]] = None,
+		query_object_inventory: Optional[Sequence[Dict[str, Any]]] = None,
 		query_objects: Optional[Sequence[str]] = None,
+		derived_analysis: Optional[Dict[str, Any]] = None,
 		negation_hints: Optional[Dict[str, Any]] = None,
 		ordered_literal_signatures: Optional[Sequence[str]] = None,
 	) -> Tuple[HTNMethodLibrary, Dict[str, Any]]:
@@ -113,10 +117,30 @@ class HTNMethodSynthesizer:
 			query_task_anchors,
 			domain,
 		)
+		normalised_semantic_objects = tuple(
+			str(value).strip()
+			for value in (semantic_objects or ())
+			if str(value).strip()
+		)
+		normalised_query_object_inventory = self._normalise_query_object_inventory(
+			query_object_inventory,
+		)
 		normalised_query_objects = tuple(
 			str(value).strip()
-			for value in (query_objects or ())
+			for value in (
+				query_objects
+				or self._query_object_names_from_inventory(normalised_query_object_inventory)
+			)
 			if str(value).strip()
+		)
+		prompt_analysis = dict(
+			derived_analysis
+			or build_prompt_analysis_payload(
+				domain,
+				target_literals=[literal.to_signature() for literal in target_literals],
+				query_task_anchors=normalised_query_task_anchors,
+				action_analysis=action_analysis,
+			),
 		)
 
 		metadata: Dict[str, Any] = {
@@ -124,14 +148,18 @@ class HTNMethodSynthesizer:
 			"model": self.model if self.client else None,
 			"target_literals": [literal.to_signature() for literal in target_literals],
 			"query_task_anchors": list(normalised_query_task_anchors),
+			"semantic_objects": list(normalised_semantic_objects),
+			"query_object_inventory": list(normalised_query_object_inventory),
 			"query_objects": list(normalised_query_objects),
 			"negation_resolution": negation_resolution.to_dict(),
 			"action_analysis": action_analysis,
+			"derived_analysis": prompt_analysis,
 			"compound_tasks": 0,
 			"primitive_tasks": len(primitive_tasks),
 			"methods": 0,
 			"failure_stage": None,
 			"failure_reason": None,
+			"failure_class": None,
 			"llm_prompt": None,
 			"llm_response": None,
 			"llm_finish_reason": None,
@@ -158,8 +186,11 @@ class HTNMethodSynthesizer:
 				self._schema_hint(),
 				query_text=query_text or "",
 				query_task_anchors=normalised_query_task_anchors,
+				semantic_objects=normalised_semantic_objects,
+				query_object_inventory=normalised_query_object_inventory,
 				query_objects=normalised_query_objects,
 				action_analysis=action_analysis,
+				derived_analysis=prompt_analysis,
 			),
 		}
 		metadata["llm_prompt"] = prompt
@@ -560,6 +591,8 @@ class HTNMethodSynthesizer:
 		dynamic_predicates: set[str] = set()
 		producer_actions_by_predicate: Dict[str, List[str]] = {}
 		producer_patterns_by_predicate: Dict[str, List[Dict[str, Any]]] = {}
+		consumer_actions_by_predicate: Dict[str, List[str]] = {}
+		consumer_patterns_by_predicate: Dict[str, List[Dict[str, Any]]] = {}
 		parsed_actions = []
 
 		for action in domain.actions:
@@ -614,15 +647,54 @@ class HTNMethodSynthesizer:
 						"negative_effect_signatures": list(negative_effect_signatures),
 					},
 				)
+			for precondition in parsed_action.preconditions:
+				if precondition.predicate == "=":
+					continue
+				if precondition.predicate not in dynamic_predicates or not precondition.is_positive:
+					continue
+				consumer_actions_by_predicate.setdefault(precondition.predicate, []).append(action_name)
+				other_dynamic_precondition_signatures = [
+					literal_signature(pattern)
+					for pattern in parsed_action.preconditions
+					if pattern.predicate != "="
+					and pattern.predicate in dynamic_predicates
+					and pattern.is_positive
+					and pattern != precondition
+				]
+				consumer_patterns_by_predicate.setdefault(precondition.predicate, []).append(
+					{
+						"action_name": action_name,
+						"source_action_name": parsed_action.name,
+						"action_parameters": list(parsed_action.parameters),
+						"action_parameter_types": list(action_parameter_types),
+						"precondition_args": list(precondition.args),
+						"precondition_signature": literal_signature(precondition),
+						"other_dynamic_precondition_signatures": list(
+							other_dynamic_precondition_signatures,
+						),
+						"positive_effect_signatures": list(positive_effect_signatures),
+						"negative_effect_signatures": list(negative_effect_signatures),
+					},
+				)
 
 		for predicate_name, producer_actions in list(producer_actions_by_predicate.items()):
 			producer_actions_by_predicate[predicate_name] = sorted(dict.fromkeys(producer_actions))
+		for predicate_name, consumer_actions in list(consumer_actions_by_predicate.items()):
+			consumer_actions_by_predicate[predicate_name] = sorted(dict.fromkeys(consumer_actions))
 		for predicate_name, patterns in list(producer_patterns_by_predicate.items()):
 			producer_patterns_by_predicate[predicate_name] = sorted(
 				patterns,
 				key=lambda item: (
 					item["action_name"],
 					item["effect_signature"],
+				),
+			)
+		for predicate_name, patterns in list(consumer_patterns_by_predicate.items()):
+			consumer_patterns_by_predicate[predicate_name] = sorted(
+				patterns,
+				key=lambda item: (
+					item["action_name"],
+					item["precondition_signature"],
 				),
 			)
 
@@ -639,6 +711,14 @@ class HTNMethodSynthesizer:
 			},
 			"producer_patterns_by_predicate": {
 				predicate_name: producer_patterns_by_predicate.get(predicate_name, [])
+				for predicate_name in sorted(dynamic_predicates)
+			},
+			"consumer_actions_by_predicate": {
+				predicate_name: consumer_actions_by_predicate.get(predicate_name, [])
+				for predicate_name in sorted(dynamic_predicates)
+			},
+			"consumer_patterns_by_predicate": {
+				predicate_name: consumer_patterns_by_predicate.get(predicate_name, [])
 				for predicate_name in sorted(dynamic_predicates)
 			},
 		}
@@ -673,6 +753,48 @@ class HTNMethodSynthesizer:
 				"args": list(args),
 			})
 		return tuple(anchors)
+
+	@staticmethod
+	def _normalise_query_object_inventory(
+		query_object_inventory: Optional[Sequence[Dict[str, Any]]],
+	) -> Tuple[Dict[str, Any], ...]:
+		if not query_object_inventory:
+			return ()
+
+		entries: List[Dict[str, Any]] = []
+		for entry in query_object_inventory:
+			type_name = str(entry.get("type", "")).strip() or "object"
+			label = str(entry.get("label", "")).strip() or type_name
+			objects = [
+				str(item).strip()
+				for item in (entry.get("objects") or [])
+				if str(item).strip()
+			]
+			if not objects:
+				continue
+			entries.append(
+				{
+					"type": type_name,
+					"label": label,
+					"objects": objects,
+				},
+			)
+		return tuple(entries)
+
+	@staticmethod
+	def _query_object_names_from_inventory(
+		query_object_inventory: Sequence[Dict[str, Any]],
+	) -> Tuple[str, ...]:
+		ordered_names: List[str] = []
+		seen: set[str] = set()
+		for entry in query_object_inventory:
+			for item in entry.get("objects", []):
+				object_name = str(item).strip()
+				if not object_name or object_name in seen:
+					continue
+				seen.add(object_name)
+				ordered_names.append(object_name)
+		return tuple(ordered_names)
 
 	def _request_complete_llm_library(
 		self,
@@ -2414,6 +2536,10 @@ class HTNMethodSynthesizer:
 		error_metadata = dict(metadata)
 		error_metadata["failure_stage"] = failure_stage
 		error_metadata["failure_reason"] = failure_reason
+		error_metadata["failure_class"] = self._classify_failure(
+			failure_stage,
+			failure_reason,
+		)
 		return HTNSynthesisError(
 			f"HTN synthesis failed during {failure_stage}: {failure_reason}",
 			model=error_metadata.get("model"),
@@ -2421,6 +2547,32 @@ class HTNMethodSynthesizer:
 			llm_response=error_metadata.get("llm_response"),
 			metadata=error_metadata,
 		)
+
+	@staticmethod
+	def _classify_failure(
+		failure_stage: str,
+		failure_reason: str,
+	) -> str:
+		reason = str(failure_reason or "").lower()
+		if failure_stage == "preflight":
+			return "llm_not_configured"
+		if failure_stage == "llm_call":
+			return "llm_call_failed"
+		if failure_stage == "response_parse":
+			return "llm_response_parse_failed"
+		if "explicit ordering edges" in reason:
+			return "missing_ordering_edges"
+		if "uses auxiliary parameter" in reason:
+			return "unconstrained_auxiliary_parameter"
+		if "shared dynamic prerequisites" in reason:
+			return "missing_shared_child_prerequisites"
+		if "dynamic preconditions" in reason:
+			return "missing_primitive_dynamic_preconditions"
+		if "grounded query object" in reason:
+			return "grounded_query_object_leakage"
+		if failure_stage == "library_validation":
+			return "library_validation_failed"
+		return f"{failure_stage}_failed"
 
 	def _action_schema_map(self, domain: Any) -> Dict[str, Any]:
 		action_schemas: Dict[str, Any] = {}

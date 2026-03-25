@@ -245,6 +245,15 @@ class HTNMethodLibrary:
             )
 
         def load_method(item: Dict[str, Any]) -> HTNMethod:
+            raw_ordering = item.get("ordering", [])
+            ordering: List[Tuple[str, str]] = []
+            for edge in raw_ordering:
+                if not isinstance(edge, (list, tuple)) or len(edge) != 2:
+                    raise ValueError(
+                        "ordering edges must be length-2 arrays like "
+                        '["s1", "s2"]',
+                    )
+                ordering.append((str(edge[0]), str(edge[1])))
             return HTNMethod(
                 method_name=item["method_name"],
                 task_name=item["task_name"],
@@ -258,10 +267,7 @@ class HTNMethodLibrary:
                     if literal is not None
                 ),
                 subtasks=tuple(load_method_step(value) for value in item.get("subtasks", [])),
-                ordering=tuple(
-                    (edge[0], edge[1])
-                    for edge in item.get("ordering", [])
-                ),
+                ordering=tuple(ordering),
                 origin=item.get("origin", "heuristic"),
                 source_method_name=item.get("source_method_name"),
             )

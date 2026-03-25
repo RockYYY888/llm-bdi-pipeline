@@ -11,8 +11,18 @@ _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
-from stage3_method_synthesis.htn_schema import HTNLiteral
+from stage3_method_synthesis.htn_schema import (
+	HTNLiteral,
+	HTNMethod,
+	HTNMethodLibrary,
+	HTNTask,
+)
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
+
+
+OFFICIAL_BLOCKSWORLD_P01 = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"
+)
 
 
 def _sample_action_schemas():
@@ -271,11 +281,14 @@ def test_validate_success_writes_stage6_artifacts(monkeypatch, tmp_path):
 	validation_payload = json.loads((tmp_path / "jason_validation.json").read_text())
 	assert validation_payload["status"] == "success"
 	assert validation_payload["environment_adapter"]["success"] is True
+	assert validation_payload["failure_class"] is None
 	assert validation_payload["action_path"] == ["pick-up(a,b)"]
 	assert validation_payload["method_trace"] == [
 		{"method_name": "m_do_put_on_domain_2", "task_args": ["a", "b"]},
 	]
 	assert validation_payload["failed_goals"] == []
+	assert validation_payload["consistency_checks"]["action_path_schema_replay"]["passed"] is True
+	assert validation_payload["consistency_checks"]["method_trace_reconstruction"]["passed"] is None
 	assert validation_payload["artifacts"]["action_path"] == str(tmp_path / "action_path.txt")
 	assert validation_payload["artifacts"]["method_trace"] == str(tmp_path / "method_trace.json")
 
@@ -313,6 +326,149 @@ def test_extract_method_trace_preserves_runtime_order():
 			"task_args": ["rover0", "waypoint1", "channel0"],
 		},
 	]
+
+
+def test_action_path_schema_replay_detects_shared_resource_precondition_violation():
+	runner = JasonRunner()
+	check = runner._replay_action_path_against_schemas(
+		action_path=["navigate(rover0, waypoint0, waypoint1)"],
+		action_schemas=[
+			{
+				"functor": "navigate",
+				"source_name": "navigate",
+				"parameters": ["?r", "?from", "?to"],
+				"precondition_clauses": [
+					[
+						{"predicate": "available", "args": ["?r"], "is_positive": True},
+						{"predicate": "at", "args": ["?r", "?from"], "is_positive": True},
+					],
+				],
+				"effects": [
+					{"predicate": "at", "args": ["?r", "?from"], "is_positive": False},
+					{"predicate": "at", "args": ["?r", "?to"], "is_positive": True},
+				],
+			},
+		],
+		seed_facts=["(at rover0 waypoint0)"],
+	)
+
+	assert check["passed"] is False
+	assert check["failure_class"] == "action_path_precondition_violation"
+
+
+def test_action_path_schema_replay_detects_store_lifecycle_violation():
+	runner = JasonRunner()
+	check = runner._replay_action_path_against_schemas(
+		action_path=[
+			"sample_soil(rover0, store0, waypoint1)",
+			"sample_soil(rover0, store0, waypoint1)",
+		],
+		action_schemas=[
+			{
+				"functor": "sample_soil",
+				"source_name": "sample_soil",
+				"parameters": ["?r", "?s", "?wp"],
+				"precondition_clauses": [
+					[
+						{"predicate": "available", "args": ["?r"], "is_positive": True},
+						{"predicate": "at", "args": ["?r", "?wp"], "is_positive": True},
+						{"predicate": "at_soil_sample", "args": ["?wp"], "is_positive": True},
+						{"predicate": "empty", "args": ["?s"], "is_positive": True},
+					],
+				],
+				"effects": [
+					{"predicate": "full", "args": ["?s"], "is_positive": True},
+					{"predicate": "empty", "args": ["?s"], "is_positive": False},
+				],
+			},
+		],
+		seed_facts=[
+			"(available rover0)",
+			"(at rover0 waypoint1)",
+			"(at_soil_sample waypoint1)",
+			"(empty store0)",
+		],
+	)
+
+	assert check["passed"] is False
+	assert check["failure_class"] == "action_path_precondition_violation"
+	assert check["checked_steps"] == 1
+
+
+def test_action_path_schema_replay_detects_calibration_lifecycle_violation():
+	runner = JasonRunner()
+	check = runner._replay_action_path_against_schemas(
+		action_path=[
+			"take_image(rover0, waypoint0, objective0, camera0, colour)",
+			"take_image(rover0, waypoint0, objective0, camera0, colour)",
+		],
+		action_schemas=[
+			{
+				"functor": "take_image",
+				"source_name": "take_image",
+				"parameters": ["?r", "?wp", "?objective", "?camera", "?mode"],
+				"precondition_clauses": [
+					[
+						{"predicate": "calibrated", "args": ["?camera", "?r"], "is_positive": True},
+						{"predicate": "available", "args": ["?r"], "is_positive": True},
+						{"predicate": "at", "args": ["?r", "?wp"], "is_positive": True},
+					],
+				],
+				"effects": [
+					{"predicate": "have_image", "args": ["?r", "?objective", "?mode"], "is_positive": True},
+					{"predicate": "calibrated", "args": ["?camera", "?r"], "is_positive": False},
+				],
+			},
+		],
+		seed_facts=[
+			"(calibrated camera0 rover0)",
+			"(available rover0)",
+			"(at rover0 waypoint0)",
+		],
+	)
+
+	assert check["passed"] is False
+	assert check["failure_class"] == "action_path_precondition_violation"
+	assert check["checked_steps"] == 1
+
+
+def test_method_trace_reconstruction_detects_missing_root_entries():
+	if not OFFICIAL_BLOCKSWORLD_P01.exists():
+		pytest.skip(f"Missing blocksworld problem file: {OFFICIAL_BLOCKSWORLD_P01}")
+
+	runner = JasonRunner()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("BLOCK1", "BLOCK2"), False, ("on",), source_name="do_put_on"),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_noop",
+				task_name="do_put_on",
+				parameters=("BLOCK1", "BLOCK2"),
+				context=(HTNLiteral("on", ("BLOCK1", "BLOCK2"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	check = runner._check_method_trace_reconstruction(
+		action_path=[],
+		method_trace=[
+			{"method_name": "m_do_put_on_noop", "task_args": ["b4", "b2"]},
+			{"method_name": "m_do_put_on_noop", "task_args": ["b1", "b4"]},
+		],
+		method_library=method_library,
+		problem_file=OFFICIAL_BLOCKSWORLD_P01,
+	)
+
+	assert check["passed"] is False
+	assert check["failure_class"] == "method_trace_reconstruction_failed"
 
 
 def test_extract_failed_goals_preserves_runtime_order():

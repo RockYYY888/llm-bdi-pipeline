@@ -114,6 +114,7 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
             "model": "deepseek-chat",
             "failure_stage": "response_parse",
             "failure_reason": "invalid payload",
+            "failure_class": "llm_response_parse_failed",
         },
     )
     logger.end_pipeline(success=False)
@@ -131,6 +132,7 @@ def test_stage3_failure_persists_diagnostics_in_logs(tmp_path):
     assert execution["stage3_llm_response"] == '{"bad":"payload"}'
     assert execution["stage3_metadata"]["failure_stage"] == "response_parse"
     assert execution["stage3_metadata"]["failure_reason"] == "invalid payload"
+    assert execution["stage3_metadata"]["failure_class"] == "llm_response_parse_failed"
 
     assert "HTN METHOD SYNTHESIS DIAGNOSTICS" in execution_txt
     assert "failure_stage: response_parse" in execution_txt

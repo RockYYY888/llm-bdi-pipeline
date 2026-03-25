@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary
 from stage6_jason_validation.environment_adapter import (
@@ -51,6 +51,8 @@ class JasonValidationResult:
 	method_trace: List[Dict[str, Any]]
 	failed_goals: List[str]
 	environment_adapter: Dict[str, Any]
+	failure_class: Optional[str]
+	consistency_checks: Dict[str, Any]
 	artifacts: Dict[str, str]
 
 	def to_dict(self) -> Dict[str, Any]:
@@ -69,6 +71,8 @@ class JasonValidationResult:
 			"method_trace": list(self.method_trace),
 			"failed_goals": list(self.failed_goals),
 			"environment_adapter": dict(self.environment_adapter),
+			"failure_class": self.failure_class,
+			"consistency_checks": dict(self.consistency_checks),
 			"artifacts": dict(self.artifacts),
 		}
 
@@ -111,6 +115,7 @@ class JasonRunner:
 		action_schemas: Sequence[Dict[str, Any]],
 		seed_facts: Sequence[str] = (),
 		domain_name: str,
+		problem_file: str | Path | None = None,
 		output_dir: str | Path,
 	) -> JasonValidationResult:
 		"""Execute Jason validation and return a structured result."""
@@ -227,13 +232,29 @@ class JasonRunner:
 			"jason_validation": str(validation_json_path),
 		}
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
+		consistency_checks = self._run_consistency_checks(
+			action_path=action_path,
+			method_trace=method_trace,
+			method_library=method_library,
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+			problem_file=problem_file,
+		)
 		is_success = self._is_successful_run(
 			stdout=stdout,
 			exit_code=exit_code,
 			timed_out=timed_out,
 			environment_result=environment_result,
+			consistency_checks=consistency_checks,
 		)
 		status = "success" if is_success else "failed"
+		failure_class = None if is_success else self._failure_class(
+			stdout,
+			exit_code,
+			timed_out,
+			environment_result,
+			consistency_checks,
+		)
 		result_payload = JasonValidationResult(
 			status=status,
 			backend=self.backend_name,
@@ -249,6 +270,8 @@ class JasonRunner:
 			method_trace=method_trace,
 			failed_goals=failed_goals,
 			environment_adapter=environment_result.to_dict(),
+			failure_class=failure_class,
+			consistency_checks=consistency_checks,
 			artifacts=artifacts,
 		)
 		validation_json_path.write_text(json.dumps(result_payload.to_dict(), indent=2))
@@ -260,6 +283,7 @@ class JasonRunner:
 				exit_code,
 				timed_out,
 				environment_result,
+				consistency_checks,
 			)
 			raise JasonValidationError(
 				f"Stage 6 Jason validation failed: {failure_reason}",
@@ -1294,6 +1318,7 @@ public class {self.environment_class_name} extends Environment {{
 		exit_code: Optional[int],
 		timed_out: bool,
 		environment_result: EnvironmentAdapterResult,
+		consistency_checks: Dict[str, Any],
 	) -> bool:
 		if timed_out:
 			return False
@@ -1305,6 +1330,8 @@ public class {self.environment_class_name} extends Environment {{
 			return False
 		if not environment_result.success:
 			return False
+		if not bool(consistency_checks.get("success", True)):
+			return False
 		return True
 
 	def _failure_reason(
@@ -1314,6 +1341,7 @@ public class {self.environment_class_name} extends Environment {{
 		exit_code: Optional[int],
 		timed_out: bool,
 		environment_result: EnvironmentAdapterResult,
+		consistency_checks: Dict[str, Any],
 	) -> str:
 		if timed_out:
 			return f"timeout ({self.timeout_seconds}s)"
@@ -1331,7 +1359,303 @@ public class {self.environment_class_name} extends Environment {{
 				"environment adapter validation failed: "
 				+ (environment_result.error or "unknown adapter error")
 			)
+		if not bool(consistency_checks.get("success", True)):
+			for check_name in ("action_path_schema_replay", "method_trace_reconstruction"):
+				check_payload = consistency_checks.get(check_name) or {}
+				if check_payload.get("passed") is False:
+					return (
+						f"{check_name} failed: "
+						f"{check_payload.get('message') or check_payload.get('failure_class') or 'unknown'}"
+					)
 		return "unknown validation error"
+
+	def _failure_class(
+		self,
+		stdout: str,
+		exit_code: Optional[int],
+		timed_out: bool,
+		environment_result: EnvironmentAdapterResult,
+		consistency_checks: Dict[str, Any],
+	) -> str:
+		if timed_out:
+			return "timeout"
+		if exit_code is None:
+			return "missing_exit_code"
+		if exit_code != 0:
+			return "runtime_process_failed"
+		if self.failure_marker in stdout:
+			return "runtime_failure_marker"
+		if self.success_marker not in stdout:
+			return "missing_success_marker"
+		if not environment_result.success:
+			return "environment_adapter_failure"
+		for check_name in ("action_path_schema_replay", "method_trace_reconstruction"):
+			check_payload = consistency_checks.get(check_name) or {}
+			if check_payload.get("passed") is False:
+				return str(check_payload.get("failure_class") or f"{check_name}_failed")
+		return "validation_failed"
+
+	def _run_consistency_checks(
+		self,
+		*,
+		action_path: Sequence[str],
+		method_trace: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+		problem_file: str | Path | None,
+	) -> Dict[str, Any]:
+		action_replay = self._replay_action_path_against_schemas(
+			action_path=action_path,
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+		)
+		method_trace_check = self._check_method_trace_reconstruction(
+			action_path=action_path,
+			method_trace=method_trace,
+			method_library=method_library,
+			problem_file=problem_file,
+		)
+		return {
+			"success": bool(action_replay.get("passed", False))
+			and method_trace_check.get("passed") is not False,
+			"action_path_schema_replay": action_replay,
+			"method_trace_reconstruction": method_trace_check,
+		}
+
+	def _replay_action_path_against_schemas(
+		self,
+		*,
+		action_path: Sequence[str],
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+	) -> Dict[str, Any]:
+		world = {
+			atom
+			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
+			if atom is not None
+		}
+		schema_lookup: Dict[str, Dict[str, Any]] = {}
+		for schema in action_schemas:
+			functor = str(schema.get("functor", "")).strip()
+			source_name = str(schema.get("source_name", "")).strip()
+			if functor:
+				schema_lookup.setdefault(functor, schema)
+			if source_name:
+				schema_lookup.setdefault(source_name, schema)
+
+		for index, step in enumerate(action_path):
+			parsed_step = self._parse_runtime_action_step(step)
+			if parsed_step is None:
+				return {
+					"passed": False,
+					"failure_class": "action_path_malformed_step",
+					"message": f"runtime action step #{index + 1} is malformed: {step}",
+					"checked_steps": index,
+				}
+			action_name, action_args = parsed_step
+			schema = schema_lookup.get(action_name)
+			if schema is None:
+				return {
+					"passed": False,
+					"failure_class": "action_path_unknown_action",
+					"message": f"runtime action step #{index + 1} references unknown action '{action_name}'",
+					"checked_steps": index,
+				}
+			parameters = [str(item) for item in (schema.get("parameters") or [])]
+			if len(parameters) != len(action_args):
+				return {
+					"passed": False,
+					"failure_class": "action_path_arity_mismatch",
+					"message": (
+						f"runtime action step #{index + 1} has arity {len(action_args)} for "
+						f"'{action_name}', expected {len(parameters)}"
+					),
+					"checked_steps": index,
+				}
+
+			bindings: Dict[str, str] = {}
+			for parameter, value in zip(parameters, action_args):
+				token = self._canonical_runtime_token(parameter)
+				bindings[token] = value
+				if token.startswith("?"):
+					bindings[token[1:]] = value
+
+			precondition_clauses = list(schema.get("precondition_clauses") or [])
+			if not precondition_clauses:
+				precondition_clauses = [list(schema.get("preconditions") or [])]
+			if not any(
+				self._replay_precondition_clause_holds(clause, bindings, world)
+				for clause in precondition_clauses
+			):
+				return {
+					"passed": False,
+					"failure_class": "action_path_precondition_violation",
+					"message": (
+						f"runtime action step #{index + 1} violates schema preconditions for "
+						f"'{action_name}{self._render_runtime_args(action_args)}'"
+					),
+					"checked_steps": index,
+				}
+
+			for effect in schema.get("effects") or []:
+				predicate = str(effect.get("predicate", "")).strip()
+				if not predicate or predicate == "=":
+					continue
+				grounded = self._ground_runtime_pattern(
+					predicate,
+					effect.get("args") or [],
+					bindings,
+				)
+				if effect.get("is_positive", True):
+					world.add(grounded)
+				else:
+					world.discard(grounded)
+
+		return {
+			"passed": True,
+			"failure_class": None,
+			"message": None,
+			"checked_steps": len(action_path),
+		}
+
+	def _check_method_trace_reconstruction(
+		self,
+		*,
+		action_path: Sequence[str],
+		method_trace: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		problem_file: str | Path | None,
+	) -> Dict[str, Any]:
+		if problem_file is None:
+			return {
+				"passed": None,
+				"failure_class": None,
+				"message": "skipped: no problem_file",
+			}
+		if method_library is None or not method_library.methods:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_reconstruction_failed",
+				"message": "method trace cannot be checked without a non-empty method library",
+			}
+
+		from utils.ipc_plan_verifier import IPCPlanVerifier
+
+		verifier = IPCPlanVerifier()
+		try:
+			rendered_plan = verifier._render_supported_hierarchical_plan(
+				domain_file=problem_file,
+				problem_file=problem_file,
+				action_path=action_path,
+				method_library=method_library,
+				method_trace=method_trace,
+			)
+		except Exception as exc:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_reconstruction_failed",
+				"message": str(exc),
+			}
+
+		build_warning = getattr(verifier, "_last_hierarchical_build_warning", None)
+		if not rendered_plan:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_reconstruction_failed",
+				"message": "hierarchical plan reconstruction returned no plan",
+			}
+		if build_warning:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_partial_reconstruction",
+				"message": build_warning,
+			}
+		return {
+			"passed": True,
+			"failure_class": None,
+			"message": None,
+		}
+
+	def _replay_precondition_clause_holds(
+		self,
+		clause: Sequence[Dict[str, Any]],
+		bindings: Dict[str, str],
+		world: Set[str],
+	) -> bool:
+		for pattern in clause:
+			predicate = str(pattern.get("predicate", "")).strip()
+			args = [str(item) for item in (pattern.get("args") or [])]
+			is_positive = bool(pattern.get("is_positive", True))
+			if predicate == "=" and len(args) == 2:
+				left = self._resolve_runtime_token(args[0], bindings)
+				right = self._resolve_runtime_token(args[1], bindings)
+				if (left == right) != is_positive:
+					return False
+				continue
+			grounded = self._ground_runtime_pattern(predicate, args, bindings)
+			holds = grounded in world if is_positive else grounded not in world
+			if not holds:
+				return False
+		return True
+
+	@staticmethod
+	def _parse_runtime_action_step(step: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		text = (step or "").strip()
+		match = re.fullmatch(r"([A-Za-z0-9_-]+)(?:\((.*)\))?", text)
+		if match is None:
+			return None
+		action_name = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		if not args_text:
+			return action_name, ()
+		return action_name, tuple(
+			part.strip()
+			for part in args_text.split(",")
+			if part.strip()
+		)
+
+	@staticmethod
+	def _canonical_runtime_token(token: str) -> str:
+		value = str(token or "").strip()
+		if len(value) >= 2 and (
+			(value.startswith('"') and value.endswith('"'))
+			or (value.startswith("'") and value.endswith("'"))
+		):
+			return value[1:-1]
+		return value
+
+	def _resolve_runtime_token(
+		self,
+		token: str,
+		bindings: Dict[str, str],
+	) -> str:
+		canonical = self._canonical_runtime_token(token)
+		if canonical in bindings:
+			return bindings[canonical]
+		if canonical.startswith("?") and canonical[1:] in bindings:
+			return bindings[canonical[1:]]
+		return canonical
+
+	def _ground_runtime_pattern(
+		self,
+		predicate: str,
+		args: Sequence[str],
+		bindings: Dict[str, str],
+	) -> str:
+		if not args:
+			return predicate
+		grounded_args = [
+			self._resolve_runtime_token(arg, bindings)
+			for arg in args
+		]
+		return f"{predicate}({','.join(grounded_args)})"
+
+	@staticmethod
+	def _render_runtime_args(args: Sequence[str]) -> str:
+		if not args:
+			return "()"
+		return f"({', '.join(args)})"
 
 	@staticmethod
 	def _hddl_fact_to_atom(fact: str) -> Optional[str]:
