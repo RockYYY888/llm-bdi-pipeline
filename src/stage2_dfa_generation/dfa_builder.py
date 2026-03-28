@@ -57,23 +57,18 @@ class DFABuilder:
                 - original_num_transitions: Number of transitions in original DFA
                 - simplification_stats: Statistics about the simplification process
         """
-        from stage1_interpretation.ltlf_formula import LogicalOperator
-        
-        # Combine all formulas with AND if multiple
-        if len(ltl_spec.formulas) == 0:
-            raise ValueError("No LTLf formulas in specification")
-        
-        if len(ltl_spec.formulas) == 1:
-            combined_formula = ltl_spec.formulas[0]
+        if hasattr(ltl_spec, "combined_formula_string"):
+            formula_str = ltl_spec.combined_formula_string()
         else:
-            # Create AND of all formulas
-            from stage1_interpretation.ltlf_formula import LTLFormula
-            combined_formula = LTLFormula()
-            combined_formula.logical_op = LogicalOperator.AND
-            combined_formula.sub_formulas = ltl_spec.formulas
-        
-        # Convert to string
-        formula_str = combined_formula.to_string()
+            if len(ltl_spec.formulas) == 0:
+                raise ValueError("No LTLf formulas in specification")
+            if len(ltl_spec.formulas) == 1:
+                formula_str = ltl_spec.formulas[0].to_string()
+            else:
+                formula_str = " & ".join(
+                    f"({formula.to_string()})"
+                    for formula in ltl_spec.formulas
+                )
 
         # Step 1: Generate DFA using the convert method (takes ltl_spec object)
         original_dfa_dot, metadata = self.converter.convert(ltl_spec)

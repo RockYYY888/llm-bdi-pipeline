@@ -235,6 +235,29 @@ class LTLSpecification:
         """Add an LTL formula to the specification"""
         self.formulas.append(formula)
 
+    def combined_formula(self) -> LTLFormula:
+        """
+        Return the specification as a single formula.
+
+        Stage 1 may emit multiple top-level formulas when the instruction expresses
+        multiple independent obligations. Stage 2 consumes a single DFA target, so
+        the specification semantics are the conjunction of those top-level formulas.
+        """
+        if not self.formulas:
+            raise ValueError("No LTLf formulas in specification")
+        if len(self.formulas) == 1:
+            return self.formulas[0]
+        return LTLFormula(
+            operator=None,
+            predicate=None,
+            sub_formulas=list(self.formulas),
+            logical_op=LogicalOperator.AND,
+        )
+
+    def combined_formula_string(self) -> str:
+        """Render the full specification semantics as one LTLf string."""
+        return self.combined_formula().to_string()
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
         result = {

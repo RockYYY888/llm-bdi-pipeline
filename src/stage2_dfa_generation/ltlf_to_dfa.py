@@ -124,20 +124,18 @@ class LTLfToDFA:
             - metadata_dict: Contains mappings, original formulas, etc.
         """
 
-        # Extract formula strings from LTLSpecification
-        if hasattr(ltl_spec, 'formulas'):
+        if hasattr(ltl_spec, "combined_formula_string"):
+            original_formula = ltl_spec.combined_formula_string()
+        elif hasattr(ltl_spec, 'formulas'):
             formula_strings = [f.to_string() for f in ltl_spec.formulas]
+            if len(formula_strings) == 0:
+                raise ValueError("No LTLf formulas provided")
+            if len(formula_strings) == 1:
+                original_formula = formula_strings[0]
+            else:
+                original_formula = " & ".join(f"({f})" for f in formula_strings)
         else:
             raise ValueError("ltl_spec must have 'formulas' attribute")
-
-        # Combine multiple formulas with conjunction if needed
-        if len(formula_strings) == 0:
-            raise ValueError("No LTLf formulas provided")
-        elif len(formula_strings) == 1:
-            original_formula = formula_strings[0]
-        else:
-            # Join multiple formulas with AND
-            original_formula = " & ".join(f"({f})" for f in formula_strings)
 
         # Convert to propositional encoding
         propositional_formula = self.encoder.convert_formula(original_formula)
