@@ -245,7 +245,15 @@ class HTNMethodLibrary:
             )
 
         def load_method(item: Dict[str, Any]) -> HTNMethod:
-            raw_ordering = item.get("ordering", [])
+            raw_ordering = item.get("ordering")
+            if raw_ordering in (None, []):
+                for alias in ("orderings", "ordering_edges"):
+                    alias_value = item.get(alias)
+                    if alias_value not in (None, []):
+                        raw_ordering = alias_value
+                        break
+                else:
+                    raw_ordering = []
             ordering: List[Tuple[str, str]] = []
             for edge in raw_ordering:
                 if not isinstance(edge, (list, tuple)) or len(edge) != 2:

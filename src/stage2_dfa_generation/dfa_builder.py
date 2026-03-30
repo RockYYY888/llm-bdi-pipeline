@@ -77,6 +77,26 @@ class DFABuilder:
         original_num_states = self._count_states(original_dfa_dot)
         original_num_transitions = self._count_transitions(original_dfa_dot)
 
+        if metadata.get("construction") == "independent_eventually_atomic_fast_path":
+            return {
+                "formula": formula_str,
+                "original_dfa_dot": original_dfa_dot,
+                "dfa_dot": original_dfa_dot,
+                "num_states": original_num_states,
+                "num_transitions": original_num_transitions,
+                "original_num_states": original_num_states,
+                "original_num_transitions": original_num_transitions,
+                "simplification_stats": {
+                    "method": "independent_eventually_atomic_fast_path",
+                    "num_predicates": len(metadata.get("alphabet", [])),
+                    "num_original_states": original_num_states,
+                    "num_new_states": original_num_states,
+                    "num_original_transitions": original_num_transitions,
+                    "num_new_transitions": original_num_transitions,
+                    "skipped_simplifier": True,
+                },
+            }
+
         # Step 2: Simplify DFA (mandatory)
         # This replaces complex boolean expressions with atomic literals (var or !var)
         if not hasattr(ltl_spec, 'grounding_map') or ltl_spec.grounding_map is None:
@@ -104,24 +124,30 @@ class DFABuilder:
     def _count_states(self, dfa_dot: str) -> int:
         """Count number of states in DFA"""
         import re
-        # Match state declarations like: node [shape = doublecircle]; 2;
-        # Only count lines that have the pattern: node [...]; <number>;
-        state_pattern = r'node\s+\[.*?\];\s*(\d+);'
         states = set()
 
         for line in dfa_dot.split('\n'):
-            matches = re.findall(state_pattern, line)
-            states.update(matches)
+            grouped_match = re.search(r'node\s+\[.*?\];\s*([^;]+);', line)
+            if grouped_match:
+                tokens = re.findall(r'[A-Za-z0-9_]+', grouped_match.group(1))
+                states.update(token for token in tokens if token != "init")
+                continue
+            single_match = re.search(r'([A-Za-z0-9_]+)\s*\[\s*shape\s*=\s*', line)
+            if single_match:
+                token = single_match.group(1)
+                if token != "init":
+                    states.add(token)
 
         return len(states)
     
     def _count_transitions(self, dfa_dot: str) -> int:
         """Count number of transitions in DFA"""
         import re
-        # Match transitions like: 1 -> 2 [label="condition"];
-        transition_pattern = r'\d+\s*->\s*\d+'
-        transitions = re.findall(transition_pattern, dfa_dot)
-        return len(transitions)
+        transitions = re.findall(
+            r'([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)',
+            dfa_dot,
+        )
+        return sum(1 for source, _ in transitions if source != "init")
 
 
 def test_dfa_builder():

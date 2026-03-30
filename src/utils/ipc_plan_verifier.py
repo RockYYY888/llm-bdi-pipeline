@@ -477,9 +477,10 @@ class IPCPlanVerifier:
 
 		actions = [self._parse_action_step(step) for step in action_path]
 		trace_entries = self._normalise_method_trace(method_trace)
+		root_tasks = list(problem.htn_tasks)
 		root_nodes, action_index, trace_index = self._reconstruct_hierarchy(
 			method_library=method_library,
-			root_tasks=problem.htn_tasks,
+			root_tasks=root_tasks,
 			actions=actions,
 			trace_entries=trace_entries,
 		)
@@ -531,28 +532,51 @@ class IPCPlanVerifier:
 			action_index: int,
 			trace_index: int,
 		) -> Tuple[_AbstractNode, int, int]:
-			if trace_index >= len(trace_entries):
-				raise ValueError(
-					f"method trace ended before task {source_task_name}{task_args} could be reconstructed",
-				)
-
-			entry = trace_entries[trace_index]
-			method = method_lookup.get(entry.method_name)
-			if method is None:
-				raise ValueError(f"method trace references unknown method '{entry.method_name}'")
-			if method.task_name != task_name:
-				raise ValueError(
-					f"expected method for task '{task_name}' but trace selected '{method.task_name}'",
-				)
-			if entry.task_args != task_args:
+			next_action_index = action_index
+			next_trace_index = trace_index
+			while next_trace_index < len(trace_entries):
+				entry = trace_entries[next_trace_index]
+				method = method_lookup.get(entry.method_name)
+				if method is None:
+					raise ValueError(f"method trace references unknown method '{entry.method_name}'")
+				if self._method_trace_entry_matches_task(
+					method=method,
+					entry=entry,
+					task_name=task_name,
+					task_args=task_args,
+				):
+					break
+				if self._can_skip_noop_trace_artifact(
+					method=method,
+					actions=actions,
+					action_index=next_action_index,
+				):
+					next_action_index += 1
+					next_trace_index += 1
+					continue
+				if method.task_name != task_name:
+					raise ValueError(
+						f"expected method for task '{task_name}' but trace selected '{method.task_name}'",
+					)
 				raise ValueError(
 					f"method trace arguments for '{entry.method_name}' do not match task "
 					f"{source_task_name}{task_args}: got {entry.task_args}",
 				)
-			bindings = self._seed_method_bindings(method, task_args, task_lookup)
 
-			next_action_index = action_index
-			next_trace_index = trace_index + 1
+			if next_trace_index >= len(trace_entries):
+				raise ValueError(
+					f"method trace ended before task {source_task_name}{task_args} could be reconstructed",
+				)
+
+			entry = trace_entries[next_trace_index]
+			method = method_lookup[entry.method_name]
+			grounded_task_args = self._resolve_task_args_from_trace(
+				task_args=task_args,
+				trace_args=entry.task_args,
+			)
+			bindings = self._seed_method_bindings(method, grounded_task_args, task_lookup)
+
+			next_trace_index += 1
 			child_nodes: List[_PlanNode] = []
 			for step in self._ordered_method_steps(method):
 				if step.kind == "primitive":
@@ -611,7 +635,7 @@ class IPCPlanVerifier:
 			return (
 				_AbstractNode(
 					task_name=source_task_name,
-					args=task_args,
+					args=grounded_task_args,
 					method_name=method.source_method_name or method.method_name,
 					children=child_nodes,
 				),
@@ -637,6 +661,49 @@ class IPCPlanVerifier:
 
 		return root_nodes, next_action_index, next_trace_index
 
+	def _method_trace_entry_matches_task(
+		self,
+		*,
+		method: HTNMethod,
+		entry: _MethodTraceEntry,
+		task_name: str,
+		task_args: Sequence[str],
+	) -> bool:
+		if method.task_name != task_name:
+			return False
+		try:
+			self._resolve_task_args_from_trace(
+				task_args=task_args,
+				trace_args=entry.task_args,
+			)
+		except ValueError:
+			return False
+		return True
+
+	def _can_skip_noop_trace_artifact(
+		self,
+		*,
+		method: HTNMethod,
+		actions: Sequence[_ActionStep],
+		action_index: int,
+	) -> bool:
+		if not self._method_is_pure_noop(method):
+			return False
+		if action_index >= len(actions):
+			return False
+		action_name, action_args = actions[action_index]
+		return action_name == "nop" and not action_args
+
+	@staticmethod
+	def _method_is_pure_noop(method: HTNMethod) -> bool:
+		if len(method.subtasks) != 1:
+			return False
+		step = method.subtasks[0]
+		if step.kind != "primitive":
+			return False
+		action_name = (step.action_name or step.task_name or "").strip()
+		return action_name == "nop"
+
 	@staticmethod
 	def _normalise_method_trace(
 		method_trace: Sequence[Dict[str, Any]],
@@ -657,6 +724,19 @@ class IPCPlanVerifier:
 				),
 			)
 		return trace_entries
+
+	@staticmethod
+	def _resolve_task_args_from_trace(
+		task_args: Sequence[str],
+		trace_args: Sequence[str],
+	) -> Tuple[str, ...]:
+		bindings = IPCPlanVerifier._unify_arguments(
+			task_args,
+			trace_args,
+			{},
+			(),
+		)
+		return IPCPlanVerifier._ground_arguments(task_args, bindings)
 
 	@staticmethod
 	def _ground_arguments(args: Sequence[str], bindings: Dict[str, str]) -> Tuple[str, ...]:
@@ -708,7 +788,7 @@ class IPCPlanVerifier:
 
 	@staticmethod
 	def _looks_like_variable(token: str) -> bool:
-		return bool(token) and token[0].isupper()
+		return bool(token) and (token[0].isupper() or token[0] == "?")
 
 	@staticmethod
 	def _default_task_args(

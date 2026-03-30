@@ -45,8 +45,14 @@ class Config:
 
     @property
     def openai_stage3_max_tokens(self) -> int:
-        """Get Stage 3 response token budget clamped to the backend-supported range."""
-        return min(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '8192')), 8192)
+        """
+        Get the Stage 3 response token budget.
+
+        Stage 3 is a single-shot synthesis step, so repository-level hard clamping
+        creates avoidable truncation risk on providers that support larger outputs.
+        Leave the budget provider-configurable instead of forcing an 8192-token cap.
+        """
+        return max(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '20000')), 1)
 
     @property
     def openai_base_url(self) -> Optional[str]:

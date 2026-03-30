@@ -36,9 +36,15 @@ class PANDAProblemBuilder:
 		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
 		task_name: str,
 		task_args: Sequence[str],
+		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
 		initial_facts: Optional[Sequence[str]] = None,
 	) -> str:
-		object_list = self._select_objects(objects, task_args)
+		task_network_entries = tuple(task_network or ())
+		object_list = self._select_objects(
+			objects,
+			task_args,
+			task_network=task_network_entries,
+		)
 		object_type = self._resolve_object_type(domain)
 		typed_object_list = self._select_typed_objects(
 			typed_objects,
@@ -52,9 +58,16 @@ class PANDAProblemBuilder:
 			lines.append(f"  (:objects {self._render_typed_objects(typed_object_list)})")
 		lines.append("  (:htn")
 		lines.append("    :parameters ()")
-		lines.append(
-			f"    :ordered-subtasks (and (t1 ({task_name}{self._render_problem_args(task_args)})))"
-		)
+		if task_network_entries:
+			task_lines = [
+				f"(t{index} ({network_task}{self._render_problem_args(network_args)}))"
+				for index, (network_task, network_args) in enumerate(task_network_entries, start=1)
+			]
+			lines.append(f"    :ordered-subtasks (and {' '.join(task_lines)})")
+		else:
+			lines.append(
+				f"    :ordered-subtasks (and (t1 ({task_name}{self._render_problem_args(task_args)})))"
+			)
 		lines.append("  )")
 		lines.append("  (:init")
 		for fact in self._build_initial_facts(domain, object_list, initial_facts):
@@ -68,8 +81,13 @@ class PANDAProblemBuilder:
 		self,
 		objects: Sequence[str],
 		task_args: Sequence[str],
+		*,
+		task_network: Sequence[Tuple[str, Sequence[str]]] = (),
 	) -> List[str]:
-		return list(dict.fromkeys(objects or task_args))
+		candidates = list(objects or task_args)
+		for _, network_args in task_network:
+			candidates.extend(str(arg) for arg in network_args)
+		return list(dict.fromkeys(candidates))
 
 	def _select_typed_objects(
 		self,

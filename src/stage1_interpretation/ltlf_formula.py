@@ -230,6 +230,7 @@ class LTLSpecification:
         self.source_instruction: str = ""
         self.negation_hints: Dict[str, Any] = {}
         self.query_object_inventory: List[Dict[str, Any]] = []
+        self.query_task_literal_signatures: List[str] = []
 
     def add_formula(self, formula: LTLFormula):
         """Add an LTL formula to the specification"""
@@ -277,5 +278,7 @@ class LTLSpecification:
             result["negation_hints"] = dict(self.negation_hints)
         if self.query_object_inventory:
             result["query_object_inventory"] = list(self.query_object_inventory)
+        if self.query_task_literal_signatures:
+            result["query_task_literal_signatures"] = list(self.query_task_literal_signatures)
 
         return result

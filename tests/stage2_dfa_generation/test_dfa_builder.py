@@ -14,6 +14,7 @@ from stage1_interpretation.ltlf_formula import (
     TemporalOperator,
 )
 from stage2_dfa_generation.dfa_builder import DFABuilder
+from stage2_dfa_generation.ltlf_to_dfa import LTLfToDFA
 
 
 def _atomic_formula(predicate: str, args: list[str]) -> LTLFormula:
@@ -83,3 +84,52 @@ digraph G {
     assert result["original_num_transitions"] == 1
     assert result["num_states"] == 2
     assert result["num_transitions"] == 1
+
+
+def test_ltlf_to_dfa_uses_fast_path_for_independent_eventually_conjunctions():
+    spec = LTLSpecification()
+    spec.add_formula(_finally_formula("on", ["a", "b"]))
+    spec.add_formula(_finally_formula("clear", ["a"]))
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_a", "clear", ["a"])
+    spec.grounding_map = grounding_map
+
+    converter = LTLfToDFA()
+    converter.ltlf_parser = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("generic ltlf2dfa path should not be used"),
+    )
+
+    dfa_dot, metadata = converter.convert(spec)
+
+    assert metadata["construction"] == "independent_eventually_atomic_fast_path"
+    assert metadata["num_states"] == 4
+    assert set(metadata["alphabet"]) == {"on_a_b", "clear_a"}
+    assert '1 -> 2 [label="on_a_b"]' in dfa_dot
+    assert '1 -> 3 [label="clear_a"]' in dfa_dot
+    assert '2 -> 4 [label="clear_a"]' in dfa_dot
+    assert '3 -> 4 [label="on_a_b"]' in dfa_dot
+
+
+def test_dfa_builder_skips_bdd_simplification_for_independent_eventually_atomic_fast_path():
+    spec = LTLSpecification()
+    spec.add_formula(_finally_formula("on", ["a", "b"]))
+    spec.add_formula(_finally_formula("clear", ["a"]))
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_a", "clear", ["a"])
+    spec.grounding_map = grounding_map
+
+    builder = DFABuilder()
+    builder.simplifier.simplify = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("BDD simplifier should be skipped for the atomic fast path"),
+    )
+
+    result = builder.build(spec)
+
+    assert result["original_num_states"] == 4
+    assert result["num_states"] == 4
+    assert result["original_num_transitions"] == 5
+    assert result["num_transitions"] == 5
+    assert result["simplification_stats"]["method"] == "independent_eventually_atomic_fast_path"
+    assert result["simplification_stats"]["skipped_simplifier"] is True

@@ -166,6 +166,7 @@ class HTNMethodSynthesizer:
 			"llm_attempts": 0,
 			"llm_generation_attempts": 0,
 			"pruned_constructive_siblings": 0,
+			"pruned_unreachable_structures": 0,
 		}
 
 		if not self.client:
@@ -222,6 +223,10 @@ class HTNMethodSynthesizer:
 			domain,
 		)
 		metadata["pruned_constructive_siblings"] = pruned_count
+		llm_only_library, unreachable_pruned_count = self._prune_unreachable_task_structures(
+			llm_only_library,
+		)
+		metadata["pruned_unreachable_structures"] = unreachable_pruned_count
 		try:
 			self._validate_library(
 				llm_only_library,
@@ -341,27 +346,22 @@ class HTNMethodSynthesizer:
 		if not transition_specs or not ordered_literal_signatures:
 			return transition_specs
 
-		ordered_unique: List[str] = []
-		seen_labels: set[str] = set()
-		for label in ordered_literal_signatures:
-			if label in seen_labels:
-				continue
-			seen_labels.add(label)
-			ordered_unique.append(label)
+		ordered_occurrences = [label for label in ordered_literal_signatures if str(label).strip()]
+		if not ordered_occurrences:
+			return transition_specs
 
 		current_labels = [spec["label"] for spec in transition_specs]
-		label_to_spec = {
-			spec["label"]: spec
-			for spec in transition_specs
-		}
-		if not all(label in label_to_spec for label in ordered_unique):
+		label_to_spec = {}
+		for spec in transition_specs:
+			label_to_spec.setdefault(spec["label"], spec)
+		if not all(label in label_to_spec for label in ordered_occurrences):
 			return transition_specs
-		if ordered_unique == current_labels and len(current_labels) == len(ordered_unique):
+		if ordered_occurrences == current_labels and len(current_labels) == len(ordered_occurrences):
 			return transition_specs
 
-		accepting_state = f"q{len(ordered_unique) + 1}"
+		accepting_state = f"q{len(ordered_occurrences) + 1}"
 		reordered_specs: List[Dict[str, Any]] = []
-		for index, label in enumerate(ordered_unique, start=1):
+		for index, label in enumerate(ordered_occurrences, start=1):
 			spec = dict(label_to_spec[label])
 			source_state = f"q{index}"
 			target_state = f"q{index + 1}"
@@ -1042,9 +1042,23 @@ class HTNMethodSynthesizer:
 					subtasks=tuple(normalised_steps),
 					ordering=method.ordering,
 					origin=method.origin,
-					source_method_name=method.source_method_name,
+					source_method_name=(
+						method.source_method_name
+						or (
+							method.method_name
+							if self._normalise_method_identifier(
+								method.method_name,
+								original_task_name=method.task_name,
+								normalised_task_name=normalised_method_task_name,
+							)
+							!= method.method_name
+							else None
+						)
+					),
 				),
 			)
+
+		methods = self._deduplicate_method_identifiers(methods)
 
 		return HTNMethodLibrary(
 			compound_tasks=compound_tasks,
@@ -1964,6 +1978,62 @@ class HTNMethodSynthesizer:
 		)
 
 	@staticmethod
+	def _prune_unreachable_task_structures(
+		library: HTNMethodLibrary,
+	) -> Tuple[HTNMethodLibrary, int]:
+		root_task_names = {
+			binding.task_name
+			for binding in library.target_task_bindings
+			if str(binding.task_name).strip()
+		}
+		if not root_task_names:
+			return library, 0
+
+		methods_by_task: Dict[str, List[HTNMethod]] = {}
+		for method in library.methods:
+			methods_by_task.setdefault(method.task_name, []).append(method)
+
+		reachable_task_names: set[str] = set()
+		pending = list(root_task_names)
+		while pending:
+			task_name = pending.pop()
+			if task_name in reachable_task_names:
+				continue
+			reachable_task_names.add(task_name)
+			for method in methods_by_task.get(task_name, ()):
+				for step in method.subtasks:
+					if step.kind == "compound" and step.task_name not in reachable_task_names:
+						pending.append(step.task_name)
+
+		pruned_compound_tasks = [
+			task
+			for task in library.compound_tasks
+			if task.name in reachable_task_names
+		]
+		pruned_methods = [
+			method
+			for method in library.methods
+			if method.task_name in reachable_task_names
+		]
+		pruned_count = (
+			len(library.compound_tasks) - len(pruned_compound_tasks)
+			+ len(library.methods) - len(pruned_methods)
+		)
+		if pruned_count == 0:
+			return library, 0
+
+		return (
+			HTNMethodLibrary(
+				compound_tasks=pruned_compound_tasks,
+				primitive_tasks=list(library.primitive_tasks),
+				methods=pruned_methods,
+				target_literals=list(library.target_literals),
+				target_task_bindings=list(library.target_task_bindings),
+			),
+			pruned_count,
+		)
+
+	@staticmethod
 	def _unique_method_name(base_name: str, existing_names: set[str]) -> str:
 		if base_name not in existing_names:
 			return base_name
@@ -2694,18 +2764,77 @@ class HTNMethodSynthesizer:
 		original_task_name: str,
 		normalised_task_name: str,
 	) -> str:
-		if not method_name or original_task_name == normalised_task_name:
-			return method_name
+		candidate = str(method_name or "").strip()
+		if not candidate:
+			return candidate
 
-		raw_prefix = f"m_{original_task_name}_"
-		if method_name.startswith(raw_prefix):
-			return f"m_{normalised_task_name}_{method_name[len(raw_prefix):]}"
+		strategy_suffix = self._extract_method_strategy_suffix(
+			candidate,
+			original_task_name=original_task_name,
+			normalised_task_name=normalised_task_name,
+		)
+		if strategy_suffix is None:
+			return candidate
 
-		sanitized_prefix = f"m_{self._sanitize_name(original_task_name)}_"
-		if method_name.startswith(sanitized_prefix):
-			return f"m_{normalised_task_name}_{method_name[len(sanitized_prefix):]}"
+		normalised_suffix = self._normalise_method_strategy_suffix(strategy_suffix)
+		if not normalised_suffix:
+			return candidate
+		return f"m_{normalised_task_name}_{normalised_suffix}"
 
-		return method_name
+	def _extract_method_strategy_suffix(
+		self,
+		method_name: str,
+		*,
+		original_task_name: str,
+		normalised_task_name: str,
+	) -> Optional[str]:
+		prefix_candidates = [
+			f"m_{normalised_task_name}_",
+			f"m_{original_task_name}_",
+			f"m_{self._sanitize_name(original_task_name)}_",
+		]
+		for prefix in prefix_candidates:
+			if method_name.startswith(prefix):
+				return method_name[len(prefix):]
+		return None
+
+	@staticmethod
+	def _normalise_method_strategy_suffix(strategy_suffix: str) -> str:
+		normalised = re.sub(r"[^A-Za-z0-9]+", "_", str(strategy_suffix).strip())
+		normalised = re.sub(r"_+", "_", normalised).strip("_").lower()
+		if not normalised:
+			return "branch"
+		if not normalised[0].isalpha():
+			normalised = f"branch_{normalised}"
+		return normalised
+
+	@staticmethod
+	def _deduplicate_method_identifiers(
+		methods: Sequence[HTNMethod],
+	) -> List[HTNMethod]:
+		seen: Dict[str, int] = {}
+		unique_methods: List[HTNMethod] = []
+		for method in methods:
+			base_name = method.method_name
+			count = seen.get(base_name, 0)
+			seen[base_name] = count + 1
+			if count == 0:
+				unique_methods.append(method)
+				continue
+			unique_methods.append(
+				HTNMethod(
+					method_name=f"{base_name}_{count + 1}",
+					task_name=method.task_name,
+					parameters=method.parameters,
+					task_args=method.task_args,
+					context=method.context,
+					subtasks=method.subtasks,
+					ordering=method.ordering,
+					origin=method.origin,
+					source_method_name=method.source_method_name or method.method_name,
+				),
+			)
+		return unique_methods
 
 	@staticmethod
 	def _parameter_type(parameter: str) -> str:

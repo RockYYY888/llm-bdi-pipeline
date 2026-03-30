@@ -176,6 +176,7 @@ class HDDLProblem:
     object_types: Dict[str, str]
     init_facts: List[HDDLFact]
     htn_tasks: List[HDDLTaskInvocation]
+    htn_ordered: bool
     goal_facts: List[HDDLFact]
 
 
@@ -238,6 +239,7 @@ class HDDLParser:
         objects, object_types = HDDLParser._extract_problem_objects(content)
         init_facts = HDDLParser._extract_problem_init_facts(content)
         htn_tasks = HDDLParser._extract_problem_htn_tasks(content)
+        htn_ordered = HDDLParser._problem_htn_tasks_are_ordered(content)
         goal_facts = HDDLParser._extract_problem_goal_facts(content)
 
         return HDDLProblem(
@@ -247,6 +249,7 @@ class HDDLParser:
             object_types=object_types,
             init_facts=init_facts,
             htn_tasks=htn_tasks,
+            htn_ordered=htn_ordered,
             goal_facts=goal_facts,
         )
 
@@ -358,6 +361,13 @@ class HDDLParser:
                 )
             )
         return task_invocations
+
+    @staticmethod
+    def _problem_htn_tasks_are_ordered(content: str) -> bool:
+        block = HDDLParser._extract_single_block(content, "htn")
+        if block is None:
+            return False
+        return ":ordered-subtasks" in block
 
     @staticmethod
     def _sexpr_to_fact(item: object) -> Optional[HDDLFact]:

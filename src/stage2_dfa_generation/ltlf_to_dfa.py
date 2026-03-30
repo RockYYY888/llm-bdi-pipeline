@@ -31,9 +31,10 @@ if _parent_dir not in sys.path:
 from utils.setup_mona_path import setup_mona
 setup_mona()
 
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 from ltlf2dfa.parser.ltlf import LTLfParser
 from utils.symbol_normalizer import SymbolNormalizer
+from stage1_interpretation.ltlf_formula import LogicalOperator, TemporalOperator
 
 
 class PredicateToProposition:
@@ -140,6 +141,28 @@ class LTLfToDFA:
         # Convert to propositional encoding
         propositional_formula = self.encoder.convert_formula(original_formula)
 
+        eventual_atoms = self._extract_independent_eventually_atoms(ltl_spec)
+        if eventual_atoms:
+            propositional_atoms = [
+                self.encoder.encode_predicate(atom)
+                for atom in eventual_atoms
+            ]
+            dfa_dot = self._build_independent_eventually_atomic_dfa(propositional_atoms)
+            unique_atoms: List[str] = []
+            for atom in propositional_atoms:
+                if atom not in unique_atoms:
+                    unique_atoms.append(atom)
+            metadata = {
+                "original_formula": original_formula,
+                "propositional_formula": propositional_formula,
+                "predicate_to_prop_mapping": self.encoder.get_mapping(),
+                "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
+                "num_states": 1 << len(unique_atoms),
+                "alphabet": list(unique_atoms),
+                "construction": "independent_eventually_atomic_fast_path",
+            }
+            return dfa_dot, metadata
+
         # Parse and convert to DFA
         try:
             formula_obj = self.ltlf_parser(propositional_formula)
@@ -163,6 +186,97 @@ class LTLfToDFA:
         }
 
         return dfa_dot, metadata
+
+    def _extract_independent_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
+        formulas = list(getattr(ltl_spec, "formulas", ()) or ())
+        if not formulas:
+            return None
+
+        atoms: List[str] = []
+        for formula in formulas:
+            if not self._collect_independent_eventually_atoms(formula, atoms):
+                return None
+        return atoms or None
+
+    def _collect_independent_eventually_atoms(self, formula: Any, atoms: List[str]) -> bool:
+        logical_op = getattr(formula, "logical_op", None)
+        operator = getattr(formula, "operator", None)
+        predicate = getattr(formula, "predicate", None)
+        sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
+
+        if logical_op == LogicalOperator.AND and predicate is None and operator is None:
+            return all(
+                self._collect_independent_eventually_atoms(child, atoms)
+                for child in sub_formulas
+            )
+
+        if operator != TemporalOperator.FINALLY or len(sub_formulas) != 1:
+            return False
+
+        atom = sub_formulas[0]
+        if getattr(atom, "operator", None) is not None:
+            return False
+        if getattr(atom, "logical_op", None) is not None:
+            return False
+        if getattr(atom, "predicate", None) is None:
+            return False
+
+        atoms.append(atom.to_string())
+        return True
+
+    def _build_independent_eventually_atomic_dfa(self, propositional_atoms: List[str]) -> str:
+        unique_atoms: List[str] = []
+        for atom in propositional_atoms:
+            if atom not in unique_atoms:
+                unique_atoms.append(atom)
+
+        transitions: List[Tuple[str, str, str]] = []
+        full_mask = (1 << len(unique_atoms)) - 1
+
+        def state_name(mask: int) -> str:
+            return str(mask + 1)
+
+        for mask in range(full_mask + 1):
+            from_state = state_name(mask)
+            if mask == full_mask:
+                transitions.append((from_state, from_state, "true"))
+                continue
+
+            for atom_index, atom_name in enumerate(unique_atoms):
+                if mask & (1 << atom_index):
+                    continue
+                next_mask = mask | (1 << atom_index)
+                transitions.append(
+                    (
+                        from_state,
+                        state_name(next_mask),
+                        atom_name,
+                    ),
+                )
+
+        accepting_states = {state_name(full_mask)}
+        other_states = {
+            state_name(mask)
+            for mask in range(full_mask + 1)
+            if mask != full_mask
+        }
+
+        lines = [
+            "digraph MONA_DFA {",
+            " rankdir = LR;",
+            " center = true;",
+            " size = \"7.5,10.5\";",
+            " edge [fontname = Courier];",
+            " node [height = .5, width = .5];",
+            f" node [shape = doublecircle]; {' '.join(sorted(accepting_states))};",
+            f" node [shape = circle]; {' '.join(sorted(other_states, key=int))};",
+            " init [shape = plaintext, label = \"\"];",
+            " init -> 1;",
+        ]
+        for from_state, to_state, label in transitions:
+            lines.append(f" {from_state} -> {to_state} [label=\"{label}\"];")
+        lines.append("}")
+        return "\n".join(lines)
 
     def _count_dfa_states(self, dfa_dot: str) -> int:
         """Count number of states in DFA from DOT representation"""

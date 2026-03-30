@@ -5227,13 +5227,14 @@ def _render_contract_blocks(
 ) -> str:
 	blocks: list[str] = []
 	for payload in payloads:
-		lines = [str(line).strip() for line in payload.get("contract_lines", ()) if str(line).strip()]
+		lines = [
+			_compact_contract_line(str(line).strip())
+			for line in payload.get("contract_lines", ())
+			if str(line).strip()
+		]
 		if not lines and tag_name != "query_task_contract":
 			continue
 		header_lines = []
-		task_signature = str(payload.get("task_signature", "")).strip()
-		if task_signature:
-			header_lines.append(f"signature: {task_signature}")
 		ordered_binding = payload.get("ordered_binding") or {}
 		if ordered_binding:
 			header_lines.append(
@@ -5248,6 +5249,71 @@ def _render_contract_blocks(
 			f"<{tag_name} name=\"{payload.get('display_name')}\">\n{body}\n</{tag_name}>"
 		)
 	return "\n".join(blocks) if blocks else f"<{tag_name}s>\n- none\n</{tag_name}s>"
+
+
+def _compact_contract_line(line: str) -> str:
+	text = line.strip()
+	if not text:
+		return text
+
+	replacements = (
+		(
+			" in earlier subtasks or context.",
+			" before the step.",
+		),
+		(
+			" via parent context or earlier parent subtasks.",
+			" before the child call.",
+		),
+		(
+			" Keep them as distinct method.parameters or earlier schematic child bindings; "
+			"never substitute grounded query objects.",
+			" Keep those extra roles schematic.",
+		),
+		(
+			" explicit in method.context as the selected producer mode condition",
+			" explicit in method.context",
+		),
+		(
+			" via parent context or earlier parent subtasks.",
+			" before the child call.",
+		),
+		(
+			" Prefer simpler modes with fewer extra roles when they remain suitable.",
+			" Prefer the simpler valid mode.",
+		),
+	)
+	for source, target in replacements:
+		text = text.replace(source, target)
+
+	pattern_rewrites = (
+		(
+			r"^(?P<head>.+): before (?P<step>.+), support (?P<support>.+) before the step\.$",
+			r"\g<head>: support \g<support> before \g<step>.",
+		),
+		(
+			r"^(?P<head>.+): if you use (?P<child>.+) to support (?P<goal>.+), first support "
+			r"its shared prerequisites (?P<requirements>.+) before the child call\.$",
+			r"\g<head>: via \g<child>, parent must provide shared \g<requirements> before the child call.",
+		),
+		(
+			r"^(?P<head>.+) targets (?P<goal>.+); constructive templates: (?P<templates>.+)$",
+			r"\g<head> targets \g<goal>; templates: \g<templates>",
+		),
+		(
+			r"^(?P<head>.+) can serve as a declared support task for (?P<goal>.+); "
+			r"constructive templates: (?P<templates>.+); if a parent calls it, first provide "
+			r"shared prerequisites (?P<requirements>.+)$",
+			r"\g<head> supports \g<goal>; templates: \g<templates>; parent shared \g<requirements>.",
+		),
+	)
+	for pattern, replacement in pattern_rewrites:
+		updated = re.sub(pattern, replacement, text)
+		if updated != text:
+			text = updated
+			break
+
+	return re.sub(r"\s+", " ", text).strip()
 
 
 def _target_predicate_names(target_literals: Sequence[str]) -> tuple[str, ...]:
@@ -5321,31 +5387,71 @@ def _render_relevant_action_lines(
 	relevant_action_names: Sequence[str],
 ) -> list[str]:
 	selected_names = set(relevant_action_names)
+	parser = HDDLConditionParser()
 	lines: list[str] = []
 	for action in getattr(domain, "actions", []):
 		action_name = _sanitize_name(str(getattr(action, "name", "")).strip())
 		if selected_names and action_name not in selected_names:
 			continue
-		if hasattr(action, "to_description"):
-			lines.append(f"- {action.to_description()}")
+		try:
+			parsed_action = parser.parse_action(action)
+		except Exception:
+			parsed_action = None
+		if parsed_action is None:
+			if hasattr(action, "to_description"):
+				lines.append(f"- {action.to_description()}")
+				continue
+			lines.append(
+				"- "
+				f"{getattr(action, 'name', 'unknown')}({', '.join(getattr(action, 'parameters', []) or []) or 'none'})\n"
+				f"    Pre: {getattr(action, 'preconditions', '()')}\n"
+				f"    Eff: {getattr(action, 'effects', '()')}"
+			)
 			continue
+
+		preconditions = [
+			_clause_signature(clause)
+			for clause in (parsed_action.precondition_clauses or [])
+		] or ["true"]
+		effects = [
+			_literal_pattern_signature(effect)
+			for effect in parsed_action.effects
+		] or ["none"]
 		lines.append(
 			"- "
-			f"{getattr(action, 'name', 'unknown')}({', '.join(getattr(action, 'parameters', []) or []) or 'none'})\n"
-			f"    Pre: {getattr(action, 'preconditions', '()')}\n"
-			f"    Eff: {getattr(action, 'effects', '()')}"
+			f"{parsed_action.name}({', '.join(parsed_action.parameters) or 'none'}): "
+			f"needs {' | '.join(preconditions)}; effects {', '.join(effects)}"
 		)
 	if lines:
 		return lines
 	for action in getattr(domain, "actions", []):
-		if hasattr(action, "to_description"):
-			lines.append(f"- {action.to_description()}")
+		try:
+			parsed_action = parser.parse_action(action)
+		except Exception:
+			parsed_action = None
+		if parsed_action is None:
+			if hasattr(action, "to_description"):
+				lines.append(f"- {action.to_description()}")
+				continue
+			lines.append(
+				"- "
+				f"{getattr(action, 'name', 'unknown')}({', '.join(getattr(action, 'parameters', []) or []) or 'none'})\n"
+				f"    Pre: {getattr(action, 'preconditions', '()')}\n"
+				f"    Eff: {getattr(action, 'effects', '()')}"
+			)
 			continue
+		preconditions = [
+			_clause_signature(clause)
+			for clause in (parsed_action.precondition_clauses or [])
+		] or ["true"]
+		effects = [
+			_literal_pattern_signature(effect)
+			for effect in parsed_action.effects
+		] or ["none"]
 		lines.append(
 			"- "
-			f"{getattr(action, 'name', 'unknown')}({', '.join(getattr(action, 'parameters', []) or []) or 'none'})\n"
-			f"    Pre: {getattr(action, 'preconditions', '()')}\n"
-			f"    Eff: {getattr(action, 'effects', '()')}"
+			f"{parsed_action.name}({', '.join(parsed_action.parameters) or 'none'}): "
+			f"needs {' | '.join(preconditions)}; effects {', '.join(effects)}"
 		)
 	return lines or ["- none"]
 
@@ -5359,18 +5465,18 @@ def build_htn_system_prompt() -> str:
 		"Return exactly one object with top-level keys target_task_bindings, compound_tasks, methods.\n"
 		"\n"
 		"GLOBAL RULES:\n"
-		"1. Preserve query-mentioned declared tasks as the top-level skeleton whenever they match the ordered targets.\n"
-		"2. Prefer declared support tasks over fresh helpers. Create a fresh helper only for a dynamic predicate that no declared task can responsibly cover.\n"
-		"3. Static predicates are context constraints only; never create helpers for them.\n"
-		"4. For every target-bound task, include an already-satisfied/noop method with the headline literal in context and empty subtasks.\n"
-		"5. Every primitive dynamic precondition must be supported by method context or earlier subtasks.\n"
-		"6. Every compound child call must satisfy the child's shared dynamic prerequisites before the child is called.\n"
-		"7. Only rely on a previous compound child's own headline effect and explicitly shared envelope. Never rely on incidental internal side effects.\n"
-		"8. Use same-arity packaging only when the user prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or new caller-shared envelopes on your own.\n"
-		"9. Auxiliary variables must remain schematic, appear in method.parameters, and be constrained before use by declared predicates, equality constraints, or earlier subtask bindings. Types come from parameter declarations and predicate positions; never invent type predicates such as block(X) or rover(R) unless the domain explicitly declares them.\n"
-		"10. Grounded query objects may appear in target literals and ordered top-level bindings only. Never copy grounded query object names into method.parameters, method.context, or subtask arguments. If query inventory and Stage 1 semantic hints conflict, the query inventory is authoritative for top-level grounding only.\n"
-		"11. When a method chooses one producer mode or primitive branch, it must support the full listed dynamic preconditions of that selected mode before the step. Do not keep only the shared subset and silently drop mode-specific requirements.\n"
-		"12. If an AUX_* variable appears in a subtask or primitive step, it must already be constrained by a positive context literal, equality constraint, or earlier step interface in the same method before that use.\n"
+		"- Preserve query-mentioned declared tasks as the top-level skeleton whenever they match the ordered targets.\n"
+		"- Prefer declared support tasks over fresh helpers; create a fresh helper only for a dynamic predicate that no declared task can responsibly cover.\n"
+		"- Static predicates are context constraints only; never create helpers for them.\n"
+		"- Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks; target_task_bindings already define the top-level roots.\n"
+		"- Each target-bound task needs an already-satisfied/noop method with the headline literal in context.\n"
+		"- Every primitive dynamic precondition must be supported by method context or earlier subtasks.\n"
+		"- Every compound child call must satisfy the child's shared dynamic prerequisites before the child is called.\n"
+		"- Only rely on a previous compound child's own headline effect and explicitly shared envelope, never incidental internal side effects.\n"
+		"- Use same-arity packaging only when the user prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or new caller-shared envelopes on your own.\n"
+		"- Auxiliary variables must remain schematic, appear in method.parameters, and be constrained before use by declared predicates, equality constraints, or earlier subtask bindings; never invent type predicates such as block(X) or rover(R) unless the domain explicitly declares them.\n"
+		"- Grounded query objects may appear in target literals and ordered top-level bindings only. If query inventory and Stage 1 semantic hints conflict, the query inventory is authoritative for top-level grounding only.\n"
+		"- When a method chooses one producer mode or primitive branch, it must support the full listed dynamic preconditions of that selected mode before the step.\n"
 		"\n"
 		"OUTPUT CONTRACT:\n"
 		"- task_name and method_name must match [a-z][a-z0-9_]*.\n"
@@ -5379,8 +5485,8 @@ def build_htn_system_prompt() -> str:
 		"- Primitive subtasks must use the provided runtime primitive aliases.\n"
 		"- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
 		"- If a method has two or more subtasks, ordering must be explicit pairwise edges such as [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]].\n"
-		"- Omit optional empty/default fields when possible, but never omit required structural fields.\n"
-		"- Every literal-bearing field must use JSON object form with predicate/args/is_positive.\n"
+		"- Compactness is part of correctness: default to one noop branch and one constructive branch per task, and add siblings only for real producer-mode differences.\n"
+		"- Omit optional empty/default fields when possible, but never omit required structural fields. Every literal-bearing field must use JSON object form with predicate/args/is_positive.\n"
 	)
 
 
@@ -5518,9 +5624,6 @@ def build_htn_user_prompt(
 	domain_summary_block = "\n".join(
 		[
 			f"domain: {domain.name}",
-			"tasks_in_scope:",
-			*task_scope_entries,
-			"",
 			"relevant_dynamic_predicates:",
 			*dynamic_predicate_lines,
 			"",
@@ -5532,32 +5635,15 @@ def build_htn_user_prompt(
 		[
 			"1. Read query_task_contracts first. They are the canonical synthesis skeleton.",
 			"2. Read support_task_contracts second. If a parent calls a support child, satisfy every listed caller-shared prerequisite before the child call, and keep the child's internal support inside that child.",
-			"3. Preserve ordered query task names in target_task_bindings and as top-level compound tasks when they are supplied.",
-			"4. Prefer declared support tasks over fresh helpers. Fresh helpers are allowed only when no declared task can responsibly own the dynamic predicate.",
-			"5. Same-arity packaging is allowed only when an exact packaging contract is listed. If selected, support its listed caller-shared prerequisites first and then let that child own the final producer.",
-			"6. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Grounded query object names may appear only in target_task_bindings and ordered top-level bindings, never inside methods. Type names are not predicates.",
-			"7. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support all of p, q, and r before ACTION. Multi-step methods require explicit pairwise ordering edges. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient.",
-		]
-	)
-	examples_block = "\n".join(
-		[
-			"- shared_child_contract: parent(ARG1) calls child(ARG1). If every constructive child method still needs ready(ARG1), parent must support ready(ARG1) before child(ARG1).",
-			"- packaging_envelope: if child(ARG1, ARG2) has constructive siblings with contexts {ready(ARG1), clear(ARG2)} and {ready(ARG1), linked(ARG2)}, then the caller-shared envelope is ready(ARG1) only. The parent must support ready(ARG1) before child(ARG1, ARG2).",
-			"- ordering_edges: for subtasks s1 then s2 then s3, emit ordering [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit [[\"s1\",\"s2\",\"s3\"]].",
-			"- producer_mode_completeness: if a chosen support mode is act(ARG1) [needs p(ARG1), q(ARG1)], the method must support both p(ARG1) and q(ARG1) before act(ARG1).",
-			"- aux_binding_before_use: if a method calls child(AUX_T1, ARG1), include a declared positive context literal or equality that constrains AUX_T1 before that child call.",
-		]
-	)
-	final_checklist_block = "\n".join(
-		[
-			"- Each target literal has exactly one binding.",
-			"- Query-mentioned declared tasks appear in the library when supplied.",
-			"- Every target-bound task has an already-satisfied/noop method.",
-			"- Every referenced compound subtask appears in compound_tasks and has methods.",
-			"- Every primitive dynamic precondition is supported by context or earlier subtasks.",
-			"- Every compound child shared dynamic prerequisite is supported by caller context or earlier caller subtasks.",
-			"- No free variables. Every auxiliary variable is typed by method.parameters and constrained by declared predicates, equality, or earlier subtask bindings. Never invent type predicates.",
-			"- Return one compact JSON object and nothing else.",
+			"3. Preserve ordered query task names in target_task_bindings and as top-level compound tasks when they are supplied. Do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top to sequence those query tasks.",
+			"4. Every task that appears in target_task_bindings must include an already-satisfied/noop method whose context contains that task's headline literal and whose subtasks are empty.",
+			"5. Prefer declared support tasks over fresh helpers. Fresh helpers are allowed only when no declared task can responsibly own the dynamic predicate.",
+			"6. Same-arity packaging is allowed only when an exact packaging contract is listed. If selected, support its listed caller-shared prerequisites first and then let that child own the final producer.",
+			"7. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Grounded query object names may appear only in target_task_bindings and ordered top-level bindings, never inside methods. Type names are not predicates.",
+			"8. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support all of p, q, and r before ACTION. Multi-step methods require explicit pairwise ordering edges. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient.",
+			"9. ordering: for subtasks s1 then s2 then s3, emit [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit [[\"s1\",\"s2\",\"s3\"]].",
+			"10. packaging_envelope: if child(ARG1, ARG2) has constructive siblings with contexts {ready(ARG1), clear(ARG2)} and {ready(ARG1), linked(ARG2)}, then the caller-shared envelope is ready(ARG1) only.",
+			"11. Never invent type predicates.",
 		]
 	)
 
@@ -5577,12 +5663,10 @@ def build_htn_user_prompt(
 		_format_tagged_block("support_task_contracts", support_task_contract_block),
 		_format_tagged_block("domain_summary", domain_summary_block),
 		_format_tagged_block("instructions", instructions_block),
-		_format_tagged_block("examples", examples_block),
 		_format_tagged_block(
 			"output_schema",
 			"Only define target_task_bindings, compound_tasks, and methods; primitive tasks are injected automatically.\n"
 			f"{schema_hint}",
 		),
-		_format_tagged_block("final_checklist", final_checklist_block),
 	]
 	return "\n\n".join(section for section in sections if section).strip() + "\n"

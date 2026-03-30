@@ -57,6 +57,21 @@ def test_hddl_fact_to_atom_ignores_negative_and_equality():
 	assert runner._hddl_fact_to_atom("(= a b)") is None
 
 
+def test_hddl_fact_to_atom_quotes_unsafe_constants():
+	runner = JasonRunner()
+	assert runner._hddl_fact_to_atom("(pointing satellite0 Phenomenon6)") == (
+		'pointing(satellite0,"Phenomenon6")'
+	)
+
+
+def test_hddl_fact_to_atom_sanitizes_hyphenated_predicates():
+	runner = JasonRunner()
+
+	assert runner._hddl_fact_to_atom("(capacity-predecessor capacity-0 capacity-1)") == (
+		'capacity_predecessor("capacity-0","capacity-1")'
+	)
+
+
 def test_runner_asl_includes_accepting_and_target_validation_without_manual_seeding():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(
@@ -82,6 +97,40 @@ def test_runner_asl_includes_accepting_and_target_validation_without_manual_seed
 	assert "+!execute_round_1 : on(a, b) & not clear(b) <-" in asl
 	assert "+!execute_round_4 : true <-" in asl
 	assert "+on(a" not in asl
+
+
+def test_runner_asl_injects_runtime_objects_and_parent_types():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"/* Initial Beliefs */",
+				"domain(test).",
+				"",
+				"/* Primitive Action Plans */",
+				"+!noop : true <-",
+				"\ttrue.",
+			],
+		),
+		[],
+		runtime_objects=("GroundStation2", "truck-0"),
+		object_types={
+			"GroundStation2": "calib_direction",
+			"truck-0": "vehicle",
+		},
+		type_parent_map={
+			"calib_direction": "direction",
+			"direction": "object",
+			"vehicle": "object",
+			"object": None,
+		},
+	)
+
+	assert 'object("GroundStation2").' in asl
+	assert 'object_type("GroundStation2", calib_direction).' in asl
+	assert 'object_type("GroundStation2", direction).' in asl
+	assert 'object("truck-0").' in asl
+	assert 'object_type("truck-0", vehicle).' in asl
 
 
 def test_runner_asl_forces_negative_targets_to_naf_notation():
@@ -144,6 +193,36 @@ def test_extract_initial_dfa_state_reads_header_belief():
 
 	assert runner._extract_initial_dfa_state("domain(test).\ndfa_state(q7).\n") == "q7"
 	assert runner._extract_initial_dfa_state("domain(test).\n") is None
+
+
+def test_extract_method_trace_strips_quoted_task_args():
+	runner = JasonRunner()
+	trace = runner._extract_method_trace(
+		'[agent] runtime trace method trace_method("method0", "Phenomenon4", thermograph0)\n',
+	)
+
+	assert trace == [
+		{
+			"method_name": "method0",
+			"task_args": ["Phenomenon4", "thermograph0"],
+		},
+	]
+
+
+def test_literal_to_context_expression_quotes_unsafe_constants():
+	context = JasonRunner._literal_to_context_expression(
+		HTNLiteral("have_image", ("Phenomenon4", "thermograph0"), True, None),
+	)
+
+	assert context == 'have_image("Phenomenon4", thermograph0)'
+
+
+def test_literal_to_context_expression_sanitizes_hyphenated_predicates():
+	context = JasonRunner._literal_to_context_expression(
+		HTNLiteral("capacity-predecessor", ("capacity-0", "capacity-1"), True, None),
+	)
+
+	assert context == 'capacity_predecessor("capacity-0", "capacity-1")'
 
 
 def test_rewrite_primitive_wrappers_keeps_only_external_action_call():
@@ -484,6 +563,105 @@ def test_extract_failed_goals_preserves_runtime_order():
 		"hold_block,b4",
 		"clear_top,b2",
 	]
+
+
+def test_render_failure_handlers_canonicalise_hddl_style_task_parameters():
+	runner = JasonRunner()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("?x", "?y"), False, ("on",)),
+		],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	lines = runner._render_failure_handlers(method_library)
+	rendered = "\n".join(lines)
+
+	assert "-!do_put_on(X, Y) : true <-" in rendered
+	assert 'fail_goal(do_put_on, X, Y)' in rendered
+
+
+def test_render_failure_handlers_sanitise_hyphenated_task_functors():
+	runner = JasonRunner()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("empty-store", ("?store", "?rover"), False, ("empty",)),
+		],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	lines = runner._render_failure_handlers(method_library)
+	rendered = "\n".join(lines)
+
+	assert '-!empty_store(STORE, ROVER) : true <-' in rendered
+	assert 'fail_goal("empty-store", STORE, ROVER)' in rendered
+
+
+def test_render_method_trace_statement_quotes_hyphenated_method_names():
+	runner = JasonRunner()
+	method = HTNMethod(
+		method_name="m-empty-store-1",
+		task_name="empty-store",
+		parameters=("STORE", "ROVER"),
+		context=(),
+		subtasks=(),
+	)
+
+	line = runner._render_method_trace_statement(
+		method,
+		"+!empty_store(STORE, ROVER) : empty(STORE) <-",
+	)
+
+	assert 'trace_method("m-empty-store-1", STORE, ROVER)' in line
+
+
+def test_extract_method_trace_strips_quotes_from_method_names():
+	runner = JasonRunner()
+	stdout = 'runtime trace method trace_method("m-empty-store-1", rover0store, rover0)\n'
+
+	trace = runner._extract_method_trace(stdout)
+
+	assert trace == [
+		{
+			"method_name": "m-empty-store-1",
+			"task_args": ["rover0store", "rover0"],
+		},
+	]
+
+
+def test_instrument_method_plans_skips_preinstrumented_code():
+	runner = JasonRunner()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("empty-store", ("STORE", "ROVER"), False, ("empty",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m-empty-store-1",
+				task_name="empty-store",
+				parameters=("STORE", "ROVER"),
+				context=(HTNLiteral("empty", ("STORE",), True, None),),
+			),
+		],
+	)
+	agentspeak_code = (
+		"/* HTN Method Plans */\n"
+		"+!empty_store(STORE, ROVER) : empty(STORE) <-\n"
+		'\t.print("runtime trace method ", trace_method("m-empty-store-1", STORE, ROVER));\n'
+		"\ttrue.\n\n"
+		"/* DFA Transition Wrappers */\n"
+	)
+
+	instrumented = runner._instrument_method_plans(agentspeak_code, method_library)
+
+	assert instrumented == agentspeak_code
 
 
 def test_combine_process_output_accepts_byte_streams():
