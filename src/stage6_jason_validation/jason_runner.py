@@ -114,6 +114,9 @@ class JasonRunner:
 		method_library: HTNMethodLibrary | None = None,
 		action_schemas: Sequence[Dict[str, Any]],
 		seed_facts: Sequence[str] = (),
+		runtime_objects: Sequence[str] = (),
+		object_types: Optional[Dict[str, str]] = None,
+		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
 		domain_name: str,
 		problem_file: str | Path | None = None,
 		output_dir: str | Path,
@@ -148,6 +151,9 @@ class JasonRunner:
 			agentspeak_code,
 			target_literals,
 			method_library=method_library,
+			runtime_objects=runtime_objects,
+			object_types=object_types or {},
+			type_parent_map=type_parent_map or {},
 		)
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
@@ -310,8 +316,17 @@ class JasonRunner:
 		target_literals: Sequence[HTNLiteral],
 		*,
 		method_library: HTNMethodLibrary | None = None,
+		runtime_objects: Sequence[str] = (),
+		object_types: Optional[Dict[str, str]] = None,
+		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
 	) -> str:
-		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(agentspeak_code)
+		runtime_ready_code = self._inject_runtime_object_beliefs(
+			agentspeak_code,
+			runtime_objects=runtime_objects,
+			object_types=object_types or {},
+			type_parent_map=type_parent_map or {},
+		)
+		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
 		trace_ready_code = self._instrument_method_plans(
 			environment_ready_code,
 			method_library,
@@ -413,6 +428,56 @@ class JasonRunner:
 		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
+
+	def _inject_runtime_object_beliefs(
+		self,
+		agentspeak_code: str,
+		*,
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> str:
+		if not runtime_objects:
+			return agentspeak_code
+
+		start_marker = "/* Initial Beliefs */"
+		end_marker = "/* Primitive Action Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		body_lines = [line for line in section_lines[1:] if line.strip()]
+		existing = {line.strip() for line in body_lines}
+		inserted: List[str] = []
+
+		for obj in runtime_objects:
+			object_line = f"{self._call('object', (self._runtime_atom_term(obj),))}."
+			if object_line not in existing:
+				existing.add(object_line)
+				inserted.append(object_line)
+			for type_name in self._type_closure(object_types.get(str(obj)), type_parent_map):
+				type_line = (
+					f"{self._call('object_type', (self._runtime_atom_term(obj), self._type_atom(type_name)))}."
+				)
+				if type_line in existing:
+					continue
+				existing.add(type_line)
+				inserted.append(type_line)
+
+		if not inserted:
+			return agentspeak_code
+
+		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
+		return f"{prefix}{injected_section}{suffix}"
 
 	def _extract_transition_target_observations(
 		self,
@@ -566,8 +631,12 @@ class JasonRunner:
 				continue
 			trace.append(
 				{
-					"method_name": parts[0],
-					"task_args": [part for part in parts[1:] if part],
+					"method_name": self._strip_quoted_atom(parts[0]),
+					"task_args": [
+						self._strip_quoted_atom(part)
+						for part in parts[1:]
+						if part
+					],
 				},
 			)
 		return trace
@@ -592,9 +661,78 @@ class JasonRunner:
 
 	@staticmethod
 	def _call(name: str, args: Sequence[str] = ()) -> str:
+		functor = JasonRunner._sanitize_name(name)
 		if not args:
-			return name
-		return f"{name}({', '.join(args)})"
+			return functor
+		return f"{functor}({', '.join(args)})"
+
+	@staticmethod
+	def _type_atom(type_name: str) -> str:
+		return JasonRunner._sanitize_name(str(type_name or "object")).lower() or "object"
+
+	@staticmethod
+	def _sanitize_name(name: str) -> str:
+		return re.sub(r"[^A-Za-z0-9_]+", "_", str(name).strip()).strip("_") or "term"
+
+	@staticmethod
+	def _asl_string(text: str) -> str:
+		return json.dumps(str(text))
+
+	@classmethod
+	def _asl_atom_or_string(cls, text: str) -> str:
+		token = str(text).strip()
+		if re.fullmatch(r"[a-z][a-z0-9_]*", token):
+			return token
+		return cls._asl_string(token)
+
+	@classmethod
+	def _runtime_atom_term(cls, text: str) -> str:
+		token = str(text).strip()
+		if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+			return token
+		return cls._asl_atom_or_string(token)
+
+	@classmethod
+	def _type_closure(
+		cls,
+		type_name: Optional[str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> Tuple[str, ...]:
+		if not type_name:
+			return ()
+
+		closure: List[str] = []
+		visited: set[str] = set()
+		cursor: Optional[str] = str(type_name).strip()
+		while cursor and cursor not in visited:
+			visited.add(cursor)
+			if cursor != "object":
+				closure.append(cursor)
+			cursor = type_parent_map.get(cursor)
+		return tuple(closure)
+
+	@staticmethod
+	def _strip_quoted_atom(text: str) -> str:
+		token = str(text).strip()
+		if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+			return token[1:-1]
+		return token
+
+	@staticmethod
+	def _failure_handler_args(parameters: Sequence[str]) -> Tuple[str, ...]:
+		used_counts: Dict[str, int] = {}
+		rendered_args: List[str] = []
+		for index, parameter in enumerate(parameters, start=1):
+			token = re.sub(r"^[?]+", "", str(parameter).strip())
+			token = re.sub(r"[^A-Za-z0-9]+", "_", token).strip("_").upper()
+			if not token:
+				token = f"ARG{index}"
+			if not token[0].isalpha():
+				token = f"ARG_{token}"
+			count = used_counts.get(token, 0) + 1
+			used_counts[token] = count
+			rendered_args.append(token if count == 1 else f"{token}{count}")
+		return tuple(rendered_args)
 
 	def _render_failure_handlers(self, method_library: HTNMethodLibrary | None) -> List[str]:
 		lines = ["/* Failure Handlers */"]
@@ -609,8 +747,9 @@ class JasonRunner:
 		if method_library is None:
 			return lines
 		for task in method_library.compound_tasks:
-			trigger = self._call(task.name, task.parameters)
-			fail_term = self._call("fail_goal", (task.name, *task.parameters))
+			handler_args = self._failure_handler_args(task.parameters)
+			trigger = self._call(self._sanitize_name(task.name), handler_args)
+			fail_term = self._call("fail_goal", (self._asl_atom_or_string(task.name), *handler_args))
 			lines.append(f"-!{trigger} : true <-")
 			lines.extend(self._indent_body([f'.print("runtime goal failed ", {fail_term})', ".fail"]))
 			lines.append("")
@@ -671,6 +810,8 @@ class JasonRunner:
 	) -> str:
 		if method_library is None or not method_library.methods:
 			return agentspeak_code
+		if "runtime trace method" in agentspeak_code:
+			return agentspeak_code
 
 		start_marker = "/* HTN Method Plans */"
 		end_marker = "/* DFA Transition Wrappers */"
@@ -717,7 +858,7 @@ class JasonRunner:
 		trigger_args = self._extract_trigger_args(head_line)
 		trace_term = self._call(
 			"trace_method",
-			(method.method_name, *trigger_args),
+			(self._asl_atom_or_string(method.method_name), *trigger_args),
 		)
 		return f'\t.print("runtime trace method ", {trace_term});'
 
@@ -964,7 +1105,7 @@ public class {self.environment_class_name} extends Environment {{
 			return predicate;
 		}}
 		String[] groundedArgs = Arrays.stream(args)
-			.map(arg -> resolveToken(arg, bindings))
+			.map(arg -> renderTerm(resolveToken(arg, bindings)))
 			.toArray(String[]::new);
 		return predicate + "(" + String.join(",", groundedArgs) + ")";
 	}}
@@ -994,6 +1135,14 @@ public class {self.environment_class_name} extends Environment {{
 			}}
 		}}
 		return value;
+	}}
+
+	private String renderTerm(String token) {{
+		String value = canonical(token);
+		if (value.matches("[a-z][a-z0-9_]*")) {{
+			return value;
+		}}
+		return "\\\"" + value.replace("\\\\", "\\\\\\\\").replace("\\\"", "\\\\\\\"") + "\\\"";
 	}}
 
 	private String renderTraceAction(String sourceName, Structure action) {{
@@ -1065,7 +1214,7 @@ public class {self.environment_class_name} extends Environment {{
 		return f'"{escaped}"'
 
 	def _render_pattern_java(self, payload: Dict[str, Any]) -> str:
-		predicate = str(payload.get("predicate", ""))
+		predicate = self._sanitize_name(str(payload.get("predicate", "")))
 		args = [str(item) for item in (payload.get("args") or [])]
 		is_positive = bool(payload.get("is_positive", True))
 		args_expr = ", ".join(self._java_quote(item) for item in args)
@@ -1096,15 +1245,19 @@ public class {self.environment_class_name} extends Environment {{
 			return "true"
 		return " & ".join(rendered_literals)
 
-	@staticmethod
-	def _literal_to_context_expression(literal: HTNLiteral) -> str:
+	@classmethod
+	def _literal_to_context_expression(cls, literal: HTNLiteral) -> str:
 		if literal.is_equality and len(literal.args) == 2:
 			operator = "==" if literal.is_positive else "\\=="
-			return f"{literal.args[0]} {operator} {literal.args[1]}"
+			return (
+				f"{cls._runtime_atom_term(literal.args[0])} {operator} "
+				f"{cls._runtime_atom_term(literal.args[1])}"
+			)
+		predicate = cls._sanitize_name(literal.predicate)
 		atom = (
-			f"{literal.predicate}({', '.join(literal.args)})"
+			f"{predicate}({', '.join(cls._runtime_atom_term(arg) for arg in literal.args)})"
 			if literal.args
-			else literal.predicate
+			else predicate
 		)
 		if literal.is_positive:
 			return atom
@@ -1643,13 +1796,14 @@ public class {self.environment_class_name} extends Environment {{
 		args: Sequence[str],
 		bindings: Dict[str, str],
 	) -> str:
+		functor = self._sanitize_name(predicate)
 		if not args:
-			return predicate
+			return functor
 		grounded_args = [
-			self._resolve_runtime_token(arg, bindings)
+			self._runtime_atom_term(self._resolve_runtime_token(arg, bindings))
 			for arg in args
 		]
-		return f"{predicate}({','.join(grounded_args)})"
+		return f"{functor}({','.join(grounded_args)})"
 
 	@staticmethod
 	def _render_runtime_args(args: Sequence[str]) -> str:
@@ -1657,8 +1811,8 @@ public class {self.environment_class_name} extends Environment {{
 			return "()"
 		return f"({', '.join(args)})"
 
-	@staticmethod
-	def _hddl_fact_to_atom(fact: str) -> Optional[str]:
+	@classmethod
+	def _hddl_fact_to_atom(cls, fact: str) -> Optional[str]:
 		text = (fact or "").strip()
 		if not text.startswith("(") or not text.endswith(")"):
 			return None
@@ -1671,9 +1825,11 @@ public class {self.environment_class_name} extends Environment {{
 		predicate, args = tokens[0], tokens[1:]
 		if predicate == "=":
 			return None
+		functor = cls._sanitize_name(predicate)
 		if not args:
-			return predicate
-		return f"{predicate}({','.join(args)})"
+			return functor
+		rendered_args = [cls._runtime_atom_term(arg) for arg in args]
+		return f"{functor}({','.join(rendered_args)})"
 
 	@staticmethod
 	def _normalise_process_output(output: str | bytes | None) -> str:

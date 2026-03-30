@@ -30,6 +30,12 @@ from utils.hddl_parser import HDDLParser
 OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
 	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
 )
+OFFICIAL_SATELLITE_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "satellite" / "domain.hddl"
+)
+OFFICIAL_TRANSPORT_DOMAIN_FILE = (
+	Path(__file__).parent.parent.parent / "src" / "domains" / "transport" / "domain.hddl"
+)
 
 
 def _domain():
@@ -142,6 +148,26 @@ def test_panda_problem_builder_accepts_explicit_initial_fact_configuration():
 	assert "(clear a)" not in problem_hddl
 
 
+def test_panda_problem_builder_renders_ordered_query_task_network_without_domain_hardcoding():
+	builder = PANDAProblemBuilder()
+	problem_hddl = builder.build_problem_hddl(
+		domain=_domain(),
+		domain_name="blocksworld_query_network",
+		objects=("a", "b", "c"),
+		task_name="place_on",
+		task_args=("a", "b"),
+		task_network=(
+			("place_on", ("a", "b")),
+			("place_on", ("c", "a")),
+		),
+	)
+
+	assert "(:domain blocksworld_query_network)" in problem_hddl
+	assert "(t1 (place_on a b))" in problem_hddl
+	assert "(t2 (place_on c a))" in problem_hddl
+	assert ":ordered-subtasks (and" in problem_hddl
+
+
 def test_panda_domain_export_uses_llm_method_library():
 	planner = PANDAPlanner()
 	domain_hddl = planner._build_domain_hddl(
@@ -185,6 +211,138 @@ def test_panda_domain_export_defaults_task_parameter_type_to_object():
 
 	assert "(:task navigate_to" in domain_hddl
 	assert ":parameters (?rover - object ?from - object ?to - object)" in domain_hddl
+
+
+def test_panda_domain_export_preserves_declared_typed_task_and_method_signatures():
+	satellite_domain = HDDLParser.parse_domain(str(OFFICIAL_SATELLITE_DOMAIN_FILE))
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=satellite_domain,
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(
+					"observe_image",
+					("OBS_DIRECTION", "OBS_MODE"),
+					False,
+					("have_image",),
+					source_name="do_observation",
+				),
+				HTNTask(
+					"activate_wrapper",
+					("SAT", "INST"),
+					False,
+					(),
+					source_name="activate_instrument",
+				),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m_observe_image",
+					task_name="observe_image",
+					parameters=("PREV", "SAT", "OBS_DIRECTION", "INST", "OBS_MODE"),
+					task_args=("OBS_DIRECTION", "OBS_MODE"),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="activate_wrapper",
+							args=("SAT", "INST"),
+							kind="compound",
+						),
+						HTNMethodStep(
+							step_id="s2",
+							task_name="turn_to",
+							args=("SAT", "OBS_DIRECTION", "PREV"),
+							kind="primitive",
+							action_name="turn_to",
+						),
+						HTNMethodStep(
+							step_id="s3",
+							task_name="take_image",
+							args=("SAT", "OBS_DIRECTION", "INST", "OBS_MODE"),
+							kind="primitive",
+							action_name="take_image",
+						),
+					),
+					ordering=(("s1", "s2"), ("s2", "s3")),
+					origin="official_hddl",
+				),
+			],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="satellite_transition_1",
+	)
+
+	assert "(:task do_observation" in domain_hddl
+	assert ":parameters (?obs_direction - image_direction ?obs_mode - mode)" in domain_hddl
+	assert "(:task activate_instrument" in domain_hddl
+	assert ":parameters (?sat - satellite ?inst - instrument)" in domain_hddl
+	assert "?prev - direction" in domain_hddl
+	assert "?sat - satellite" in domain_hddl
+	assert "?inst - instrument" in domain_hddl
+	assert "?obs_direction - image_direction" in domain_hddl
+	assert "?obs_mode - mode" in domain_hddl
+	assert ":task (do_observation ?obs_direction ?obs_mode)" in domain_hddl
+
+
+def test_panda_domain_export_uses_explicit_task_args_without_phantom_task_parameters():
+	transport_domain = HDDLParser.parse_domain(str(OFFICIAL_TRANSPORT_DOMAIN_FILE))
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=transport_domain,
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("deliver", ("PACKAGE", "LOCATION"), False, source_name="deliver"),
+				HTNTask("load", ("VEHICLE", "LOCATION", "PACKAGE"), False, source_name="load"),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m-deliver",
+					task_name="deliver",
+					parameters=("PACKAGE", "SOURCE", "DESTINATION", "VEHICLE"),
+					task_args=("PACKAGE", "DESTINATION"),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="load",
+							args=("VEHICLE", "SOURCE", "PACKAGE"),
+							kind="compound",
+						),
+					),
+				),
+				HTNMethod(
+					method_name="m-load",
+					task_name="load",
+					parameters=("VEHICLE", "LOCATION", "PACKAGE", "CAPACITY1", "CAPACITY2"),
+					task_args=("VEHICLE", "LOCATION", "PACKAGE"),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="pick_up",
+							args=("VEHICLE", "LOCATION", "PACKAGE", "CAPACITY1", "CAPACITY2"),
+							kind="primitive",
+							action_name="pick-up",
+						),
+					),
+				),
+			],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="transport_transition_1",
+	)
+
+	assert ":task (deliver ?package ?destination)" in domain_hddl
+	assert ":parameters (?package - package ?destination - location ?source - location ?vehicle - vehicle)" in domain_hddl
+	assert "?source - location" in domain_hddl
+	assert "?destination - location" in domain_hddl
+	assert "?vehicle - vehicle" in domain_hddl
+	assert "?capacity1 - capacity-number" in domain_hddl
+	assert "?capacity2 - capacity-number" in domain_hddl
+	assert "?l - object" not in domain_hddl
+	assert "?capacity1 - number" not in domain_hddl
 
 
 def test_panda_domain_export_uses_leading_method_parameters_when_task_args_omitted():

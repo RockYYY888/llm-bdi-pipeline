@@ -5,7 +5,8 @@ This file is the canonical acceptance entry point:
 - pytest uses it only for end-to-end verification
 - CLI can run `python tests/test_pipeline.py query_2`, `all`, or `list`
 - current live query cases are reverse-generated from official IPC benchmark
-  problems for Blocksworld `p01`-`p03` and Marsrover `pfile01`-`pfile03`
+  problems for Blocksworld `p01`-`p03`, Marsrover `pfile01`-`pfile03`,
+  Satellite first three problems, and Transport `pfile01`-`pfile03`
   into single-sentence natural-language instructions
 - non-E2E pipeline unit tests live in `tests/test_pipeline_units.py`
 """
@@ -36,6 +37,9 @@ from stage1_interpretation.ltlf_formula import (
 	TemporalOperator,
 )
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
+from stage3_method_synthesis.htn_method_synthesis import (
+	HTNMethodSynthesizer as RealHTNMethodSynthesizer,
+)
 from stage3_method_synthesis.htn_schema import (
 	HTNLiteral,
 	HTNMethod,
@@ -45,8 +49,10 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTask,
 )
 from stage4_panda_planning.panda_planner import PANDAPlanner
+from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
+from utils.hddl_condition_parser import HDDLConditionParser
 from utils.hddl_parser import HDDLParser
 from utils.ipc_plan_verifier import IPCPlanVerifier
 from utils.pipeline_logger import PipelineLogger
@@ -63,10 +69,48 @@ MARSROVER_DOMAIN_FILE = str(
 MARSROVER_PROBLEM_DIR = (
 	Path(__file__).parent.parent / "src" / "domains" / "marsrover" / "problems"
 )
+SATELLITE_DOMAIN_FILE = str(
+	(Path(__file__).parent.parent / "src" / "domains" / "satellite" / "domain.hddl").resolve(),
+)
+SATELLITE_PROBLEM_DIR = (
+	Path(__file__).parent.parent / "src" / "domains" / "satellite" / "problems"
+)
+TRANSPORT_DOMAIN_FILE = str(
+	(Path(__file__).parent.parent / "src" / "domains" / "transport" / "domain.hddl").resolve(),
+)
+TRANSPORT_PROBLEM_DIR = (
+	Path(__file__).parent.parent / "src" / "domains" / "transport" / "problems"
+)
 
 
 BANNED_TASK_PREFIXES = ("achieve_", "maintain_not_", "ensure_", "goal_")
 IPC_PLAN_VERIFIER = IPCPlanVerifier()
+
+BLOCKSWORLD_OFFICIAL_TASK_SOURCE_PREDICATES = {
+	"do_put_on": ("on",),
+	"do_on_table": ("clear",),
+	"do_move": ("on",),
+	"do_clear": ("clear",),
+}
+
+MARSROVER_OFFICIAL_TASK_SOURCE_PREDICATES = {
+	"calibrate_abs": ("calibrated",),
+	"empty-store": ("empty",),
+	"navigate_abs": ("at",),
+	"get_image_data": ("communicated_image_data",),
+	"get_rock_data": ("communicated_rock_data",),
+	"get_soil_data": ("communicated_soil_data",),
+	"send_image_data": ("communicated_image_data",),
+	"send_rock_data": ("communicated_rock_data",),
+	"send_soil_data": ("communicated_soil_data",),
+}
+
+OFFICIAL_STAGE3_MASK_TASK_SOURCE_PREDICATES: Dict[str, Dict[str, tuple[str, ...]]] = {
+	"blocksworld": BLOCKSWORLD_OFFICIAL_TASK_SOURCE_PREDICATES,
+	"marsrover": MARSROVER_OFFICIAL_TASK_SOURCE_PREDICATES,
+	"satellite": {},
+	"transport": {},
+}
 
 
 def _literal_signature(predicate: str, args: List[str], is_positive: bool = True) -> str:
@@ -82,6 +126,12 @@ def _serialise_nl_list(items: List[str]) -> str:
 	if len(items) == 2:
 		return f"{items[0]} and {items[1]}"
 	return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _serialise_task_clause_sequence(task_clauses: List[str], *, ordered: bool) -> str:
+	if not ordered or len(task_clauses) <= 1:
+		return _serialise_nl_list(task_clauses)
+	return ", then ".join(task_clauses)
 
 
 def _task_invocation_to_query_clause(task_name: str, args: List[str]) -> str:
@@ -137,7 +187,7 @@ def _build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 	return {
 		"instruction": (
 			f"{_typed_object_phrase(problem)}, complete the tasks "
-			f"{_serialise_nl_list(task_clauses)}."
+			f"{_serialise_task_clause_sequence(task_clauses, ordered=problem.htn_ordered)}."
 		),
 		"required_task_clauses": task_clauses,
 		"problem_file": str(problem_path.resolve()),
@@ -150,11 +200,12 @@ def _load_problem_query_cases(
 	problem_dir: Path,
 	*,
 	limit: int = 3,
+	pattern: str = "p*.hddl",
 ) -> Dict[str, Dict[str, Any]]:
 	if not problem_dir.exists():
 		return {}
 	cases: Dict[str, Dict[str, Any]] = {}
-	problem_paths = sorted(problem_dir.glob("p*.hddl"))[:limit]
+	problem_paths = sorted(problem_dir.glob(pattern))[:limit]
 	for index, problem_path in enumerate(problem_paths, start=1):
 		case = _build_case_from_problem(problem_path)
 		if case is None:
@@ -171,14 +222,27 @@ MARSROVER_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
 	MARSROVER_PROBLEM_DIR,
 	limit=3,
 )
+SATELLITE_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
+	SATELLITE_PROBLEM_DIR,
+	limit=3,
+	pattern="*.hddl",
+)
+TRANSPORT_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
+	TRANSPORT_PROBLEM_DIR,
+	limit=3,
+)
 QUERY_CASES: Dict[str, Dict[str, Any]] = BLOCKSWORLD_QUERY_CASES
 CLI_QUERY_CASE_GROUPS: Dict[str, Dict[str, Dict[str, Any]]] = {
 	"blocksworld": BLOCKSWORLD_QUERY_CASES,
 	"marsrover": MARSROVER_QUERY_CASES,
+	"satellite": SATELLITE_QUERY_CASES,
+	"transport": TRANSPORT_QUERY_CASES,
 }
 CLI_DOMAIN_FILES: Dict[str, str] = {
 	"blocksworld": OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
 	"marsrover": MARSROVER_DOMAIN_FILE,
+	"satellite": SATELLITE_DOMAIN_FILE,
+	"transport": TRANSPORT_DOMAIN_FILE,
 }
 
 
@@ -241,8 +305,8 @@ def _resolve_cli_selection(argv: List[str]) -> tuple[str, Dict[str, Dict[str, An
 	if len(argv) > 3:
 		raise ValueError(
 			"Usage: python tests/test_pipeline.py "
-			"[blocksworld|marsrover] [query_i|all|list] or "
-			"[blocksworld:query_i|marsrover:all|list]",
+			"[blocksworld|marsrover|satellite|transport] [query_i|all|list] or "
+			"[blocksworld:query_i|marsrover:all|satellite:all|transport:list]",
 		)
 
 	if len(argv) == 1:
@@ -295,6 +359,358 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "ipc_official_verifier.txt",
 		log_dir / "ipc_official_verification.json",
 	]
+
+
+def _literal_from_signature_text(signature: str) -> HTNLiteral:
+	text = str(signature).strip()
+	is_positive = not text.startswith("!")
+	if not is_positive:
+		text = text[1:].strip()
+	if "(" not in text:
+		return HTNLiteral(text, (), is_positive, None)
+	predicate, _, remainder = text.partition("(")
+	args_text = remainder[:-1] if remainder.endswith(")") else remainder
+	args = tuple(arg.strip() for arg in args_text.split(",") if arg.strip())
+	return HTNLiteral(predicate.strip(), args, is_positive, None)
+
+
+def _official_hddl_method_library(
+	*,
+	domain_file: str,
+	task_source_predicates: Dict[str, tuple[str, ...]],
+	target_literal_signatures: List[str],
+	query_task_anchors: List[Dict[str, Any]],
+) -> HTNMethodLibrary:
+	domain = HDDLParser.parse_domain(domain_file)
+	condition_parser = HDDLConditionParser()
+	synthesizer = RealHTNMethodSynthesizer()
+	primitive_action_names = {action.name for action in domain.actions}
+	compound_tasks = [
+			HTNTask(
+				name=task.name,
+				parameters=tuple(condition_parser._extract_parameter_names(task.parameters)),
+				is_primitive=False,
+				source_predicates=task_source_predicates.get(task.name, ()),
+				source_name=task.name,
+			)
+			for task in domain.tasks
+		]
+	primitive_tasks = synthesizer._build_primitive_tasks(domain)
+	methods: List[HTNMethod] = []
+	for method in domain.methods:
+		context = tuple(
+			HTNLiteral(
+				predicate=pattern.predicate,
+				args=tuple(pattern.args),
+				is_positive=pattern.is_positive,
+				source_symbol=None,
+			)
+			for pattern in condition_parser.parse_literals(
+				method.precondition,
+				action_name=method.name,
+				scope="method_precondition",
+			)
+		)
+		subtasks = tuple(
+			HTNMethodStep(
+				step_id=step.label,
+				task_name=(
+					synthesizer._sanitize_name(step.task_name)
+					if step.task_name in primitive_action_names
+					else step.task_name
+				),
+				args=tuple(step.args),
+				kind="primitive" if step.task_name in primitive_action_names else "compound",
+				action_name=step.task_name if step.task_name in primitive_action_names else None,
+			)
+			for step in method.subtasks
+		)
+		methods.append(
+			HTNMethod(
+				method_name=method.name,
+				task_name=method.task_name,
+				parameters=tuple(condition_parser._extract_parameter_names(method.parameters)),
+				task_args=tuple(method.task_args),
+				context=context,
+				subtasks=subtasks,
+				ordering=tuple(tuple(edge) for edge in method.ordering),
+				origin="official_hddl",
+			),
+		)
+
+	method_library = HTNMethodLibrary(
+		compound_tasks=compound_tasks,
+		primitive_tasks=primitive_tasks,
+		methods=methods,
+	)
+	target_literals, target_task_bindings = _official_task_headline_targets(
+		domain=domain,
+		method_library=method_library,
+		target_literal_signatures=target_literal_signatures,
+		query_task_anchors=query_task_anchors,
+	)
+	method_library.target_literals = target_literals
+	method_library.target_task_bindings = target_task_bindings
+	return method_library
+
+
+def _official_task_headline_targets(
+	*,
+	domain: Any,
+	method_library: HTNMethodLibrary,
+	target_literal_signatures: List[str],
+	query_task_anchors: List[Dict[str, Any]],
+) -> tuple[List[HTNLiteral], List[HTNTargetTaskBinding]]:
+	if not query_task_anchors:
+		return (
+			[_literal_from_signature_text(signature) for signature in target_literal_signatures],
+			[],
+		)
+
+	renderer = AgentSpeakRenderer()
+	task_lookup = {
+		task.name: task
+		for task in method_library.compound_tasks + method_library.primitive_tasks
+	}
+	methods_by_task: Dict[str, List[HTNMethod]] = {}
+	for method in method_library.methods:
+		methods_by_task.setdefault(method.task_name, []).append(method)
+	task_render_specs = renderer._build_task_render_specs(domain, method_library)
+	effect_cache: Dict[str, tuple[Any, ...]] = {}
+	stage1_literal_signatures = set(target_literal_signatures)
+	target_literals: List[HTNLiteral] = []
+	target_task_bindings: List[HTNTargetTaskBinding] = []
+	seen_signatures: set[str] = set()
+
+	for anchor in query_task_anchors:
+		task_name = anchor.get("task_name")
+		if not task_name:
+			continue
+		task_schema = task_lookup.get(task_name)
+		if task_schema is None:
+			continue
+		task_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+		anchor_args = tuple(anchor.get("args", ()) or ())
+		bindings = {
+			parameter: arg
+			for parameter, arg in zip(task_parameters, anchor_args)
+		}
+		candidate_literals = [
+			HTNLiteral(
+				predicate=template.predicate,
+				args=tuple(bindings.get(arg, arg) for arg in template.args),
+				is_positive=template.is_positive,
+				source_symbol=None,
+			)
+			for template in renderer._compound_task_effect_templates(
+				task_name,
+				task_lookup,
+				methods_by_task,
+				task_render_specs,
+				effect_cache,
+			)
+		]
+		if stage1_literal_signatures:
+			candidate_literals = [
+				literal
+				for literal in candidate_literals
+				if literal.to_signature() in stage1_literal_signatures
+			]
+		for literal in candidate_literals:
+			signature = literal.to_signature()
+			if signature in seen_signatures:
+				continue
+			seen_signatures.add(signature)
+			target_literals.append(literal)
+			target_task_bindings.append(HTNTargetTaskBinding(signature, task_name))
+
+	if target_literals:
+		return target_literals, target_task_bindings
+
+	return (
+		[_literal_from_signature_text(signature) for signature in target_literal_signatures],
+		[
+			HTNTargetTaskBinding(signature, anchor["task_name"])
+			for signature, anchor in zip(target_literal_signatures, query_task_anchors)
+			if anchor.get("task_name")
+		],
+	)
+
+
+OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS: Dict[str, Dict[str, Any]] = {
+	"blocksworld": {
+		"domain_file": OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		"query_cases": BLOCKSWORLD_QUERY_CASES,
+	},
+	"marsrover": {
+		"domain_file": MARSROVER_DOMAIN_FILE,
+		"query_cases": MARSROVER_QUERY_CASES,
+	},
+	"satellite": {
+		"domain_file": SATELLITE_DOMAIN_FILE,
+		"query_cases": SATELLITE_QUERY_CASES,
+	},
+	"transport": {
+		"domain_file": TRANSPORT_DOMAIN_FILE,
+		"query_cases": TRANSPORT_QUERY_CASES,
+	},
+}
+
+
+def _official_domain_method_library(
+	domain_key: str,
+	*,
+	target_literal_signatures: List[str],
+	query_task_anchors: List[Dict[str, Any]],
+) -> HTNMethodLibrary:
+	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
+	return _official_hddl_method_library(
+		domain_file=domain_config["domain_file"],
+		task_source_predicates=OFFICIAL_STAGE3_MASK_TASK_SOURCE_PREDICATES[domain_key],
+		target_literal_signatures=target_literal_signatures,
+		query_task_anchors=query_task_anchors,
+	)
+
+
+def _run_domain_query_case_with_official_stage3_mask(
+	domain_key: str,
+	query_id: str,
+	monkeypatch,
+) -> Dict[str, Any]:
+	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
+	case = domain_config["query_cases"][query_id]
+
+	class OfficialStage3MaskSynthesizer:
+		def __init__(self, *args, **kwargs):
+			self._delegate = RealHTNMethodSynthesizer()
+
+		def synthesize(
+			self,
+			domain,
+			grounding_map,
+			dfa_result,
+			*,
+			query_text=None,
+			query_task_anchors=None,
+			semantic_objects=None,
+			query_object_inventory=None,
+			query_objects=None,
+			derived_analysis=None,
+			negation_hints=None,
+			ordered_literal_signatures=None,
+		):
+			target_literal_signatures = list(ordered_literal_signatures or ())
+			anchors = list(query_task_anchors or ())
+			method_library = _official_domain_method_library(
+				domain_key,
+				target_literal_signatures=target_literal_signatures,
+				query_task_anchors=anchors,
+			)
+			return method_library, {
+				"used_llm": False,
+				"model": None,
+				"target_literals": target_literal_signatures,
+				"query_task_anchors": anchors,
+				"semantic_objects": list(semantic_objects or ()),
+				"query_object_inventory": list(query_object_inventory or ()),
+				"query_objects": list(query_objects or ()),
+				"negation_resolution": {"predicates": [], "mode_by_predicate": {}},
+				"action_analysis": {},
+				"derived_analysis": dict(derived_analysis or {}),
+				"compound_tasks": len(method_library.compound_tasks),
+				"primitive_tasks": len(method_library.primitive_tasks),
+				"methods": len(method_library.methods),
+				"failure_stage": None,
+				"failure_reason": None,
+				"failure_class": None,
+				"llm_prompt": None,
+				"llm_response": None,
+				"llm_finish_reason": None,
+				"llm_attempts": 0,
+				"llm_generation_attempts": 0,
+			}
+
+		def extract_progressing_transitions(
+			self,
+			grounding_map,
+			dfa_result,
+			*,
+			ordered_literal_signatures=None,
+		):
+			return self._delegate.extract_progressing_transitions(
+				grounding_map,
+				dfa_result,
+				ordered_literal_signatures=ordered_literal_signatures,
+			)
+
+	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", OfficialStage3MaskSynthesizer)
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=domain_config["domain_file"],
+		problem_file=case.get("problem_file"),
+	)
+	test_logs_dir = Path(__file__).parent / "logs"
+	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	result = pipeline.execute(case["instruction"], mode="dfa_agentspeak")
+	log_dir = pipeline.logger.current_log_dir
+	if log_dir is None:
+		raise RuntimeError(f"{domain_key}:{query_id} did not produce a log directory")
+	execution = json.loads((log_dir / "execution.json").read_text())
+	stage6_artifacts = execution.get("stage6_artifacts") or {}
+	stage7_artifacts = execution.get("stage7_artifacts") or {}
+
+	bug_messages: List[str] = []
+	if not result["success"]:
+		bug_messages.append("pipeline returned success=False")
+	failed_stages: List[str] = []
+	for stage_key in (
+		"stage1_status",
+		"stage2_status",
+		"stage3_status",
+		"stage4_status",
+		"stage5_status",
+		"stage6_status",
+		"stage7_status",
+	):
+		if execution.get(stage_key) != "success":
+			failed_stages.append(stage_key)
+	if failed_stages:
+		bug_messages.extend(f"{stage_key} is not success" for stage_key in failed_stages)
+	if execution.get("stage6_status") == "success" and stage6_artifacts.get("status") != "success":
+		bug_messages.append("Stage 6 status payload is not success")
+	if execution.get("stage7_status") == "success" and stage7_artifacts.get("plan_kind") != "hierarchical":
+		bug_messages.append("official IPC verifier did not validate a hierarchical plan")
+	if (
+		execution.get("stage7_status") == "success"
+		and stage7_artifacts.get("verification_result") is not True
+	):
+		bug_messages.append("official IPC HTN verifier did not accept the generated plan")
+
+	return {
+		"query_id": query_id,
+		"case": case,
+		"result": result,
+		"log_dir": log_dir,
+		"execution": execution,
+		"bug_messages": bug_messages,
+		"has_bug": bool(bug_messages),
+	}
+
+
+def _run_query_case_with_official_stage3_mask(query_id: str, monkeypatch) -> Dict[str, Any]:
+	return _run_domain_query_case_with_official_stage3_mask("blocksworld", query_id, monkeypatch)
+
+
+def _run_marsrover_query_case_with_official_stage3_mask(query_id: str, monkeypatch) -> Dict[str, Any]:
+	return _run_domain_query_case_with_official_stage3_mask("marsrover", query_id, monkeypatch)
+
+
+def _run_satellite_query_case_with_official_stage3_mask(query_id: str, monkeypatch) -> Dict[str, Any]:
+	return _run_domain_query_case_with_official_stage3_mask("satellite", query_id, monkeypatch)
+
+
+def _run_transport_query_case_with_official_stage3_mask(query_id: str, monkeypatch) -> Dict[str, Any]:
+	return _run_domain_query_case_with_official_stage3_mask("transport", query_id, monkeypatch)
 
 
 def _agent_vars(text: str) -> set[str]:
@@ -558,7 +974,7 @@ def assert_seed_validation_scope_preserves_multi_type_object_assignments(tmp_pat
 	assert object_types["loc2"] == "location"
 
 
-def assert_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
+def assert_seed_validation_scope_accepts_parent_type_when_leaf_type_is_unconstrained(tmp_path):
 	domain_file = tmp_path / "domain_vehicle.hddl"
 	domain_file.write_text(
 		"""
@@ -595,13 +1011,18 @@ def assert_seed_validation_scope_fails_for_ambiguous_parent_type(tmp_path):
 		target_task_bindings=[HTNTargetTaskBinding("at(v1, l1)", "reach")],
 	)
 
-	with pytest.raises(TypeResolutionError, match="ambiguous"):
-		pipeline._seed_validation_scope(
-			"reach",
-			method_library,
-			("v1", "l1"),
-			("v1", "l1"),
-		)
+	object_pool, object_types = pipeline._seed_validation_scope(
+		"reach",
+		method_library,
+		("v1", "l1"),
+		("v1", "l1"),
+	)
+
+	assert object_pool == ["v1", "l1"]
+	assert object_types == {
+		"v1": "vehicle",
+		"l1": "location",
+	}
 
 
 def assert_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
@@ -645,6 +1066,176 @@ def assert_stage3_type_validation_fails_for_untyped_method_variable(tmp_path):
 
 	with pytest.raises(TypeResolutionError, match="UNBOUND"):
 		pipeline._validate_method_library_typing(method_library)
+
+
+def assert_problem_domain_name_mismatch_allows_compatible_problem(tmp_path):
+	domain_file = tmp_path / "domain_transport.hddl"
+	domain_file.write_text(
+		"""
+(define (domain transport)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types location vehicle package)
+  (:predicates
+    (at ?x - package ?l - location)
+    (truck_at ?v - vehicle ?l - location)
+  )
+  (:task deliver
+    :parameters (?p - package ?l - location)
+  )
+  (:action noop
+    :parameters (?v - vehicle ?l - location)
+    :precondition (and (truck_at ?v ?l))
+    :effect ()
+  )
+)
+		""".strip(),
+	)
+	problem_file = tmp_path / "problem_transport_alias.hddl"
+	problem_file.write_text(
+		"""
+(define (problem transport_alias)
+  (:domain domain_htn)
+  (:objects
+    truck0 - vehicle
+    package0 - package
+    loc0 - location
+  )
+  (:htn
+    :tasks (and
+      (deliver package0 loc0)
+    )
+    :ordering ()
+    :constraints ()
+  )
+  (:init
+    (at package0 loc0)
+    (truck_at truck0 loc0)
+  )
+)
+		""".strip(),
+	)
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=str(domain_file),
+		problem_file=str(problem_file),
+	)
+
+	assert pipeline.problem is not None
+	assert pipeline.problem.domain_name == "domain_htn"
+	assert pipeline.domain.name == "transport"
+
+
+def assert_problem_domain_name_mismatch_rejects_incompatible_problem(tmp_path):
+	domain_file = tmp_path / "domain_transport.hddl"
+	domain_file.write_text(
+		"""
+(define (domain transport)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types location vehicle package)
+  (:predicates
+    (at ?x - package ?l - location)
+  )
+  (:task deliver
+    :parameters (?p - package ?l - location)
+  )
+  (:action noop
+    :parameters (?p - package ?l - location)
+    :precondition (and (at ?p ?l))
+    :effect ()
+  )
+)
+		""".strip(),
+	)
+	problem_file = tmp_path / "problem_transport_bad.hddl"
+	problem_file.write_text(
+		"""
+(define (problem transport_bad)
+  (:domain domain_htn)
+  (:objects
+    package0 - package
+    loc0 - location
+  )
+  (:htn
+    :tasks (and
+      (pickup package0 loc0)
+    )
+    :ordering ()
+    :constraints ()
+  )
+  (:init
+    (at package0 loc0)
+  )
+)
+		""".strip(),
+	)
+
+	with pytest.raises(ValueError, match="HTN task is not declared"):
+		LTL_BDI_Pipeline(
+			domain_file=str(domain_file),
+			problem_file=str(problem_file),
+		)
+
+
+def assert_method_task_argument_type_hints_prefer_explicit_task_args(tmp_path):
+	domain_file = tmp_path / "domain_delivery.hddl"
+	domain_file.write_text(
+		"""
+(define (domain delivery_world)
+  (:requirements :typing :hierarchy :negative-preconditions)
+  (:types package vehicle location)
+  (:predicates
+    (pkg_at ?p - package ?l - location)
+    (truck_at ?v - vehicle ?l - location)
+  )
+  (:task deliver
+    :parameters (?p - package ?l - location)
+  )
+  (:action drive
+    :parameters (?v - vehicle ?from - location ?to - location)
+    :precondition (and (truck_at ?v ?from))
+    :effect (and (truck_at ?v ?to) (not (truck_at ?v ?from)))
+  )
+)
+		""".strip(),
+	)
+	pipeline = LTL_BDI_Pipeline(domain_file=str(domain_file))
+	method = HTNMethod(
+		method_name="m_deliver_drive",
+		task_name="deliver",
+		parameters=("FROM", "TRUCK", "PKG", "DEST"),
+		task_args=("PKG", "DEST"),
+		context=(
+			HTNLiteral("truck_at", ("TRUCK", "FROM"), True, None),
+			HTNLiteral("pkg_at", ("PKG", "FROM"), True, None),
+		),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="drive",
+				args=("TRUCK", "FROM", "DEST"),
+				kind="primitive",
+				action_name="drive",
+			),
+		),
+		ordering=(),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("deliver", ("PKG", "DEST"), False, ())],
+		primitive_tasks=[],
+		methods=[method],
+		target_literals=[HTNLiteral("pkg_at", ("pkg0", "loc1"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("pkg_at(pkg0, loc1)", "deliver")],
+	)
+
+	variable_types = pipeline._method_variable_type_hints(method, method_library)
+
+	assert variable_types == {
+		"DEST": "location",
+		"FROM": "location",
+		"PKG": "package",
+		"TRUCK": "vehicle",
+	}
+	pipeline._validate_method_library_typing(method_library)
 
 
 def assert_stage1_object_universe_merges_constants_from_atoms_and_formulas():
@@ -714,6 +1305,410 @@ def assert_ordered_literal_signatures_extracts_eventually_wrapped_atoms():
 	)
 
 
+def assert_ordered_literal_signatures_preserve_identical_occurrences():
+	spec = SimpleNamespace(
+		formulas=[
+			LTLFormula(
+				operator=TemporalOperator.FINALLY,
+				predicate=None,
+				sub_formulas=[
+					LTLFormula(
+						operator=None,
+						predicate={"on": ["b10", "b6"]},
+						sub_formulas=[],
+						logical_op=None,
+					),
+				],
+				logical_op=None,
+			),
+			LTLFormula(
+				operator=TemporalOperator.FINALLY,
+				predicate=None,
+				sub_formulas=[
+					LTLFormula(
+						operator=None,
+						predicate={"on": ["b5", "b10"]},
+						sub_formulas=[],
+						logical_op=None,
+					),
+				],
+				logical_op=None,
+			),
+			LTLFormula(
+				operator=TemporalOperator.FINALLY,
+				predicate=None,
+				sub_formulas=[
+					LTLFormula(
+						operator=None,
+						predicate={"on": ["b10", "b6"]},
+						sub_formulas=[],
+						logical_op=None,
+					),
+				],
+				logical_op=None,
+			),
+		],
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"on(b10, b6)",
+		"on(b5, b10)",
+		"on(b10, b6)",
+	)
+
+
+def assert_ordered_literal_signatures_prefer_query_task_literal_contract():
+	spec = SimpleNamespace(
+		query_task_literal_signatures=["on(b10, b6)", "on(b5, b10)", "on(b10, b6)"],
+		formulas=[
+			LTLFormula(
+				operator=TemporalOperator.FINALLY,
+				predicate=None,
+				sub_formulas=[
+					LTLFormula(
+						operator=None,
+						predicate=None,
+						sub_formulas=[
+							LTLFormula(
+								operator=None,
+								predicate={"on": ["b10", "b6"]},
+								sub_formulas=[],
+								logical_op=None,
+							),
+							LTLFormula(
+								operator=TemporalOperator.FINALLY,
+								predicate=None,
+								sub_formulas=[
+									LTLFormula(
+										operator=None,
+										predicate=None,
+										sub_formulas=[
+											LTLFormula(
+												operator=None,
+												predicate={"on": ["b10", "b6"]},
+												sub_formulas=[],
+												logical_op=None,
+											),
+											LTLFormula(
+												operator=None,
+												predicate={"on": ["b5", "b10"]},
+												sub_formulas=[],
+												logical_op=None,
+											),
+										],
+										logical_op=LogicalOperator.AND,
+									),
+								],
+								logical_op=None,
+							),
+						],
+						logical_op=LogicalOperator.AND,
+					),
+				],
+				logical_op=None,
+			),
+		],
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"on(b10, b6)",
+		"on(b5, b10)",
+		"on(b10, b6)",
+	)
+
+
+def assert_stage1_task_grounded_eventual_targets_drop_support_only_literals():
+	pipeline = LTL_BDI_Pipeline(domain_file=str(MARSROVER_DOMAIN_FILE))
+	spec = LTLSpecification()
+	spec.add_formula(
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate=None,
+					sub_formulas=[
+						LTLFormula(
+							operator=None,
+							predicate={"have_soil_analysis": ["rover0", "waypoint2"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"communicated_soil_data": ["waypoint2"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+					],
+					logical_op=LogicalOperator.AND,
+				),
+			],
+			logical_op=None,
+		),
+	)
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		spec,
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+		),
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"communicated_soil_data(waypoint2)",
+	)
+
+
+def assert_stage1_task_grounded_singleton_support_targets_canonicalize_to_headline():
+	pipeline = LTL_BDI_Pipeline(domain_file=str(MARSROVER_DOMAIN_FILE))
+	spec = LTLSpecification()
+	spec.add_formula(
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate={"have_soil_analysis": ["rover0", "waypoint2"]},
+					sub_formulas=[],
+					logical_op=None,
+				),
+			],
+			logical_op=None,
+		),
+	)
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		spec,
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+		),
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"communicated_soil_data(waypoint2)",
+	)
+
+
+def assert_stage1_task_grounded_joint_eventual_bundle_canonicalizes_per_anchor():
+	pipeline = LTL_BDI_Pipeline(domain_file=str(MARSROVER_DOMAIN_FILE))
+	spec = LTLSpecification()
+	spec.add_formula(
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate=None,
+					sub_formulas=[
+						LTLFormula(
+							operator=None,
+							predicate={"have_soil_analysis": ["rover0", "waypoint2"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"communicated_soil_data": ["waypoint2"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"have_rock_analysis": ["rover0", "waypoint3"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"communicated_rock_data": ["waypoint3"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"have_image": ["rover0", "objective1", "high_res"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"communicated_image_data": ["objective1", "high_res"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+					],
+					logical_op=LogicalOperator.AND,
+				),
+			],
+			logical_op=None,
+		),
+	)
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		spec,
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+			{"task_name": "get_rock_data", "args": ["waypoint3"]},
+			{"task_name": "get_image_data", "args": ["objective1", "high_res"]},
+		),
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"communicated_soil_data(waypoint2)",
+		"communicated_rock_data(waypoint3)",
+		"communicated_image_data(objective1, high_res)",
+	)
+
+
+def assert_stage1_task_grounded_satellite_headline_prefers_task_signature_match():
+	pipeline = LTL_BDI_Pipeline(domain_file=str(SATELLITE_DOMAIN_FILE))
+	spec = LTLSpecification()
+	spec.add_formula(
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate=None,
+					sub_formulas=[
+						LTLFormula(
+							operator=None,
+							predicate={"calibrated": ["instrument0"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+						LTLFormula(
+							operator=None,
+							predicate={"have_image": ["Phenomenon4", "thermograph0"]},
+							sub_formulas=[],
+							logical_op=None,
+						),
+					],
+					logical_op=LogicalOperator.AND,
+				),
+			],
+			logical_op=None,
+		),
+	)
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		spec,
+		query_task_anchors=(
+			{"task_name": "do_observation", "args": ["Phenomenon4", "thermograph0"]},
+		),
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"have_image(Phenomenon4, thermograph0)",
+	)
+
+
+def assert_stage1_task_grounded_satellite_variable_arguments_use_typed_witness_grounding():
+	pipeline = LTL_BDI_Pipeline(domain_file=str(SATELLITE_DOMAIN_FILE))
+	spec = LTLSpecification()
+	spec.query_object_inventory = [
+		{"type": "instrument", "label": "instruments", "objects": ["instrument0", "instrument1"]},
+		{"type": "satellite", "label": "satellites", "objects": ["satellite0", "satellite1"]},
+		{"type": "mode", "label": "mode", "objects": ["image1"]},
+		{"type": "calib_direction", "label": "calib_direction", "objects": ["star0"]},
+		{
+			"type": "image_direction",
+			"label": "image_directions",
+			"objects": ["star5", "phenomenon1", "phenomenon2"],
+		},
+	]
+	spec.add_formula(
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate={"have_image": ["?direction1", "?mode1"]},
+					sub_formulas=[],
+					logical_op=None,
+				),
+			],
+			logical_op=None,
+		),
+	)
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		spec,
+		query_task_anchors=(
+			{"task_name": "do_observation", "args": ["?direction1", "?mode1"]},
+		),
+	)
+
+	assert LTL_BDI_Pipeline._ordered_literal_signatures_from_spec(spec) == (
+		"have_image(star5, image1)",
+	)
+
+
+def assert_ipc_plan_verifier_grounds_parameterised_root_tasks_from_trace():
+	verifier = IPCPlanVerifier()
+	grounded = verifier._resolve_task_args_from_trace(
+		("?direction1", "?mode1"),
+		("star5", "image1"),
+	)
+
+	assert grounded == ("star5", "image1")
+
+
+def assert_ipc_plan_verifier_reconstructs_multi_root_depth_first_method_traces():
+	problem = HDDLParser.parse_problem(
+		str(SATELLITE_PROBLEM_DIR / "2obs-1sat-1mod.hddl"),
+	)
+	method_library = _official_domain_method_library(
+		"satellite",
+		target_literal_signatures=[],
+		query_task_anchors=[],
+	)
+	verifier = IPCPlanVerifier()
+	trace_entries = verifier._normalise_method_trace(
+		[
+			{"method_name": "method0", "task_args": ["Phenomenon4", "thermograph0"]},
+			{"method_name": "method5", "task_args": ["satellite0", "instrument0"]},
+			{"method_name": "method6", "task_args": ["satellite0", "instrument0"]},
+			{"method_name": "method0", "task_args": ["Star5", "thermograph0"]},
+			{"method_name": "method4", "task_args": ["satellite0", "instrument0"]},
+			{"method_name": "method6", "task_args": ["satellite0", "instrument0"]},
+		],
+	)
+	actions = [
+		("switch_on", ("instrument0", "satellite0")),
+		("turn_to", ("satellite0", "GroundStation2", "Phenomenon6")),
+		("calibrate", ("satellite0", "instrument0", "GroundStation2")),
+		("turn_to", ("satellite0", "Phenomenon4", "GroundStation2")),
+		("take_image", ("satellite0", "Phenomenon4", "instrument0", "thermograph0")),
+		("switch_off", ("instrument0", "satellite0")),
+		("switch_on", ("instrument0", "satellite0")),
+		("turn_to", ("satellite0", "GroundStation2", "Phenomenon4")),
+		("calibrate", ("satellite0", "instrument0", "GroundStation2")),
+		("turn_to", ("satellite0", "Star5", "GroundStation2")),
+		("take_image", ("satellite0", "Star5", "instrument0", "thermograph0")),
+	]
+
+	root_nodes, action_index, trace_index = verifier._reconstruct_hierarchy(
+		method_library=method_library,
+		root_tasks=problem.htn_tasks,
+		actions=actions,
+		trace_entries=trace_entries,
+	)
+
+	assert action_index == len(actions)
+	assert trace_index == len(trace_entries)
+	assert [tuple(node.args) for node in root_nodes] == [
+		("Phenomenon4", "thermograph0"),
+		("Star5", "thermograph0"),
+	]
+
+
 def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks():
 	problem_path = (
 		Path(__file__).parent.parent
@@ -730,7 +1725,8 @@ def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks
 	assert case is not None
 	assert case["instruction"] == (
 		"Using blocks b1, b2, b3, b4, and b5, "
-		"complete the tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1)."
+		"complete the tasks do_put_on(b4, b2), then do_put_on(b1, b4), "
+		"then do_put_on(b3, b1)."
 	)
 	assert case["required_task_clauses"] == [
 		"do_put_on(b4, b2)",
@@ -738,6 +1734,46 @@ def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks
 		"do_put_on(b3, b1)",
 	]
 	assert case["problem_file"] == str(problem_path.resolve())
+
+
+def assert_official_blocksworld_problem_query_case_generation_preserves_identical_root_task_occurrences():
+	problem_path = (
+		Path(__file__).parent.parent
+		/ "src"
+		/ "domains"
+		/ "blocksworld"
+		/ "problems"
+		/ "p04.hddl"
+	)
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	case = _build_case_from_problem(problem_path)
+	assert case is not None
+	assert case["required_task_clauses"] == [
+		"do_put_on(b10, b6)",
+		"do_put_on(b5, b10)",
+		"do_put_on(b2, b5)",
+		"do_put_on(b9, b2)",
+		"do_put_on(b1, b9)",
+		"do_put_on(b11, b1)",
+		"do_put_on(b10, b6)",
+		"do_put_on(b5, b10)",
+		"do_put_on(b2, b5)",
+		"do_put_on(b9, b2)",
+		"do_put_on(b1, b9)",
+		"do_put_on(b11, b1)",
+		"do_put_on(b4, b11)",
+		"do_put_on(b7, b4)",
+	]
+	assert case["instruction"] == (
+		"Using blocks b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, and b11, "
+		"complete the tasks do_put_on(b10, b6), then do_put_on(b5, b10), "
+		"then do_put_on(b2, b5), then do_put_on(b9, b2), then do_put_on(b1, b9), "
+		"then do_put_on(b11, b1), then do_put_on(b10, b6), then do_put_on(b5, b10), "
+		"then do_put_on(b2, b5), then do_put_on(b9, b2), then do_put_on(b1, b9), "
+		"then do_put_on(b11, b1), then do_put_on(b4, b11), then do_put_on(b7, b4)."
+	)
 
 
 def assert_official_marsrover_problem_query_case_generation_from_problem_tasks():
@@ -769,6 +1805,31 @@ def assert_official_marsrover_problem_query_case_generation_from_problem_tasks()
 	assert case["problem_file"] == str(problem_path.resolve())
 
 
+def assert_official_satellite_problem_query_case_generation_from_problem_tasks():
+	problem_path = (
+		Path(__file__).parent.parent
+		/ "src"
+		/ "domains"
+		/ "satellite"
+		/ "problems"
+		/ "1obs-1sat-1mod.hddl"
+	)
+	if not problem_path.exists():
+		pytest.skip(f"Missing satellite problem file: {problem_path}")
+
+	case = _build_case_from_problem(problem_path)
+	assert case is not None
+	assert case["instruction"] == (
+		"Using instrument instrument0, satellite satellite0, mode thermograph0, "
+		"calib_direction GroundStation2, and image_directions Phenomenon4 and Phenomenon6, "
+		"complete the tasks do_observation(Phenomenon4, thermograph0)."
+	)
+	assert case["required_task_clauses"] == [
+		"do_observation(Phenomenon4, thermograph0)",
+	]
+	assert case["problem_file"] == str(problem_path.resolve())
+
+
 def assert_query_task_anchor_extraction_uses_declared_tasks_only():
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	anchors = pipeline._extract_query_task_anchors(
@@ -780,6 +1841,134 @@ def assert_query_task_anchor_extraction_uses_declared_tasks_only():
 		{"task_name": "do_put_on", "args": ["b1", "b2"]},
 		{"task_name": "do_clear", "args": ["b1"]},
 	)
+
+
+def assert_task_grounded_canonical_formulas_preserve_identical_obligation_occurrences():
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	signatures, formulas = pipeline._canonical_task_grounded_formulas(
+		(
+			{"task_name": "do_put_on", "args": ["b1", "b2"]},
+			{"task_name": "do_put_on", "args": ["b1", "b2"]},
+			{"task_name": "do_put_on", "args": ["b3", "b1"]},
+		),
+		query_object_inventory=(),
+	)
+
+	assert signatures == ("on(b1, b2)", "on(b1, b2)", "on(b3, b1)")
+	assert [formula.to_string() for formula in formulas] == [
+		"F(on(b1, b2))",
+		"F(on(b1, b2))",
+		"F(on(b3, b1))",
+	]
+
+
+def assert_task_grounded_canonical_formulas_preserve_order_when_query_requests_sequence():
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	signatures, formulas = pipeline._canonical_task_grounded_formulas(
+		(
+			{"task_name": "do_put_on", "args": ["b4", "b2"]},
+			{"task_name": "do_put_on", "args": ["b1", "b4"]},
+			{"task_name": "do_put_on", "args": ["b3", "b1"]},
+		),
+		query_object_inventory=(),
+		ordered_sequence=True,
+	)
+
+	assert signatures == ("on(b4, b2)", "on(b1, b4)", "on(b3, b1)")
+	assert [formula.to_string() for formula in formulas] == [
+		"F((on(b4, b2) & F(((on(b4, b2) & on(b1, b4)) & F((on(b4, b2) & on(b1, b4) & on(b3, b1)))))))",
+	]
+
+
+def assert_task_grounded_stage1_normalisation_overrides_independent_eventuals_for_ordered_queries():
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	ltl_spec = LTLSpecification()
+	ltl_spec.formulas = [
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate={"on": ["b4", "b2"]},
+					sub_formulas=[],
+					logical_op=None,
+				),
+			],
+			logical_op=None,
+		),
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate={"on": ["b1", "b4"]},
+					sub_formulas=[],
+					logical_op=None,
+				),
+			],
+			logical_op=None,
+		),
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate={"on": ["b3", "b1"]},
+					sub_formulas=[],
+					logical_op=None,
+				),
+			],
+			logical_op=None,
+		),
+	]
+	ltl_spec.objects = ["b1", "b2", "b3", "b4"]
+	ltl_spec.grounding_map = GroundingMap()
+	ltl_spec.source_instruction = (
+		"Using blocks b1, b2, b3, and b4, complete the tasks "
+		"do_put_on(b4, b2), then do_put_on(b1, b4), then do_put_on(b3, b1)."
+	)
+	ltl_spec.negation_hints = {}
+	ltl_spec.query_object_inventory = []
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		ltl_spec,
+		query_task_anchors=(
+			{"task_name": "do_put_on", "args": ["b4", "b2"]},
+			{"task_name": "do_put_on", "args": ["b1", "b4"]},
+			{"task_name": "do_put_on", "args": ["b3", "b1"]},
+		),
+		query_text=ltl_spec.source_instruction,
+	)
+
+	assert [formula.to_string() for formula in ltl_spec.formulas] == [
+		"F((on(b4, b2) & F(((on(b4, b2) & on(b1, b4)) & F((on(b4, b2) & on(b1, b4) & on(b3, b1)))))))",
+	]
+	assert ltl_spec.query_task_literal_signatures == [
+		"on(b4, b2)",
+		"on(b1, b4)",
+		"on(b3, b1)",
+	]
+
+
+def assert_task_grounded_ordered_formulas_accumulate_prior_positive_obligations():
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	signatures, formulas = pipeline._canonical_task_grounded_formulas(
+		(
+			{"task_name": "do_put_on", "args": ["b1", "b2"]},
+			{"task_name": "do_put_on", "args": ["b1", "b2"]},
+			{"task_name": "do_put_on", "args": ["b3", "b1"]},
+		),
+		query_object_inventory=(),
+		ordered_sequence=True,
+	)
+
+	assert signatures == ("on(b1, b2)", "on(b1, b2)", "on(b3, b1)")
+	assert [formula.to_string() for formula in formulas] == [
+		"F((on(b1, b2) & F((on(b1, b2) & F((on(b1, b2) & on(b3, b1)))))))",
+	]
 
 
 def assert_query_object_inventory_extraction_preserves_full_benchmark_inventory():
@@ -1481,7 +2670,10 @@ def assert_method_validation_initial_facts_allocate_typed_witness_objects(tmp_pa
 	assert holding_obj in object_pool
 
 
-def assert_stage7_prefers_planned_hierarchical_verification(tmp_path, monkeypatch):
+def assert_stage7_verifies_exported_hierarchical_plan_even_when_planner_available(
+	tmp_path,
+	monkeypatch,
+):
 	calls: list[str] = []
 
 	class FakeResult:
@@ -1525,13 +2717,15 @@ def assert_stage7_prefers_planned_hierarchical_verification(tmp_path, monkeypatc
 			return True
 
 		def verify_planned_hierarchical_plan(self, **kwargs):
-			calls.append("planned")
-			return FakeResult()
+			raise AssertionError(
+				"Stage 7 should verify the exported runtime plan rather than replanning it"
+			)
 
 		def verify_plan(self, **kwargs):
-			raise AssertionError(
-				"trace-based verification should not run when the planner toolchain is available"
-			)
+			calls.append("trace")
+			assert kwargs["action_path"] == ["stack(a, b)"]
+			assert kwargs["method_trace"] == [{"method_name": "m_put_on", "task_args": ["a", "b"]}]
+			return FakeResult()
 
 	monkeypatch.setattr(pipeline_module, "IPCPlanVerifier", FakeVerifier)
 
@@ -1551,10 +2745,15 @@ def assert_stage7_prefers_planned_hierarchical_verification(tmp_path, monkeypatc
 	result = pipeline._stage7_official_verification(
 		ltl_spec=None,
 		method_library=method_library,
-		stage6_data={"artifacts": {"action_path": [], "method_trace": []}},
+		stage6_data={
+			"artifacts": {
+				"action_path": ["stack(a, b)"],
+				"method_trace": [{"method_name": "m_put_on", "task_args": ["a", "b"]}],
+			},
+		},
 	)
 
-	assert calls == ["planned"]
+	assert calls == ["trace"]
 	assert result is not None
 	assert result["summary"]["status"] == "success"
 	assert result["artifacts"]["plan_kind"] == "hierarchical"
@@ -1627,6 +2826,34 @@ def test_blocksworld_pipeline_query_case(query_id: str):
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 
 
+@pytest.mark.parametrize("query_id", ("query_1", "query_2", "query_3"))
+def test_blocksworld_pipeline_query_case_with_official_stage3_mask(query_id: str, monkeypatch):
+	_ensure_live_dependencies()
+	report = _run_query_case_with_official_stage3_mask(query_id, monkeypatch)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", ("query_1", "query_2", "query_3"))
+def test_marsrover_pipeline_query_case_with_official_stage3_mask(query_id: str, monkeypatch):
+	_ensure_live_dependencies()
+	report = _run_marsrover_query_case_with_official_stage3_mask(query_id, monkeypatch)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", ("query_1", "query_2", "query_3"))
+def test_satellite_pipeline_query_case_with_official_stage3_mask(query_id: str, monkeypatch):
+	_ensure_live_dependencies()
+	report = _run_satellite_query_case_with_official_stage3_mask(query_id, monkeypatch)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", ("query_1", "query_2", "query_3"))
+def test_transport_pipeline_query_case_with_official_stage3_mask(query_id: str, monkeypatch):
+	_ensure_live_dependencies()
+	report = _run_transport_query_case_with_official_stage3_mask(query_id, monkeypatch)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
 @pytest.mark.parametrize("query_id", _pytest_selected_marsrover_query_ids())
 def test_marsrover_pipeline_query_case(query_id: str):
 	_ensure_live_dependencies()
@@ -1641,13 +2868,14 @@ def test_marsrover_pipeline_query_case(query_id: str):
 def _print_cli_report(report: Dict[str, Any]) -> None:
 	query_id = report["query_id"]
 	case = report["case"]
-	execution = report["execution"]
+	execution = report["execution"] or {}
+	stage3_metadata = execution.get("stage3_metadata") or {}
 
 	print(f"{query_id}: {case['description']}")
 	print(f"Instruction: {case['instruction']}")
 	print(f"Log Dir: {report['log_dir']}")
 	print(f"Success: {report['result']['success']}")
-	print(f"Stage 3 Target Literals: {execution.get('stage3_metadata', {}).get('target_literals', [])}")
+	print(f"Stage 3 Target Literals: {stage3_metadata.get('target_literals', [])}")
 	print(
 		f"Stage 3 Target Task Bindings: "
 		f"{(execution.get('stage3_method_library') or {}).get('target_task_bindings', [])}",
@@ -1664,6 +2892,31 @@ def _print_cli_report(report: Dict[str, Any]) -> None:
 		for message in report["bug_messages"]:
 			print(f"  - {message}")
 	print("")
+
+
+def test_print_cli_report_handles_missing_stage3_metadata(capsys):
+	_print_cli_report(
+		{
+			"query_id": "query_3",
+			"case": {
+				"description": "Auto-generated from p03.hddl",
+				"instruction": "Complete the tasks do_put_on(b3, b4).",
+			},
+			"log_dir": "/tmp/fake-log",
+			"result": {"success": False},
+			"execution": {
+				"stage3_metadata": None,
+				"stage3_method_library": None,
+			},
+			"official_verifier": None,
+			"has_bug": True,
+			"bug_messages": ["pipeline returned success=False"],
+		},
+	)
+
+	rendered = capsys.readouterr().out
+	assert "Stage 3 Target Literals: []" in rendered
+	assert "Stage 3 Target Task Bindings: []" in rendered
 
 
 def main(argv: List[str]) -> int:

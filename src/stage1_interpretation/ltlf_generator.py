@@ -140,15 +140,7 @@ class NLToLTLfGenerator:
                 if closing_fence != -1 and closing_fence > first_newline:
                     result_text = result_text[first_newline+1:closing_fence].strip()
 
-        # Parse JSON response
-        try:
-            result = json.loads(result_text)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(
-                f"Failed to parse LLM response as JSON: {str(e)}\n"
-                f"Response preview: {result_text[:200]}...\n"
-                f"The LLM did not return valid JSON. Please try again or check the prompt."
-            ) from e
+        result = self._parse_result_json(result_text)
 
         # Build LTL specification
         spec = LTLSpecification()
@@ -521,6 +513,32 @@ class NLToLTLfGenerator:
             spec.grounding_map = self._create_grounding_map(spec)
 
         return (spec, prompt_dict, result_text)
+
+    def _parse_result_json(self, result_text: str) -> dict:
+        """Parse the LLM response, tolerating prose wrappers around one JSON object."""
+        try:
+            return json.loads(result_text)
+        except json.JSONDecodeError as original_error:
+            candidate = self._extract_json_object_candidate(result_text)
+            if candidate is not None:
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+            raise RuntimeError(
+                f"Failed to parse LLM response as JSON: {str(original_error)}\n"
+                f"Response preview: {result_text[:200]}...\n"
+                f"The LLM did not return valid JSON. Please try again or check the prompt."
+            ) from original_error
+
+    @staticmethod
+    def _extract_json_object_candidate(result_text: str) -> str | None:
+        start_index = result_text.find("{")
+        end_index = result_text.rfind("}")
+        if start_index == -1 or end_index == -1 or end_index <= start_index:
+            return None
+        candidate = result_text[start_index:end_index + 1].strip()
+        return candidate or None
 
     def _augment_objects_from_formulas_and_atoms(
         self,

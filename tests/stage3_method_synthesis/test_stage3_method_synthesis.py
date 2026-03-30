@@ -208,6 +208,49 @@ def test_extract_progressing_transitions_can_follow_explicit_literal_order():
 	]
 
 
+def test_extract_progressing_transitions_preserves_duplicate_literal_occurrences_in_query_order():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("on_b10_b6", "on", ["b10", "b6"])
+	grounding_map.add_atom("on_b5_b10", "on", ["b5", "b10"])
+	dfa_result = {
+		"dfa_dot": (
+			"digraph MONA_DFA {\n"
+			"  node [shape = doublecircle]; 2;\n"
+			"  node [shape = circle]; 1;\n"
+			"  init [shape = plaintext, label = \"\"];\n"
+			"  init -> 1;\n"
+			"  1 -> 2 [label=\"on_b10_b6\"];\n"
+			"  1 -> 2 [label=\"on_b5_b10\"];\n"
+			"}\n"
+		),
+	}
+
+	transition_specs = synthesizer.extract_progressing_transitions(
+		grounding_map,
+		dfa_result,
+		ordered_literal_signatures=[
+			"on(b10, b6)",
+			"on(b5, b10)",
+			"on(b10, b6)",
+		],
+	)
+
+	assert [
+		(
+			spec["transition_name"],
+			spec["source_state"],
+			spec["target_state"],
+			spec["label"],
+		)
+		for spec in transition_specs
+	] == [
+		("dfa_step_q1_q2_on_b10_b6", "q1", "q2", "on(b10, b6)"),
+		("dfa_step_q2_q3_on_b5_b10", "q2", "q3", "on(b5, b10)"),
+		("dfa_step_q3_q4_on_b10_b6", "q3", "q4", "on(b10, b6)"),
+	]
+
+
 def test_extract_progressing_transitions_can_drop_auxiliary_dfa_labels_when_query_order_is_known():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
@@ -539,6 +582,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]]" in system_prompt
 	assert "never invent type predicates such as block(X) or rover(R)" in system_prompt
 	assert "Do not infer new packaging candidates or new caller-shared envelopes on your own." in system_prompt
+	assert "Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks" in system_prompt
 
 	assert derived_analysis["query_task_contracts"]
 	assert derived_analysis["support_task_contracts"]
@@ -564,6 +608,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "send_soil_data(?rover, ?waypoint): caller-shared dynamic prerequisites at_soil_sample(?waypoint)." in user_prompt
 	assert "if a constructive sibling uses sample_soil(?rover, AUX_STORE1, ?waypoint)" in user_prompt
 	assert "Use ARG1..ARGn for task-signature roles and AUX_* for extra roles." in user_prompt
+	assert "Do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top" in user_prompt
 	assert "Type names are not predicates." in user_prompt
 	assert "Do not copy grounded constants from the original sentence into methods." in user_prompt
 	assert "ACTION [needs p, q, r]" in user_prompt
@@ -599,7 +644,7 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "AUX_BLOCK1" in user_prompt
 	assert "do_clear(?x): caller-shared dynamic prerequisites" not in user_prompt
 	assert "Multi-step methods require explicit pairwise ordering edges." in user_prompt
-	assert "ordering_edges: for subtasks s1 then s2 then s3, emit ordering [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]." in user_prompt
+	assert "ordering: for subtasks s1 then s2 then s3, emit [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]." in user_prompt
 	assert "Type names are not predicates." in user_prompt
 	assert "the caller-shared envelope is ready(ARG1) only." in user_prompt
 	assert "If a contract line lists ACTION [needs p, q, r]" in user_prompt
@@ -670,16 +715,60 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 18000
+	assert len(system_prompt) + len(user_prompt) < 15000
 	assert user_prompt.count("<query_task_contract name=\"do_put_on\">") == 1
 	assert user_prompt.count("ordered_binding #") == 1
 	assert "<support_task_contract name=\"do_clear\">" in user_prompt
 	assert "<support_task_contract name=\"do_move\">" in user_prompt
 	assert "Use ARG1..ARGn for task-signature roles and AUX_* for extra roles." in user_prompt
-	assert "ordering_edges: for subtasks s1 then s2 then s3, emit ordering [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]." in user_prompt
+	assert "ordering: for subtasks s1 then s2 then s3, emit [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]." in user_prompt
 	assert "Support caller-shared prerequisites holding(?x) before the child call" in user_prompt
 	assert "declaring AUX_* in method.parameters alone is insufficient." in user_prompt
 	assert "inferred_task_headline_candidates:" not in user_prompt
+
+
+def test_stage3_prompt_stays_compact_for_marsrover_benchmark_case():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	system_prompt = build_htn_system_prompt()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		[
+			"communicated_soil_data(waypoint2)",
+			"communicated_rock_data(waypoint3)",
+			"communicated_image_data(objective1, high_res)",
+		],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using lander general, modes colour, high_res, and low_res, rover rover0, "
+			"store rover0store, waypoints waypoint0, waypoint1, waypoint2, and waypoint3, "
+			"camera camera0, and objectives objective0 and objective1, complete the tasks "
+			"get_soil_data(waypoint2), get_rock_data(waypoint3), and "
+			"get_image_data(objective1, high_res)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+			{"task_name": "get_rock_data", "args": ["waypoint3"]},
+			{"task_name": "get_image_data", "args": ["objective1", "high_res"]},
+		),
+		query_object_inventory=(
+			{"type": "lander", "objects": ["general"]},
+			{"type": "mode", "objects": ["colour", "high_res", "low_res"]},
+			{"type": "rover", "objects": ["rover0"]},
+			{"type": "store", "objects": ["rover0store"]},
+			{"type": "waypoint", "objects": ["waypoint0", "waypoint1", "waypoint2", "waypoint3"]},
+			{"type": "camera", "objects": ["camera0"]},
+			{"type": "objective", "objects": ["objective0", "objective1"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert len(system_prompt) + len(user_prompt) < 17500
+	assert "<query_task_contract name=\"get_soil_data\">" in user_prompt
+	assert "<support_task_contract name=\"send_soil_data\">" in user_prompt
+	assert "send_soil_data(?rover, ?waypoint): caller-shared dynamic prerequisites at_soil_sample(?waypoint)." in user_prompt
+	assert "sample_soil(?rover, AUX_STORE1, ?waypoint)" in user_prompt
+	assert "take_image(?rover, AUX_WAYPOINT1, ?objective, AUX_CAMERA1, ?mode)" in user_prompt
 
 
 def test_stage3_prompt_filters_same_arity_packaging_by_parameter_types():
@@ -994,10 +1083,9 @@ def test_stage3_user_prompt_carries_branchy_action_schemas_into_domain_summary()
 	)
 
 	assert "<domain_summary>" in user_prompt
-	assert "probe(?x - object)" in user_prompt
-	assert "Pre: (or (clear ?x) (holding ?x))" in user_prompt
+	assert "probe(?x): needs clear(?x) | holding(?x); effects checked(?x)" in user_prompt
 	assert "seal_if_clear(?x - object)" not in user_prompt
-	assert "Pre: (imply (clear ?x) (holding ?x))" not in user_prompt
+	assert "needs clear(?x) -> holding(?x)" not in user_prompt
 
 
 def test_action_analysis_includes_producer_effect_patterns():
@@ -1484,6 +1572,37 @@ def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising(
 
 	with pytest.raises(ValueError, match="Invalid task identifier 'place-on'"):
 		synthesizer._validate_library(normalised, domain)
+
+
+def test_normalise_llm_library_canonicalises_method_strategy_suffixes():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("place_on", ("B1", "B2"), False, ("on",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_place_on_B1c_Xt",
+				task_name="place_on",
+				parameters=("B1", "B2"),
+				context=(
+					HTNLiteral("on", ("B1", "B2"), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+	assert normalised.methods[0].method_name == "m_place_on_b1c_xt"
+	assert normalised.methods[0].source_method_name == "m_place_on_B1c_Xt"
+	synthesizer._validate_library(normalised, domain)
 
 
 def test_normalise_llm_library_rewrites_primitive_action_name_to_source_hddl_name():
@@ -2555,6 +2674,77 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 	synthesizer._validate_library(pruned_library, domain)
 
 
+def test_unreachable_wrapper_tasks_are_pruned_before_validation():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("X", "Y"), False, ("on",)),
+			HTNTask("do_world", (), False, ()),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_noop",
+				task_name="do_put_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("on", ("X", "Y"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_put_on_stack",
+				task_name="do_put_on",
+				parameters=("X", "Y"),
+				context=(
+					HTNLiteral("holding", ("X",), True, None),
+					HTNLiteral("clear", ("Y",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("X", "Y"),
+						kind="primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_world_sequential",
+				task_name="do_world",
+				parameters=(),
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_put_on",
+						args=("X", "Y"),
+						kind="compound",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, "on_a_b")],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "do_put_on")],
+	)
+
+	pruned_library, pruned_count = synthesizer._prune_unreachable_task_structures(library)
+
+	assert pruned_count == 2
+	assert [task.name for task in pruned_library.compound_tasks] == ["do_put_on"]
+	assert {method.method_name for method in pruned_library.methods} == {
+		"m_do_put_on_noop",
+		"m_do_put_on_stack",
+	}
+	synthesizer._validate_library(pruned_library, domain)
+
+
 def test_direct_self_recursive_siblings_are_preserved_when_contexts_are_distinct():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3087,6 +3277,106 @@ def test_parse_llm_library_rejects_non_pairwise_ordering_edges():
 				},
 			),
 		)
+
+
+def test_parse_llm_library_accepts_orderings_alias():
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		json.dumps(
+			{
+				"target_task_bindings": [
+					{"target_literal": "on(a, b)", "task_name": "place_on"},
+				],
+				"compound_tasks": [
+					{
+						"name": "place_on",
+						"parameters": ["A", "B"],
+						"is_primitive": False,
+						"source_predicates": ["on"],
+					},
+				],
+				"methods": [
+					{
+						"method_name": "m_place_on_constructive",
+						"task_name": "place_on",
+						"parameters": ["A", "B"],
+						"context": [
+							{"predicate": "clear", "args": ["B"], "is_positive": True},
+						],
+						"subtasks": [
+							{
+								"step_id": "s1",
+								"task_name": "pick_up_from_table",
+								"args": ["A"],
+								"kind": "primitive",
+								"action_name": "pick_up",
+							},
+							{
+								"step_id": "s2",
+								"task_name": "stack",
+								"args": ["A", "B"],
+								"kind": "primitive",
+								"action_name": "stack",
+							},
+						],
+						"orderings": [["s1", "s2"]],
+					},
+				],
+			},
+		),
+	)
+
+	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_accepts_ordering_edges_alias():
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		json.dumps(
+			{
+				"target_task_bindings": [
+					{"target_literal": "on(a, b)", "task_name": "place_on"},
+				],
+				"compound_tasks": [
+					{
+						"name": "place_on",
+						"parameters": ["A", "B"],
+						"is_primitive": False,
+						"source_predicates": ["on"],
+					},
+				],
+				"methods": [
+					{
+						"method_name": "m_place_on_constructive",
+						"task_name": "place_on",
+						"parameters": ["A", "B"],
+						"context": [
+							{"predicate": "clear", "args": ["B"], "is_positive": True},
+						],
+						"subtasks": [
+							{
+								"step_id": "s1",
+								"task_name": "pick_up_from_table",
+								"args": ["A"],
+								"kind": "primitive",
+								"action_name": "pick_up",
+							},
+							{
+								"step_id": "s2",
+								"task_name": "stack",
+								"args": ["A", "B"],
+								"kind": "primitive",
+								"action_name": "stack",
+							},
+						],
+						"ordering_edges": [["s1", "s2"]],
+					},
+				],
+			},
+		),
+	)
+
+	assert library.methods[0].ordering == (("s1", "s2"),)
 
 
 def test_validate_library_rejects_semantically_duplicate_methods():

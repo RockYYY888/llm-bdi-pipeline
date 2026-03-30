@@ -71,12 +71,19 @@ class PANDAPlanner:
 		*,
 		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
 		task_args: Optional[Sequence[str]] = None,
+		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
 		allow_empty_plan: bool = False,
 		initial_facts: Optional[Sequence[str]] = None,
 	) -> PANDAPlanResult:
 		self._require_toolchain()
 
-		task_args_tuple = tuple(task_args if task_args is not None else (target_literal.args if target_literal else ()))
+		task_args_tuple = tuple(
+			task_args if task_args is not None else (target_literal.args if target_literal else ())
+		)
+		task_network_entries = tuple(
+			(str(network_task), tuple(str(arg) for arg in network_args))
+			for network_task, network_args in (task_network or ())
+		)
 		domain_name = f"{domain.name}_{transition_name}"
 		work_dir = self._resolve_work_dir(transition_name)
 		work_dir.mkdir(parents=True, exist_ok=True)
@@ -93,6 +100,7 @@ class PANDAPlanner:
 			typed_objects=typed_objects,
 			task_name=task_name,
 			task_args=task_args_tuple,
+			task_network=task_network_entries,
 			initial_facts=initial_facts,
 		)
 
@@ -219,6 +227,7 @@ class PANDAPlanner:
 		method_library: HTNMethodLibrary,
 		domain_name: str,
 	) -> str:
+		task_type_map = self._infer_task_type_map(domain, method_library)
 		requirements = list(domain.requirements or [])
 		if ":hierarchy" not in requirements:
 			requirements.append(":hierarchy")
@@ -236,16 +245,26 @@ class PANDAPlanner:
 		lines.append("")
 
 		for task in method_library.compound_tasks:
+			task_signature = task_type_map.get(task.name) or task_type_map.get(task.source_name or "")
 			lines.append(f"  (:task {task.source_name or task.name}")
 			lines.append(
-				f"    :parameters ({self._render_typed_variables(task.parameters, domain.types)})"
+				f"    :parameters ({self._render_typed_variables(task.parameters, domain.types, task_signature)})"
 			)
 			lines.append("  )")
 			lines.append("")
 
 		task_lookup = {task.name: task for task in method_library.compound_tasks}
 		for method in method_library.methods:
-			lines.extend(self._render_method(method, task_lookup, domain.types))
+			lines.extend(
+				self._render_method(
+					method,
+					task_lookup,
+					domain.types,
+					task_type_map,
+					self._predicate_type_map(domain),
+					self._action_type_map(domain),
+				)
+			)
 			lines.append("")
 
 		for action in domain.actions:
@@ -266,8 +285,21 @@ class PANDAPlanner:
 		method: HTNMethod,
 		task_lookup: Dict[str, Any],
 		domain_types: Sequence[str],
+		task_type_map: Dict[str, Tuple[str, ...]],
+		predicate_types: Dict[str, Tuple[str, ...]],
+		action_types: Dict[str, Tuple[str, ...]],
 	) -> List[str]:
 		method_parameters = self._method_parameter_order(method, task_lookup.get(method.task_name))
+		task_signature = task_type_map.get(method.task_name, ())
+		method_parameter_types = self._infer_method_parameter_types(
+			method,
+			method_parameters,
+			task_signature,
+			predicate_types,
+			action_types,
+			task_type_map,
+			self._default_parameter_type(domain_types),
+		)
 		variable_map = {
 			name: self._render_variable(name)
 			for name in method_parameters
@@ -277,7 +309,7 @@ class PANDAPlanner:
 
 		lines = [f"  (:method {method.method_name}"]
 		lines.append(
-			f"    :parameters ({self._render_typed_variables(method_parameters, domain_types)})"
+			f"    :parameters ({self._render_typed_variables(method_parameters, domain_types, method_parameter_types)})"
 		)
 		lines.append(
 			f"    :task ({getattr(task_schema, 'source_name', None) or method.task_name}"
@@ -481,7 +513,13 @@ class PANDAPlanner:
 			seen.add(canonical)
 			ordered.append(canonical)
 
-		for token in (task_schema.parameters if task_schema else ()):
+		task_binding_tokens: Sequence[str] = ()
+		if task_schema is not None:
+			task_binding_tokens = self._task_binding_parameters(
+				method,
+				len(tuple(getattr(task_schema, "parameters", ()) or ())),
+			)
+		for token in task_binding_tokens:
 			add_schema_token(token)
 		for token in method.parameters:
 			add_schema_token(token)
@@ -507,11 +545,222 @@ class PANDAPlanner:
 		self,
 		parameters: Sequence[str],
 		domain_types: Sequence[str],
+		type_signature: Optional[Sequence[Optional[str]]] = None,
 	) -> str:
-		default_type = "object"
-		if "object" not in domain_types:
-			default_type = domain_types[0] if domain_types else "object"
-		return " ".join(f"{self._render_variable(parameter)} - {default_type}" for parameter in parameters)
+		default_type = self._default_parameter_type(domain_types)
+		return " ".join(
+			f"{self._render_variable(parameter)} - "
+			f"{self._signature_type_at(type_signature, index, default_type)}"
+			for index, parameter in enumerate(parameters)
+		)
+
+	def _infer_task_type_map(
+		self,
+		domain: Any,
+		method_library: HTNMethodLibrary,
+	) -> Dict[str, Tuple[str, ...]]:
+		predicate_types = self._predicate_type_map(domain)
+		action_types = self._action_type_map(domain)
+		declared_task_types = self._declared_task_type_map(domain)
+		default_type = self._default_parameter_type(getattr(domain, "types", ()))
+		methods_by_task: Dict[str, List[HTNMethod]] = {}
+		task_aliases: Dict[str, str] = {}
+		inferred: Dict[str, List[Optional[str]]] = {}
+
+		for task in method_library.compound_tasks:
+			task_aliases[task.name] = task.name
+			if task.source_name:
+				task_aliases[task.source_name] = task.name
+			inferred[task.name] = [None] * len(task.parameters)
+			declared_signature = declared_task_types.get(task.source_name or task.name)
+			if declared_signature and len(declared_signature) == len(task.parameters):
+				inferred[task.name] = list(declared_signature)
+				continue
+			if len(task.source_predicates) == 1:
+				predicate_signature = predicate_types.get(task.source_predicates[0])
+				if predicate_signature and len(predicate_signature) == len(task.parameters):
+					inferred[task.name] = list(predicate_signature)
+
+		for method in method_library.methods:
+			methods_by_task.setdefault(method.task_name, []).append(method)
+
+		changed = True
+		while changed:
+			changed = False
+			for task in method_library.compound_tasks:
+				task_signature = inferred.get(task.name, [])
+				for method in methods_by_task.get(task.name, ()):
+					for index, parameter in enumerate(
+						self._task_binding_parameters(method, len(task.parameters))
+					):
+						if index >= len(task_signature) or task_signature[index] is not None:
+							continue
+						candidates = self._variable_type_candidates(
+							method,
+							parameter,
+							predicate_types,
+							action_types,
+							inferred,
+							task_aliases,
+						)
+						if not candidates:
+							continue
+						task_signature[index] = candidates[0]
+						changed = True
+
+		resolved: Dict[str, Tuple[str, ...]] = {}
+		for task in method_library.compound_tasks:
+			signature = tuple(type_name or default_type for type_name in inferred.get(task.name, ()))
+			resolved[task.name] = signature
+			if task.source_name:
+				resolved[task.source_name] = signature
+		return resolved
+
+	def _infer_method_parameter_types(
+		self,
+		method: HTNMethod,
+		ordered_parameters: Sequence[str],
+		task_signature: Sequence[str],
+		predicate_types: Dict[str, Tuple[str, ...]],
+		action_types: Dict[str, Tuple[str, ...]],
+		task_type_map: Dict[str, Tuple[str, ...]],
+		default_type: str,
+	) -> Tuple[str, ...]:
+		variable_types: Dict[str, str] = {}
+		for index, parameter in enumerate(self._task_binding_parameters(method, len(task_signature))):
+			if index >= len(task_signature):
+				continue
+			variable_types[self._canonical_symbol(parameter)] = task_signature[index]
+
+		for parameter in ordered_parameters:
+			canonical = self._canonical_symbol(parameter)
+			if canonical in variable_types:
+				continue
+			candidates = self._variable_type_candidates(
+				method,
+				parameter,
+				predicate_types,
+				action_types,
+				task_type_map,
+				{},
+			)
+			variable_types[canonical] = candidates[0] if candidates else default_type
+
+		return tuple(variable_types.get(self._canonical_symbol(parameter), default_type) for parameter in ordered_parameters)
+
+	def _variable_type_candidates(
+		self,
+		method: HTNMethod,
+		variable: str,
+		predicate_types: Dict[str, Tuple[str, ...]],
+		action_types: Dict[str, Tuple[str, ...]],
+		task_type_map: Dict[str, Sequence[Optional[str]]],
+		task_aliases: Dict[str, str],
+	) -> List[str]:
+		canonical_variable = self._canonical_symbol(variable)
+		candidates: List[str] = []
+
+		def add_candidate(candidate: Optional[str]) -> None:
+			if candidate and candidate not in candidates:
+				candidates.append(candidate)
+
+		def collect_from_literal(literal: HTNLiteral) -> None:
+			signature = predicate_types.get(literal.predicate)
+			if not signature:
+				return
+			for index, arg in enumerate(literal.args):
+				if self._canonical_symbol(arg) == canonical_variable and index < len(signature):
+					add_candidate(signature[index])
+
+		for literal in method.context:
+			collect_from_literal(literal)
+
+		for step in method.subtasks:
+			if step.kind == "primitive":
+				step_signature = action_types.get(step.action_name or "") or action_types.get(step.task_name)
+			else:
+				internal_name = task_aliases.get(step.task_name, step.task_name)
+				step_signature = task_type_map.get(internal_name) or task_type_map.get(step.task_name)
+			if step_signature:
+				for index, arg in enumerate(step.args):
+					if self._canonical_symbol(arg) == canonical_variable and index < len(step_signature):
+						add_candidate(step_signature[index])
+			for literal in (step.literal, *step.preconditions, *step.effects):
+				if literal is not None:
+					collect_from_literal(literal)
+
+		return candidates
+
+	def _predicate_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		mapping: Dict[str, Tuple[str, ...]] = {}
+		for predicate in getattr(domain, "predicates", []) or ():
+			mapping[predicate.name] = tuple(
+				self._parameter_type(parameter)
+				for parameter in getattr(predicate, "parameters", ()) or ()
+			)
+		return mapping
+
+	def _action_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		mapping: Dict[str, Tuple[str, ...]] = {}
+		for action in getattr(domain, "actions", []) or ():
+			type_signature = tuple(
+				self._parameter_type(parameter)
+				for parameter in getattr(action, "parameters", ()) or ()
+			)
+			mapping[action.name] = type_signature
+			mapping[self._sanitize_name(action.name)] = type_signature
+		return mapping
+
+	def _declared_task_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		mapping: Dict[str, Tuple[str, ...]] = {}
+		for task in getattr(domain, "tasks", []) or ():
+			mapping[str(task.name)] = tuple(
+				self._parameter_type(parameter)
+				for parameter in getattr(task, "parameters", ()) or ()
+			)
+		return mapping
+
+	@staticmethod
+	def _task_binding_parameters(
+		method: HTNMethod,
+		task_arity: int,
+	) -> Tuple[str, ...]:
+		task_binding_parameters = tuple(method.task_args or ())
+		if len(task_binding_parameters) == task_arity:
+			return task_binding_parameters
+		leading_parameters = tuple(method.parameters[:task_arity])
+		if len(leading_parameters) == task_arity:
+			return leading_parameters
+		return task_binding_parameters
+
+	@staticmethod
+	def _parameter_type(parameter: Any) -> str:
+		text = str(parameter or "").strip()
+		if "-" not in text:
+			return "object"
+		_, type_name = text.split("-", 1)
+		resolved = type_name.strip()
+		return resolved or "object"
+
+	@staticmethod
+	def _canonical_symbol(token: str) -> str:
+		return str(token or "").strip().lstrip("?")
+
+	@staticmethod
+	def _default_parameter_type(domain_types: Sequence[str]) -> str:
+		if "object" in domain_types:
+			return "object"
+		return domain_types[0] if domain_types else "object"
+
+	@staticmethod
+	def _signature_type_at(
+		type_signature: Optional[Sequence[Optional[str]]],
+		index: int,
+		default_type: str,
+	) -> str:
+		if type_signature is None or index >= len(type_signature):
+			return default_type
+		return type_signature[index] or default_type
 
 	def _render_literal_conjunction(
 		self,

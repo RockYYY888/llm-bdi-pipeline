@@ -75,6 +75,43 @@ class TestResult:
         }
 
 
+def test_parse_result_json_extracts_embedded_object_from_prose_wrapper():
+    generator = NLToLTLfGenerator()
+
+    result = generator._parse_result_json(
+        'I will return JSON now.\n{"objects":["a"],"ltl_formulas":[],"atoms":[]}\nDone.',
+    )
+
+    assert result == {
+        "objects": ["a"],
+        "ltl_formulas": [],
+        "atoms": [],
+    }
+
+
+def test_ltl_spec_preserves_identical_top_level_formula_occurrences():
+    spec = LTLSpecification()
+    formula = LTLFormula(
+        operator=None,
+        predicate={"on": ["b1", "b2"]},
+        sub_formulas=[],
+        logical_op=None,
+    )
+
+    spec.add_formula(formula)
+    spec.add_formula(
+        LTLFormula(
+            operator=None,
+            predicate={"on": ["b1", "b2"]},
+            sub_formulas=[],
+            logical_op=None,
+        ),
+    )
+
+    assert len(spec.formulas) == 2
+    assert [item.to_string() for item in spec.formulas] == ["on(b1, b2)", "on(b1, b2)"]
+
+
 def load_test_cases(csv_path: Path) -> List[Dict[str, str]]:
     """Load test cases from CSV file"""
     test_cases = []
