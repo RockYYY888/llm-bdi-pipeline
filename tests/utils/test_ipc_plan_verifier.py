@@ -108,6 +108,52 @@ def test_verify_planned_hierarchical_plan_converts_planner_output_before_verifyi
 	assert Path(result.plan_file).read_text() == converted_plan
 
 
+def test_verify_plan_text_verifies_authoritative_hierarchical_plan_directly(tmp_path, monkeypatch):
+	domain_file = tmp_path / "domain.hddl"
+	problem_file = tmp_path / "problem.hddl"
+	domain_file.write_text("(define (domain TEST))\n")
+	problem_file.write_text("(define (problem test) (:domain TEST))\n")
+	plan_text = "\n".join(
+		[
+			"==>",
+			"0 move a b",
+			"root 1",
+			"1 do_move a b -> m_do_move 0",
+		],
+	) + "\n"
+	verify_stdout = "\n".join(
+		[
+			"Plan is executable: true",
+			"Plan verification result: true",
+		],
+	)
+
+	def fake_run(command, text, capture_output, check):
+		assert command[1:2] == ["-V"]
+		assert Path(command[4]).read_text() == plan_text
+		return subprocess.CompletedProcess(command, 0, verify_stdout, "")
+
+	verifier = IPCPlanVerifier()
+	monkeypatch.setattr(verifier, "_resolve_command_head", lambda command: "/fake/parser")
+	monkeypatch.setattr("utils.ipc_plan_verifier.subprocess.run", fake_run)
+
+	result = verifier.verify_plan_text(
+		domain_file=domain_file,
+		problem_file=problem_file,
+		plan_text=plan_text,
+		output_dir=tmp_path,
+		plan_kind="hierarchical",
+		build_warning="authoritative guided plan",
+	)
+
+	assert result.tool_available is True
+	assert result.plan_kind == "hierarchical"
+	assert result.verification_result is True
+	assert result.primitive_plan_executable is True
+	assert result.build_warning == "authoritative guided plan"
+	assert Path(result.plan_file).read_text() == plan_text
+
+
 def test_render_primitive_only_plan_uses_official_primitive_plan_format():
 	plan_text = IPCPlanVerifier.render_primitive_only_plan(
 		[

@@ -125,6 +125,86 @@ class IPCPlanVerifier:
 			prefer_hierarchical=True,
 		)
 
+	def verify_plan_text(
+		self,
+		*,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		plan_text: str,
+		output_dir: str | Path,
+		plan_kind: str = "hierarchical",
+		build_warning: Optional[str] = None,
+		plan_filename: str = "ipc_official_plan.txt",
+		output_filename: str = "ipc_official_verifier.txt",
+		json_filename: str = "ipc_official_verification.json",
+	) -> IPCPrimitivePlanVerificationResult:
+		output_path = Path(output_dir).resolve()
+		output_path.mkdir(parents=True, exist_ok=True)
+		plan_path = output_path / plan_filename
+		output_text_path = output_path / output_filename
+		output_json_path = output_path / json_filename
+
+		plan_path.write_text(str(plan_text))
+		resolved_parser = self._resolve_command_head(self.parser_cmd) or self.parser_cmd
+		command = [
+			resolved_parser,
+			"-V",
+			str(Path(domain_file).resolve()),
+			str(Path(problem_file).resolve()),
+			str(plan_path),
+		]
+
+		if not self.tool_available():
+			result = IPCPrimitivePlanVerificationResult(
+				tool_available=False,
+				command=command,
+				plan_file=str(plan_path),
+				output_file=str(output_text_path),
+				stdout="",
+				stderr="",
+				primitive_plan_only=None,
+				primitive_plan_executable=None,
+				verification_result=None,
+				reached_goal_state=None,
+				plan_kind=plan_kind,
+				build_warning=build_warning,
+				error=f"{self.parser_cmd} is not available on PATH",
+			)
+			output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
+			return result
+
+		completed = subprocess.run(
+			command,
+			text=True,
+			capture_output=True,
+			check=False,
+		)
+		stdout = self.strip_ansi(completed.stdout)
+		stderr = self.strip_ansi(completed.stderr)
+		combined = self._combine_output(stdout, stderr)
+		output_text_path.write_text(combined)
+
+		result = IPCPrimitivePlanVerificationResult(
+			tool_available=True,
+			command=command,
+			plan_file=str(plan_path),
+			output_file=str(output_text_path),
+			stdout=stdout,
+			stderr=stderr,
+			primitive_plan_only="Primitive plan only" in combined,
+			primitive_plan_executable=self._extract_executability(combined),
+			verification_result=self._extract_bool(
+				combined,
+				"Plan verification result",
+			),
+			reached_goal_state=self._infer_goal_reached(combined),
+			plan_kind=plan_kind,
+			build_warning=build_warning,
+			error=None if completed.returncode == 0 else f"verifier exited with code {completed.returncode}",
+		)
+		output_json_path.write_text(json.dumps(result.to_dict(), indent=2))
+		return result
+
 	def verify_primitive_plan(
 		self,
 		*,

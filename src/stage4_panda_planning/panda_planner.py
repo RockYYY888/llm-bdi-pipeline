@@ -72,8 +72,11 @@ class PANDAPlanner:
 		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
 		task_args: Optional[Sequence[str]] = None,
 		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
+		task_network_ordered: bool = True,
 		allow_empty_plan: bool = False,
 		initial_facts: Optional[Sequence[str]] = None,
+		goal_facts: Optional[Sequence[str]] = None,
+		timeout_seconds: Optional[float] = None,
 	) -> PANDAPlanResult:
 		self._require_toolchain()
 
@@ -101,7 +104,9 @@ class PANDAPlanner:
 			task_name=task_name,
 			task_args=task_args_tuple,
 			task_network=task_network_entries,
+			task_network_ordered=task_network_ordered,
 			initial_facts=initial_facts,
+			goal_facts=goal_facts,
 		)
 
 		domain_path = work_dir / "domain.hddl"
@@ -118,16 +123,19 @@ class PANDAPlanner:
 			self._build_command(self.parser_cmd, str(domain_path), str(problem_path), str(parsed_path)),
 			"parser",
 			work_dir,
+			timeout_seconds=timeout_seconds,
 		)
 		grounder_run = self._run_command(
 			self._build_command(self.grounder_cmd, str(parsed_path), str(grounded_path)),
 			"grounder",
 			work_dir,
+			timeout_seconds=timeout_seconds,
 		)
 		engine_run = self._run_command(
 			self._build_command(self.engine_cmd, str(grounded_path)),
 			"engine",
 			work_dir,
+			timeout_seconds=timeout_seconds,
 		)
 		raw_plan_text = engine_run["stdout"]
 		raw_plan_path.write_text(raw_plan_text)
@@ -141,15 +149,30 @@ class PANDAPlanner:
 			str(raw_plan_path),
 			str(actual_plan_path),
 		)
-		conversion_result = subprocess.run(
-			conversion_command,
-			cwd=work_dir,
-			text=True,
-			capture_output=True,
-			check=False,
-		)
-		conversion_stdout = conversion_result.stdout
-		conversion_stderr = conversion_result.stderr
+		try:
+			conversion_result = subprocess.run(
+				conversion_command,
+				cwd=work_dir,
+				text=True,
+				capture_output=True,
+				check=False,
+				timeout=timeout_seconds,
+			)
+			conversion_stdout = conversion_result.stdout
+			conversion_stderr = conversion_result.stderr
+		except subprocess.TimeoutExpired as exc:
+			raise PANDAPlanningError(
+				"PANDA plan conversion timed out",
+				metadata={
+					"backend": "pandaPI",
+					"stage": "conversion",
+					"command": list(conversion_command),
+					"stdout": exc.stdout or "",
+					"stderr": exc.stderr or "",
+					"work_dir": str(work_dir),
+					"timeout_seconds": timeout_seconds,
+				},
+			) from exc
 		if conversion_result.returncode == 0 and actual_plan_path.exists():
 			actual_plan_text = actual_plan_path.read_text()
 		elif raw_plan_path.exists():
@@ -197,6 +220,64 @@ class PANDAPlanner:
 			actual_plan=actual_plan_text or raw_plan_text,
 			work_dir=str(work_dir),
 		)
+
+	def extract_method_trace(self, plan_text: str) -> List[Dict[str, Any]]:
+		lines = [
+			line.strip()
+			for line in str(plan_text or "").splitlines()
+			if line.strip() and line.strip() != "==>"
+		]
+		if not lines:
+			return []
+
+		method_nodes: Dict[int, Dict[str, Any]] = {}
+		root_ids: List[int] = []
+		for line in lines:
+			if line.startswith("root "):
+				root_ids.extend(self._parse_plan_node_ids(line.split()[1:]))
+				continue
+			parts = line.split()
+			if not parts:
+				continue
+			try:
+				node_id = int(parts[0])
+			except ValueError:
+				continue
+			if "->" not in parts:
+				continue
+			arrow_index = parts.index("->")
+			if arrow_index < 2 or arrow_index + 1 >= len(parts):
+				continue
+			method_nodes[node_id] = {
+				"method_name": parts[arrow_index + 1],
+				"task_args": parts[2:arrow_index],
+				"children": self._parse_plan_node_ids(parts[arrow_index + 2:]),
+			}
+
+		trace: List[Dict[str, Any]] = []
+		visited: set[int] = set()
+
+		def visit(node_id: int) -> None:
+			if node_id in visited:
+				return
+			node = method_nodes.get(node_id)
+			if node is None:
+				return
+			visited.add(node_id)
+			trace.append(
+				{
+					"method_name": node["method_name"],
+					"task_args": list(node["task_args"]),
+				},
+			)
+			for child_id in node["children"]:
+				visit(child_id)
+
+		for node_id in root_ids:
+			visit(node_id)
+		for node_id in sorted(method_nodes):
+			visit(node_id)
+		return trace
 
 	def _resolve_work_dir(self, transition_name: str) -> Path:
 		if self.workspace is None:
@@ -407,14 +488,31 @@ class PANDAPlanner:
 		command: Sequence[str],
 		stage: str,
 		work_dir: Path,
+		*,
+		timeout_seconds: Optional[float] = None,
 	) -> Dict[str, str]:
-		result = subprocess.run(
-			command,
-			cwd=work_dir,
-			text=True,
-			capture_output=True,
-			check=False,
-		)
+		try:
+			result = subprocess.run(
+				command,
+				cwd=work_dir,
+				text=True,
+				capture_output=True,
+				check=False,
+				timeout=timeout_seconds,
+			)
+		except subprocess.TimeoutExpired as exc:
+			raise PANDAPlanningError(
+				f"PANDA {stage} step timed out",
+				metadata={
+					"backend": "pandaPI",
+					"stage": stage,
+					"command": list(command),
+					"stdout": exc.stdout or "",
+					"stderr": exc.stderr or "",
+					"work_dir": str(work_dir),
+					"timeout_seconds": timeout_seconds,
+				},
+			) from exc
 		if result.returncode == 0:
 			return {
 				"stdout": result.stdout,
@@ -432,6 +530,16 @@ class PANDAPlanner:
 				"work_dir": str(work_dir),
 			},
 		)
+
+	@staticmethod
+	def _parse_plan_node_ids(tokens: Sequence[str]) -> List[int]:
+		node_ids: List[int] = []
+		for token in tokens:
+			try:
+				node_ids.append(int(str(token)))
+			except ValueError:
+				continue
+		return node_ids
 
 	@staticmethod
 	def _sanitize_name(name: str) -> str:

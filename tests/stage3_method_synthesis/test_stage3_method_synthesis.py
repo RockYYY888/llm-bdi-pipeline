@@ -289,6 +289,39 @@ def test_extract_progressing_transitions_can_drop_auxiliary_dfa_labels_when_quer
 	]
 
 
+def test_extract_progressing_transitions_can_linearise_ordered_literals_without_parsing_dfa():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+
+	def fail_parse(_dfa_dot):
+		raise AssertionError("DFA graph parsing should be skipped when ordered literals are explicit")
+
+	synthesizer._parse_dfa_graph = fail_parse  # type: ignore[method-assign]
+	transition_specs = synthesizer.extract_progressing_transitions(
+		grounding_map,
+		{"dfa_dot": "digraph HUGE_DFA { ... }"},
+		ordered_literal_signatures=[
+			"on(b4, b2)",
+			"on(b1, b4)",
+			"on(b3, b1)",
+		],
+	)
+
+	assert [
+		(
+			spec["transition_name"],
+			spec["source_state"],
+			spec["target_state"],
+			spec["label"],
+		)
+		for spec in transition_specs
+	] == [
+		("dfa_step_q1_q2_on_b4_b2", "q1", "q2", "on(b4, b2)"),
+		("dfa_step_q2_q3_on_b1_b4", "q2", "q3", "on(b1, b4)"),
+		("dfa_step_q3_q4_on_b3_b1", "q3", "q4", "on(b3, b1)"),
+	]
+
+
 def test_synthesize_requires_live_llm():
 	domain_path = (
 		Path(__file__).parent.parent.parent

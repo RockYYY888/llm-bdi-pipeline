@@ -133,3 +133,83 @@ def test_dfa_builder_skips_bdd_simplification_for_independent_eventually_atomic_
     assert result["num_transitions"] == 5
     assert result["simplification_stats"]["method"] == "independent_eventually_atomic_fast_path"
     assert result["simplification_stats"]["skipped_simplifier"] is True
+
+
+def test_ltlf_to_dfa_uses_fast_path_for_ordered_eventually_sequences():
+    spec = LTLSpecification()
+    spec.formulas = [
+        LTLFormula(
+            operator=TemporalOperator.FINALLY,
+            predicate=None,
+            sub_formulas=[
+                LTLFormula(
+                    operator=None,
+                    predicate=None,
+                    logical_op=LogicalOperator.AND,
+                    sub_formulas=[
+                        _atomic_formula("on", ["a", "b"]),
+                        LTLFormula(
+                            operator=TemporalOperator.FINALLY,
+                            predicate=None,
+                            sub_formulas=[
+                                LTLFormula(
+                                    operator=None,
+                                    predicate=None,
+                                    logical_op=LogicalOperator.AND,
+                                    sub_formulas=[
+                                        _atomic_formula("clear", ["a"]),
+                                        _finally_formula("holding", ["a"]),
+                                    ],
+                                ),
+                            ],
+                            logical_op=None,
+                        ),
+                    ],
+                ),
+            ],
+            logical_op=None,
+        ),
+    ]
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("on_a_b", "on", ["a", "b"])
+    grounding_map.add_atom("clear_a", "clear", ["a"])
+    grounding_map.add_atom("holding_a", "holding", ["a"])
+    spec.grounding_map = grounding_map
+
+    converter = LTLfToDFA()
+    converter.ltlf_parser = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("generic ltlf2dfa path should not be used for ordered atomic sequences"),
+    )
+
+    dfa_dot, metadata = converter.convert(spec)
+
+    assert metadata["construction"] == "ordered_eventually_atomic_fast_path"
+    assert metadata["num_states"] == 4
+    assert '1 -> 2 [label="on_a_b"]' in dfa_dot
+    assert '2 -> 3 [label="clear_a"]' in dfa_dot
+    assert '3 -> 4 [label="holding_a"]' in dfa_dot
+
+
+def test_dfa_builder_skips_bdd_simplification_for_ordered_eventually_atomic_fast_path():
+    spec = LTLSpecification()
+    spec.formulas = [_finally_formula("goal", ["a"])]
+    spec.query_task_sequence_is_ordered = True
+    spec.query_task_literal_signatures = ["goal(a)", "goal(a)", "finish(a)"]
+    grounding_map = GroundingMap()
+    grounding_map.add_atom("goal_a", "goal", ["a"])
+    grounding_map.add_atom("finish_a", "finish", ["a"])
+    spec.grounding_map = grounding_map
+
+    builder = DFABuilder()
+    builder.simplifier.simplify = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("BDD simplifier should be skipped for ordered atomic fast path"),
+    )
+
+    result = builder.build(spec)
+
+    assert result["original_num_states"] == 4
+    assert result["num_states"] == 4
+    assert result["original_num_transitions"] == 3
+    assert result["num_transitions"] == 3
+    assert result["simplification_stats"]["method"] == "ordered_eventually_atomic_fast_path"
+    assert result["simplification_stats"]["skipped_simplifier"] is True

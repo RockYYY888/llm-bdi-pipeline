@@ -29,6 +29,7 @@ class AgentSpeakRenderer:
         method_library: HTNMethodLibrary,
         plan_records: Sequence[Dict[str, Any]],
         typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
+        ordered_query_sequence: bool = True,
     ) -> str:
         self._object_symbol_set = {str(obj) for obj in objects}
         self._object_type_map = {
@@ -36,6 +37,7 @@ class AgentSpeakRenderer:
             for name, type_name in (typed_objects or ())
         }
         self._type_parent_map = self._build_type_parent_map(domain)
+        _ = ordered_query_sequence
         lines: List[str] = []
         lines.extend(self._render_header(domain, objects, plan_records))
         lines.extend(self._render_primitive_wrappers(domain))
@@ -195,6 +197,12 @@ class AgentSpeakRenderer:
             )
 
         return tuple(ordered)
+
+    @staticmethod
+    def _method_is_pure_noop(method: HTNMethod) -> bool:
+        """Return True when a method has no subtasks and performs no decomposition."""
+
+        return not tuple(getattr(method, "subtasks", ()) or ())
 
     def _ordered_task_methods_for_rendering(
         self,

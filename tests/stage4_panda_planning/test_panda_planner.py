@@ -168,6 +168,29 @@ def test_panda_problem_builder_renders_ordered_query_task_network_without_domain
 	assert ":ordered-subtasks (and" in problem_hddl
 
 
+def test_panda_problem_builder_renders_unordered_query_task_network_and_goal_facts_generically():
+	builder = PANDAProblemBuilder()
+	problem_hddl = builder.build_problem_hddl(
+		domain=_domain(),
+		domain_name="blocksworld_query_network_unordered",
+		objects=("a", "b", "c"),
+		task_name="place_on",
+		task_args=("a", "b"),
+		task_network=(
+			("place_on", ("a", "b")),
+			("place_on", ("c", "a")),
+		),
+		task_network_ordered=False,
+		goal_facts=("(on a b)", "(on c a)"),
+	)
+
+	assert ":subtasks (and" in problem_hddl
+	assert ":ordered-subtasks" not in problem_hddl
+	assert "(:goal (and" in problem_hddl
+	assert "    (on a b)" in problem_hddl
+	assert "    (on c a)" in problem_hddl
+
+
 def test_panda_domain_export_uses_llm_method_library():
 	planner = PANDAPlanner()
 	domain_hddl = planner._build_domain_hddl(
@@ -211,6 +234,25 @@ def test_panda_domain_export_defaults_task_parameter_type_to_object():
 
 	assert "(:task navigate_to" in domain_hddl
 	assert ":parameters (?rover - object ?from - object ?to - object)" in domain_hddl
+
+
+def test_panda_planner_extract_method_trace_preserves_depth_first_method_order():
+	planner = PANDAPlanner()
+	plan_text = "\n".join(
+		[
+			"==>",
+			"3 primitive_action a",
+			"4 primitive_action b",
+			"root 10",
+			"5 child_task b -> m-child 3",
+			"10 parent_task a b -> m-parent 5 4",
+		],
+	)
+
+	assert planner.extract_method_trace(plan_text) == [
+		{"method_name": "m-parent", "task_args": ["a", "b"]},
+		{"method_name": "m-child", "task_args": ["b"]},
+	]
 
 
 def test_panda_domain_export_preserves_declared_typed_task_and_method_signatures():

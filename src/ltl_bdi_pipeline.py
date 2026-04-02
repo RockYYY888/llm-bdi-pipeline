@@ -2782,19 +2782,135 @@ class LTL_BDI_Pipeline:
             return self._stage6_problem_seed_facts()
         return self._stage6_seed_facts(plan_records, target_literals)
 
-    def _stage6_query_task_network(self, ltl_spec):
+    def _stage6_query_task_network(self, ltl_spec, method_library=None):
         query_text = getattr(ltl_spec, "source_instruction", "") or ""
         query_task_anchors = self._extract_query_task_anchors(query_text)
+        literal_signatures = tuple(
+            str(signature).strip()
+            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
+            if str(signature).strip()
+        )
+        query_object_inventory = tuple(getattr(ltl_spec, "query_object_inventory", ()) or ())
+        if not query_object_inventory:
+            query_object_inventory = self._extract_query_object_inventory(query_text)
+
         task_network = []
+        variable_assignments: Dict[str, str] = {}
         for anchor in query_task_anchors:
             task_name = str(anchor.get("task_name", "")).strip()
-            task_args = tuple(str(arg).strip() for arg in (anchor.get("args") or ()))
-            if not task_name or any(not arg for arg in task_args):
+            raw_task_args = tuple(str(arg).strip() for arg in (anchor.get("args") or ()))
+            if not task_name or any(not arg for arg in raw_task_args):
                 return ()
-            if any(arg.startswith("?") for arg in task_args):
+            task_args = self._stage6_ground_query_task_arguments(
+                task_name=task_name,
+                task_args=raw_task_args,
+                literal_signature=(
+                    literal_signatures[len(task_network)]
+                    if len(task_network) < len(literal_signatures)
+                    else None
+                ),
+                method_library=method_library,
+                query_object_inventory=query_object_inventory,
+                variable_assignments=variable_assignments,
+            )
+            if any(not arg for arg in task_args):
+                return ()
+            if any(self._is_query_variable_symbol(arg) for arg in task_args):
                 return ()
             task_network.append((task_name, task_args))
         return tuple(task_network)
+
+    def _stage6_ground_query_task_arguments(
+        self,
+        *,
+        task_name: str,
+        task_args: Sequence[str],
+        literal_signature: Optional[str],
+        method_library,
+        query_object_inventory: Sequence[Dict[str, Any]],
+        variable_assignments: Dict[str, str],
+    ) -> Tuple[str, ...]:
+        grounded_args = tuple(str(arg).strip() for arg in (task_args or ()))
+        if not any(self._is_query_variable_symbol(arg) for arg in grounded_args):
+            return grounded_args
+
+        literal = self._stage6_parse_literal_signature(literal_signature or "")
+        inferred_args = self._stage6_infer_task_args_from_literal(
+            task_name=task_name,
+            task_args=grounded_args,
+            literal=literal,
+            method_library=method_library,
+        )
+        if inferred_args is not None:
+            grounded_args = self._stage6_bind_query_variables(
+                task_args=grounded_args,
+                candidate_args=inferred_args,
+                variable_assignments=variable_assignments,
+            )
+
+        if any(self._is_query_variable_symbol(arg) for arg in grounded_args):
+            grounded_args = self._ground_query_task_arguments(
+                task_name=task_name,
+                task_args=grounded_args,
+                query_object_inventory=query_object_inventory,
+                variable_assignments=variable_assignments,
+            )
+        return grounded_args
+
+    def _stage6_infer_task_args_from_literal(
+        self,
+        *,
+        task_name: str,
+        task_args: Sequence[str],
+        literal: Optional[HTNLiteral],
+        method_library,
+    ) -> Optional[Tuple[str, ...]]:
+        if literal is None:
+            return None
+
+        literal_args = tuple(str(arg).strip() for arg in (literal.args or ()))
+        if not literal_args:
+            return None
+        if len(literal_args) == len(task_args):
+            return literal_args
+
+        task_types = tuple(self._task_type_signature(task_name, method_library))
+        predicate_types = tuple(self.predicate_type_map.get(literal.predicate, ()))
+        if len(task_types) != len(task_args) or len(predicate_types) != len(literal_args):
+            return None
+        return self._stage6_project_args_by_type(
+            literal_args,
+            predicate_types,
+            task_types,
+        )
+
+    def _stage6_bind_query_variables(
+        self,
+        *,
+        task_args: Sequence[str],
+        candidate_args: Sequence[str],
+        variable_assignments: Dict[str, str],
+    ) -> Tuple[str, ...]:
+        if len(task_args) != len(candidate_args):
+            return tuple(str(arg).strip() for arg in (task_args or ()))
+
+        grounded: List[str] = []
+        for task_arg, candidate_arg in zip(task_args, candidate_args):
+            raw_task_arg = str(task_arg).strip()
+            raw_candidate_arg = str(candidate_arg).strip()
+            if not self._is_query_variable_symbol(raw_task_arg):
+                grounded.append(raw_task_arg)
+                continue
+            if not raw_candidate_arg:
+                grounded.append(raw_task_arg)
+                continue
+            existing = variable_assignments.get(raw_task_arg)
+            if existing is not None:
+                grounded.append(existing if existing == raw_candidate_arg else raw_task_arg)
+                continue
+            variable_assignments[raw_task_arg] = raw_candidate_arg
+            grounded.append(raw_candidate_arg)
+        return tuple(grounded)
 
     def _stage6_query_goal_facts(
         self,
@@ -3348,7 +3464,7 @@ class LTL_BDI_Pipeline:
         if self.problem is None:
             return None
 
-        task_network = self._stage6_query_task_network(ltl_spec)
+        task_network = self._stage6_query_task_network(ltl_spec, method_library)
         if not task_network:
             return None
 

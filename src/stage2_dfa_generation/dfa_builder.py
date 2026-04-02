@@ -77,7 +77,10 @@ class DFABuilder:
         original_num_states = self._count_states(original_dfa_dot)
         original_num_transitions = self._count_transitions(original_dfa_dot)
 
-        if metadata.get("construction") == "independent_eventually_atomic_fast_path":
+        if metadata.get("construction") in {
+            "independent_eventually_atomic_fast_path",
+            "ordered_eventually_atomic_fast_path",
+        }:
             return {
                 "formula": formula_str,
                 "original_dfa_dot": original_dfa_dot,
@@ -87,7 +90,7 @@ class DFABuilder:
                 "original_num_states": original_num_states,
                 "original_num_transitions": original_num_transitions,
                 "simplification_stats": {
-                    "method": "independent_eventually_atomic_fast_path",
+                    "method": metadata.get("construction"),
                     "num_predicates": len(metadata.get("alphabet", [])),
                     "num_original_states": original_num_states,
                     "num_new_states": original_num_states,

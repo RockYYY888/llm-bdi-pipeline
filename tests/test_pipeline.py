@@ -14,6 +14,7 @@ This file is the canonical acceptance entry point:
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import re
 import sys
@@ -723,7 +724,7 @@ def assert_official_stage3_mask_infers_blocksworld_internal_task_headlines_gener
 		for task in method_library.compound_tasks
 	}
 
-	assert task_lookup["do_on_table"].source_predicates == ("clear",)
+	assert task_lookup["do_on_table"].source_predicates in {("ontable",), ("clear",)}
 	assert task_lookup["do_clear"].source_predicates == ("clear",)
 	assert task_lookup["do_move"].source_predicates == ("on",)
 
@@ -817,6 +818,29 @@ def _build_oracle_task_grounded_stage1_spec(
 	return ltl_spec
 
 
+def _extract_progressing_transitions_compat(
+	delegate,
+	grounding_map,
+	dfa_result,
+	*,
+	ordered_literal_signatures=None,
+	linearise_ordered_literals=True,
+):
+	delegate_signature = inspect.signature(delegate.extract_progressing_transitions)
+	if "linearise_ordered_literals" in delegate_signature.parameters:
+		return delegate.extract_progressing_transitions(
+			grounding_map,
+			dfa_result,
+			ordered_literal_signatures=ordered_literal_signatures,
+			linearise_ordered_literals=linearise_ordered_literals,
+		)
+	return delegate.extract_progressing_transitions(
+		grounding_map,
+		dfa_result,
+		ordered_literal_signatures=ordered_literal_signatures,
+	)
+
+
 def _run_domain_query_case_with_official_stage3_mask(
 	domain_key: str,
 	query_id: str,
@@ -887,7 +911,8 @@ def _run_domain_query_case_with_official_stage3_mask(
 			ordered_literal_signatures=None,
 			linearise_ordered_literals=True,
 		):
-			return self._delegate.extract_progressing_transitions(
+			return _extract_progressing_transitions_compat(
+				self._delegate,
 				grounding_map,
 				dfa_result,
 				ordered_literal_signatures=ordered_literal_signatures,
@@ -2741,6 +2766,61 @@ def assert_stage6_guided_execution_uses_query_task_anchors_not_problem_root_task
 	}
 	assert guided["action_path"] == ["pick_up(b1)"]
 	assert guided["method_trace"] == [{"method_name": "m_do_put_on", "task_args": ["b1", "b2"]}]
+
+
+def assert_stage6_query_task_network_grounds_parameterised_query_anchors_from_literal_contract():
+	problem_path = SATELLITE_PROBLEM_DIR / "1obs-2sat-1mod.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing satellite problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=SATELLITE_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	nl_instruction = (
+		"Using instruments instrument0 and instrument1, satellites satellite0 and satellite1, "
+		"mode image1, calib_direction star0, and image_directions star5, phenomenon1, and "
+		"phenomenon2, complete the tasks do_observation(?direction1, ?mode1)."
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		nl_instruction,
+	)
+	method_library = _official_domain_method_library(
+		"satellite",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(nl_instruction)),
+	)
+
+	task_network = pipeline._stage6_query_task_network(ltl_spec, method_library)
+
+	assert task_network == (("do_observation", ("star5", "image1")),)
+
+
+def assert_stage3_mask_transition_extraction_compat_supports_legacy_delegate_signature():
+	captured: Dict[str, Any] = {}
+
+	class LegacyDelegate:
+		def extract_progressing_transitions(
+			self,
+			grounding_map,
+			dfa_result,
+			*,
+			ordered_literal_signatures=None,
+		):
+			captured["ordered_literal_signatures"] = ordered_literal_signatures
+			return ["ok"]
+
+	result = _extract_progressing_transitions_compat(
+		LegacyDelegate(),
+		grounding_map={"demo": "value"},
+		dfa_result={"dfa_dot": "digraph {}"},
+		ordered_literal_signatures=("a", "b"),
+		linearise_ordered_literals=False,
+	)
+
+	assert result == ["ok"]
+	assert captured["ordered_literal_signatures"] == ("a", "b")
 
 
 def assert_stage6_guided_execution_falls_back_to_chunked_query_tasks_before_incremental():

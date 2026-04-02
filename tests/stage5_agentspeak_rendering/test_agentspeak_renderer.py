@@ -2128,6 +2128,47 @@ def test_renderer_supports_or_in_primitive_precondition_context():
 	assert "+!probe(OBJECT) : clear(OBJECT) | holding(OBJECT) <-" in code
 
 
+def test_renderer_identifies_pure_noop_methods_generically():
+	renderer = AgentSpeakRenderer()
+	noop_method = HTNMethod(
+		method_name="m_clear_top_noop",
+		task_name="clear_top",
+		parameters=("BLOCK1",),
+		context=(HTNLiteral("clear", ("BLOCK1",), True, None),),
+		subtasks=(),
+	)
+	decomposing_method = HTNMethod(
+		method_name="m_clear_top_recursive",
+		task_name="clear_top",
+		parameters=("BLOCK1",),
+		subtasks=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="pick_up",
+				args=("BLOCK1", "BLOCK2"),
+				kind="primitive",
+				action_name="unstack",
+			),
+		),
+	)
+
+	assert renderer._method_is_pure_noop(noop_method) is True
+	assert renderer._method_is_pure_noop(decomposing_method) is False
+
+
+def test_renderer_generate_accepts_ordered_query_sequence_flag():
+	renderer = AgentSpeakRenderer()
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a", "b"),
+		method_library=HTNMethodLibrary(),
+		plan_records=[],
+		ordered_query_sequence=False,
+	)
+
+	assert "domain(" in code
+
+
 def test_renderer_supports_imply_in_primitive_precondition_context():
 	renderer = AgentSpeakRenderer()
 	action = type(

@@ -149,7 +149,7 @@ class PipelineLogger:
 			return
 
 		self.current_record.stage1_status = "success"
-		self.current_record.stage1_ltlf_spec = ltl_spec
+		self.current_record.stage1_ltlf_spec = self._sanitise_stage1_spec(ltl_spec)
 		self.current_record.stage1_used_llm = used_llm
 		self.current_record.stage1_model = model
 		self.current_record.stage1_llm_prompt = llm_prompt
@@ -160,6 +160,17 @@ class PipelineLogger:
 			grounding_map_path.write_text(json.dumps(ltl_spec["grounding_map"], indent=2))
 
 		self._save_current_state()
+
+	@staticmethod
+	def _sanitise_stage1_spec(ltl_spec: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+		if not isinstance(ltl_spec, dict):
+			return ltl_spec
+		sanitised = dict(ltl_spec)
+		# The recursive formula tree is redundant once formulas_string is present and
+		# makes execution logs disproportionately large on longer benchmark queries.
+		if sanitised.get("formulas_string"):
+			sanitised.pop("formulas", None)
+		return sanitised
 
 	def log_stage1_error(self, error: str) -> None:
 		if not self.current_record:

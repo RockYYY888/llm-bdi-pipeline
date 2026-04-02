@@ -37,7 +37,9 @@ class PANDAProblemBuilder:
 		task_name: str,
 		task_args: Sequence[str],
 		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
+		task_network_ordered: bool = True,
 		initial_facts: Optional[Sequence[str]] = None,
+		goal_facts: Optional[Sequence[str]] = None,
 	) -> str:
 		task_network_entries = tuple(task_network or ())
 		object_list = self._select_objects(
@@ -63,7 +65,8 @@ class PANDAProblemBuilder:
 				f"(t{index} ({network_task}{self._render_problem_args(network_args)}))"
 				for index, (network_task, network_args) in enumerate(task_network_entries, start=1)
 			]
-			lines.append(f"    :ordered-subtasks (and {' '.join(task_lines)})")
+			subtask_keyword = ":ordered-subtasks" if task_network_ordered else ":subtasks"
+			lines.append(f"    {subtask_keyword} (and {' '.join(task_lines)})")
 		else:
 			lines.append(
 				f"    :ordered-subtasks (and (t1 ({task_name}{self._render_problem_args(task_args)})))"
@@ -73,7 +76,7 @@ class PANDAProblemBuilder:
 		for fact in self._build_initial_facts(domain, object_list, initial_facts):
 			lines.append(f"    {fact}")
 		lines.append("  )")
-		lines.append("  (:goal (and))")
+		lines.extend(self._render_goal_block(goal_facts))
 		lines.append(")")
 		return "\n".join(lines) + "\n"
 
@@ -160,6 +163,18 @@ class PANDAProblemBuilder:
 				facts.append(f"({predicate_name} {obj})")
 
 		return facts
+
+	@staticmethod
+	def _render_goal_block(goal_facts: Optional[Sequence[str]]) -> List[str]:
+		facts = [str(fact).strip() for fact in (goal_facts or ()) if str(fact).strip()]
+		if not facts:
+			return ["  (:goal (and))"]
+
+		lines = ["  (:goal (and"]
+		for fact in facts:
+			lines.append(f"    {fact}")
+		lines.append("  ))")
+		return lines
 
 	@staticmethod
 	def _render_typed_objects(typed_objects: Sequence[Tuple[str, str]]) -> str:

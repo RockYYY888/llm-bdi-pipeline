@@ -289,6 +289,12 @@ class HTNMethodSynthesizer:
 		if grounding_map is None:
 			return []
 
+		linearised_specs = self._linearise_transition_specs_for_literal_order(
+			ordered_literal_signatures,
+		)
+		if linearised_specs is not None:
+			return linearised_specs
+
 		dfa_dot = dfa_result.get("dfa_dot", "")
 		graph = self._parse_dfa_graph(dfa_dot)
 		selected_edges = self._select_relevant_edges(graph)
@@ -337,6 +343,45 @@ class HTNMethodSynthesizer:
 			transition_specs,
 			ordered_literal_signatures,
 		)
+
+	def _linearise_transition_specs_for_literal_order(
+		self,
+		ordered_literal_signatures: Optional[Sequence[str]],
+	) -> Optional[List[Dict[str, Any]]]:
+		if not ordered_literal_signatures:
+			return None
+
+		ordered_occurrences = [label for label in ordered_literal_signatures if str(label).strip()]
+		if not ordered_occurrences:
+			return None
+
+		accepting_state = f"q{len(ordered_occurrences) + 1}"
+		transition_specs: List[Dict[str, Any]] = []
+		for index, signature in enumerate(ordered_occurrences, start=1):
+			literal = self._literal_from_signature_text(signature)
+			if literal is None:
+				return None
+			source_state = f"q{index}"
+			target_state = f"q{index + 1}"
+			transition_specs.append(
+				{
+					"transition_name": (
+						f"dfa_step_{source_state}_{target_state}_"
+						f"{self._transition_suffix_for_literal(literal)}"
+					),
+					"label": literal.to_signature(),
+					"raw_label": str(signature).strip(),
+					"literal": literal,
+					"source_state": source_state,
+					"target_state": target_state,
+					"raw_source_state": source_state,
+					"raw_target_state": target_state,
+					"initial_state": "q1",
+					"accepting_states": [accepting_state],
+				},
+			)
+
+		return transition_specs
 
 	def _reorder_transition_specs_for_literal_order(
 		self,
@@ -563,6 +608,32 @@ class HTNMethodSynthesizer:
 		prefix = "" if literal.is_positive else "not_"
 		parts = [literal.predicate, *literal.args]
 		return prefix + "_".join(self._sanitize_name(part) for part in parts if part)
+
+	@staticmethod
+	def _literal_from_signature_text(signature: str) -> Optional[HTNLiteral]:
+		token = str(signature or "").strip()
+		if not token:
+			return None
+		is_positive = not token.startswith("!")
+		if not is_positive:
+			token = token[1:].strip()
+		predicate, has_args, args_text = token.partition("(")
+		predicate = predicate.strip()
+		if not predicate:
+			return None
+		args: Tuple[str, ...] = ()
+		if has_args:
+			args = tuple(
+				str(arg).strip()
+				for arg in args_text.rstrip(")").split(",")
+				if str(arg).strip()
+			)
+		return HTNLiteral(
+			predicate=predicate,
+			args=args,
+			is_positive=is_positive,
+			source_symbol=None,
+		)
 
 	def _build_primitive_tasks(self, domain: Any) -> List[HTNTask]:
 		actions = [self.parser.parse_action(action) for action in domain.actions]
