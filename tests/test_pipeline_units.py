@@ -87,8 +87,60 @@ def test_official_blocksworld_problem_query_case_generation_preserves_identical_
 	pipeline_tests.assert_official_blocksworld_problem_query_case_generation_preserves_identical_root_task_occurrences()
 
 
+def test_official_stage3_mask_infers_blocksworld_internal_task_headlines_generically():
+	pipeline_tests.assert_official_stage3_mask_infers_blocksworld_internal_task_headlines_generically()
+
+
+def test_official_stage3_mask_oracle_targets_fall_back_to_primary_task_effects():
+	method_library = pipeline_tests._official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=[],
+		query_task_anchors=[{"task_name": "do_put_on", "args": ["b1", "b2"]}],
+	)
+	assert [literal.to_signature() for literal in method_library.target_literals] == ["on(b1, b2)"]
+	assert [binding.to_dict() for binding in method_library.target_task_bindings] == [
+		{"target_literal": "on(b1, b2)", "task_name": "do_put_on"},
+	]
+
+	method_library = pipeline_tests._official_domain_method_library(
+		"marsrover",
+		target_literal_signatures=[],
+		query_task_anchors=[{"task_name": "get_soil_data", "args": ["waypoint2"]}],
+	)
+	assert [literal.to_signature() for literal in method_library.target_literals] == [
+		"communicated_soil_data(waypoint2)",
+	]
+	assert [binding.to_dict() for binding in method_library.target_task_bindings] == [
+		{"target_literal": "communicated_soil_data(waypoint2)", "task_name": "get_soil_data"},
+	]
+
+
 def test_official_marsrover_problem_query_case_generation_from_problem_tasks():
 	pipeline_tests.assert_official_marsrover_problem_query_case_generation_from_problem_tasks()
+
+
+def test_stage6_guided_execution_uses_query_task_anchors_not_problem_root_tasks():
+	pipeline_tests.assert_stage6_guided_execution_uses_query_task_anchors_not_problem_root_tasks()
+
+
+def test_stage6_guided_execution_falls_back_to_chunked_query_tasks_before_incremental():
+	pipeline_tests.assert_stage6_guided_execution_falls_back_to_chunked_query_tasks_before_incremental()
+
+
+def test_stage6_unordered_guided_execution_falls_back_to_chunked_query_tasks():
+	pipeline_tests.assert_stage6_unordered_guided_execution_falls_back_to_chunked_query_tasks()
+
+
+def test_stage6_query_goal_projection_drops_transient_ordered_support_effects():
+	pipeline_tests.assert_stage6_query_goal_projection_drops_transient_ordered_support_effects()
+
+
+def test_stage6_chunked_hierarchical_plan_merge_preserves_structure():
+	pipeline_tests.assert_stage6_chunked_hierarchical_plan_merge_preserves_structure()
+
+
+def test_stage7_prefers_guided_hierarchical_plan_text():
+	pipeline_tests.assert_stage7_prefers_guided_hierarchical_plan_text()
 
 
 def test_official_satellite_problem_query_case_generation_from_problem_tasks():
@@ -107,6 +159,10 @@ def test_task_grounded_canonical_formulas_preserve_identical_obligation_occurren
 	pipeline_tests.assert_task_grounded_canonical_formulas_preserve_identical_obligation_occurrences()
 
 
+def test_task_grounded_stage1_normalisation_marks_default_queries_as_unordered():
+	pipeline_tests.assert_task_grounded_stage1_normalisation_marks_default_queries_as_unordered()
+
+
 def test_task_grounded_canonical_formulas_preserve_order_when_query_requests_sequence():
 	pipeline_tests.assert_task_grounded_canonical_formulas_preserve_order_when_query_requests_sequence()
 
@@ -115,8 +171,8 @@ def test_task_grounded_stage1_normalisation_overrides_independent_eventuals_for_
 	pipeline_tests.assert_task_grounded_stage1_normalisation_overrides_independent_eventuals_for_ordered_queries()
 
 
-def test_task_grounded_ordered_formulas_accumulate_prior_positive_obligations():
-	pipeline_tests.assert_task_grounded_ordered_formulas_accumulate_prior_positive_obligations()
+def test_task_grounded_ordered_formulas_encode_sequential_task_events():
+	pipeline_tests.assert_task_grounded_ordered_formulas_encode_sequential_task_events()
 
 
 def test_ordered_literal_signatures_prefer_query_task_literal_contract():
@@ -135,8 +191,24 @@ def test_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypa
 	pipeline_tests.assert_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch)
 
 
+def test_oracle_task_grounded_stage1_mask_builds_canonical_blocksworld_spec():
+	pipeline_tests.assert_oracle_task_grounded_stage1_mask_builds_canonical_blocksworld_spec()
+
+
+def test_oracle_task_grounded_stage1_mask_grounds_parameterised_satellite_queries():
+	pipeline_tests.assert_oracle_task_grounded_stage1_mask_grounds_parameterised_satellite_queries()
+
+
+def test_pipeline_logger_stage1_payload_omits_recursive_formula_tree(tmp_path):
+	pipeline_tests.assert_pipeline_logger_stage1_payload_omits_recursive_formula_tree(tmp_path)
+
+
 def test_stage6_object_type_resolution_ignores_unused_query_objects():
 	pipeline_tests.assert_stage6_object_type_resolution_ignores_unused_query_objects()
+
+
+def test_stage6_object_type_resolution_preserves_problem_typed_runtime_symbols():
+	pipeline_tests.assert_stage6_object_type_resolution_preserves_problem_typed_runtime_symbols()
 
 
 def test_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_are_partial(
