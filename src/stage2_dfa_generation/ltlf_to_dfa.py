@@ -108,6 +108,8 @@ class LTLfToDFA:
     Pipeline: Predicate LTLf → Propositional LTLf → DFA (DOT format)
     """
 
+    MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_STATES = 1 << 12
+
     def __init__(self):
         self.ltlf_parser = LTLfParser()
         self.encoder = PredicateToProposition()
@@ -169,21 +171,22 @@ class LTLfToDFA:
                 self.encoder.encode_predicate(atom)
                 for atom in eventual_atoms
             ]
-            dfa_dot = self._build_independent_eventually_atomic_dfa(propositional_atoms)
             unique_atoms: List[str] = []
             for atom in propositional_atoms:
                 if atom not in unique_atoms:
                     unique_atoms.append(atom)
-            metadata = {
-                "original_formula": original_formula,
-                "propositional_formula": propositional_formula,
-                "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                "num_states": 1 << len(unique_atoms),
-                "alphabet": list(unique_atoms),
-                "construction": "independent_eventually_atomic_fast_path",
-            }
-            return dfa_dot, metadata
+            if self._can_materialize_exact_independent_eventually_dfa(unique_atoms):
+                dfa_dot = self._build_independent_eventually_atomic_dfa(propositional_atoms)
+                metadata = {
+                    "original_formula": original_formula,
+                    "propositional_formula": propositional_formula,
+                    "predicate_to_prop_mapping": self.encoder.get_mapping(),
+                    "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
+                    "num_states": 1 << len(unique_atoms),
+                    "alphabet": list(unique_atoms),
+                    "construction": "independent_eventually_atomic_fast_path",
+                }
+                return dfa_dot, metadata
 
         # Parse and convert to DFA
         try:
@@ -204,10 +207,16 @@ class LTLfToDFA:
             "predicate_to_prop_mapping": self.encoder.get_mapping(),
             "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
             "num_states": self._count_dfa_states(dfa_dot),
+            "num_transitions": self._count_dfa_transitions(dfa_dot),
             "alphabet": self._extract_alphabet(dfa_dot),
         }
 
         return dfa_dot, metadata
+
+    def _can_materialize_exact_independent_eventually_dfa(self, unique_atoms: List[str]) -> bool:
+        if not unique_atoms:
+            return False
+        return (1 << len(unique_atoms)) <= self.MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_STATES
 
     def _extract_independent_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
         formulas = list(getattr(ltl_spec, "formulas", ()) or ())
@@ -375,6 +384,12 @@ class LTLfToDFA:
         transition_lines = [line for line in lines if '->' in line and 'init' not in line]
         # Rough estimate - not exact but good enough for metadata
         return max(10, len(transition_lines) // 2)  # Placeholder logic
+
+    def _count_dfa_transitions(self, dfa_dot: str) -> int:
+        """Count DFA transitions cheaply for large generic ltlf2dfa outputs."""
+        total_edges = dfa_dot.count("->")
+        init_edges = dfa_dot.count("init ->")
+        return max(0, total_edges - init_edges)
 
     def _extract_alphabet(self, dfa_dot: str) -> List[str]:
         """Extract alphabet (propositional variables) from DFA"""

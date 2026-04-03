@@ -322,6 +322,41 @@ def test_extract_progressing_transitions_can_linearise_ordered_literals_without_
 	]
 
 
+def test_extract_progressing_transitions_builds_compact_unordered_specs_without_dfa_parse():
+	synthesizer = HTNMethodSynthesizer()
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("goal_a", "goal", ["a"])
+	grounding_map.add_atom("goal_b", "goal", ["b"])
+
+	def fail_parse(_dfa_dot):
+		raise AssertionError("unordered literal compaction should avoid DFA graph parsing")
+
+	synthesizer._parse_dfa_graph = fail_parse  # type: ignore[method-assign]
+
+	transition_specs = synthesizer.extract_progressing_transitions(
+		grounding_map,
+		{"dfa_dot": "digraph HUGE_DFA { ... }"},
+		ordered_literal_signatures=[
+			"goal(a)",
+			"goal(b)",
+		],
+		linearise_ordered_literals=False,
+	)
+
+	assert [
+		(
+			spec["transition_name"],
+			spec["source_state"],
+			spec["target_state"],
+			spec["label"],
+		)
+		for spec in transition_specs
+	] == [
+		("dfa_step_q1_q1_t1_goal_a", "q1", "q1", "goal(a)"),
+		("dfa_step_q1_q1_t2_goal_b", "q1", "q1", "goal(b)"),
+	]
+
+
 def test_synthesize_requires_live_llm():
 	domain_path = (
 		Path(__file__).parent.parent.parent

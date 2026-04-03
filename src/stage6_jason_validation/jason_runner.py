@@ -125,6 +125,10 @@ class JasonRunner:
 		planning_domain: Any | None = None,
 		guided_action_path: Sequence[str] = (),
 		guided_method_trace: Sequence[Dict[str, Any]] = (),
+		guided_continue_with_runtime_goal: bool = False,
+		guided_post_seed_facts: Sequence[str] = (),
+		guided_completed_target_count: int = 0,
+		guided_completed_target_ids: Sequence[str] = (),
 		skip_method_trace_reconstruction: bool = False,
 	) -> JasonValidationResult:
 		"""Execute Jason validation and return a structured result."""
@@ -156,22 +160,33 @@ class JasonRunner:
 		unordered_target_order_ids: List[str] = []
 		unordered_target_order_signatures: List[str] = []
 		effective_agentspeak_code = agentspeak_code
+		ordering_seed_facts = tuple(seed_facts)
+		ordering_target_literals = tuple(target_literals)
+		target_id_offset = 0
+		if guided_continue_with_runtime_goal:
+			if guided_post_seed_facts:
+				ordering_seed_facts = tuple(guided_post_seed_facts)
+			if guided_completed_target_count > 0:
+				target_id_offset = guided_completed_target_count
+				ordering_target_literals = tuple(target_literals[guided_completed_target_count:])
 		if (
-			not guided_action_path
+			(not guided_action_path or guided_continue_with_runtime_goal)
 			and not ordered_query_sequence
 			and completion_mode == "target_literals"
 			and method_library is not None
 			and planning_domain is not None
+			and ordering_target_literals
 		):
 			ordering = self._infer_unordered_target_execution_order(
-				target_literals=target_literals,
+				target_literals=ordering_target_literals,
 				method_library=method_library,
 				action_schemas=action_schemas,
-				seed_facts=seed_facts,
+				seed_facts=ordering_seed_facts,
 				runtime_objects=runtime_objects,
 				object_types=object_types or {},
 				planning_domain=planning_domain,
 				output_path=output_path,
+				target_id_offset=target_id_offset,
 			)
 			unordered_target_order_ids = list(ordering.get("target_ids") or [])
 			unordered_target_order_signatures = list(ordering.get("target_signatures") or [])
@@ -192,7 +207,14 @@ class JasonRunner:
 			ordered_query_sequence=ordered_query_sequence,
 			guided_action_path=guided_action_path,
 			guided_method_trace=guided_method_trace,
+			guided_continue_with_runtime_goal=guided_continue_with_runtime_goal,
+			guided_completed_target_ids=guided_completed_target_ids,
 		)
+		if unordered_target_order_ids:
+			runner_asl = self._reorder_unordered_control_plan_blocks(
+				runner_asl,
+				unordered_target_order_ids,
+			)
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
 			action_schemas=action_schemas,
@@ -256,8 +278,13 @@ class JasonRunner:
 		stdout = self._combine_process_output(stdout_text, stderr_text)
 		stderr = stderr_text
 		action_path = self._extract_action_path(stdout)
-		extracted_method_trace = self._extract_method_trace(stdout)
-		method_trace = list(guided_method_trace) if guided_method_trace else extracted_method_trace
+		method_trace_output = stderr_text if "runtime trace method" in stderr_text else stdout
+		extracted_method_trace = self._extract_method_trace(method_trace_output)
+		guided_prefix_mode = bool(guided_action_path and guided_continue_with_runtime_goal)
+		if guided_prefix_mode:
+			method_trace = extracted_method_trace or list(guided_method_trace)
+		else:
+			method_trace = list(guided_method_trace) if guided_method_trace else extracted_method_trace
 		failed_goals = self._extract_failed_goals(stdout)
 
 		stdout_path.write_text(stdout)
@@ -352,14 +379,35 @@ class JasonRunner:
 		object_types: Dict[str, str],
 		planning_domain: Any,
 		output_path: Path,
+		target_id_offset: int = 0,
 	) -> Dict[str, List[str]]:
 		from stage4_panda_planning.panda_planner import PANDAPlanner
 
+		max_planner_ordering_targets = 24
 		if len(target_literals) <= 1:
 			return {
-				"target_ids": [f"t{index}" for index, _ in enumerate(target_literals, start=1)],
+				"target_ids": [
+					f"t{target_id_offset + index}"
+					for index, _ in enumerate(target_literals, start=1)
+				],
 				"target_signatures": [literal.to_signature() for literal in target_literals],
 			}
+		if len(target_literals) > max_planner_ordering_targets:
+			# Planner-guided global ordering is quadratic in the number of unordered
+			# targets because each depth evaluates many remaining candidates. For
+			# large unordered query tails, bounded chunk planning later in Stage 6 is
+			# the right generic place to search locally; preserving query order here
+			# avoids spending minutes in a front-loaded ranking pass.
+			return {
+				"target_ids": [
+					f"t{target_id_offset + index}"
+					for index, _ in enumerate(target_literals, start=1)
+				],
+				"target_signatures": [literal.to_signature() for literal in target_literals],
+			}
+		ordering_planner_timeout_seconds = 5.0
+		exact_search_limit = 10
+		lookahead_probe_limit = 10
 
 		planner = PANDAPlanner(workspace=output_path / "unordered_target_ordering")
 		if not planner.toolchain_available():
@@ -385,11 +433,10 @@ class JasonRunner:
 			if str(obj) in object_types
 		)
 		remaining = [
-			(f"t{index}", literal, index)
+			(f"t{target_id_offset + index}", literal, target_id_offset + index)
 			for index, literal in enumerate(target_literals, start=1)
 		]
 		plan_cache: Dict[Tuple[Tuple[str, ...], str], Any] = {}
-		dead_end_cache: Set[Tuple[Tuple[str, ...], Tuple[str, ...]]] = set()
 
 		def plan_for_target(
 			current_world: Set[str],
@@ -423,6 +470,7 @@ class JasonRunner:
 						predicate_name_map=predicate_name_map,
 					),
 					allow_empty_plan=False,
+					timeout_seconds=ordering_planner_timeout_seconds,
 				)
 			except Exception:
 				plan = None
@@ -430,21 +478,11 @@ class JasonRunner:
 			plan_cache[cache_key] = plan
 			return plan
 
-		def search(
+		def ranked_candidates(
 			current_world: Set[str],
 			remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
 			depth: int,
-		) -> Optional[List[Tuple[str, str]]]:
-			if not remaining_targets:
-				return []
-
-			state_key = (
-				tuple(sorted(current_world)),
-				tuple(target_id for target_id, _, _ in remaining_targets),
-			)
-			if state_key in dead_end_cache:
-				return None
-
+		) -> List[Tuple[int, int, str, str, HTNLiteral, Any]]:
 			candidates: List[Tuple[int, int, str, str, HTNLiteral, Any]] = []
 			for target_id, literal, original_index in remaining_targets:
 				plan = plan_for_target(current_world, target_id, literal, depth)
@@ -462,34 +500,163 @@ class JasonRunner:
 				)
 
 			if not candidates:
-				dead_end_cache.add(state_key)
-				return None
+				return []
 
-			if depth == 0:
-				candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
-			else:
-				candidates.sort(key=lambda item: (item[1], item[0], item[2], item[3]))
-			for _, _, signature, target_id, literal, plan in candidates:
-				next_world = self._replay_plan_steps_into_world(
-					world=current_world,
+			candidates.sort(key=lambda item: (item[1], item[0], item[2], item[3]))
+			if len(remaining_targets) <= lookahead_probe_limit and len(candidates) > 1:
+				lookahead_ranked: List[
+					Tuple[int, int, int, str, str, HTNLiteral, Any]
+				] = []
+				for (
+					original_index,
+					plan_length,
+					signature,
+					target_id,
+					literal,
+					plan,
+				) in candidates:
+					hypothetical_world = self._replay_plan_steps_into_world(
+						world=current_world,
+						steps=plan.steps,
+						schema_lookup=schema_lookup,
+					)
+					reachable_follow_ons = 0
+					for (
+						other_target_id,
+						other_literal,
+						_,
+					) in remaining_targets:
+						if other_target_id == target_id:
+							continue
+						if (
+							plan_for_target(
+								hypothetical_world,
+								other_target_id,
+								other_literal,
+								depth + 1,
+							)
+							is not None
+						):
+							reachable_follow_ons += 1
+					lookahead_ranked.append(
+						(
+							-reachable_follow_ons,
+							plan_length,
+							original_index,
+							signature,
+							target_id,
+							literal,
+							plan,
+						),
+					)
+				lookahead_ranked.sort(key=lambda item: item[:5])
+				return [
+					(
+						original_index,
+						len(plan.steps),
+						signature,
+						target_id,
+						literal,
+						plan,
+					)
+					for (
+						_,
+						_,
+						original_index,
+						signature,
+						target_id,
+						literal,
+						plan,
+					) in lookahead_ranked
+				]
+			return candidates
+
+		def greedy_ordered_pairs(
+			current_world: Set[str],
+			remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+		) -> List[Tuple[str, str]]:
+			ordered_pairs: List[Tuple[str, str]] = []
+			pending_world = set(current_world)
+			pending_targets = list(remaining_targets)
+			depth = 0
+			while pending_targets:
+				candidates = ranked_candidates(pending_world, pending_targets, depth)
+				if not candidates:
+					break
+				_, _, signature, target_id, _, plan = candidates[0]
+				pending_world = self._replay_plan_steps_into_world(
+					world=pending_world,
 					steps=plan.steps,
 					schema_lookup=schema_lookup,
 				)
-				next_remaining = [
+				ordered_pairs.append((target_id, signature))
+				pending_targets = [
 					(item_target_id, item_literal, item_original_index)
-					for item_target_id, item_literal, item_original_index in remaining_targets
+					for item_target_id, item_literal, item_original_index in pending_targets
 					if item_target_id != target_id
 				]
-				suffix = search(next_world, next_remaining, depth + 1)
-				if suffix is not None:
-					return [(target_id, signature), *suffix]
+				depth += 1
+			return ordered_pairs
 
-			dead_end_cache.add(state_key)
-			return None
+		ordered_pairs: List[Tuple[str, str]]
+		if len(remaining) <= exact_search_limit:
+			failed_states: Set[Tuple[Tuple[str, ...], Tuple[str, ...]]] = set()
+			best_partial: List[Tuple[str, str]] = []
 
-		search_result = search(runtime_world, remaining, 0) or []
-		ordered_target_ids = [target_id for target_id, _ in search_result]
-		ordered_signatures = [signature for _, signature in search_result]
+			def search_exact(
+				current_world: Set[str],
+				remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+				depth: int,
+				prefix: Sequence[Tuple[str, str]],
+			) -> Optional[List[Tuple[str, str]]]:
+				nonlocal best_partial
+				if len(prefix) > len(best_partial):
+					best_partial = list(prefix)
+				if not remaining_targets:
+					return []
+
+				state_key = (
+					tuple(sorted(current_world)),
+					tuple(sorted(target_id for target_id, _, _ in remaining_targets)),
+				)
+				if state_key in failed_states:
+					return None
+
+				candidates = ranked_candidates(current_world, remaining_targets, depth)
+				if not candidates:
+					failed_states.add(state_key)
+					return None
+
+				for _, _, signature, target_id, _, plan in candidates:
+					next_world = self._replay_plan_steps_into_world(
+						world=current_world,
+						steps=plan.steps,
+						schema_lookup=schema_lookup,
+					)
+					next_remaining = [
+						(item_target_id, item_literal, item_original_index)
+						for item_target_id, item_literal, item_original_index in remaining_targets
+						if item_target_id != target_id
+					]
+					next_prefix = [*prefix, (target_id, signature)]
+					suffix = search_exact(
+						next_world,
+						next_remaining,
+						depth + 1,
+						next_prefix,
+					)
+					if suffix is not None:
+						return [(target_id, signature), *suffix]
+
+				failed_states.add(state_key)
+				return None
+
+			ordered_pairs = search_exact(set(runtime_world), list(remaining), 0, ()) or best_partial
+		else:
+			ordered_pairs = greedy_ordered_pairs(set(runtime_world), list(remaining))
+
+		ordered_target_ids = [target_id for target_id, _ in ordered_pairs]
+		ordered_signatures = [signature for _, signature in ordered_pairs]
 
 		return {
 			"target_ids": ordered_target_ids,
@@ -507,7 +674,19 @@ class JasonRunner:
 			return agentspeak_code
 
 		prefix = agentspeak_code[:start_index]
-		control_section = agentspeak_code[start_index:]
+		end_index = self._next_section_index(
+			agentspeak_code,
+			start_index + len(start_marker),
+			(
+				"/* Target Observation Plans */",
+				"/* Failure Handlers */",
+				"/* Execution Entry */",
+				"/* Primitive Action Plans */",
+				"/* HTN Method Plans */",
+			),
+		)
+		control_section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
 		blocks = [
 			block.strip()
 			for block in re.split(r"\n\s*\n", control_section.strip())
@@ -520,9 +699,11 @@ class JasonRunner:
 		success_blocks: List[str] = []
 		clear_blocks: List[str] = []
 		fallback_blocks: List[str] = []
+		passthrough_blocks: List[str] = []
 		pair_lookup: Dict[str, List[str]] = {}
 		original_pair_order: List[str] = []
 		pending_run_target_id: Optional[str] = None
+		transition_target_lookup = self._unordered_transition_target_lookup(agentspeak_code)
 
 		for block in blocks[1:]:
 			target_id = self._unordered_control_target_id(block)
@@ -535,6 +716,25 @@ class JasonRunner:
 				continue
 			if header_line.startswith("+!run_dfa : true <-"):
 				fallback_blocks.append(block)
+				continue
+			if (
+				header_line.startswith("+!run_dfa : dfa_state(")
+				and "accepting_state(" in header_line
+			):
+				success_blocks.append(block)
+				continue
+			if header_line.startswith("+!run_dfa : dfa_state("):
+				transition_name = self._unordered_control_transition_name(block)
+				if transition_name is None:
+					passthrough_blocks.append(block)
+					continue
+				target_id = transition_target_lookup.get(transition_name)
+				if target_id is None:
+					passthrough_blocks.append(block)
+					continue
+				pair_lookup.setdefault(target_id, []).append(block)
+				if target_id not in original_pair_order:
+					original_pair_order.append(target_id)
 				continue
 			if header_line.startswith("+!run_dfa : not target_seen(") and target_id is not None:
 				pending_run_target_id = target_id
@@ -549,6 +749,7 @@ class JasonRunner:
 					original_pair_order.append(pair_target_id)
 				pending_run_target_id = None
 				continue
+			passthrough_blocks.append(block)
 
 		ordered_target_ids = [
 			target_id
@@ -566,9 +767,63 @@ class JasonRunner:
 		reordered_blocks.extend(clear_blocks)
 		for target_id in ordered_target_ids:
 			reordered_blocks.extend(pair_lookup.get(target_id, ()))
+		reordered_blocks.extend(passthrough_blocks)
 		reordered_blocks.extend(fallback_blocks)
 		reordered_section = "\n\n".join(reordered_blocks).rstrip() + "\n"
-		return prefix + reordered_section
+		return prefix + reordered_section + suffix
+
+	@staticmethod
+	def _next_section_index(
+		agentspeak_code: str,
+		start_index: int,
+		markers: Sequence[str],
+	) -> int:
+		candidates = [
+			index
+			for marker in markers
+			if (index := agentspeak_code.find(marker, start_index)) != -1
+		]
+		if not candidates:
+			return len(agentspeak_code)
+		return min(candidates)
+
+	def _unordered_transition_target_lookup(self, agentspeak_code: str) -> Dict[str, str]:
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return {}
+
+		transition_section = agentspeak_code[start_index:end_index]
+		blocks = [
+			block.strip()
+			for block in re.split(r"\n\s*\n", transition_section.strip())
+			if block.strip()
+		]
+		if not blocks:
+			return {}
+
+		lookup: Dict[str, str] = {}
+		for block in blocks[1:]:
+			lines = [line.strip() for line in block.splitlines() if line.strip()]
+			if not lines:
+				continue
+			header_match = re.match(r"^\+!([^\s(:]+)", lines[0])
+			if header_match is None:
+				continue
+			target_match = re.search(r"!mark_target_(t\d+)", block)
+			if target_match is None:
+				continue
+			lookup[header_match.group(1).strip()] = target_match.group(1)
+		return lookup
+
+	@staticmethod
+	def _unordered_control_transition_name(block: str) -> Optional[str]:
+		match = re.search(r"!\s*([A-Za-z0-9_]+)\s*;", block)
+		if match is None:
+			return None
+		return match.group(1).strip()
 
 	@staticmethod
 	def _unordered_control_target_id(block: str) -> Optional[str]:
@@ -730,6 +985,8 @@ class JasonRunner:
 		ordered_query_sequence: bool = True,
 		guided_action_path: Sequence[str] = (),
 		guided_method_trace: Sequence[Dict[str, Any]] = (),
+		guided_continue_with_runtime_goal: bool = False,
+		guided_completed_target_ids: Sequence[str] = (),
 	) -> str:
 		runtime_ready_code = self._inject_runtime_object_beliefs(
 			agentspeak_code,
@@ -742,6 +999,31 @@ class JasonRunner:
 			environment_ready_code,
 			method_library,
 		)
+		target_observations = self._extract_transition_target_observations(
+			trace_ready_code,
+			target_literals,
+		)
+		if guided_action_path and guided_continue_with_runtime_goal:
+			observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
+				trace_ready_code,
+				target_observations,
+			)
+			if not ordered_query_sequence:
+				observation_ready_code = self._rewrite_unordered_control_plans(
+					observation_ready_code,
+					target_observations,
+				)
+			return self._build_guided_prefix_runner_asl(
+				observation_ready_code,
+				target_literals=target_literals,
+				target_observations=target_observations,
+				method_library=method_library,
+				completion_mode=completion_mode,
+				ordered_query_sequence=ordered_query_sequence,
+				guided_action_path=guided_action_path,
+				guided_method_trace=guided_method_trace,
+				guided_completed_target_ids=guided_completed_target_ids,
+			)
 		if guided_action_path:
 			return self._build_guided_runner_asl(
 				trace_ready_code,
@@ -750,14 +1032,15 @@ class JasonRunner:
 				guided_action_path=guided_action_path,
 				guided_method_trace=guided_method_trace,
 			)
-		target_observations = self._extract_transition_target_observations(
-			trace_ready_code,
-			target_literals,
-		)
 		observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
 			trace_ready_code,
 			target_observations,
 		)
+		if not ordered_query_sequence:
+			observation_ready_code = self._rewrite_unordered_control_plans(
+				observation_ready_code,
+				target_observations,
+			)
 		target_context = (
 			self._observed_target_context_expression(target_observations)
 			or self._target_context_expression(target_literals)
@@ -895,6 +1178,261 @@ class JasonRunner:
 		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
+
+	def _build_guided_prefix_runner_asl(
+		self,
+		agentspeak_code: str,
+		*,
+		target_literals: Sequence[HTNLiteral],
+		target_observations: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		completion_mode: str,
+		ordered_query_sequence: bool,
+		guided_action_path: Sequence[str],
+		guided_method_trace: Sequence[Dict[str, Any]],
+		guided_completed_target_ids: Sequence[str],
+	) -> str:
+		target_context = (
+			self._observed_target_context_expression(target_observations)
+			or self._target_context_expression(target_literals)
+		)
+		initial_dfa_state = self._extract_initial_dfa_state(agentspeak_code) or "q1"
+		max_execution_passes = max(2, len(target_literals) + 1)
+		prefix_body = [
+			self._render_guided_method_trace_statement(entry)
+			for entry in guided_method_trace
+		]
+		prefix_body.extend(f"!{action_step}" for action_step in guided_action_path)
+		completed_target_ids = [
+			str(target_id).strip()
+			for target_id in guided_completed_target_ids
+			if str(target_id).strip()
+		]
+		for target_id in completed_target_ids:
+			prefix_body.append(f"!mark_target_{target_id}")
+			prefix_body.append(f"!advance_dfa_for_{target_id}")
+		guided_dfa_sync_plans = self._render_guided_dfa_sync_plans(
+			agentspeak_code,
+			completed_target_ids,
+		)
+		lines = [
+			agentspeak_code.rstrip(),
+			"",
+			*self._render_target_observation_plans(target_observations),
+			"",
+			*guided_dfa_sync_plans,
+			"",
+			*self._render_failure_handlers(
+				method_library,
+				ordered_query_sequence=ordered_query_sequence,
+			),
+			"",
+			"/* Execution Entry */",
+			"!execute.",
+			"",
+		]
+
+		if completion_mode == "accepting_state":
+			lines.append("+!execute : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute start")',
+						*prefix_body,
+						"!run_dfa",
+						"?dfa_state(FINAL_STATE)",
+						"?accepting_state(FINAL_STATE)",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("")
+			lines.append("-!execute : true <-")
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+			lines.append("")
+			return "\n".join(lines)
+
+		if completion_mode != "target_literals":
+			raise JasonValidationError(
+				f"Unsupported Stage 6 completion mode: {completion_mode}",
+				metadata={"completion_mode": completion_mode},
+			)
+
+		lines.append(f"+!verify_targets : {target_context} <-")
+		lines.extend(self._indent_body(["true"]))
+		lines.append("")
+		if not ordered_query_sequence:
+			lines.append("+!execute : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute start")',
+						*prefix_body,
+						"!run_dfa",
+						"!verify_targets",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("")
+			lines.append("-!execute : true <-")
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+			lines.append("")
+			return "\n".join(lines)
+
+		lines.append("+!reset_execution_state : dfa_state(CURRENT_STATE) <-")
+		lines.extend(
+			self._indent_body(
+				[
+					"-dfa_state(CURRENT_STATE)",
+					f"+dfa_state({initial_dfa_state})",
+				],
+			),
+		)
+		lines.append("")
+		lines.append("+!execute : true <-")
+		lines.extend(
+			self._indent_body(
+				[
+					'.print("execute start")',
+					*prefix_body,
+					"!execute_round_1",
+				],
+			),
+		)
+		lines.append("")
+		for round_index in range(1, max_execution_passes + 1):
+			goal_name = f"execute_round_{round_index}"
+			next_goal_name = f"execute_round_{round_index + 1}"
+			lines.append(f"+!{goal_name} : {target_context} <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("")
+			body_lines: List[str] = [
+				"!run_dfa",
+				"?dfa_state(FINAL_STATE)",
+				"?accepting_state(FINAL_STATE)",
+			]
+			if round_index < max_execution_passes:
+				body_lines.extend(
+					[
+						"!reset_execution_state",
+						f"!{next_goal_name}",
+					],
+				)
+			else:
+				body_lines.append(f"!{next_goal_name}")
+			lines.append(f"+!{goal_name} : true <-")
+			lines.extend(self._indent_body(body_lines))
+			lines.append("")
+
+		final_goal_name = f"execute_round_{max_execution_passes + 1}"
+		lines.append(f"+!{final_goal_name} : {target_context} <-")
+		lines.extend(
+			self._indent_body(
+				[
+					'.print("execute success")',
+					".stopMAS",
+				],
+			),
+		)
+		lines.append("")
+		lines.append(f"+!{final_goal_name} : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		lines.append("")
+		lines.append("-!execute : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		lines.append("")
+		return "\n".join(lines)
+
+	def _render_guided_dfa_sync_plans(
+		self,
+		agentspeak_code: str,
+		completed_target_ids: Sequence[str],
+	) -> List[str]:
+		if not completed_target_ids:
+			return []
+
+		target_state_advances = self._extract_target_state_advances(agentspeak_code)
+		lines = ["/* Guided DFA Sync Plans */"]
+		rendered_any = False
+		for target_id in completed_target_ids:
+			advance_pairs = target_state_advances.get(str(target_id), ())
+			for source_state, target_state in advance_pairs:
+				rendered_any = True
+				lines.append(
+					f"+!advance_dfa_for_{target_id} : target_seen({target_id}) & "
+					f"{self._call('dfa_state', (source_state,))} <-"
+				)
+				if source_state == target_state:
+					lines.extend(self._indent_body(["true"]))
+				else:
+					lines.extend(
+						self._indent_body(
+							[
+								f"-{self._call('dfa_state', (source_state,))}",
+								f"+{self._call('dfa_state', (target_state,))}",
+							],
+						),
+					)
+				lines.append("")
+			lines.append(f"+!advance_dfa_for_{target_id} : true <-")
+			lines.extend(self._indent_body(["true"]))
+			lines.append("")
+		return lines if rendered_any or completed_target_ids else []
+
+	def _extract_target_state_advances(
+		self,
+		agentspeak_code: str,
+	) -> Dict[str, Tuple[Tuple[str, str], ...]]:
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return {}
+
+		transition_section = agentspeak_code[start_index:end_index]
+		blocks = [
+			block.strip()
+			for block in re.split(r"\n\s*\n", transition_section.strip())
+			if block.strip()
+		]
+		if not blocks:
+			return {}
+
+		advances: Dict[str, List[Tuple[str, str]]] = {}
+		for block in blocks[1:]:
+			source_match = re.search(
+				r"^\+![^\s(:]+\s*:\s*dfa_state\(([^)]+)\)",
+				block,
+				re.MULTILINE,
+			)
+			target_id_match = re.search(r"!mark_target_(t\d+)", block)
+			if source_match is None or target_id_match is None:
+				continue
+			source_state = source_match.group(1).strip()
+			target_state_match = re.search(r"\+dfa_state\(([^)]+)\)", block)
+			target_state = (
+				target_state_match.group(1).strip()
+				if target_state_match is not None
+				else source_state
+			)
+			advances.setdefault(target_id_match.group(1), []).append(
+				(source_state, target_state),
+			)
+		return {
+			target_id: tuple(pairs)
+			for target_id, pairs in advances.items()
+		}
 
 	def _build_guided_runner_asl(
 		self,
@@ -1144,6 +1682,67 @@ class JasonRunner:
 				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
 			lines.append("")
 		return lines
+
+	def _rewrite_unordered_control_plans(
+		self,
+		agentspeak_code: str,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> str:
+		start_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		if start_index == -1:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		target_context = self._observed_target_context_expression(target_observations)
+		control_lines = ["/* DFA Control Plans */"]
+		if target_context:
+			control_lines.append(f"+!run_dfa : {target_context} <-")
+			control_lines.extend(self._indent_body(["true"]))
+			control_lines.append("")
+		control_lines.append("+!clear_blocked_targets : blocked_target(TARGET_ID) <-")
+		control_lines.extend(
+			self._indent_body(
+				[
+					"-blocked_target(TARGET_ID)",
+					"!clear_blocked_targets",
+				],
+			),
+		)
+		control_lines.append("")
+		control_lines.append("+!clear_blocked_targets : true <-")
+		control_lines.extend(self._indent_body(["true"]))
+		control_lines.append("")
+		for item in target_observations:
+			target_id = str(item["target_id"])
+			transition_name = str(item["transition_name"])
+			control_lines.append(
+				f"+!run_dfa : not target_seen({target_id}) & not blocked_target({target_id}) <-"
+			)
+			control_lines.extend(
+				self._indent_body(
+					[
+						f"!{transition_name}",
+						"!clear_blocked_targets",
+						"!run_dfa",
+					],
+				),
+			)
+			control_lines.append("")
+			control_lines.append(f"-!{transition_name} : not target_seen({target_id}) <-")
+			control_lines.extend(
+				self._indent_body(
+					[
+						f"+blocked_target({target_id})",
+						"!run_dfa",
+					],
+				),
+			)
+			control_lines.append("")
+		control_lines.append("+!run_dfa : true <-")
+		control_lines.extend(self._indent_body([".fail"]))
+		control_lines.append("")
+		return prefix + "\n".join(control_lines).rstrip() + "\n"
 
 	def _observed_target_context_expression(
 		self,

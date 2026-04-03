@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -150,30 +151,29 @@ class PANDAPlanner:
 			str(actual_plan_path),
 		)
 		try:
-			conversion_result = subprocess.run(
+			conversion_result = self._run_subprocess(
 				conversion_command,
-				cwd=work_dir,
-				text=True,
-				capture_output=True,
-				check=False,
-				timeout=timeout_seconds,
+				work_dir,
+				timeout_seconds=timeout_seconds,
 			)
-			conversion_stdout = conversion_result.stdout
-			conversion_stderr = conversion_result.stderr
-		except subprocess.TimeoutExpired as exc:
+			conversion_stdout = conversion_result["stdout"]
+			conversion_stderr = conversion_result["stderr"]
+		except PANDAPlanningError as exc:
+			if exc.metadata.get("stage") != "subprocess_timeout":
+				raise
 			raise PANDAPlanningError(
 				"PANDA plan conversion timed out",
 				metadata={
 					"backend": "pandaPI",
 					"stage": "conversion",
 					"command": list(conversion_command),
-					"stdout": exc.stdout or "",
-					"stderr": exc.stderr or "",
+					"stdout": exc.metadata.get("stdout", ""),
+					"stderr": exc.metadata.get("stderr", ""),
 					"work_dir": str(work_dir),
 					"timeout_seconds": timeout_seconds,
 				},
 			) from exc
-		if conversion_result.returncode == 0 and actual_plan_path.exists():
+		if conversion_result["returncode"] == 0 and actual_plan_path.exists():
 			actual_plan_text = actual_plan_path.read_text()
 		elif raw_plan_path.exists():
 			actual_plan_text = raw_plan_path.read_text()
@@ -231,6 +231,7 @@ class PANDAPlanner:
 			return []
 
 		method_nodes: Dict[int, Dict[str, Any]] = {}
+		primitive_node_ids: set[int] = set()
 		root_ids: List[int] = []
 		for line in lines:
 			if line.startswith("root "):
@@ -244,6 +245,7 @@ class PANDAPlanner:
 			except ValueError:
 				continue
 			if "->" not in parts:
+				primitive_node_ids.add(node_id)
 				continue
 			arrow_index = parts.index("->")
 			if arrow_index < 2 or arrow_index + 1 >= len(parts):
@@ -256,6 +258,24 @@ class PANDAPlanner:
 
 		trace: List[Dict[str, Any]] = []
 		visited: set[int] = set()
+		first_primitive_cache: Dict[int, int] = {}
+
+		def first_primitive_id(node_id: int) -> int:
+			if node_id in first_primitive_cache:
+				return first_primitive_cache[node_id]
+			if node_id in primitive_node_ids:
+				first_primitive_cache[node_id] = node_id
+				return node_id
+			node = method_nodes.get(node_id)
+			if node is None:
+				first_primitive_cache[node_id] = node_id
+				return node_id
+			child_order = [
+				first_primitive_id(child_id)
+				for child_id in node["children"]
+			]
+			first_primitive_cache[node_id] = min(child_order) if child_order else node_id
+			return first_primitive_cache[node_id]
 
 		def visit(node_id: int) -> None:
 			if node_id in visited:
@@ -270,12 +290,15 @@ class PANDAPlanner:
 					"task_args": list(node["task_args"]),
 				},
 			)
-			for child_id in node["children"]:
+			for child_id in sorted(
+				node["children"],
+				key=lambda child_id: (first_primitive_id(child_id), child_id),
+			):
 				visit(child_id)
 
-		for node_id in root_ids:
+		for node_id in sorted(root_ids, key=lambda node_id: (first_primitive_id(node_id), node_id)):
 			visit(node_id)
-		for node_id in sorted(method_nodes):
+		for node_id in sorted(method_nodes, key=lambda node_id: (first_primitive_id(node_id), node_id)):
 			visit(node_id)
 		return trace
 
@@ -492,44 +515,90 @@ class PANDAPlanner:
 		timeout_seconds: Optional[float] = None,
 	) -> Dict[str, str]:
 		try:
-			result = subprocess.run(
+			result = self._run_subprocess(
 				command,
-				cwd=work_dir,
-				text=True,
-				capture_output=True,
-				check=False,
-				timeout=timeout_seconds,
+				work_dir,
+				timeout_seconds=timeout_seconds,
 			)
-		except subprocess.TimeoutExpired as exc:
+		except PANDAPlanningError as exc:
+			if exc.metadata.get("stage") != "subprocess_timeout":
+				raise
 			raise PANDAPlanningError(
 				f"PANDA {stage} step timed out",
 				metadata={
 					"backend": "pandaPI",
 					"stage": stage,
 					"command": list(command),
-					"stdout": exc.stdout or "",
-					"stderr": exc.stderr or "",
+					"stdout": exc.metadata.get("stdout", ""),
+					"stderr": exc.metadata.get("stderr", ""),
 					"work_dir": str(work_dir),
 					"timeout_seconds": timeout_seconds,
 				},
 			) from exc
-		if result.returncode == 0:
+		if result["returncode"] == 0:
 			return {
-				"stdout": result.stdout,
-				"stderr": result.stderr,
+				"stdout": result["stdout"],
+				"stderr": result["stderr"],
 			}
 
 		raise PANDAPlanningError(
-			f"PANDA {stage} step failed with exit code {result.returncode}",
+			f"PANDA {stage} step failed with exit code {result['returncode']}",
 			metadata={
 				"backend": "pandaPI",
 				"stage": stage,
 				"command": list(command),
-				"stdout": result.stdout,
-				"stderr": result.stderr,
+				"stdout": result["stdout"],
+				"stderr": result["stderr"],
 				"work_dir": str(work_dir),
 			},
 		)
+
+	def _run_subprocess(
+		self,
+		command: Sequence[str],
+		work_dir: Path,
+		*,
+		timeout_seconds: Optional[float] = None,
+	) -> Dict[str, Any]:
+		process = subprocess.Popen(
+			command,
+			cwd=work_dir,
+			text=True,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			start_new_session=True,
+		)
+		try:
+			stdout, stderr = process.communicate(timeout=timeout_seconds)
+		except subprocess.TimeoutExpired as exc:
+			self._terminate_process_group(process)
+			stdout, stderr = process.communicate()
+			raise PANDAPlanningError(
+				"PANDA subprocess timed out",
+				metadata={
+					"stage": "subprocess_timeout",
+					"command": list(command),
+					"stdout": exc.stdout or stdout or "",
+					"stderr": exc.stderr or stderr or "",
+					"work_dir": str(work_dir),
+					"timeout_seconds": timeout_seconds,
+				},
+			) from exc
+		return {
+			"returncode": process.returncode,
+			"stdout": stdout or "",
+			"stderr": stderr or "",
+		}
+
+	@staticmethod
+	def _terminate_process_group(process: subprocess.Popen) -> None:
+		try:
+			os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+		except Exception:
+			try:
+				process.kill()
+			except Exception:
+				return
 
 	@staticmethod
 	def _parse_plan_node_ids(tokens: Sequence[str]) -> List[int]:

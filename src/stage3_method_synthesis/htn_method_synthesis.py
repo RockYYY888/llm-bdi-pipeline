@@ -92,6 +92,7 @@ class HTNMethodSynthesizer:
 		derived_analysis: Optional[Dict[str, Any]] = None,
 		negation_hints: Optional[Dict[str, Any]] = None,
 		ordered_literal_signatures: Optional[Sequence[str]] = None,
+		linearise_ordered_literals: bool = True,
 	) -> Tuple[HTNMethodLibrary, Dict[str, Any]]:
 		"""Create a method library and metadata for logging."""
 
@@ -100,6 +101,7 @@ class HTNMethodSynthesizer:
 			normalised_grounding_map,
 			dfa_result,
 			ordered_literal_signatures=ordered_literal_signatures,
+			linearise_ordered_literals=linearise_ordered_literals,
 		)
 		negation_resolution = resolve_negation_modes(
 			domain,
@@ -254,6 +256,7 @@ class HTNMethodSynthesizer:
 		dfa_result: Dict[str, Any],
 		*,
 		ordered_literal_signatures: Optional[Sequence[str]] = None,
+		linearise_ordered_literals: bool = True,
 	) -> List[HTNLiteral]:
 		"""Read atomic transition labels from the simplified DFA."""
 
@@ -264,6 +267,7 @@ class HTNMethodSynthesizer:
 			grounding_map,
 			dfa_result,
 			ordered_literal_signatures=ordered_literal_signatures,
+			linearise_ordered_literals=linearise_ordered_literals,
 		)
 		seen: set[str] = set()
 		literals: List[HTNLiteral] = []
@@ -283,17 +287,26 @@ class HTNMethodSynthesizer:
 		dfa_result: Dict[str, Any],
 		*,
 		ordered_literal_signatures: Optional[Sequence[str]] = None,
+		linearise_ordered_literals: bool = True,
 	) -> List[Dict[str, Any]]:
 		"""Preserve DFA state-to-state progress edges for later rendering."""
 
 		if grounding_map is None:
 			return []
 
-		linearised_specs = self._linearise_transition_specs_for_literal_order(
-			ordered_literal_signatures,
-		)
-		if linearised_specs is not None:
-			return linearised_specs
+		if not linearise_ordered_literals:
+			unordered_specs = self._build_unordered_transition_specs_for_literal_occurrences(
+				ordered_literal_signatures,
+			)
+			if unordered_specs is not None:
+				return unordered_specs
+
+		if linearise_ordered_literals:
+			linearised_specs = self._linearise_transition_specs_for_literal_order(
+				ordered_literal_signatures,
+			)
+			if linearised_specs is not None:
+				return linearised_specs
 
 		dfa_dot = dfa_result.get("dfa_dot", "")
 		graph = self._parse_dfa_graph(dfa_dot)
@@ -341,8 +354,42 @@ class HTNMethodSynthesizer:
 
 		return self._reorder_transition_specs_for_literal_order(
 			transition_specs,
-			ordered_literal_signatures,
+			ordered_literal_signatures if linearise_ordered_literals else None,
 		)
+
+	def _build_unordered_transition_specs_for_literal_occurrences(
+		self,
+		ordered_literal_signatures: Optional[Sequence[str]],
+	) -> Optional[List[Dict[str, Any]]]:
+		if not ordered_literal_signatures:
+			return None
+
+		ordered_occurrences = [label for label in ordered_literal_signatures if str(label).strip()]
+		if not ordered_occurrences:
+			return None
+
+		transition_specs: List[Dict[str, Any]] = []
+		for index, signature in enumerate(ordered_occurrences, start=1):
+			literal = self._literal_from_signature_text(signature)
+			if literal is None:
+				return None
+			suffix = self._transition_suffix_for_literal(literal)
+			transition_specs.append(
+				{
+					"transition_name": f"dfa_step_q1_q1_t{index}_{suffix}",
+					"label": literal.to_signature(),
+					"raw_label": str(signature).strip(),
+					"literal": literal,
+					"source_state": "q1",
+					"target_state": "q1",
+					"raw_source_state": "q1",
+					"raw_target_state": "q1",
+					"initial_state": "q1",
+					"accepting_states": ["q1"],
+				},
+			)
+
+		return transition_specs
 
 	def _linearise_transition_specs_for_literal_order(
 		self,

@@ -135,6 +135,73 @@ def test_dfa_builder_skips_bdd_simplification_for_independent_eventually_atomic_
     assert result["simplification_stats"]["skipped_simplifier"] is True
 
 
+def test_ltlf_to_dfa_falls_back_to_generic_converter_for_large_independent_eventually_sets():
+    spec = LTLSpecification()
+    grounding_map = GroundingMap()
+    for index in range(13):
+        predicate = f"goal_{index}"
+        spec.add_formula(_finally_formula(predicate, []))
+        grounding_map.add_atom(predicate, predicate, [])
+    spec.grounding_map = grounding_map
+
+    parser_calls: list[str] = []
+
+    class StubFormula:
+        def to_dfa(self):
+            return """
+digraph MONA_DFA {
+ node [shape = doublecircle]; 2;
+ node [shape = circle]; 1;
+ init [shape = plaintext, label = ""];
+ init -> 1;
+ 1 -> 2 [label="goal_0"];
+}
+""".strip()
+
+    converter = LTLfToDFA()
+    converter.ltlf_parser = lambda formula: parser_calls.append(formula) or StubFormula()
+
+    dfa_dot, metadata = converter.convert(spec)
+
+    assert parser_calls
+    assert metadata.get("construction") != "independent_eventually_atomic_fast_path"
+    assert metadata["num_transitions"] == 1
+    assert '1 -> 2 [label="goal_0"]' in dfa_dot
+
+
+def test_dfa_builder_uses_generic_path_for_large_independent_eventually_sets():
+    spec = LTLSpecification()
+    grounding_map = GroundingMap()
+    for index in range(13):
+        predicate = f"goal_{index}"
+        spec.add_formula(_finally_formula(predicate, []))
+        grounding_map.add_atom(predicate, predicate, [])
+    spec.grounding_map = grounding_map
+
+    original_dfa = """
+digraph MONA_DFA {
+  node [shape = doublecircle]; 2;
+  node [shape = circle]; 1;
+  init -> 1;
+  1 -> 2 [label="goal_0"];
+}
+""".strip()
+    simplified_dfa = original_dfa
+
+    builder = DFABuilder()
+    builder.converter.ltlf_parser = lambda *_args, **_kwargs: SimpleNamespace(to_dfa=lambda: original_dfa)
+    builder.simplifier.simplify = lambda dot, grounding: SimpleNamespace(
+        simplified_dot=simplified_dfa,
+        stats={"method": "stub"},
+    )
+
+    result = builder.build(spec)
+
+    assert result["original_num_transitions"] == 1
+    assert result["num_transitions"] == 1
+    assert result["simplification_stats"]["method"] == "stub"
+
+
 def test_ltlf_to_dfa_uses_fast_path_for_ordered_eventually_sequences():
     spec = LTLSpecification()
     spec.formulas = [
@@ -213,3 +280,16 @@ def test_dfa_builder_skips_bdd_simplification_for_ordered_eventually_atomic_fast
     assert result["num_transitions"] == 3
     assert result["simplification_stats"]["method"] == "ordered_eventually_atomic_fast_path"
     assert result["simplification_stats"]["skipped_simplifier"] is True
+
+
+def test_dfa_builder_count_transitions_ignores_init_and_handles_multiple_edges_per_line():
+    builder = DFABuilder()
+    dfa_dot = """
+digraph G {
+  init -> 1;
+  1 -> 2 [label="a"]; 1 -> 3 [label="b"];
+  2 -> 4 [label="c"];
+}
+""".strip()
+
+    assert builder._count_transitions(dfa_dot) == 3

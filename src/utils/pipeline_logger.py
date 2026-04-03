@@ -137,6 +137,20 @@ class PipelineLogger:
 			return "unknown"
 		return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "unknown"
 
+	def _relative_artifact_path(self, path: str | Path | None) -> Optional[str]:
+		if not path:
+			return None
+		candidate = Path(path)
+		if self.current_log_dir is not None:
+			try:
+				return str(candidate.resolve().relative_to(self.current_log_dir.resolve()))
+			except Exception:
+				try:
+					return str(candidate.relative_to(self.current_log_dir))
+				except Exception:
+					pass
+		return candidate.name or str(candidate)
+
 	def log_stage1_success(
 		self,
 		ltl_spec: Dict[str, Any],
@@ -207,7 +221,7 @@ class PipelineLogger:
 
 		if status == "Success" and dfa_result:
 			self.current_record.stage2_status = "success"
-			self.current_record.stage2_dfa_result = dfa_result
+			self.current_record.stage2_dfa_result = self._sanitise_stage2_dfa_result(dfa_result)
 			self.current_record.stage2_formula = dfa_result.get("formula", "N/A")
 			self.current_record.stage2_num_states = dfa_result.get("num_states", 0)
 			self.current_record.stage2_num_transitions = dfa_result.get("num_transitions", 0)
@@ -227,6 +241,19 @@ class PipelineLogger:
 			self.current_record.stage2_error = str(error)
 
 		self._save_current_state()
+
+	@staticmethod
+	def _sanitise_stage2_dfa_result(dfa_result: Any) -> Any:
+		if not isinstance(dfa_result, dict):
+			return dfa_result
+		sanitised = dict(dfa_result)
+		sanitised.pop("original_dfa_dot", None)
+		sanitised.pop("dfa_dot", None)
+		if "original_dfa_path" not in sanitised:
+			sanitised["original_dfa_path"] = "dfa_original.dot"
+		if "simplified_dfa_path" not in sanitised:
+			sanitised["simplified_dfa_path"] = "dfa_simplified.dot"
+		return sanitised
 
 	def log_stage3_method_synthesis(
 		self,
@@ -257,7 +284,6 @@ class PipelineLogger:
 
 		if status == "Success" and method_library is not None:
 			self.current_record.stage3_status = "success"
-			self.current_record.stage3_method_library = method_library
 			self.current_record.stage3_metadata = self._build_stage3_summary(
 				method_library,
 				self.current_record.stage3_metadata,
@@ -266,11 +292,14 @@ class PipelineLogger:
 				(self.current_log_dir / "htn_method_library.json").write_text(
 					json.dumps(method_library, indent=2)
 				)
+			self.current_record.stage3_method_library = {
+				"artifact_path": "htn_method_library.json",
+			}
 		elif error:
 			self.current_record.stage3_status = "failed"
 			self.current_record.stage3_error = str(error)
 
-			self._save_current_state()
+		self._save_current_state()
 
 	def _build_stage3_summary(
 		self,
@@ -333,7 +362,7 @@ class PipelineLogger:
 		self.current_record.stage4_metadata = metadata
 		if status == "Success" and transitions is not None:
 			self.current_record.stage4_status = "success"
-			self.current_record.stage4_artifacts = transitions
+			self.current_record.stage4_artifacts = self._sanitise_stage4_artifacts(transitions)
 			if self.current_log_dir:
 				(self.current_log_dir / "panda_transitions.json").write_text(
 					json.dumps(transitions, indent=2)
@@ -343,6 +372,17 @@ class PipelineLogger:
 			self.current_record.stage4_error = str(error)
 
 		self._save_current_state()
+
+	@staticmethod
+	def _sanitise_stage4_artifacts(transitions: Any) -> Any:
+		if not isinstance(transitions, dict):
+			return transitions
+		sanitised = dict(transitions)
+		transition_items = list(sanitised.pop("transitions", ()) or ())
+		sanitised["transition_count"] = len(transition_items)
+		if "transitions_path" not in sanitised:
+			sanitised["transitions_path"] = "panda_transitions.json"
+		return sanitised
 
 	def log_stage5_agentspeak_rendering(
 		self,
@@ -358,7 +398,7 @@ class PipelineLogger:
 		self.current_record.stage5_metadata = metadata
 		if status == "Success" and agentspeak_code is not None:
 			self.current_record.stage5_status = "success"
-			self.current_record.stage5_agentspeak = agentspeak_code
+			self.current_record.stage5_agentspeak = "agentspeak_generated.asl"
 			self.current_record.stage5_code_size_chars = len(agentspeak_code)
 		elif error:
 			self.current_record.stage5_status = "failed"
@@ -387,13 +427,61 @@ class PipelineLogger:
 			self.current_record.stage6_backend = str(backend)
 		if status == "Success" and artifacts is not None:
 			self.current_record.stage6_status = "success"
-			self.current_record.stage6_artifacts = artifacts
+			self.current_record.stage6_artifacts = self._sanitise_stage6_artifacts(artifacts)
 		elif error:
 			self.current_record.stage6_status = "failed"
 			self.current_record.stage6_error = str(error)
-			self.current_record.stage6_artifacts = artifacts
+			self.current_record.stage6_artifacts = self._sanitise_stage6_artifacts(artifacts)
 
 		self._save_current_state()
+
+	def _sanitise_stage6_artifacts(self, artifacts: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+		if not isinstance(artifacts, dict):
+			return artifacts
+		sanitised = {
+			"status": artifacts.get("status"),
+			"backend": artifacts.get("backend"),
+			"java_path": artifacts.get("java_path"),
+			"java_version": artifacts.get("java_version"),
+			"javac_path": artifacts.get("javac_path"),
+			"jason_jar": artifacts.get("jason_jar"),
+			"exit_code": artifacts.get("exit_code"),
+			"timed_out": artifacts.get("timed_out"),
+			"failed_goals": list(artifacts.get("failed_goals") or ()),
+			"failed_goal_count": len(artifacts.get("failed_goals") or ()),
+			"environment_adapter": artifacts.get("environment_adapter"),
+			"failure_class": artifacts.get("failure_class"),
+			"consistency_checks": artifacts.get("consistency_checks"),
+		}
+		artifact_paths = {
+			key: self._relative_artifact_path(value)
+			for key, value in dict(artifacts.get("artifacts") or {}).items()
+			if self._relative_artifact_path(value)
+		}
+		if artifact_paths:
+			sanitised["artifacts"] = artifact_paths
+			action_path_path = artifact_paths.get("action_path")
+			if action_path_path:
+				sanitised["action_path_path"] = action_path_path
+			method_trace_path = artifact_paths.get("method_trace")
+			if method_trace_path:
+				sanitised["method_trace_path"] = method_trace_path
+			stdout_path = artifact_paths.get("jason_stdout")
+			if stdout_path:
+				sanitised["stdout_path"] = stdout_path
+			stderr_path = artifact_paths.get("jason_stderr")
+			if stderr_path:
+				sanitised["stderr_path"] = stderr_path
+		guided_plan_text = artifacts.get("guided_hierarchical_plan_text")
+		if guided_plan_text and self.current_log_dir is not None:
+			guided_plan_path = self.current_log_dir / "guided_hierarchical_plan.txt"
+			guided_plan_path.write_text(str(guided_plan_text))
+			sanitised["guided_hierarchical_plan_path"] = guided_plan_path.name
+		if artifacts.get("guided_hierarchical_plan_source") is not None:
+			sanitised["guided_hierarchical_plan_source"] = artifacts.get(
+				"guided_hierarchical_plan_source",
+			)
+		return sanitised
 
 	def log_stage7_official_verification(
 		self,
@@ -416,16 +504,31 @@ class PipelineLogger:
 			self.current_record.stage7_backend = str(backend)
 		if status == "Success" and artifacts is not None:
 			self.current_record.stage7_status = "success"
-			self.current_record.stage7_artifacts = artifacts
+			self.current_record.stage7_artifacts = self._sanitise_stage7_artifacts(artifacts)
 		elif status == "Skipped":
 			self.current_record.stage7_status = "skipped"
-			self.current_record.stage7_artifacts = artifacts
+			self.current_record.stage7_artifacts = self._sanitise_stage7_artifacts(artifacts)
 		elif error:
 			self.current_record.stage7_status = "failed"
 			self.current_record.stage7_error = str(error)
-			self.current_record.stage7_artifacts = artifacts
+			self.current_record.stage7_artifacts = self._sanitise_stage7_artifacts(artifacts)
 
 		self._save_current_state()
+
+	def _sanitise_stage7_artifacts(self, artifacts: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+		if not isinstance(artifacts, dict):
+			return artifacts
+		sanitised = dict(artifacts)
+		sanitised.pop("stdout", None)
+		sanitised.pop("stderr", None)
+		command = sanitised.get("command")
+		if command is not None:
+			sanitised["command"] = list(command)
+		if "plan_file" in sanitised:
+			sanitised["plan_file"] = self._relative_artifact_path(sanitised.get("plan_file"))
+		if "output_file" in sanitised:
+			sanitised["output_file"] = self._relative_artifact_path(sanitised.get("output_file"))
+		return sanitised
 
 	def _save_current_state(self) -> None:
 		if not self.current_record or not self.current_log_dir:
@@ -548,9 +651,10 @@ class PipelineLogger:
 			handle.write(f"  States: {record.get('stage2_num_states', 0)}\n")
 			handle.write(f"  Transitions: {record.get('stage2_num_transitions', 0)}\n")
 			handle.write("  File: dfa_simplified.dot\n\n")
-			handle.write("Simplified DFA:\n")
-			handle.write(record["stage2_dfa_result"].get("dfa_dot", ""))
-			handle.write("\n\n")
+			handle.write(
+				"Full DFA bodies are stored in dfa_original.dot and dfa_simplified.dot; "
+				"execution artifacts keep only metadata to avoid pathological log bloat.\n\n"
+			)
 		elif record["stage2_error"]:
 			handle.write(f"\nError: {record['stage2_error']}\n\n")
 		else:
@@ -604,9 +708,9 @@ class PipelineLogger:
 			handle.write("\n" + "~" * 40 + "\n")
 			handle.write("HTN METHOD LIBRARY (Stage 3)\n")
 			handle.write("~" * 40 + "\n")
-			handle.write("Full JSON also saved to htn_method_library.json\n")
-			handle.write(json.dumps(record["stage3_method_library"], indent=2))
-			handle.write("\n")
+			handle.write(
+				f"Artifact path: {record['stage3_method_library'].get('artifact_path', 'htn_method_library.json')}\n"
+			)
 		elif record["stage3_error"]:
 			handle.write(f"\nError: {record['stage3_error']}\n")
 
@@ -632,7 +736,9 @@ class PipelineLogger:
 			handle.write("\n" + "~" * 40 + "\n")
 			handle.write("PANDA PLAN ARTIFACTS (Stage 4)\n")
 			handle.write("~" * 40 + "\n")
-			handle.write("Full JSON also saved to panda_transitions.json\n")
+			handle.write(
+				f"Artifact path: {record['stage4_artifacts'].get('transitions_path', 'panda_transitions.json')}\n"
+			)
 			handle.write(json.dumps(record["stage4_artifacts"], indent=2))
 			handle.write("\n")
 		elif record["stage4_error"]:
@@ -659,8 +765,7 @@ class PipelineLogger:
 			handle.write("\n" + "~" * 40 + "\n")
 			handle.write("GENERATED AGENTSPEAK CODE (Stage 5)\n")
 			handle.write("~" * 40 + "\n")
-			handle.write(record["stage5_agentspeak"])
-			handle.write("\n")
+			handle.write(f"Artifact path: {record['stage5_agentspeak']}\n")
 		elif record["stage5_error"]:
 			handle.write(f"\nError: {record['stage5_error']}\n")
 

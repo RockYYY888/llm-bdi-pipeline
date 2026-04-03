@@ -2,8 +2,13 @@
 Focused tests for PANDA HDDL export and plan parsing.
 """
 
+import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 _tests_dir = str(Path(__file__).parent.parent)
 if _tests_dir not in sys.path:
@@ -21,6 +26,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTargetTaskBinding,
 )
 from stage4_panda_planning.panda_planner import PANDAPlanner
+from stage4_panda_planning.panda_planner import PANDAPlanningError
 from stage4_panda_planning.problem_builder import (
 	PANDAProblemBuilder,
 	PANDAProblemBuilderConfig,
@@ -253,6 +259,66 @@ def test_panda_planner_extract_method_trace_preserves_depth_first_method_order()
 		{"method_name": "m-parent", "task_args": ["a", "b"]},
 		{"method_name": "m-child", "task_args": ["b"]},
 	]
+
+
+def test_panda_planner_extract_method_trace_orders_roots_and_children_by_first_primitive():
+	planner = PANDAPlanner()
+	plan_text = "\n".join(
+		[
+			"==>",
+			"1 primitive_action first",
+			"2 primitive_action second",
+			"3 primitive_action third",
+			"root 30 10",
+			"20 child_first x -> m-child-first 1",
+			"40 child_second y -> m-child-second 2",
+			"10 parent p -> m-parent 40 20",
+			"30 other q -> m-other 3",
+		],
+	)
+
+	assert planner.extract_method_trace(plan_text) == [
+		{"method_name": "m-parent", "task_args": ["p"]},
+		{"method_name": "m-child-first", "task_args": ["x"]},
+		{"method_name": "m-child-second", "task_args": ["y"]},
+		{"method_name": "m-other", "task_args": ["q"]},
+	]
+
+
+def test_panda_run_command_kills_process_group_on_timeout(monkeypatch, tmp_path):
+	planner = PANDAPlanner()
+	killpg_calls = []
+
+	class FakeProcess:
+		pid = 12345
+		returncode = -9
+
+		def communicate(self, timeout=None):
+			if timeout is not None:
+				raise subprocess.TimeoutExpired(cmd=["fake"], timeout=timeout)
+			return ("", "")
+
+		def kill(self):
+			killpg_calls.append(("kill", self.pid))
+
+	monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+	monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+	monkeypatch.setattr(
+		os,
+		"killpg",
+		lambda pgid, sig: killpg_calls.append(("killpg", pgid, sig)),
+	)
+
+	with pytest.raises(PANDAPlanningError) as excinfo:
+		planner._run_command(
+			["fake"],
+			"engine",
+			tmp_path,
+			timeout_seconds=0.01,
+		)
+
+	assert "timed out" in str(excinfo.value)
+	assert killpg_calls == [("killpg", 12345, signal.SIGKILL)]
 
 
 def test_panda_domain_export_preserves_declared_typed_task_and_method_signatures():

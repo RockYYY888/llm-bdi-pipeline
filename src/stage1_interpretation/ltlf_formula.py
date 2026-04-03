@@ -110,103 +110,130 @@ class LTLFormula:
         Strategy: Add parentheses around binary operators when they appear as sub-formulas.
         This ensures unambiguous parsing while keeping atomic/unary formulas clean.
         """
-        # Propositional constants: true, false
-        if isinstance(self.predicate, str) and self.predicate in ["true", "false"]:
-            return self.predicate
+        rendered: Dict[int, str] = {}
+        stack: List[tuple['LTLFormula', bool]] = [(self, False)]
 
-        # Atomic proposition: on(a, b), clear(a), or handempty
-        if self._is_atomic():
-            if isinstance(self.predicate, dict):
-                pred_name = list(self.predicate.keys())[0]
-                args = self.predicate[pred_name]
-                if len(args) == 0:
-                    return pred_name
-                return f"{pred_name}({', '.join(args)})"
+        while stack:
+            formula, expanded = stack.pop()
+            formula_id = id(formula)
+            if not expanded:
+                stack.append((formula, True))
+                for child in reversed(formula.sub_formulas):
+                    stack.append((child, False))
+                continue
 
-        # Unary temporal operators: X, WX, F, G
-        if self.operator in [TemporalOperator.NEXT, TemporalOperator.WEAK_NEXT,
-                             TemporalOperator.FINALLY, TemporalOperator.GLOBALLY]:
-            inner = self.sub_formulas[0].to_string()
-            return f"{self.operator.value}({inner})"
+            # Propositional constants: true, false
+            if isinstance(formula.predicate, str) and formula.predicate in ["true", "false"]:
+                rendered[formula_id] = formula.predicate
+                continue
 
-        # Binary temporal operators: U (Until), R (Release)
-        if self.operator in [TemporalOperator.UNTIL, TemporalOperator.RELEASE]:
-            left = self.sub_formulas[0].to_string()
-            right = self.sub_formulas[1].to_string()
-            op_symbol = self.operator.value
+            # Atomic proposition: on(a, b), clear(a), or handempty
+            if formula._is_atomic():
+                if isinstance(formula.predicate, dict):
+                    pred_name = list(formula.predicate.keys())[0]
+                    args = formula.predicate[pred_name]
+                    if len(args) == 0:
+                        rendered[formula_id] = pred_name
+                    else:
+                        rendered[formula_id] = f"{pred_name}({', '.join(args)})"
+                    continue
+                rendered[formula_id] = "true"
+                continue
 
-            # ALWAYS add parens to binary sub-formulas for clarity
-            if self.sub_formulas[0]._is_binary():
-                left = f"({left})"
-            if self.sub_formulas[1]._is_binary():
-                right = f"({right})"
+            child_strings = [rendered[id(child)] for child in formula.sub_formulas]
 
-            # Wrap entire Until/Release in parens (they're binary operators)
-            return f"({left} {op_symbol} {right})"
+            # Unary temporal operators: X, WX, F, G
+            if formula.operator in [
+                TemporalOperator.NEXT,
+                TemporalOperator.WEAK_NEXT,
+                TemporalOperator.FINALLY,
+                TemporalOperator.GLOBALLY,
+            ]:
+                rendered[formula_id] = f"{formula.operator.value}({child_strings[0]})"
+                continue
 
-        # Boolean operators
-        if self.logical_op:
-            if self.logical_op == LogicalOperator.NOT:
-                # NOT is unary
-                inner = self.sub_formulas[0].to_string()
-                return f"!({inner})"
-
-            elif self.logical_op == LogicalOperator.AND:
-                parts = []
-                for f in self.sub_formulas:
-                    s = f.to_string()
-                    # ALWAYS add parens to binary sub-formulas (except AND)
-                    if f._is_binary() and not (f.logical_op == LogicalOperator.AND):
-                        s = f"({s})"
-                    parts.append(s)
-                # Wrap entire AND in parens
-                return f"({' & '.join(parts)})"
-
-            elif self.logical_op == LogicalOperator.OR:
-                parts = []
-                for f in self.sub_formulas:
-                    s = f.to_string()
-                    # ALWAYS add parens to binary sub-formulas (except OR)
-                    if f._is_binary() and not (f.logical_op == LogicalOperator.OR):
-                        s = f"({s})"
-                    parts.append(s)
-                # Wrap entire OR in parens
-                return f"({' | '.join(parts)})"
-
-            elif self.logical_op == LogicalOperator.IMPLIES:
-                left = self.sub_formulas[0].to_string()
-                right = self.sub_formulas[1].to_string()
-
-                # ALWAYS add parens to binary sub-formulas
-                if self.sub_formulas[0]._is_binary():
+            # Binary temporal operators: U (Until), R (Release)
+            if formula.operator in [TemporalOperator.UNTIL, TemporalOperator.RELEASE]:
+                left = child_strings[0]
+                right = child_strings[1]
+                if formula.sub_formulas[0]._is_binary():
                     left = f"({left})"
-                if self.sub_formulas[1]._is_binary():
+                if formula.sub_formulas[1]._is_binary():
                     right = f"({right})"
+                rendered[formula_id] = f"({left} {formula.operator.value} {right})"
+                continue
 
-                return f"{left} -> {right}"
+            # Boolean operators
+            if formula.logical_op == LogicalOperator.NOT:
+                rendered[formula_id] = f"!({child_strings[0]})"
+                continue
 
-            elif self.logical_op == LogicalOperator.EQUIVALENCE:
-                left = self.sub_formulas[0].to_string()
-                right = self.sub_formulas[1].to_string()
+            if formula.logical_op == LogicalOperator.AND:
+                parts = []
+                for child, child_string in zip(formula.sub_formulas, child_strings):
+                    part = child_string
+                    if child._is_binary() and child.logical_op != LogicalOperator.AND:
+                        part = f"({part})"
+                    parts.append(part)
+                rendered[formula_id] = f"({' & '.join(parts)})"
+                continue
 
-                # ALWAYS add parens to binary sub-formulas
-                if self.sub_formulas[0]._is_binary():
+            if formula.logical_op == LogicalOperator.OR:
+                parts = []
+                for child, child_string in zip(formula.sub_formulas, child_strings):
+                    part = child_string
+                    if child._is_binary() and child.logical_op != LogicalOperator.OR:
+                        part = f"({part})"
+                    parts.append(part)
+                rendered[formula_id] = f"({' | '.join(parts)})"
+                continue
+
+            if formula.logical_op == LogicalOperator.IMPLIES:
+                left = child_strings[0]
+                right = child_strings[1]
+                if formula.sub_formulas[0]._is_binary():
                     left = f"({left})"
-                if self.sub_formulas[1]._is_binary():
+                if formula.sub_formulas[1]._is_binary():
                     right = f"({right})"
+                rendered[formula_id] = f"{left} -> {right}"
+                continue
 
-                return f"{left} <-> {right}"
+            if formula.logical_op == LogicalOperator.EQUIVALENCE:
+                left = child_strings[0]
+                right = child_strings[1]
+                if formula.sub_formulas[0]._is_binary():
+                    left = f"({left})"
+                if formula.sub_formulas[1]._is_binary():
+                    right = f"({right})"
+                rendered[formula_id] = f"{left} <-> {right}"
+                continue
 
-        return "true"
+            rendered[formula_id] = "true"
+
+        return rendered[id(self)]
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
-        return {
-            "operator": self.operator.value if self.operator else None,
-            "predicate": self.predicate,
-            "logical_op": self.logical_op.value if self.logical_op else None,
-            "sub_formulas": [f.to_dict() for f in self.sub_formulas]
-        }
+        serialised: Dict[int, Dict[str, Any]] = {}
+        stack: List[tuple['LTLFormula', bool]] = [(self, False)]
+
+        while stack:
+            formula, expanded = stack.pop()
+            formula_id = id(formula)
+            if not expanded:
+                stack.append((formula, True))
+                for child in reversed(formula.sub_formulas):
+                    stack.append((child, False))
+                continue
+
+            serialised[formula_id] = {
+                "operator": formula.operator.value if formula.operator else None,
+                "predicate": formula.predicate,
+                "logical_op": formula.logical_op.value if formula.logical_op else None,
+                "sub_formulas": [serialised[id(child)] for child in formula.sub_formulas],
+            }
+
+        return serialised[id(self)]
 
 
 class LTLSpecification:

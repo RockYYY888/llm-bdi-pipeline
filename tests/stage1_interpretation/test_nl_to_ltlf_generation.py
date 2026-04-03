@@ -21,7 +21,7 @@ if _src_dir not in sys.path:
 
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
-from stage1_interpretation.ltlf_formula import LTLSpecification, LTLFormula
+from stage1_interpretation.ltlf_formula import LTLSpecification, LTLFormula, LogicalOperator
 from stage1_interpretation.grounding_map import GroundingMap
 from stage2_dfa_generation.ltlf_to_dfa import LTLfToDFA
 
@@ -110,6 +110,70 @@ def test_ltl_spec_preserves_identical_top_level_formula_occurrences():
 
     assert len(spec.formulas) == 2
     assert [item.to_string() for item in spec.formulas] == ["on(b1, b2)", "on(b1, b2)"]
+
+
+def _deep_conjunction_formula(depth: int) -> LTLFormula:
+	atomic_formulas = [
+		LTLFormula(
+			operator=None,
+			predicate={"goal": [f"b{index}", f"b{index + 1}"]},
+			sub_formulas=[],
+			logical_op=None,
+		)
+		for index in range(depth)
+	]
+	formula = atomic_formulas[0]
+	for next_formula in atomic_formulas[1:]:
+		formula = LTLFormula(
+			operator=None,
+			predicate=None,
+			sub_formulas=[formula, next_formula],
+			logical_op=LogicalOperator.AND,
+		)
+	return formula
+
+
+def test_create_grounding_map_handles_deep_formula_without_recursion_error():
+	generator = NLToLTLfGenerator()
+	spec = LTLSpecification()
+	spec.formulas = [_deep_conjunction_formula(1500)]
+
+	gmap = generator._create_grounding_map(spec)
+
+	assert len(gmap.atoms) == 1500
+	assert gmap.get_atom("goal_b0_b1") is not None
+
+
+def test_augment_objects_from_formulas_and_atoms_handles_deep_formula_iteratively():
+	generator = NLToLTLfGenerator()
+	formula = _deep_conjunction_formula(1500)
+
+	objects = generator._augment_objects_from_formulas_and_atoms([], [formula], [])
+
+	assert "b0" in objects
+	assert "b1499" in objects
+	assert "b1500" in objects
+
+
+def test_deep_formula_to_string_handles_large_nested_conjunction_iteratively():
+	formula = _deep_conjunction_formula(1500)
+
+	rendered = formula.to_string()
+
+	assert "goal(b0, b1)" in rendered
+	assert "goal(b1499, b1500)" in rendered
+	assert rendered.count("goal(") == 1500
+
+
+def test_spec_to_dict_handles_deep_formula_iteratively():
+	spec = LTLSpecification()
+	spec.formulas = [_deep_conjunction_formula(1500)]
+
+	serialised = spec.to_dict()
+
+	assert len(serialised["formulas"]) == 1
+	assert serialised["formulas_string"][0].count("goal(") == 1500
+	assert serialised["formulas"][0]["logical_op"] == "and"
 
 
 def load_test_cases(csv_path: Path) -> List[Dict[str, str]]:

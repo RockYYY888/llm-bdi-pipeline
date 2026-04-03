@@ -330,6 +330,7 @@ class LTL_BDI_Pipeline:
                 query_objects=query_objects,
                 negation_hints=getattr(ltl_spec, "negation_hints", {}),
                 ordered_literal_signatures=ordered_literal_signatures,
+                linearise_ordered_literals=self._query_task_sequence_is_ordered(ltl_spec),
             )
             self._validate_method_library_typing(method_library)
             summary = {
@@ -358,6 +359,7 @@ class LTL_BDI_Pipeline:
                 grounding_map,
                 dfa_result,
                 ordered_literal_signatures=ordered_literal_signatures,
+                linearise_ordered_literals=self._query_task_sequence_is_ordered(ltl_spec),
             )
             summary["dfa_progress_transitions"] = len(transition_specs)
 
@@ -2552,9 +2554,35 @@ class LTL_BDI_Pipeline:
                 planning_domain=self.domain,
                 guided_action_path=tuple((guided_execution or {}).get("action_path") or ()),
                 guided_method_trace=tuple((guided_execution or {}).get("method_trace") or ()),
+                guided_continue_with_runtime_goal=bool(
+                    (guided_execution or {}).get("is_partial")
+                ),
+                guided_post_seed_facts=tuple(
+                    (guided_execution or {}).get("post_guided_seed_facts") or ()
+                ),
+                guided_completed_target_count=int(
+                    (guided_execution or {}).get("completed_task_count") or 0
+                ),
+                guided_completed_target_ids=tuple(
+                    str(target_id).strip()
+                    for target_id in (
+                        (guided_execution or {}).get("completed_target_ids")
+                        or (
+                            f"t{index}"
+                            for index in range(
+                                1,
+                                int((guided_execution or {}).get("completed_task_count") or 0) + 1,
+                            )
+                        )
+                    )
+                    if str(target_id).strip()
+                ),
                 skip_method_trace_reconstruction=bool(
-                    (guided_execution or {}).get("actual_plan")
-                    or (guided_execution or {}).get("method_trace")
+                    not (guided_execution or {}).get("is_partial")
+                    and (
+                        (guided_execution or {}).get("actual_plan")
+                        or (guided_execution or {}).get("method_trace")
+                    )
                 ),
             )
             summary = {
@@ -2579,12 +2607,17 @@ class LTL_BDI_Pipeline:
                 "failure_class": result.failure_class,
                 "consistency_checks": result.consistency_checks,
                 "guided_execution_source": (guided_execution or {}).get("source"),
+                "guided_execution_is_partial": bool((guided_execution or {}).get("is_partial")),
                 "guided_execution_action_count": len((guided_execution or {}).get("action_path") or ()),
                 "guided_execution_method_count": len((guided_execution or {}).get("method_trace") or ()),
                 "guided_execution_work_dir": (guided_execution or {}).get("work_dir"),
             }
             artifacts = result.to_dict()
-            if guided_execution and guided_execution.get("actual_plan"):
+            if (
+                guided_execution
+                and guided_execution.get("actual_plan")
+                and not guided_execution.get("is_partial")
+            ):
                 artifacts["guided_hierarchical_plan_text"] = guided_execution.get("actual_plan")
                 artifacts["guided_hierarchical_plan_source"] = guided_execution.get("source")
             self.logger.log_stage6_jason_validation(
@@ -3473,6 +3506,9 @@ class LTL_BDI_Pipeline:
         typed_objects = self._typed_object_entries(runtime_objects, object_types)
         ordered = self._query_task_sequence_is_ordered(ltl_spec)
         planner_timeout_seconds = 30.0
+        unordered_timeout_seconds = min(planner_timeout_seconds, 5.0)
+        unordered_full_probe_limit = 4
+        unordered_ordered_probe_limit = 16
         predicate_name_map = runner._runtime_predicate_name_map(
             action_schemas=action_schemas,
             predicate_names=[
@@ -3487,6 +3523,105 @@ class LTL_BDI_Pipeline:
             method_library,
             action_schemas,
         )
+        unordered_task_ids: Optional[Tuple[str, ...]] = None
+        unordered_literal_signatures: Optional[Tuple[str, ...]] = None
+        if not ordered:
+            ordering_output_path = (
+                self.output_dir
+                if self.output_dir is not None
+                else Path.cwd() / ".stage6_ordering"
+            )
+            ordering = runner._infer_unordered_target_execution_order(
+                target_literals=method_library.target_literals,
+                method_library=method_library,
+                action_schemas=action_schemas,
+                seed_facts=tuple(seed_facts),
+                runtime_objects=runtime_objects,
+                object_types=object_types,
+                planning_domain=self.domain,
+                output_path=ordering_output_path,
+            )
+            (
+                task_network,
+                unordered_literal_signatures,
+                unordered_task_ids,
+            ) = self._stage6_reorder_unordered_guided_task_network(
+                task_network=task_network,
+                literal_signatures=tuple(
+                    getattr(ltl_spec, "query_task_literal_signatures", ()) or ()
+                ),
+                preferred_target_ids=tuple(ordering.get("target_ids") or ()),
+            )
+            goal_facts = self._stage6_query_goal_facts(
+                type(
+                    "Stage6UnorderedReorderedSpec",
+                    (),
+                    {"query_task_literal_signatures": unordered_literal_signatures},
+                )(),
+                task_network,
+                method_library,
+                action_schemas,
+            )
+            if len(task_network) <= unordered_ordered_probe_limit:
+                unordered_ordered_probe_timeout_seconds = (
+                    20.0 if len(task_network) <= 11 else 60.0
+                )
+                try:
+                    guided_plan = planner.plan(
+                        domain=self.domain,
+                        method_library=method_library,
+                        objects=tuple(runtime_objects),
+                        target_literal=None,
+                        task_name="stage6_guided_reordered_schedule",
+                        transition_name="stage6_guided_reordered_schedule",
+                        typed_objects=typed_objects,
+                        task_args=(),
+                        task_network=task_network,
+                        task_network_ordered=True,
+                        allow_empty_plan=True,
+                        initial_facts=tuple(seed_facts),
+                        goal_facts=goal_facts,
+                        timeout_seconds=unordered_ordered_probe_timeout_seconds,
+                    )
+                except Exception:
+                    guided_plan = None
+                if guided_plan is not None:
+                    try:
+                        (
+                            guided_plan,
+                            action_path,
+                            method_trace,
+                            actual_plan_text,
+                        ) = self._stage6_ensure_task_network_guided_plan_evidence(
+                            planner=planner,
+                            guided_plan=guided_plan,
+                            method_library=method_library,
+                            runtime_objects=runtime_objects,
+                            typed_objects=typed_objects,
+                            seed_facts=tuple(seed_facts),
+                            task_network=task_network,
+                            task_network_ordered=True,
+                            task_name="stage6_guided_reordered_schedule",
+                            transition_name="stage6_guided_reordered_schedule",
+                            timeout_seconds=unordered_ordered_probe_timeout_seconds,
+                        )
+                    except Exception:
+                        pass
+                    else:
+                        if action_path or method_trace:
+                            return {
+                                "source": "panda_reordered_query_task_network_with_goals",
+                                "task_network": [
+                                    {"task_name": task_name, "args": list(task_args)}
+                                    for task_name, task_args in task_network
+                                ],
+                                "action_path": action_path,
+                                "method_trace": method_trace,
+                                "work_dir": guided_plan.work_dir,
+                                "raw_plan": guided_plan.raw_plan,
+                                "actual_plan": actual_plan_text,
+                                "completed_target_ids": list(unordered_task_ids or ()),
+                            }
 
         if ordered and goal_facts:
             try:
@@ -3543,6 +3678,7 @@ class LTL_BDI_Pipeline:
                 predicate_name_map=predicate_name_map,
                 task_network_ordered=True,
                 timeout_seconds=planner_timeout_seconds,
+                single_task_timeout_seconds=planner_timeout_seconds,
             )
             if chunked_guidance is not None:
                 return chunked_guidance
@@ -3613,6 +3749,25 @@ class LTL_BDI_Pipeline:
                 "work_dir": work_dirs[-1] if work_dirs else None,
             }
 
+        if len(task_network) > unordered_full_probe_limit:
+            return self._stage6_chunked_guided_execution(
+                ltl_spec,
+                task_network,
+                method_library,
+                planner=planner,
+                runner=runner,
+                typed_objects=typed_objects,
+                runtime_objects=runtime_objects,
+                action_schemas=action_schemas,
+                seed_facts=seed_facts,
+                predicate_name_map=predicate_name_map,
+                task_network_ordered=False,
+                timeout_seconds=unordered_timeout_seconds,
+                single_task_timeout_seconds=planner_timeout_seconds,
+                task_literal_signatures=unordered_literal_signatures,
+                task_target_ids=unordered_task_ids,
+            )
+
         guided_plan = None
         try:
             guided_plan = planner.plan(
@@ -3629,32 +3784,48 @@ class LTL_BDI_Pipeline:
                 allow_empty_plan=True,
                 initial_facts=tuple(seed_facts),
                 goal_facts=goal_facts,
-                timeout_seconds=planner_timeout_seconds,
+                timeout_seconds=unordered_timeout_seconds,
             )
         except Exception as exc:
             print(f"  • Guided execution planning unavailable: {exc}")
 
         if guided_plan is not None:
-            action_path = [
-                JasonRunner._runtime_call(step.task_name, step.args)
-                for step in guided_plan.steps
-            ]
-            method_trace = planner.extract_method_trace(
-                guided_plan.actual_plan or guided_plan.raw_plan,
-            )
-            if action_path or method_trace:
-                return {
-                    "source": "panda_query_task_network",
-                    "task_network": [
-                        {"task_name": task_name, "args": list(task_args)}
-                        for task_name, task_args in task_network
-                    ],
-                    "action_path": action_path,
-                    "method_trace": method_trace,
-                    "work_dir": guided_plan.work_dir,
-                    "raw_plan": guided_plan.raw_plan,
-                    "actual_plan": guided_plan.actual_plan,
-                }
+            try:
+                (
+                    guided_plan,
+                    action_path,
+                    method_trace,
+                    actual_plan_text,
+                ) = self._stage6_ensure_task_network_guided_plan_evidence(
+                    planner=planner,
+                    guided_plan=guided_plan,
+                    method_library=method_library,
+                    runtime_objects=runtime_objects,
+                    typed_objects=typed_objects,
+                    seed_facts=tuple(seed_facts),
+                    task_network=task_network,
+                    task_network_ordered=ordered,
+                    task_name="stage6_guided_schedule",
+                    transition_name="stage6_guided_schedule",
+                    timeout_seconds=unordered_timeout_seconds,
+                )
+            except Exception as exc:
+                print(f"  • Guided execution planning unavailable: {exc}")
+            else:
+                if action_path or method_trace:
+                    return {
+                        "source": "panda_query_task_network",
+                        "task_network": [
+                            {"task_name": task_name, "args": list(task_args)}
+                            for task_name, task_args in task_network
+                        ],
+                        "action_path": action_path,
+                        "method_trace": method_trace,
+                        "work_dir": guided_plan.work_dir,
+                        "raw_plan": guided_plan.raw_plan,
+                        "actual_plan": actual_plan_text,
+                        "completed_target_ids": list(unordered_task_ids or ()),
+                    }
 
         return self._stage6_chunked_guided_execution(
             ltl_spec,
@@ -3668,7 +3839,10 @@ class LTL_BDI_Pipeline:
             seed_facts=seed_facts,
             predicate_name_map=predicate_name_map,
             task_network_ordered=False,
-            timeout_seconds=planner_timeout_seconds,
+            timeout_seconds=unordered_timeout_seconds,
+            single_task_timeout_seconds=planner_timeout_seconds,
+            task_literal_signatures=unordered_literal_signatures,
+            task_target_ids=unordered_task_ids,
         )
 
     def _stage6_chunked_guided_execution(
@@ -3686,27 +3860,271 @@ class LTL_BDI_Pipeline:
         predicate_name_map,
         task_network_ordered: bool,
         timeout_seconds: float,
+        single_task_timeout_seconds: Optional[float] = None,
+        task_literal_signatures: Optional[Sequence[str]] = None,
+        task_target_ids: Optional[Sequence[str]] = None,
     ):
         if not task_network:
             return None
 
+        task_network = [
+            (
+                str(task_name),
+                tuple(str(arg) for arg in (task_args or ())),
+            )
+            for task_name, task_args in task_network
+        ]
         current_seed_facts = tuple(seed_facts)
         action_path: List[str] = []
         method_trace: List[Dict[str, Any]] = []
         work_dirs: List[str] = []
         actual_plan_texts: List[str] = []
-        all_signatures = tuple(getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
+        chunk_snapshots: List[Dict[str, Any]] = [
+            {
+                "completed_count": 0,
+                "seed_facts": tuple(current_seed_facts),
+                "action_count": 0,
+                "method_count": 0,
+                "plan_text_count": 0,
+                "work_dir_count": 0,
+            },
+        ]
+        all_signatures = list(
+            task_literal_signatures
+            if task_literal_signatures is not None
+            else (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
+        )
+        all_target_ids = list(
+            str(target_id).strip()
+            for target_id in (
+                task_target_ids
+                if task_target_ids is not None
+                else (
+                    f"t{index}"
+                    for index in range(1, len(task_network) + 1)
+                )
+            )
+            if str(target_id).strip()
+        )
         start = 0
-        max_chunk_size = min(16, len(task_network))
+        # Chunked guidance is a local fallback, not a second global planner. Keeping
+        # the horizon small avoids repeated 30s planner timeouts on large query tails
+        # while still allowing limited joint reordering within each chunk.
+        chunk_ceiling = min(4, len(task_network))
+        tail_replan_task_limit = 6
+        singleton_reorder_lookahead = 8
+        tail_replan_timeout_seconds = max(
+            timeout_seconds,
+            single_task_timeout_seconds or 0.0,
+        ) * 2
+
+        def tail_replanned_full_result():
+            if start >= len(task_network):
+                return None
+            for snapshot in reversed(chunk_snapshots):
+                completed_count = int(snapshot.get("completed_count") or 0)
+                if completed_count >= start:
+                    continue
+                tail_network = tuple(task_network[completed_count:])
+                if len(tail_network) <= 1 or len(tail_network) > tail_replan_task_limit:
+                    continue
+                tail_signatures = all_signatures[completed_count:]
+                tail_spec = type(
+                    "Stage6TailChunkSpec",
+                    (),
+                    {"query_task_literal_signatures": tuple(tail_signatures)},
+                )()
+                tail_goal_facts = self._stage6_query_goal_facts(
+                    tail_spec,
+                    tail_network,
+                    method_library,
+                    action_schemas,
+                )
+                tail_seed_facts = tuple(snapshot.get("seed_facts") or ())
+                try:
+                    guided_plan = planner.plan(
+                        domain=self.domain,
+                        method_library=method_library,
+                        objects=tuple(runtime_objects),
+                        target_literal=None,
+                        task_name="stage6_guided_tail",
+                        transition_name=(
+                            f"stage6_guided_tail_{completed_count + 1}_{len(task_network)}"
+                        ),
+                        typed_objects=typed_objects,
+                        task_args=(),
+                        task_network=tail_network,
+                        task_network_ordered=task_network_ordered,
+                        allow_empty_plan=True,
+                        initial_facts=tail_seed_facts,
+                        goal_facts=tail_goal_facts,
+                        timeout_seconds=tail_replan_timeout_seconds,
+                    )
+                    (
+                        guided_plan,
+                        tail_action_path,
+                        tail_method_trace,
+                        tail_actual_plan_text,
+                    ) = self._stage6_ensure_task_network_guided_plan_evidence(
+                        planner=planner,
+                        guided_plan=guided_plan,
+                        method_library=method_library,
+                        runtime_objects=runtime_objects,
+                        typed_objects=typed_objects,
+                        seed_facts=tail_seed_facts,
+                        task_network=tail_network,
+                        task_network_ordered=task_network_ordered,
+                        task_name="stage6_guided_tail",
+                        transition_name=(
+                            f"stage6_guided_tail_{completed_count + 1}_{len(task_network)}"
+                        ),
+                        timeout_seconds=tail_replan_timeout_seconds,
+                    )
+                except Exception:
+                    continue
+
+                replay = runner._replay_action_path_against_schemas(
+                    action_path=tail_action_path,
+                    action_schemas=action_schemas,
+                    seed_facts=tail_seed_facts,
+                )
+                if replay.get("passed") is not True:
+                    continue
+
+                merged_actual_plan_texts = actual_plan_texts[
+                    : int(snapshot.get("plan_text_count") or 0)
+                ]
+                if tail_actual_plan_text:
+                    merged_actual_plan_texts.append(tail_actual_plan_text)
+                merged_work_dirs = work_dirs[: int(snapshot.get("work_dir_count") or 0)]
+                if guided_plan.work_dir:
+                    merged_work_dirs.append(str(guided_plan.work_dir))
+                return {
+                    "source": "panda_chunked_query_tasks_tail_replan",
+                    "task_network": [
+                        {"task_name": task_name, "args": list(task_args)}
+                        for task_name, task_args in task_network
+                    ],
+                    "action_path": (
+                        action_path[: int(snapshot.get("action_count") or 0)]
+                        + tail_action_path
+                    ),
+                    "method_trace": (
+                        method_trace[: int(snapshot.get("method_count") or 0)]
+                        + tail_method_trace
+                    ),
+                    "work_dir": merged_work_dirs[-1] if merged_work_dirs else None,
+                    "actual_plan": self._stage6_merge_hierarchical_plan_texts(
+                        merged_actual_plan_texts,
+                    ),
+                    "completed_target_ids": list(all_target_ids),
+                }
+            return None
+
+        def partial_guidance_result():
+            tail_replanned = tail_replanned_full_result()
+            if tail_replanned is not None:
+                return tail_replanned
+            if not action_path and not method_trace:
+                return None
+            merged_actual_plan = self._stage6_merge_hierarchical_plan_texts(actual_plan_texts)
+            return {
+                "source": "panda_chunked_query_tasks_partial_prefix",
+                "task_network": [
+                    {"task_name": task_name, "args": list(task_args)}
+                    for task_name, task_args in task_network
+                ],
+                "action_path": action_path,
+                "method_trace": method_trace,
+                "work_dir": work_dirs[-1] if work_dirs else None,
+                "actual_plan": merged_actual_plan,
+                "is_partial": True,
+                "completed_task_count": start,
+                "completed_target_ids": list(all_target_ids[:start]),
+                "post_guided_seed_facts": tuple(current_seed_facts),
+            }
+
+        def reordered_singleton_result(
+            *,
+            current_index: int,
+            plan_timeout_seconds: float,
+        ):
+            if task_network_ordered:
+                return None
+            candidate_limit = min(
+                len(task_network),
+                current_index + 1 + singleton_reorder_lookahead,
+            )
+            for candidate_index in range(current_index + 1, candidate_limit):
+                candidate_network = (task_network[candidate_index],)
+                try:
+                    (
+                        guided_plan,
+                        candidate_action_path,
+                        candidate_method_trace,
+                        candidate_actual_plan_text,
+                    ) = self._stage6_plan_task_network_only(
+                        planner=planner,
+                        method_library=method_library,
+                        runtime_objects=runtime_objects,
+                        typed_objects=typed_objects,
+                        seed_facts=current_seed_facts,
+                        task_network=candidate_network,
+                        task_network_ordered=task_network_ordered,
+                        task_name="stage6_guided_chunk",
+                        transition_name=(
+                            f"stage6_guided_chunk_{current_index + 1}_{candidate_index + 1}"
+                        ),
+                        timeout_seconds=plan_timeout_seconds,
+                    )
+                except Exception:
+                    continue
+
+                replay = runner._replay_action_path_against_schemas(
+                    action_path=candidate_action_path,
+                    action_schemas=action_schemas,
+                    seed_facts=current_seed_facts,
+                )
+                if replay.get("passed") is not True:
+                    continue
+
+                if candidate_index != current_index:
+                    task_network[current_index], task_network[candidate_index] = (
+                        task_network[candidate_index],
+                        task_network[current_index],
+                    )
+                    if candidate_index < len(all_signatures):
+                        all_signatures[current_index], all_signatures[candidate_index] = (
+                            all_signatures[candidate_index],
+                            all_signatures[current_index],
+                        )
+                    if candidate_index < len(all_target_ids):
+                        all_target_ids[current_index], all_target_ids[candidate_index] = (
+                            all_target_ids[candidate_index],
+                            all_target_ids[current_index],
+                        )
+                return (
+                    guided_plan,
+                    candidate_action_path,
+                    candidate_method_trace,
+                    candidate_actual_plan_text,
+                    replay,
+                )
+            return None
 
         while start < len(task_network):
             remaining = len(task_network) - start
-            chunk_size = min(max_chunk_size, remaining)
+            chunk_size = min(chunk_ceiling, remaining)
             solved_chunk = False
 
             while chunk_size >= 1:
                 chunk_network = tuple(task_network[start:start + chunk_size])
                 chunk_signatures = all_signatures[start:start + chunk_size]
+                plan_timeout_seconds = (
+                    single_task_timeout_seconds
+                    if chunk_size == 1 and single_task_timeout_seconds is not None
+                    else timeout_seconds
+                )
                 chunk_spec = type(
                     "Stage6ChunkSpec",
                     (),
@@ -3733,7 +4151,107 @@ class LTL_BDI_Pipeline:
                         allow_empty_plan=True,
                         initial_facts=current_seed_facts,
                         goal_facts=chunk_goal_facts,
-                        timeout_seconds=timeout_seconds,
+                        timeout_seconds=plan_timeout_seconds,
+                    )
+                except Exception as exc:
+                    if chunk_size == 1:
+                        try:
+                            (
+                                guided_plan,
+                                task_action_path,
+                                chunk_method_trace,
+                                actual_plan_text,
+                            ) = self._stage6_plan_task_network_only(
+                                planner=planner,
+                                method_library=method_library,
+                                runtime_objects=runtime_objects,
+                                typed_objects=typed_objects,
+                                seed_facts=current_seed_facts,
+                                task_network=chunk_network,
+                                task_network_ordered=task_network_ordered,
+                                task_name="stage6_guided_chunk",
+                                transition_name=(
+                                    f"stage6_guided_chunk_{start + 1}_{start + chunk_size}"
+                                ),
+                                timeout_seconds=plan_timeout_seconds,
+                            )
+                            replay = runner._replay_action_path_against_schemas(
+                                action_path=task_action_path,
+                                action_schemas=action_schemas,
+                                seed_facts=current_seed_facts,
+                            )
+                        except Exception:
+                            reordered = reordered_singleton_result(
+                                current_index=start,
+                                plan_timeout_seconds=plan_timeout_seconds,
+                            )
+                            if reordered is None:
+                                print(
+                                    "  • Chunked guided planning unavailable at task "
+                                    f"{start + 1}: {exc}"
+                                )
+                                return partial_guidance_result()
+                            (
+                                guided_plan,
+                                task_action_path,
+                                chunk_method_trace,
+                                actual_plan_text,
+                                replay,
+                            ) = reordered
+                        if replay.get("passed") is not True:
+                            reordered = reordered_singleton_result(
+                                current_index=start,
+                                plan_timeout_seconds=plan_timeout_seconds,
+                            )
+                            if reordered is None:
+                                print(
+                                    "  • Chunked guided replay failed at task "
+                                    f"{start + 1}: {replay.get('message')}"
+                                )
+                                return partial_guidance_result()
+                            (
+                                guided_plan,
+                                task_action_path,
+                                chunk_method_trace,
+                                actual_plan_text,
+                                replay,
+                            ) = reordered
+                        current_seed_facts = runner._runtime_world_to_hddl_facts(
+                            replay.get("world_facts") or (),
+                            predicate_name_map=predicate_name_map,
+                        )
+                        action_path.extend(task_action_path)
+                        method_trace.extend(chunk_method_trace)
+                        if actual_plan_text:
+                            actual_plan_texts.append(actual_plan_text)
+                        if guided_plan.work_dir:
+                            work_dirs.append(str(guided_plan.work_dir))
+                        chunk_ceiling = min(chunk_ceiling, chunk_size)
+                        start += chunk_size
+                        solved_chunk = True
+                        break
+                    chunk_size //= 2
+                    chunk_ceiling = min(chunk_ceiling, chunk_size)
+                    continue
+
+                try:
+                    (
+                        guided_plan,
+                        task_action_path,
+                        chunk_method_trace,
+                        actual_plan_text,
+                    ) = self._stage6_ensure_task_network_guided_plan_evidence(
+                        planner=planner,
+                        guided_plan=guided_plan,
+                        method_library=method_library,
+                        runtime_objects=runtime_objects,
+                        typed_objects=typed_objects,
+                        seed_facts=current_seed_facts,
+                        task_network=chunk_network,
+                        task_network_ordered=task_network_ordered,
+                        task_name="stage6_guided_chunk",
+                        transition_name=f"stage6_guided_chunk_{start + 1}_{start + chunk_size}",
+                        timeout_seconds=plan_timeout_seconds,
                     )
                 except Exception as exc:
                     if chunk_size == 1:
@@ -3741,14 +4259,11 @@ class LTL_BDI_Pipeline:
                             "  • Chunked guided planning unavailable at task "
                             f"{start + 1}: {exc}"
                         )
-                        return None
+                        return partial_guidance_result()
                     chunk_size //= 2
+                    chunk_ceiling = min(chunk_ceiling, chunk_size)
                     continue
 
-                task_action_path = [
-                    JasonRunner._runtime_call(step.task_name, step.args)
-                    for step in guided_plan.steps
-                ]
                 replay = runner._replay_action_path_against_schemas(
                     action_path=task_action_path,
                     action_schemas=action_schemas,
@@ -3760,8 +4275,9 @@ class LTL_BDI_Pipeline:
                             "  • Chunked guided replay failed at task "
                             f"{start + 1}: {replay.get('message')}"
                         )
-                        return None
+                        return partial_guidance_result()
                     chunk_size //= 2
+                    chunk_ceiling = min(chunk_ceiling, chunk_size)
                     continue
 
                 current_seed_facts = runner._runtime_world_to_hddl_facts(
@@ -3769,21 +4285,28 @@ class LTL_BDI_Pipeline:
                     predicate_name_map=predicate_name_map,
                 )
                 action_path.extend(task_action_path)
-                method_trace.extend(
-                    planner.extract_method_trace(
-                        guided_plan.actual_plan or guided_plan.raw_plan,
-                    ),
-                )
-                if guided_plan.actual_plan or guided_plan.raw_plan:
-                    actual_plan_texts.append(guided_plan.actual_plan or guided_plan.raw_plan)
+                method_trace.extend(chunk_method_trace)
+                if actual_plan_text:
+                    actual_plan_texts.append(actual_plan_text)
                 if guided_plan.work_dir:
                     work_dirs.append(str(guided_plan.work_dir))
+                chunk_ceiling = min(chunk_ceiling, chunk_size)
                 start += chunk_size
+                chunk_snapshots.append(
+                    {
+                        "completed_count": start,
+                        "seed_facts": tuple(current_seed_facts),
+                        "action_count": len(action_path),
+                        "method_count": len(method_trace),
+                        "plan_text_count": len(actual_plan_texts),
+                        "work_dir_count": len(work_dirs),
+                    },
+                )
                 solved_chunk = True
                 break
 
             if not solved_chunk:
-                return None
+                return partial_guidance_result()
 
         if not action_path and not method_trace:
             return None
@@ -3798,7 +4321,155 @@ class LTL_BDI_Pipeline:
             "method_trace": method_trace,
             "work_dir": work_dirs[-1] if work_dirs else None,
             "actual_plan": merged_actual_plan,
+            "completed_target_ids": list(all_target_ids),
         }
+
+    @staticmethod
+    def _stage6_reorder_unordered_guided_task_network(
+        *,
+        task_network: Sequence[Tuple[str, Sequence[str]]],
+        literal_signatures: Sequence[str],
+        preferred_target_ids: Sequence[str],
+    ) -> Tuple[Tuple[Tuple[str, Tuple[str, ...]], ...], Tuple[str, ...], Tuple[str, ...]]:
+        indexed_entries = [
+            (
+                f"t{index}",
+                (
+                    str(task_name),
+                    tuple(str(arg) for arg in (task_args or ())),
+                ),
+                str(literal_signatures[index - 1]).strip()
+                if index - 1 < len(literal_signatures)
+                else "",
+            )
+            for index, (task_name, task_args) in enumerate(task_network, start=1)
+        ]
+        if not indexed_entries:
+            return (), (), ()
+
+        preferred_order = [
+            str(target_id).strip()
+            for target_id in preferred_target_ids
+            if str(target_id).strip()
+        ]
+        if not preferred_order:
+            return (
+                tuple(entry for _, entry, _ in indexed_entries),
+                tuple(signature for _, _, signature in indexed_entries),
+                tuple(target_id for target_id, _, _ in indexed_entries),
+            )
+
+        by_id = {
+            target_id: (task_entry, signature)
+            for target_id, task_entry, signature in indexed_entries
+        }
+        ordered_ids = [target_id for target_id in preferred_order if target_id in by_id]
+        ordered_ids.extend(
+            target_id
+            for target_id, _, _ in indexed_entries
+            if target_id not in ordered_ids
+        )
+        return (
+            tuple(by_id[target_id][0] for target_id in ordered_ids),
+            tuple(by_id[target_id][1] for target_id in ordered_ids),
+            tuple(ordered_ids),
+        )
+
+    def _stage6_plan_task_network_only(
+        self,
+        *,
+        planner,
+        method_library,
+        runtime_objects,
+        typed_objects,
+        seed_facts,
+        task_network,
+        task_network_ordered: bool,
+        task_name: str,
+        transition_name: str,
+        timeout_seconds: float,
+    ):
+        fallback_plan = planner.plan(
+            domain=self.domain,
+            method_library=method_library,
+            objects=tuple(runtime_objects),
+            target_literal=None,
+            task_name=task_name,
+            transition_name=f"{transition_name}_task_network",
+            typed_objects=typed_objects,
+            task_args=(),
+            task_network=task_network,
+            task_network_ordered=task_network_ordered,
+            allow_empty_plan=False,
+            initial_facts=tuple(seed_facts),
+            goal_facts=None,
+            timeout_seconds=timeout_seconds,
+        )
+        action_path, method_trace, actual_plan_text = self._stage6_extract_guided_plan_artifacts(
+            planner,
+            fallback_plan,
+        )
+        if not action_path and not method_trace:
+            raise RuntimeError(
+                "task-network-only fallback returned no hierarchical evidence",
+            )
+        return fallback_plan, action_path, method_trace, actual_plan_text
+
+    def _stage6_ensure_task_network_guided_plan_evidence(
+        self,
+        *,
+        planner,
+        guided_plan,
+        method_library,
+        runtime_objects,
+        typed_objects,
+        seed_facts,
+        task_network,
+        task_network_ordered: bool,
+        task_name: str,
+        transition_name: str,
+        timeout_seconds: float,
+        max_direct_fallback_task_network_size: int = 2,
+    ):
+        action_path, method_trace, actual_plan_text = self._stage6_extract_guided_plan_artifacts(
+            planner,
+            guided_plan,
+        )
+        if not task_network or action_path or method_trace:
+            return guided_plan, action_path, method_trace, actual_plan_text
+        if len(task_network) > max_direct_fallback_task_network_size:
+            raise RuntimeError(
+                "goal-guided plan returned no hierarchical evidence for a large task network",
+            )
+
+        fallback_plan, fallback_action_path, fallback_method_trace, fallback_plan_text = (
+            self._stage6_plan_task_network_only(
+                planner=planner,
+                method_library=method_library,
+                runtime_objects=runtime_objects,
+                typed_objects=typed_objects,
+                seed_facts=seed_facts,
+                task_network=task_network,
+                task_network_ordered=task_network_ordered,
+                task_name=task_name,
+                transition_name=transition_name,
+                timeout_seconds=timeout_seconds,
+            )
+        )
+        return fallback_plan, fallback_action_path, fallback_method_trace, fallback_plan_text
+
+    @staticmethod
+    def _stage6_extract_guided_plan_artifacts(
+        planner,
+        guided_plan,
+    ):
+        actual_plan_text = guided_plan.actual_plan or guided_plan.raw_plan or ""
+        action_path = [
+            JasonRunner._runtime_call(step.task_name, step.args)
+            for step in guided_plan.steps
+        ]
+        method_trace = planner.extract_method_trace(actual_plan_text)
+        return action_path, method_trace, actual_plan_text
 
     @staticmethod
     def _stage6_merge_hierarchical_plan_texts(plan_texts):
@@ -3833,6 +4504,9 @@ class LTL_BDI_Pipeline:
                     except ValueError:
                         return None
                     continue
+                if line == "root":
+                    chunk_root_ids = []
+                    continue
 
                 parts = line.split()
                 if not parts:
@@ -3846,7 +4520,7 @@ class LTL_BDI_Pipeline:
                     next_id += 1
 
             for line in raw_lines:
-                if line.startswith("root "):
+                if line.startswith("root ") or line == "root":
                     continue
                 rewritten = LTL_BDI_Pipeline._stage6_rewrite_hierarchical_plan_line_ids(
                     line,
@@ -3858,6 +4532,9 @@ class LTL_BDI_Pipeline:
                     chunk_methods.append(rewritten)
                 else:
                     chunk_actions.append(rewritten)
+
+            if not chunk_root_ids and not chunk_actions and not chunk_methods:
+                continue
 
             for original_root_id in chunk_root_ids:
                 rewritten_root_id = id_map.get(original_root_id)

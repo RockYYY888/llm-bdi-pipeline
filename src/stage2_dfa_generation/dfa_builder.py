@@ -74,8 +74,10 @@ class DFABuilder:
         original_dfa_dot, metadata = self.converter.convert(ltl_spec)
 
         # Parse original DFA to get statistics (BEFORE simplification)
-        original_num_states = self._count_states(original_dfa_dot)
-        original_num_transitions = self._count_transitions(original_dfa_dot)
+        original_num_states = int(metadata.get("num_states") or self._count_states(original_dfa_dot))
+        original_num_transitions = int(
+            metadata.get("num_transitions") or self._count_transitions(original_dfa_dot)
+        )
 
         if metadata.get("construction") in {
             "independent_eventually_atomic_fast_path",
@@ -146,11 +148,21 @@ class DFABuilder:
     def _count_transitions(self, dfa_dot: str) -> int:
         """Count number of transitions in DFA"""
         import re
-        transitions = re.findall(
-            r'([A-Za-z0-9_]+)\s*->\s*([A-Za-z0-9_]+)',
-            dfa_dot,
-        )
-        return sum(1 for source, _ in transitions if source != "init")
+        if "->" not in dfa_dot:
+            return 0
+        if "\n" not in dfa_dot:
+            total_edges = dfa_dot.count("->")
+            init_edges = len(re.findall(r'init\s*->', dfa_dot))
+            return max(0, total_edges - init_edges)
+
+        transition_count = 0
+        for line in dfa_dot.splitlines():
+            if "->" not in line:
+                continue
+            total_edges = line.count("->")
+            init_edges = len(re.findall(r'init\s*->', line))
+            transition_count += max(0, total_edges - init_edges)
+        return transition_count
 
 
 def test_dfa_builder():

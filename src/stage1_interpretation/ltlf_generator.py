@@ -571,7 +571,9 @@ class NLToLTLfGenerator:
             for arg in atom_dict.get("args", []) or []:
                 add_object(arg)
 
-        def walk_formula(formula: LTLFormula) -> None:
+        formula_stack = list(reversed(list(formulas or [])))
+        while formula_stack:
+            formula = formula_stack.pop()
             if formula.predicate and isinstance(formula.predicate, dict):
                 special_keys = {"type", "formulas", "left_formula", "right_formula", "formula", "operator"}
                 if all(key not in special_keys for key in formula.predicate.keys()):
@@ -579,11 +581,8 @@ class NLToLTLfGenerator:
                         if isinstance(args, list):
                             for arg in args:
                                 add_object(arg)
-            for sub_formula in formula.sub_formulas:
-                walk_formula(sub_formula)
-
-        for formula in formulas:
-            walk_formula(formula)
+            sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
+            formula_stack.extend(reversed(sub_formulas))
 
         return merged
 
@@ -596,9 +595,11 @@ class NLToLTLfGenerator:
         """
         gmap = GroundingMap()
 
-        # Helper to recursively extract predicates from formula
-        def extract_predicates(formula: LTLFormula):
-            """Recursively extract all predicates from a formula"""
+        # Iteratively walk formula nodes so large cumulative conjunctions do not
+        # depend on Python recursion depth.
+        formula_stack = list(reversed(list(spec.formulas or [])))
+        while formula_stack:
+            formula = formula_stack.pop()
             if formula.predicate and isinstance(formula.predicate, dict):
                 # Check if this is a real atomic predicate or a nested formula structure
                 # Real predicates have predicate_name: [args] format
@@ -620,13 +621,8 @@ class NLToLTLfGenerator:
                             # Add to grounding map
                             gmap.add_atom(symbol, pred_name, args)
 
-            # Recursively process sub-formulas
-            for sub_formula in formula.sub_formulas:
-                extract_predicates(sub_formula)
-
-        # Extract predicates from all formulas
-        for formula in spec.formulas:
-            extract_predicates(formula)
+            sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
+            formula_stack.extend(reversed(sub_formulas))
 
         return gmap
 

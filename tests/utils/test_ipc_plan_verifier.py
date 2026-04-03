@@ -446,3 +446,107 @@ def test_render_supported_hierarchical_plan_skips_mismatched_noop_trace_artifact
 	assert "nop" not in plan_text
 	assert "assemble a b -> m_assemble_direct" in plan_text
 	assert "assemble c d -> m_assemble_direct" in plan_text
+
+
+def test_render_supported_hierarchical_plan_accepts_unordered_root_task_reordering(tmp_path):
+	verifier = IPCPlanVerifier()
+	domain_file = tmp_path / "domain.hddl"
+	problem_file = tmp_path / "problem.hddl"
+	domain_file.write_text(
+		"""
+(define (domain TEST)
+  (:requirements :hierarchy :typing)
+  (:types block)
+  (:predicates (ready ?x - block) (linked ?x - block ?y - block))
+  (:task assemble
+    :parameters (?x - block ?y - block)
+  )
+  (:task prepare
+    :parameters (?x - block)
+  )
+  (:action polish
+    :parameters (?x - block)
+    :precondition (and)
+    :effect (and (ready ?x))
+  )
+  (:action attach
+    :parameters (?x - block ?y - block)
+    :precondition (and (ready ?x))
+    :effect (and (linked ?x ?y))
+  )
+)
+""".strip()
+		+ "\n",
+	)
+	problem_file.write_text(
+		"""
+(define (problem render-plan)
+  (:domain TEST)
+  (:objects a b c d - block)
+  (:htn
+    :tasks (and
+      (t1 (assemble a b))
+      (t2 (assemble c d))
+    )
+  )
+  (:init)
+  (:goal (and))
+)
+""".strip()
+		+ "\n",
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("assemble", ("X", "Y"), False),
+			HTNTask("prepare", ("X",), False),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_assemble_direct",
+				task_name="assemble",
+				parameters=("X", "Y"),
+				subtasks=(
+					HTNMethodStep("s1", "prepare", ("X",), "compound"),
+					HTNMethodStep("s2", "attach", ("X", "Y"), "primitive", action_name="attach"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+			HTNMethod(
+				method_name="m_prepare_polish",
+				task_name="prepare",
+				parameters=("X",),
+				subtasks=(
+					HTNMethodStep("s1", "polish", ("X",), "primitive", action_name="polish"),
+				),
+				ordering=(),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_text = verifier._render_supported_hierarchical_plan(
+		domain_file=domain_file,
+		problem_file=problem_file,
+		action_path=[
+			"polish(c)",
+			"attach(c,d)",
+			"polish(a)",
+			"attach(a,b)",
+		],
+		method_library=method_library,
+		method_trace=[
+			{"method_name": "m_assemble_direct", "task_args": ["c", "d"]},
+			{"method_name": "m_prepare_polish", "task_args": ["c"]},
+			{"method_name": "m_assemble_direct", "task_args": ["a", "b"]},
+			{"method_name": "m_prepare_polish", "task_args": ["a"]},
+		],
+	)
+
+	assert plan_text is not None
+	assert "assemble c d -> m_assemble_direct" in plan_text
+	assert "assemble a b -> m_assemble_direct" in plan_text
+	assert plan_text.index("assemble c d -> m_assemble_direct") < plan_text.index(
+		"assemble a b -> m_assemble_direct",
+	)

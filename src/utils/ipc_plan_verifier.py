@@ -563,6 +563,7 @@ class IPCPlanVerifier:
 			root_tasks=root_tasks,
 			actions=actions,
 			trace_entries=trace_entries,
+			root_tasks_ordered=bool(problem.htn_ordered),
 		)
 		warnings: List[str] = []
 		if action_index != len(actions):
@@ -585,6 +586,7 @@ class IPCPlanVerifier:
 		root_tasks: Sequence[Any],
 		actions: Sequence[_ActionStep],
 		trace_entries: Sequence[_MethodTraceEntry],
+		root_tasks_ordered: bool,
 	) -> Tuple[List[_AbstractNode], int, int]:
 		task_lookup = {
 			task.name: task
@@ -726,18 +728,73 @@ class IPCPlanVerifier:
 		root_nodes: List[_AbstractNode] = []
 		next_action_index = 0
 		next_trace_index = 0
-		for task in root_tasks:
-			source_task_name = getattr(task, "task_name")
-			task_args = tuple(getattr(task, "args"))
-			internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
-			root_node, next_action_index, next_trace_index = reconstruct_task(
-				internal_task_name,
-				task_args,
-				source_task_name,
-				next_action_index,
-				next_trace_index,
-			)
-			root_nodes.append(root_node)
+		if root_tasks_ordered:
+			for task in root_tasks:
+				source_task_name = getattr(task, "task_name")
+				task_args = tuple(getattr(task, "args"))
+				internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
+				root_node, next_action_index, next_trace_index = reconstruct_task(
+					internal_task_name,
+					task_args,
+					source_task_name,
+					next_action_index,
+					next_trace_index,
+				)
+				root_nodes.append(root_node)
+			return root_nodes, next_action_index, next_trace_index
+
+		remaining_root_tasks = list(root_tasks)
+		while remaining_root_tasks:
+			current_entry = trace_entries[next_trace_index] if next_trace_index < len(trace_entries) else None
+			prioritised_tasks: List[Any] = []
+			other_tasks: List[Any] = []
+			for task in remaining_root_tasks:
+				source_task_name = getattr(task, "task_name")
+				task_args = tuple(getattr(task, "args"))
+				internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
+				method = method_lookup.get(current_entry.method_name) if current_entry is not None else None
+				if (
+					method is not None
+					and self._method_trace_entry_matches_task(
+						method=method,
+						entry=current_entry,
+						task_name=internal_task_name,
+						task_args=task_args,
+					)
+				):
+					prioritised_tasks.append(task)
+				else:
+					other_tasks.append(task)
+
+			candidate_tasks = prioritised_tasks + other_tasks
+			last_error: Optional[Exception] = None
+			matched_task = None
+			for task in candidate_tasks:
+				source_task_name = getattr(task, "task_name")
+				task_args = tuple(getattr(task, "args"))
+				internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
+				try:
+					root_node, candidate_action_index, candidate_trace_index = reconstruct_task(
+						internal_task_name,
+						task_args,
+						source_task_name,
+						next_action_index,
+						next_trace_index,
+					)
+				except Exception as exc:
+					last_error = exc
+					continue
+				root_nodes.append(root_node)
+				next_action_index = candidate_action_index
+				next_trace_index = candidate_trace_index
+				matched_task = task
+				break
+
+			if matched_task is None:
+				if last_error is not None:
+					raise last_error
+				raise ValueError("failed to match unordered root task from method trace")
+			remaining_root_tasks.remove(matched_task)
 
 		return root_nodes, next_action_index, next_trace_index
 

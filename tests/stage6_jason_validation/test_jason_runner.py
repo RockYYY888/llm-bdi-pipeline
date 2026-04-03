@@ -182,6 +182,139 @@ def test_runner_asl_guided_execution_replays_method_trace_and_actions():
 	assert "+!verify_targets" not in asl
 
 
+def test_runner_asl_guided_prefix_continues_with_runtime_goal():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q2).",
+				'dfa_edge_label(dfa_step_q1_q2_on_a_b, "on(a, b)").',
+				"",
+				"/* DFA Transition Wrappers */",
+				"+!dfa_step_q1_q2_on_a_b : not target_seen(t1) & not blocked_target(t1) <-",
+				"\t!place_on(a, b).",
+				"",
+				"/* DFA Control Plans */",
+				"+!run_dfa : target_seen(t1) <-",
+				"\ttrue.",
+				"",
+				"+!run_dfa : not target_seen(t1) & not blocked_target(t1) <-",
+				"\t!dfa_step_q1_q2_on_a_b;",
+				"\t!clear_blocked_targets;",
+				"\t!run_dfa.",
+				"",
+				"-!dfa_step_q1_q2_on_a_b : not target_seen(t1) <-",
+				"\t+blocked_target(t1);",
+				"\t!run_dfa.",
+				"",
+				"/* Primitive Action Plans */",
+				"+!pick_up(X) : true <-",
+				"\tpick_up(X).",
+				"",
+				"/* HTN Method Plans */",
+				"+!place_on(A, B) : true <-",
+				"\ttrue.",
+			],
+		),
+		[
+			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
+		],
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("place_on", ("BLOCK1", "BLOCK2"), False, ("on",)),
+			],
+		),
+		ordered_query_sequence=False,
+		guided_action_path=('pick_up("GroundStation2")',),
+		guided_method_trace=(
+			{"method_name": "m_place_on_stack", "task_args": ["GroundStation2", "b"]},
+		),
+		guided_continue_with_runtime_goal=True,
+		guided_completed_target_ids=("t1",),
+	)
+
+	assert '.print("runtime trace method ", trace_method(m_place_on_stack, "GroundStation2", b))' in asl
+	assert '!pick_up("GroundStation2");' in asl
+	assert "!mark_target_t1;" in asl
+	assert "!run_dfa;" in asl
+	assert "!verify_targets;" in asl
+	assert '+!verify_targets : target_seen(t1) <-' in asl
+
+
+def test_runner_asl_guided_prefix_syncs_dfa_state_for_current_transition_style():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q3).",
+				'dfa_edge_label(dfa_step_q1_q2_goal_a, "goal(a)").',
+				'dfa_edge_label(dfa_step_q2_q3_goal_b, "goal(b)").',
+				"",
+				"/* DFA Transition Wrappers */",
+				"+!dfa_step_q1_q2_goal_a : dfa_state(q1) <-",
+				"\t!task_a;",
+				"\t-dfa_state(q1);",
+				"\t+dfa_state(q2).",
+				"",
+				"+!dfa_step_q2_q3_goal_b : dfa_state(q2) <-",
+				"\t!task_b;",
+				"\t-dfa_state(q2);",
+				"\t+dfa_state(q3).",
+				"",
+				"/* DFA Control Plans */",
+				"+!run_dfa : dfa_state(q3) & accepting_state(q3) <-",
+				"\ttrue.",
+				"",
+				"+!run_dfa : dfa_state(q1) <-",
+				"\t!dfa_step_q1_q2_goal_a;",
+				"\t!run_dfa.",
+				"",
+				"+!run_dfa : dfa_state(q2) <-",
+				"\t!dfa_step_q2_q3_goal_b;",
+				"\t!run_dfa.",
+				"",
+				"/* Primitive Action Plans */",
+				"+!task_a : true <-",
+				"\ttask_a.",
+				"",
+				"+!task_b : true <-",
+				"\ttask_b.",
+				"",
+				"/* HTN Method Plans */",
+				"+!do_goal(A) : true <-",
+				"\ttrue.",
+			],
+		),
+		[
+			HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+		],
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("do_goal", ("X",), False, ("goal",)),
+			],
+		),
+		ordered_query_sequence=False,
+		guided_action_path=("task_a",),
+		guided_method_trace=(
+			{"method_name": "m_do_goal", "task_args": ["a"]},
+		),
+		guided_continue_with_runtime_goal=True,
+		guided_completed_target_ids=("t1",),
+	)
+
+	assert "!mark_target_t1;" in asl
+	assert "!advance_dfa_for_t1;" in asl
+	assert "+!advance_dfa_for_t1 : target_seen(t1) & dfa_state(q1) <-" in asl
+	assert "\t-dfa_state(q1);" in asl
+	assert "\t+dfa_state(q2)." in asl
+	assert "+!advance_dfa_for_t1 : true <-" in asl
+
+
 def test_runner_asl_unordered_target_completion_skips_dfa_round_reset_logic():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(
@@ -230,6 +363,60 @@ def test_runner_asl_unordered_target_completion_skips_dfa_round_reset_logic():
 	assert "?dfa_state(FINAL_STATE)" not in asl
 	assert "?accepting_state(FINAL_STATE)" not in asl
 	assert "-!place_on(BLOCK1, BLOCK2) : true <-" not in asl
+
+
+def test_runner_asl_rewrites_unordered_current_style_control_to_target_centric_runtime():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q1).",
+				'dfa_edge_label(dfa_step_q1_q1_goal_a, "goal(a)").',
+				'dfa_edge_label(dfa_step_q1_q1_goal_b, "goal(b)").',
+				"",
+				"/* DFA Transition Wrappers */",
+				"+!dfa_step_q1_q1_goal_a : dfa_state(q1) <-",
+				"\t!task_a.",
+				"",
+				"+!dfa_step_q1_q1_goal_b : dfa_state(q1) <-",
+				"\t!task_b.",
+				"",
+				"/* DFA Control Plans */",
+				"+!run_dfa : dfa_state(q1) & accepting_state(q1) <-",
+				"\ttrue.",
+				"",
+				"/* Primitive Action Plans */",
+				"+!task_a : true <-",
+				"\ttask_a.",
+				"",
+				"+!task_b : true <-",
+				"\ttask_b.",
+				"",
+				"/* HTN Method Plans */",
+				"+!do_goal(X) : true <-",
+				"\ttrue.",
+			],
+		),
+		[
+			HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+		],
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("do_goal", ("X",), False, ("goal",)),
+			],
+		),
+		ordered_query_sequence=False,
+	)
+
+	assert "+!run_dfa : target_seen(t1) & target_seen(t2) <-" in asl
+	assert "+!clear_blocked_targets : blocked_target(TARGET_ID) <-" in asl
+	assert "+!run_dfa : not target_seen(t1) & not blocked_target(t1) <-" in asl
+	assert "!dfa_step_q1_q1_goal_a;" in asl
+	assert "-!dfa_step_q1_q1_goal_a : not target_seen(t1) <-" in asl
+	assert "+!run_dfa : dfa_state(q1) & accepting_state(q1) <-" not in asl
 
 
 def test_reorder_unordered_control_plan_blocks_uses_preferred_target_order():
@@ -283,6 +470,118 @@ def test_reorder_unordered_control_plan_blocks_uses_preferred_target_order():
 	)
 	assert reordered.index("+!run_dfa : true <-") > reordered.index(
 		"-!dfa_step_q1_q2_goal_a : not target_seen(t1) <-",
+	)
+
+
+def test_reorder_unordered_control_plan_blocks_preserves_current_dfa_state_style():
+	runner = JasonRunner()
+	code = "\n".join(
+		[
+			"domain(test).",
+			"",
+			"/* DFA Transition Wrappers */",
+			"+!dfa_step_q1_q2_goal_a : dfa_state(q1) <-",
+			"\t!task_a;",
+			"\t!mark_target_t1;",
+			"\t-dfa_state(q1);",
+			"\t+dfa_state(q2).",
+			"",
+			"+!dfa_step_q1_q3_goal_b : dfa_state(q1) <-",
+			"\t!task_b;",
+			"\t!mark_target_t2;",
+			"\t-dfa_state(q1);",
+			"\t+dfa_state(q3).",
+			"",
+			"/* DFA Control Plans */",
+			"+!run_dfa : dfa_state(q4) & accepting_state(q4) <-",
+			"\ttrue.",
+			"",
+			"+!run_dfa : dfa_state(q1) <-",
+			"\t!dfa_step_q1_q2_goal_a;",
+			"\t!run_dfa.",
+			"",
+			"+!run_dfa : dfa_state(q1) <-",
+			"\t!dfa_step_q1_q3_goal_b;",
+			"\t!run_dfa.",
+			"",
+			"+!run_dfa : true <-",
+			"\t.fail.",
+		],
+	)
+
+	reordered = runner._reorder_unordered_control_plan_blocks(code, ["t2", "t1"])
+
+	assert reordered.startswith("domain(test).\n")
+	assert reordered.index("+!run_dfa : dfa_state(q4) & accepting_state(q4) <-") < reordered.index(
+		"+!run_dfa : dfa_state(q1) <-",
+	)
+	assert reordered.index("!dfa_step_q1_q3_goal_b;") < reordered.index(
+		"!dfa_step_q1_q2_goal_a;",
+	)
+	assert reordered.count("+!run_dfa : dfa_state(q1) <-") == 2
+	assert reordered.index("+!run_dfa : true <-") > reordered.index("!dfa_step_q1_q2_goal_a;")
+
+
+def test_reorder_unordered_control_plan_blocks_keeps_following_sections_outside_control_region():
+	runner = JasonRunner()
+	code = "\n".join(
+		[
+			"domain(test).",
+			"",
+			"/* DFA Transition Wrappers */",
+			"+!dfa_step_q1_q1_goal_a : dfa_state(q1) <-",
+			"\t!task_a.",
+			"",
+			"+!dfa_step_q1_q1_goal_b : dfa_state(q1) <-",
+			"\t!task_b.",
+			"",
+			"/* DFA Control Plans */",
+			"+!run_dfa : target_seen(t1) & target_seen(t2) <-",
+			"\ttrue.",
+			"",
+			"+!run_dfa : not target_seen(t1) & not blocked_target(t1) <-",
+			"\t!dfa_step_q1_q1_goal_a;",
+			"\t!clear_blocked_targets;",
+			"\t!run_dfa.",
+			"",
+			"-!dfa_step_q1_q1_goal_a : not target_seen(t1) <-",
+			"\t+blocked_target(t1);",
+			"\t!run_dfa.",
+			"",
+			"+!run_dfa : not target_seen(t2) & not blocked_target(t2) <-",
+			"\t!dfa_step_q1_q1_goal_b;",
+			"\t!clear_blocked_targets;",
+			"\t!run_dfa.",
+			"",
+			"-!dfa_step_q1_q1_goal_b : not target_seen(t2) <-",
+			"\t+blocked_target(t2);",
+			"\t!run_dfa.",
+			"",
+			"+!run_dfa : true <-",
+			"\t.fail.",
+			"",
+			"/* Target Observation Plans */",
+			"+!mark_target_t1 : goal(a) <-",
+			"\t+target_seen(t1).",
+			"",
+			"/* Failure Handlers */",
+			"-!run_dfa : true <-",
+			"\t.fail.",
+			"",
+			"/* Execution Entry */",
+			"!execute.",
+		],
+	)
+
+	reordered = runner._reorder_unordered_control_plan_blocks(code, ["t2", "t1"])
+
+	assert reordered.index("/* Target Observation Plans */") > reordered.index("+!run_dfa : true <-")
+	assert reordered.index("/* Failure Handlers */") > reordered.index("/* Target Observation Plans */")
+	assert reordered.index("/* Execution Entry */") > reordered.index("/* Failure Handlers */")
+	assert reordered.count("/* Target Observation Plans */") == 1
+	assert reordered.count("+!run_dfa : true <-") == 1
+	assert reordered.index("+!run_dfa : not target_seen(t2) & not blocked_target(t2) <-") < reordered.index(
+		"+!run_dfa : not target_seen(t1) & not blocked_target(t1) <-",
 	)
 
 
@@ -365,7 +664,7 @@ def test_infer_unordered_target_execution_order_replays_world_between_targets(mo
 	assert ordering["target_signatures"] == ["goal(a)", "goal(b)"]
 
 
-def test_infer_unordered_target_execution_order_only_pins_original_order_at_root(monkeypatch, tmp_path):
+def test_infer_unordered_target_execution_order_prefers_shorter_root_plan(monkeypatch, tmp_path):
 	class FakePlanner:
 		def __init__(self, *args, **kwargs):
 			pass
@@ -388,29 +687,20 @@ def test_infer_unordered_target_execution_order_only_pins_original_order_at_root
 				return SimpleNamespace(
 					steps=[
 						SimpleNamespace(action_name="unlock_first", task_name="unlock_first", args=()),
+						SimpleNamespace(action_name="unlock_first", task_name="unlock_first", args=()),
+						SimpleNamespace(action_name="unlock_first", task_name="unlock_first", args=()),
 					],
 				)
 			if signature == "goal(second)":
-				if "(after_first)" not in fact_set:
-					raise ValueError("second not ready yet")
-				if "(after_third)" in fact_set:
-					return SimpleNamespace(
-						steps=[
-							SimpleNamespace(action_name="finish_second", task_name="finish_second", args=()),
-						],
-					)
 				return SimpleNamespace(
 					steps=[
-						SimpleNamespace(action_name="finish_second", task_name="finish_second", args=()),
-						SimpleNamespace(action_name="finish_second", task_name="finish_second", args=()),
 						SimpleNamespace(action_name="finish_second", task_name="finish_second", args=()),
 					],
 				)
 			if signature == "goal(third)":
-				if "(after_first)" not in fact_set:
-					raise ValueError("third not ready yet")
 				return SimpleNamespace(
 					steps=[
+						SimpleNamespace(action_name="unlock_third", task_name="unlock_third", args=()),
 						SimpleNamespace(action_name="unlock_third", task_name="unlock_third", args=()),
 					],
 				)
@@ -468,8 +758,428 @@ def test_infer_unordered_target_execution_order_only_pins_original_order_at_root
 		output_path=tmp_path,
 	)
 
-	assert ordering["target_ids"] == ["t1", "t3", "t2"]
-	assert ordering["target_signatures"] == ["goal(first)", "goal(third)", "goal(second)"]
+	assert ordering["target_ids"] == ["t2", "t3", "t1"]
+	assert ordering["target_signatures"] == ["goal(second)", "goal(third)", "goal(first)"]
+
+
+def test_infer_unordered_target_execution_order_prefers_more_reachable_follow_ons(
+	monkeypatch,
+	tmp_path,
+):
+	class FakePlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def toolchain_available(self) -> bool:
+			return True
+
+		def plan(
+			self,
+			*,
+			target_literal,
+			initial_facts,
+			**kwargs,
+		):
+			signature = target_literal.to_signature()
+			fact_set = set(initial_facts)
+			if signature == "goal(first)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_first", task_name="do_first", args=()),
+					],
+				)
+			if signature == "goal(second)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_second", task_name="do_second", args=()),
+						SimpleNamespace(action_name="do_second", task_name="do_second", args=()),
+					],
+				)
+			if signature == "goal(third)":
+				if "(after_second)" not in fact_set:
+					raise ValueError("third requires second first")
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_third", task_name="do_third", args=()),
+					],
+				)
+			raise AssertionError(f"unexpected target {signature}")
+
+	monkeypatch.setattr(panda_planner_module, "PANDAPlanner", FakePlanner)
+
+	runner = JasonRunner()
+	target_literals = [
+		HTNLiteral(predicate="goal", args=("first",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("second",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("third",), is_positive=True, source_symbol=None),
+	]
+	method_library = HTNMethodLibrary(
+		target_literals=list(target_literals),
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="goal(first)", task_name="task_first"),
+			HTNTargetTaskBinding(target_literal="goal(second)", task_name="task_second"),
+			HTNTargetTaskBinding(target_literal="goal(third)", task_name="task_third"),
+		],
+	)
+	ordering = runner._infer_unordered_target_execution_order(
+		target_literals=target_literals,
+		method_library=method_library,
+		action_schemas=[
+			{
+				"functor": "do_first",
+				"source_name": "do_first",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_first", "args": [], "is_positive": True},
+				],
+			},
+			{
+				"functor": "do_second",
+				"source_name": "do_second",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_second", "args": [], "is_positive": True},
+				],
+			},
+			{
+				"functor": "do_third",
+				"source_name": "do_third",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_third", "args": [], "is_positive": True},
+				],
+			},
+		],
+		seed_facts=["(start)"],
+		runtime_objects=(),
+		object_types={},
+		planning_domain=SimpleNamespace(name="test"),
+		output_path=tmp_path,
+	)
+
+	assert ordering["target_ids"][0] == "t2"
+	assert ordering["target_signatures"][0] == "goal(second)"
+
+
+def test_infer_unordered_target_execution_order_backtracks_to_complete_small_unordered_set(
+	monkeypatch,
+	tmp_path,
+):
+	class FakePlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def toolchain_available(self) -> bool:
+			return True
+
+		def plan(
+			self,
+			*,
+			target_literal,
+			initial_facts,
+			**kwargs,
+		):
+			signature = target_literal.to_signature()
+			fact_set = set(initial_facts)
+			if signature == "goal(first)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_first", task_name="do_first", args=()),
+					],
+				)
+			if signature == "goal(second)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_second", task_name="do_second", args=()),
+					],
+				)
+			if signature == "goal(third)":
+				if "(after_first)" not in fact_set:
+					raise ValueError("third requires first")
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_third", task_name="do_third", args=()),
+					],
+				)
+			if signature == "goal(fourth)":
+				if "(after_second)" not in fact_set or "(after_first)" in fact_set:
+					raise ValueError("fourth requires second before first")
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="do_fourth", task_name="do_fourth", args=()),
+					],
+				)
+			raise AssertionError(f"unexpected target {signature}")
+
+	monkeypatch.setattr(panda_planner_module, "PANDAPlanner", FakePlanner)
+
+	runner = JasonRunner()
+	target_literals = [
+		HTNLiteral(predicate="goal", args=("first",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("second",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("third",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("fourth",), is_positive=True, source_symbol=None),
+	]
+	method_library = HTNMethodLibrary(
+		target_literals=list(target_literals),
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="goal(first)", task_name="task_first"),
+			HTNTargetTaskBinding(target_literal="goal(second)", task_name="task_second"),
+			HTNTargetTaskBinding(target_literal="goal(third)", task_name="task_third"),
+			HTNTargetTaskBinding(target_literal="goal(fourth)", task_name="task_fourth"),
+		],
+	)
+	ordering = runner._infer_unordered_target_execution_order(
+		target_literals=target_literals,
+		method_library=method_library,
+		action_schemas=[
+			{
+				"functor": "do_first",
+				"source_name": "do_first",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_first", "args": [], "is_positive": True},
+				],
+			},
+			{
+				"functor": "do_second",
+				"source_name": "do_second",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_second", "args": [], "is_positive": True},
+				],
+			},
+			{
+				"functor": "do_third",
+				"source_name": "do_third",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_third", "args": [], "is_positive": True},
+				],
+			},
+			{
+				"functor": "do_fourth",
+				"source_name": "do_fourth",
+				"parameters": [],
+				"effects": [
+					{"predicate": "after_fourth", "args": [], "is_positive": True},
+				],
+			},
+		],
+		seed_facts=["(start)"],
+		runtime_objects=(),
+		object_types={},
+		planning_domain=SimpleNamespace(name="test"),
+		output_path=tmp_path,
+	)
+
+	assert ordering["target_ids"] == ["t2", "t4", "t1", "t3"]
+	assert ordering["target_signatures"] == [
+		"goal(second)",
+		"goal(fourth)",
+		"goal(first)",
+		"goal(third)",
+	]
+
+
+def test_infer_unordered_target_execution_order_uses_bounded_planner_timeout(monkeypatch, tmp_path):
+	captured_timeouts = []
+
+	class FakePlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def toolchain_available(self) -> bool:
+			return True
+
+		def plan(
+			self,
+			*,
+			target_literal,
+			timeout_seconds,
+			**kwargs,
+		):
+			captured_timeouts.append(timeout_seconds)
+			signature = target_literal.to_signature()
+			if signature == "goal(a)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="unlock", task_name="unlock", args=()),
+					],
+				)
+			if signature == "goal(b)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="finish", task_name="finish", args=()),
+					],
+				)
+			raise AssertionError(f"unexpected target {signature}")
+
+	monkeypatch.setattr(panda_planner_module, "PANDAPlanner", FakePlanner)
+
+	runner = JasonRunner()
+	target_literals = [
+		HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+	]
+	method_library = HTNMethodLibrary(
+		target_literals=list(target_literals),
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="goal(a)", task_name="task_a"),
+			HTNTargetTaskBinding(target_literal="goal(b)", task_name="task_b"),
+		],
+	)
+	ordering = runner._infer_unordered_target_execution_order(
+		target_literals=target_literals,
+		method_library=method_library,
+		action_schemas=[
+			{
+				"functor": "unlock",
+				"source_name": "unlock",
+				"parameters": [],
+				"effects": [
+					{"predicate": "ready", "args": [], "is_positive": True},
+				],
+			},
+			{
+				"functor": "finish",
+				"source_name": "finish",
+				"parameters": [],
+				"effects": [
+					{"predicate": "done", "args": [], "is_positive": True},
+				],
+			},
+		],
+		seed_facts=["(start)"],
+		runtime_objects=(),
+		object_types={},
+		planning_domain=SimpleNamespace(name="test"),
+		output_path=tmp_path,
+	)
+
+	assert ordering["target_ids"] == ["t1", "t2"]
+	assert captured_timeouts
+	assert all(timeout == 5.0 for timeout in captured_timeouts)
+
+
+def test_infer_unordered_target_execution_order_skips_global_ranking_for_large_target_sets(
+	monkeypatch,
+	tmp_path,
+):
+	class FakePlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def toolchain_available(self) -> bool:
+			return True
+
+		def plan(self, **kwargs):
+			raise AssertionError("large unordered target sets should not call planner ranking")
+
+	monkeypatch.setattr(panda_planner_module, "PANDAPlanner", FakePlanner)
+
+	runner = JasonRunner()
+	target_literals = [
+		HTNLiteral(predicate="goal", args=(str(index),), is_positive=True, source_symbol=None)
+		for index in range(25)
+	]
+	method_library = HTNMethodLibrary(
+		target_literals=list(target_literals),
+		target_task_bindings=[
+			HTNTargetTaskBinding(
+				target_literal=literal.to_signature(),
+				task_name=f"task_{index}",
+			)
+			for index, literal in enumerate(target_literals, start=1)
+		],
+	)
+
+	ordering = runner._infer_unordered_target_execution_order(
+		target_literals=target_literals,
+		method_library=method_library,
+		action_schemas=[],
+		seed_facts=["(start)"],
+		runtime_objects=(),
+		object_types={},
+		planning_domain=SimpleNamespace(name="test"),
+		output_path=tmp_path,
+	)
+
+	assert ordering["target_ids"] == [f"t{index}" for index in range(1, 26)]
+	assert ordering["target_signatures"] == [
+		f"goal({index})"
+		for index in range(25)
+	]
+
+
+def test_infer_unordered_target_execution_order_retains_partial_prefix_when_later_targets_timeout(
+	monkeypatch,
+	tmp_path,
+):
+	class FakePlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def toolchain_available(self) -> bool:
+			return True
+
+		def plan(
+			self,
+			*,
+			target_literal,
+			initial_facts,
+			**kwargs,
+		):
+			signature = target_literal.to_signature()
+			fact_set = set(initial_facts)
+			if signature == "goal(a)":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(action_name="unlock", task_name="unlock", args=()),
+					],
+				)
+			if signature == "goal(b)":
+				if "(ready)" not in fact_set:
+					raise ValueError("not yet reachable")
+				raise TimeoutError("planner timed out on later target")
+			raise AssertionError(f"unexpected target {signature}")
+
+	monkeypatch.setattr(panda_planner_module, "PANDAPlanner", FakePlanner)
+
+	runner = JasonRunner()
+	target_literals = [
+		HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+		HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+	]
+	method_library = HTNMethodLibrary(
+		target_literals=list(target_literals),
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="goal(a)", task_name="task_a"),
+			HTNTargetTaskBinding(target_literal="goal(b)", task_name="task_b"),
+		],
+	)
+	ordering = runner._infer_unordered_target_execution_order(
+		target_literals=target_literals,
+		method_library=method_library,
+		action_schemas=[
+			{
+				"functor": "unlock",
+				"source_name": "unlock",
+				"parameters": [],
+				"effects": [
+					{"predicate": "ready", "args": [], "is_positive": True},
+				],
+			},
+		],
+		seed_facts=["(start)"],
+		runtime_objects=(),
+		object_types={},
+		planning_domain=SimpleNamespace(name="test"),
+		output_path=tmp_path,
+	)
+
+	assert ordering["target_ids"] == ["t1"]
+	assert ordering["target_signatures"] == ["goal(a)"]
 
 
 def test_runner_asl_injects_runtime_objects_and_parent_types():
@@ -911,6 +1621,181 @@ def test_validate_prefers_guided_method_trace_when_provided(tmp_path, monkeypatc
 	assert validation_payload["consistency_checks"]["method_trace_reconstruction"]["message"] == (
 		"skipped: authoritative guided hierarchical plan available"
 	)
+
+
+def test_validate_uses_runtime_method_trace_when_guided_prefix_continues(tmp_path, monkeypatch):
+	stage6_dir = Path("src/stage6_jason_validation").resolve()
+	runner = JasonRunner(stage6_dir=stage6_dir, timeout_seconds=1)
+	jar_file = tmp_path / "jason-cli-all.jar"
+	log_conf = tmp_path / "console-info.properties"
+	jar_file.write_text("jar")
+	log_conf.write_text("log")
+
+	monkeypatch.setattr(runner, "_select_java_binary", lambda: ("/java23", 23))
+	monkeypatch.setattr(runner, "_select_javac_binary", lambda java_bin: "/javac23")
+	monkeypatch.setattr(runner, "_ensure_jason_jar", lambda java_bin: jar_file)
+	monkeypatch.setattr(runner, "_resolve_log_config", lambda: log_conf)
+	monkeypatch.setattr(
+		runner,
+		"_compile_environment_java",
+		lambda **kwargs: (tmp_path / "Stage6PipelineEnvironment.class").write_text("class"),
+	)
+	monkeypatch.setattr(
+		runner,
+		"_run_consistency_checks",
+		lambda **kwargs: {
+			"success": True,
+			"action_path_schema_replay": {"passed": True},
+			"method_trace_reconstruction": {"passed": True},
+		},
+	)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda *args, **kwargs: subprocess.CompletedProcess(
+			args=args[0],
+			returncode=0,
+			stdout=(
+				"runtime env ready\n"
+				"runtime env action success pick_up(a,b)\n"
+				"runtime env action success pick_up(c,d)\n"
+				"execute start\n"
+				"execute success\n"
+			),
+			stderr=(
+				'[agentspeak_generated] runtime trace method trace_method(m_guided_trace,"a","b")\n'
+				"[agentspeak_generated] runtime trace method trace_method(m_runtime_trace,c,d)\n"
+			),
+		),
+	)
+
+	result = runner.validate(
+		agentspeak_code="domain(test).\n/* Primitive Action Plans */\n+!pick_up(B1,B2):true<-\n\tpick_up(B1,B2).\n\n/* HTN Method Plans */",
+		target_literals=[
+			HTNLiteral(predicate="on", args=("a", "b"), is_positive=True, source_symbol=None),
+		],
+		action_schemas=_sample_action_schemas(),
+		seed_facts=("(clear a)", "(on a b)"),
+		domain_name="blocksworld",
+		output_dir=tmp_path,
+		guided_action_path=("pick_up(a,b)",),
+		guided_method_trace=(
+			{"method_name": "m_guided_trace", "task_args": ["a", "b"]},
+		),
+		guided_continue_with_runtime_goal=True,
+	)
+
+	assert result.status == "success"
+	assert result.method_trace == [
+		{"method_name": "m_guided_trace", "task_args": ["a", "b"]},
+		{"method_name": "m_runtime_trace", "task_args": ["c", "d"]},
+	]
+
+
+def test_validate_reorders_remaining_unordered_targets_after_guided_prefix(tmp_path, monkeypatch):
+	stage6_dir = Path("src/stage6_jason_validation").resolve()
+	runner = JasonRunner(stage6_dir=stage6_dir, timeout_seconds=1)
+	jar_file = tmp_path / "jason-cli-all.jar"
+	log_conf = tmp_path / "console-info.properties"
+	jar_file.write_text("jar")
+	log_conf.write_text("log")
+	captured = {}
+
+	monkeypatch.setattr(runner, "_select_java_binary", lambda: ("/java23", 23))
+	monkeypatch.setattr(runner, "_select_javac_binary", lambda java_bin: "/javac23")
+	monkeypatch.setattr(runner, "_ensure_jason_jar", lambda java_bin: jar_file)
+	monkeypatch.setattr(runner, "_resolve_log_config", lambda: log_conf)
+	monkeypatch.setattr(
+		runner,
+		"_build_runner_asl",
+		lambda *args, **kwargs: "domain(test).",
+	)
+	monkeypatch.setattr(
+		runner,
+		"_compile_environment_java",
+		lambda **kwargs: (tmp_path / "Stage6PipelineEnvironment.class").write_text("class"),
+	)
+	monkeypatch.setattr(
+		runner,
+		"_run_consistency_checks",
+		lambda **kwargs: {
+			"success": True,
+			"action_path_schema_replay": {"passed": True},
+			"method_trace_reconstruction": {"passed": True},
+		},
+	)
+
+	def capture_ordering(**kwargs):
+		captured["ordering"] = {
+			"seed_facts": tuple(kwargs["seed_facts"]),
+			"signatures": tuple(literal.to_signature() for literal in kwargs["target_literals"]),
+			"target_id_offset": kwargs["target_id_offset"],
+		}
+		return {
+			"target_ids": ["t3", "t2"],
+			"target_signatures": ["goal(c)", "goal(b)"],
+		}
+
+	def capture_reordered(code, preferred_target_ids):
+		captured["reordered_ids"] = list(preferred_target_ids)
+		return code
+
+	monkeypatch.setattr(
+		runner,
+		"_infer_unordered_target_execution_order",
+		capture_ordering,
+	)
+	monkeypatch.setattr(
+		runner,
+		"_reorder_unordered_control_plan_blocks",
+		capture_reordered,
+	)
+	monkeypatch.setattr(
+		subprocess,
+		"run",
+		lambda *args, **kwargs: subprocess.CompletedProcess(
+			args=args[0],
+			returncode=0,
+			stdout="runtime env ready\nexecute success\n",
+			stderr="",
+		),
+	)
+
+	runner.validate(
+		agentspeak_code="domain(test).",
+		target_literals=[
+			HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("c",), is_positive=True, source_symbol=None),
+		],
+		method_library=HTNMethodLibrary(
+			target_literals=[
+				HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+				HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+				HTNLiteral(predicate="goal", args=("c",), is_positive=True, source_symbol=None),
+			],
+			target_task_bindings=[
+				HTNTargetTaskBinding(target_literal="goal(a)", task_name="task_a"),
+				HTNTargetTaskBinding(target_literal="goal(b)", task_name="task_b"),
+				HTNTargetTaskBinding(target_literal="goal(c)", task_name="task_c"),
+			],
+		),
+		action_schemas=_sample_action_schemas(),
+		seed_facts=("(start)",),
+		domain_name="blocksworld",
+		output_dir=tmp_path,
+		ordered_query_sequence=False,
+		planning_domain=SimpleNamespace(name="test", predicates=()),
+		guided_action_path=("pick_up(a,b)",),
+		guided_continue_with_runtime_goal=True,
+		guided_post_seed_facts=("(after_prefix)",),
+		guided_completed_target_count=1,
+	)
+
+	assert captured["ordering"]["seed_facts"] == ("(after_prefix)",)
+	assert captured["ordering"]["signatures"] == ("goal(b)", "goal(c)")
+	assert captured["ordering"]["target_id_offset"] == 1
+	assert captured["reordered_ids"] == ["t3", "t2"]
 
 
 def test_action_path_schema_replay_detects_shared_resource_precondition_violation():

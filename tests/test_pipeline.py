@@ -362,6 +362,85 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 	]
 
 
+def _resolve_log_artifact_path(log_dir: Path, relative_path: Any) -> Path | None:
+	if not relative_path:
+		return None
+	candidate = Path(str(relative_path))
+	if candidate.is_absolute():
+		return candidate
+	return log_dir / candidate
+
+
+def _read_json_artifact(log_dir: Path, relative_path: Any) -> Any:
+	artifact_path = _resolve_log_artifact_path(log_dir, relative_path)
+	if artifact_path is None or not artifact_path.exists():
+		return None
+	return json.loads(artifact_path.read_text())
+
+
+def _read_text_artifact(log_dir: Path, relative_path: Any) -> str:
+	artifact_path = _resolve_log_artifact_path(log_dir, relative_path)
+	if artifact_path is None or not artifact_path.exists():
+		return ""
+	return artifact_path.read_text()
+
+
+def _load_stage3_method_library(execution: Dict[str, Any], log_dir: Path) -> Dict[str, Any]:
+	stage3_payload = execution.get("stage3_method_library")
+	if not isinstance(stage3_payload, dict):
+		return {}
+	artifact_path = stage3_payload.get("artifact_path")
+	if artifact_path:
+		loaded = _read_json_artifact(log_dir, artifact_path)
+		if isinstance(loaded, dict):
+			return loaded
+	return stage3_payload
+
+
+def _load_stage5_agentspeak_code(execution: Dict[str, Any], log_dir: Path) -> str:
+	stage5_payload = execution.get("stage5_agentspeak")
+	if not isinstance(stage5_payload, str) or not stage5_payload:
+		return ""
+	if "\n" in stage5_payload or "/* " in stage5_payload:
+		return stage5_payload
+	return _read_text_artifact(log_dir, stage5_payload)
+
+
+def _load_stage6_artifacts(execution: Dict[str, Any], log_dir: Path) -> Dict[str, Any]:
+	stage6_payload = execution.get("stage6_artifacts")
+	if not isinstance(stage6_payload, dict):
+		return {}
+	loaded = dict(stage6_payload)
+	if "stdout" not in loaded and loaded.get("stdout_path"):
+		loaded["stdout"] = _read_text_artifact(log_dir, loaded["stdout_path"])
+	if "stderr" not in loaded and loaded.get("stderr_path"):
+		loaded["stderr"] = _read_text_artifact(log_dir, loaded["stderr_path"])
+	if "action_path" not in loaded and loaded.get("action_path_path"):
+		action_path_text = _read_text_artifact(log_dir, loaded["action_path_path"])
+		loaded["action_path"] = [
+			line.strip()
+			for line in action_path_text.splitlines()
+			if line.strip()
+		]
+	if "method_trace" not in loaded and loaded.get("method_trace_path"):
+		method_trace = _read_json_artifact(log_dir, loaded["method_trace_path"])
+		if isinstance(method_trace, list):
+			loaded["method_trace"] = method_trace
+	return loaded
+
+
+def _load_stage7_artifacts(execution: Dict[str, Any], log_dir: Path) -> Dict[str, Any]:
+	stage7_payload = execution.get("stage7_artifacts")
+	if not isinstance(stage7_payload, dict):
+		return {}
+	loaded = _read_json_artifact(log_dir, "ipc_official_verification.json")
+	if isinstance(loaded, dict):
+		merged = dict(loaded)
+		merged.update(stage7_payload)
+		return merged
+	return dict(stage7_payload)
+
+
 def _literal_from_signature_text(signature: str) -> HTNLiteral:
 	text = str(signature).strip()
 	is_positive = not text.startswith("!")
@@ -871,6 +950,7 @@ def _run_domain_query_case_with_official_stage3_mask(
 			derived_analysis=None,
 			negation_hints=None,
 			ordered_literal_signatures=None,
+			linearise_ordered_literals=True,
 		):
 			target_literal_signatures = list(ordered_literal_signatures or ())
 			anchors = list(query_task_anchors or ())
@@ -954,8 +1034,8 @@ def _run_domain_query_case_with_official_stage3_mask(
 	if log_dir is None:
 		raise RuntimeError(f"{domain_key}:{query_id} did not produce a log directory")
 	execution = json.loads((log_dir / "execution.json").read_text())
-	stage6_artifacts = execution.get("stage6_artifacts") or {}
-	stage7_artifacts = execution.get("stage7_artifacts") or {}
+	stage6_artifacts = _load_stage6_artifacts(execution, log_dir)
+	stage7_artifacts = _load_stage7_artifacts(execution, log_dir)
 
 	bug_messages: List[str] = []
 	if not result["success"]:
@@ -1163,6 +1243,7 @@ def assert_stage3_summary_preserves_llm_timing_metadata(tmp_path, monkeypatch):
 			query_object_inventory=None,
 			negation_hints=None,
 			ordered_literal_signatures=None,
+			linearise_ordered_literals=True,
 			query_objects=None,
 			derived_analysis=None,
 		):
@@ -2014,6 +2095,7 @@ def assert_ipc_plan_verifier_reconstructs_multi_root_depth_first_method_traces()
 		root_tasks=problem.htn_tasks,
 		actions=actions,
 		trace_entries=trace_entries,
+		root_tasks_ordered=bool(problem.htn_ordered),
 	)
 
 	assert action_index == len(actions)
@@ -2405,6 +2487,7 @@ def assert_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_
 			derived_analysis=None,
 			negation_hints=None,
 			ordered_literal_signatures=None,
+			linearise_ordered_literals=True,
 		):
 			captured["semantic_objects"] = semantic_objects
 			captured["query_object_inventory"] = query_object_inventory
@@ -2515,6 +2598,104 @@ def assert_expected_execution_identity_is_derived_from_selected_domain_and_probl
 	}
 
 
+def assert_stage3_transition_extraction_respects_unordered_query_semantics(
+	tmp_path,
+	monkeypatch,
+):
+	method_library = HTNMethodLibrary(
+		compound_tasks=[HTNTask("get_soil_data", ("WAYPOINT",), False, ("communicated_soil_data",))],
+		primitive_tasks=[],
+		methods=[],
+		target_literals=[HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding("communicated_soil_data(waypoint2)", "get_soil_data"),
+		],
+	)
+	captured: Dict[str, Any] = {}
+
+	class FakeSynthesizer:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def synthesize(
+			self,
+			domain,
+			grounding_map,
+			dfa_result,
+			*,
+			query_text=None,
+			query_task_anchors=None,
+			semantic_objects=None,
+			query_object_inventory=None,
+			query_objects=None,
+			derived_analysis=None,
+			negation_hints=None,
+			ordered_literal_signatures=None,
+			linearise_ordered_literals=True,
+		):
+			captured["synthesize_linearise"] = linearise_ordered_literals
+			return method_library, {
+				"used_llm": True,
+				"model": "deepseek-chat",
+				"target_literals": ["communicated_soil_data(waypoint2)"],
+				"query_task_anchors": list(query_task_anchors or ()),
+				"semantic_objects": list(semantic_objects or ()),
+				"query_object_inventory": list(query_object_inventory or ()),
+				"query_objects": list(query_objects or ()),
+				"derived_analysis": dict(derived_analysis or {}),
+				"negation_resolution": {"predicates": [], "mode_by_predicate": {}},
+				"action_analysis": {},
+				"compound_tasks": 1,
+				"primitive_tasks": 0,
+				"methods": 0,
+				"llm_prompt": {"system": "SYSTEM", "user": "USER"},
+				"llm_response": '{"ok": true}',
+				"llm_finish_reason": "stop",
+				"llm_attempts": 1,
+				"llm_response_time_seconds": 1.0,
+				"llm_attempt_durations_seconds": [1.0],
+				"failure_class": None,
+			}
+
+		def extract_progressing_transitions(
+			self,
+			grounding_map,
+			dfa_result,
+			*,
+			ordered_literal_signatures=None,
+			linearise_ordered_literals=True,
+		):
+			captured["extract_linearise"] = linearise_ordered_literals
+			return []
+
+	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", FakeSynthesizer)
+
+	pipeline = LTL_BDI_Pipeline(domain_file=MARSROVER_DOMAIN_FILE)
+	pipeline.logger = PipelineLogger(logs_dir=str(tmp_path))
+	pipeline.logger.start_pipeline(
+		"demo instruction",
+		mode="dfa_agentspeak",
+		domain_file=pipeline.domain_file,
+		output_dir=str(tmp_path),
+	)
+	pipeline.output_dir = pipeline.logger.current_log_dir
+
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		MARSROVER_QUERY_CASES["query_3"]["instruction"],
+	)
+	assert pipeline._query_task_sequence_is_ordered(ltl_spec) is False
+
+	_, stage3_data = pipeline._stage3_method_synthesis(
+		ltl_spec,
+		{"dfa_dot": 'digraph MONA_DFA { 0 -> 1 [label="communicated_soil_data_waypoint2"]; }'},
+	)
+
+	assert stage3_data is not None
+	assert captured["synthesize_linearise"] is False
+	assert captured["extract_linearise"] is False
+
+
 def assert_stage1_generation_uses_only_instruction_even_with_problem_file(monkeypatch):
 	problem_path = (
 		Path(__file__).parent.parent
@@ -2619,6 +2800,235 @@ def assert_pipeline_logger_stage1_payload_omits_recursive_formula_tree(tmp_path)
 	assert stage1_spec["formulas_string"] == [
 		"F((on(b4, b2) & F((on(b1, b4) & F(on(b3, b1))))))",
 	]
+
+
+def assert_pipeline_logger_stage2_payload_omits_embedded_dfa_bodies(tmp_path):
+	logger = PipelineLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"Using package-0, complete the tasks deliver(package-0, city-loc-0).",
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		domain_name="transport",
+		problem_name="demo",
+		output_dir=str(tmp_path),
+	)
+
+	dfa_result = {
+		"formula": "F(at(package-0, city-loc-0))",
+		"original_dfa_dot": 'digraph MONA_DFA { init -> 1; 1 -> 2 [label="at_package_0_city_loc_0"]; }',
+		"dfa_dot": 'digraph MONA_DFA { init -> 1; 1 -> 2 [label="at_package_0_city_loc_0"]; }',
+		"num_states": 2,
+		"num_transitions": 1,
+		"original_num_states": 2,
+		"original_num_transitions": 1,
+		"simplification_stats": {"method": "stub"},
+	}
+
+	logger.log_stage2_dfas(None, dfa_result, "Success")
+
+	assert logger.current_log_dir is not None
+	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
+	stage2_result = execution_json["stage2_dfa_result"]
+	assert "dfa_dot" not in stage2_result
+	assert "original_dfa_dot" not in stage2_result
+	assert stage2_result["original_dfa_path"] == "dfa_original.dot"
+	assert stage2_result["simplified_dfa_path"] == "dfa_simplified.dot"
+
+	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
+	assert "Full DFA bodies are stored in dfa_original.dot and dfa_simplified.dot" in execution_txt
+	assert 'label="at_package_0_city_loc_0"' not in execution_txt
+
+
+def assert_pipeline_logger_stage4_payload_omits_embedded_transition_dump(tmp_path):
+	logger = PipelineLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"Using package-0, complete the tasks deliver(package-0, city-loc-0).",
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		domain_name="transport",
+		problem_name="demo",
+		output_dir=str(tmp_path),
+	)
+
+	stage4_artifacts = {
+		"transitions": [
+			{
+				"source_state": "q1",
+				"target_state": "q2",
+				"transition_name": "dfa_step_q1_q2_demo",
+				"initial_facts": ["(road city-loc-0 city-loc-1)"],
+				"plan": {
+					"task_name": "deliver",
+					"task_args": ["package-0", "city-loc-0"],
+					"steps": [],
+				},
+			},
+		],
+	}
+
+	logger.log_stage4_panda_planning(stage4_artifacts, "Success", metadata={"backend": "pandaPI"})
+
+	assert logger.current_log_dir is not None
+	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
+	stage4_result = execution_json["stage4_artifacts"]
+	assert "transitions" not in stage4_result
+	assert stage4_result["transition_count"] == 1
+	assert stage4_result["transitions_path"] == "panda_transitions.json"
+
+	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
+	assert "Artifact path: panda_transitions.json" in execution_txt
+	assert '"source_state": "q1"' not in execution_txt
+
+
+def assert_pipeline_logger_stage3_payload_records_only_artifact_path(tmp_path):
+	logger = PipelineLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"Using package-0, complete the tasks deliver(package-0, city-loc-0).",
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		domain_name="transport",
+		problem_name="demo",
+		output_dir=str(tmp_path),
+	)
+
+	method_library = {
+		"compound_tasks": [{"name": "deliver", "parameters": ["package-0", "city-loc-0"]}],
+		"primitive_tasks": [{"name": "drive-truck", "parameters": ["truck-0", "city-loc-0"]}],
+		"methods": [{"method_name": "m_deliver_demo", "task_name": "deliver"}],
+		"target_literals": [{"predicate": "at", "args": ["package-0", "city-loc-0"], "is_positive": True}],
+		"target_task_bindings": [{"task_name": "deliver", "arguments": ["package-0", "city-loc-0"]}],
+	}
+
+	logger.log_stage3_method_synthesis(method_library, "Success", metadata={"backend": "oracle"})
+
+	assert logger.current_log_dir is not None
+	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
+	assert execution_json["stage3_method_library"] == {"artifact_path": "htn_method_library.json"}
+	assert execution_json["stage3_metadata"]["target_task_bindings"] == [
+		{"task_name": "deliver", "arguments": ["package-0", "city-loc-0"]},
+	]
+	saved_library = json.loads((logger.current_log_dir / "htn_method_library.json").read_text())
+	assert saved_library["methods"][0]["method_name"] == "m_deliver_demo"
+
+	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
+	assert "Artifact path: htn_method_library.json" in execution_txt
+	assert '"method_name": "m_deliver_demo"' not in execution_txt
+
+
+def assert_pipeline_logger_stage5_payload_records_only_artifact_path(tmp_path):
+	logger = PipelineLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"Using package-0, complete the tasks deliver(package-0, city-loc-0).",
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		domain_name="transport",
+		problem_name="demo",
+		output_dir=str(tmp_path),
+	)
+
+	logger.log_stage5_agentspeak_rendering(
+		"/* HTN Method Plans */\n+!deliver(P, L) <- true.\n",
+		"Success",
+		metadata={"code_size_chars": 49},
+	)
+
+	assert logger.current_log_dir is not None
+	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
+	assert execution_json["stage5_agentspeak"] == "agentspeak_generated.asl"
+
+	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
+	assert "Artifact path: agentspeak_generated.asl" in execution_txt
+	assert "+!deliver(P, L)" not in execution_txt
+
+
+def assert_pipeline_logger_stage6_payload_records_relative_artifact_paths(tmp_path):
+	logger = PipelineLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"Using package-0, complete the tasks deliver(package-0, city-loc-0).",
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		domain_name="transport",
+		problem_name="demo",
+		output_dir=str(tmp_path),
+	)
+	assert logger.current_log_dir is not None
+
+	action_path_file = logger.current_log_dir / "action_path.txt"
+	action_path_file.write_text("drive-truck(truck-0, city-loc-0, city-loc-1)\n")
+	method_trace_file = logger.current_log_dir / "method_trace.json"
+	method_trace_file.write_text(json.dumps([{"task": "deliver"}]))
+	stdout_file = logger.current_log_dir / "jason_stdout.txt"
+	stdout_file.write_text("execute success\n")
+	stderr_file = logger.current_log_dir / "jason_stderr.txt"
+	stderr_file.write_text("")
+
+	logger.log_stage6_jason_validation(
+		{
+			"status": "success",
+			"backend": "RunLocalMAS",
+			"timed_out": False,
+			"failed_goals": [],
+			"artifacts": {
+				"action_path": str(action_path_file),
+				"method_trace": str(method_trace_file),
+				"jason_stdout": str(stdout_file),
+				"jason_stderr": str(stderr_file),
+			},
+		},
+		"Success",
+	)
+
+	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
+	stage6_artifacts = execution_json["stage6_artifacts"]
+	assert "action_path" not in stage6_artifacts
+	assert "method_trace" not in stage6_artifacts
+	assert "stdout" not in stage6_artifacts
+	assert stage6_artifacts["action_path_path"] == "action_path.txt"
+	assert stage6_artifacts["method_trace_path"] == "method_trace.json"
+	assert stage6_artifacts["stdout_path"] == "jason_stdout.txt"
+	assert stage6_artifacts["stderr_path"] == "jason_stderr.txt"
+
+	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
+	assert '"action_path_path": "action_path.txt"' in execution_txt
+	assert "execute success" not in execution_txt
+
+
+def assert_pipeline_logger_stage7_payload_records_relative_artifact_paths(tmp_path):
+	logger = PipelineLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"Using package-0, complete the tasks deliver(package-0, city-loc-0).",
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		domain_name="transport",
+		problem_name="demo",
+		output_dir=str(tmp_path),
+	)
+	assert logger.current_log_dir is not None
+
+	plan_file = logger.current_log_dir / "ipc_official_plan.txt"
+	plan_file.write_text("0 drive-truck truck-0 city-loc-0 city-loc-1\n")
+	output_file = logger.current_log_dir / "ipc_official_verifier.txt"
+	output_file.write_text("Plan verification result: true\n")
+
+	logger.log_stage7_official_verification(
+		{
+			"tool_available": True,
+			"plan_kind": "hierarchical",
+			"verification_result": True,
+			"primitive_plan_executable": True,
+			"reached_goal_state": True,
+			"plan_file": str(plan_file),
+			"output_file": str(output_file),
+			"stdout": "huge verifier stdout",
+			"stderr": "",
+		},
+		"Success",
+	)
+
+	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
+	stage7_artifacts = execution_json["stage7_artifacts"]
+	assert stage7_artifacts["plan_file"] == "ipc_official_plan.txt"
+	assert stage7_artifacts["output_file"] == "ipc_official_verifier.txt"
+	assert "stdout" not in stage7_artifacts
+	assert "stderr" not in stage7_artifacts
+
+	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
+	assert '"plan_file": "ipc_official_plan.txt"' in execution_txt
+	assert "huge verifier stdout" not in execution_txt
 
 
 def assert_stage6_object_type_resolution_ignores_unused_query_objects():
@@ -2763,6 +3173,7 @@ def assert_stage6_guided_execution_uses_query_task_anchors_not_problem_root_task
 		"panda_incremental_query_tasks",
 		"panda_query_task_network",
 		"panda_query_task_network_with_goals",
+		"panda_reordered_query_task_network_with_goals",
 	}
 	assert guided["action_path"] == ["pick_up(b1)"]
 	assert guided["method_trace"] == [{"method_name": "m_do_put_on", "task_args": ["b1", "b2"]}]
@@ -2960,11 +3371,422 @@ def assert_stage6_unordered_guided_execution_falls_back_to_chunked_query_tasks()
 
 	assert guided is not None
 	assert guided["source"] == "panda_chunked_query_tasks_with_goals"
-	assert len(captured["calls"]) >= 2
-	assert len(captured["calls"][0]["task_network"]) == 8
-	assert captured["calls"][0]["task_network_ordered"] is False
-	assert any(len(call["task_network"]) < 8 for call in captured["calls"][1:])
-	assert all(call["task_network_ordered"] is False for call in captured["calls"][1:])
+	assert len(captured["calls"]) >= 1
+	full_calls = [call for call in captured["calls"] if len(call["task_network"]) > 4]
+	fallback_calls = [call for call in captured["calls"] if 0 < len(call["task_network"]) <= 4]
+	assert full_calls
+	assert fallback_calls
+	assert any(call["task_network_ordered"] is True for call in captured["calls"])
+	assert all(call["task_network_ordered"] is False for call in fallback_calls)
+
+
+def assert_stage6_chunked_guided_execution_caps_chunk_horizon_generically():
+	problem_path = MARSROVER_PROBLEM_DIR / "pfile08.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing marsrover problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=MARSROVER_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		(
+			"Using lander general, modes colour, high_res, and low_res, rovers rover0, "
+			"rover1, rover2, and rover3, stores rover0store, rover1store, rover2store, "
+			"and rover3store, waypoints waypoint0, waypoint1, waypoint2, waypoint3, "
+			"waypoint4, and waypoint5, cameras camera0, camera1, camera2, and camera3, "
+			"and objectives objective0, objective1, and objective2, complete the tasks "
+			"get_soil_data(waypoint1), get_soil_data(waypoint3), get_soil_data(waypoint4), "
+			"get_rock_data(waypoint5), get_rock_data(waypoint4), "
+			"get_image_data(objective0, low_res), get_image_data(objective0, high_res), "
+			"and get_image_data(objective2, low_res)."
+		),
+	)
+	method_library = _official_domain_method_library(
+		"marsrover",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_network": task_network,
+					"task_network_ordered": kwargs.get("task_network_ordered"),
+				},
+			)
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full unordered guided search timed out")
+			if len(task_network) > 4:
+				raise AssertionError("chunked horizon should be capped at four tasks")
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="sample_soil",
+						args=("rover0", "rover0store", "waypoint1"),
+					),
+				],
+				work_dir="dummy-capped-guided-plan",
+				raw_plan="==>\n1 sample_soil rover0 rover0store waypoint1\nroot 2\n2 get_soil_data waypoint1 -> m-get_soil_data 1\n",
+				actual_plan="==>\n1 sample_soil rover0 rover0store waypoint1\nroot 2\n2 get_soil_data waypoint1 -> m-get_soil_data 1\n",
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m-get_soil_data", "task_args": ["waypoint1"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["communicated_soil_data(waypoint1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_chunked_query_tasks_with_goals"
+	chunk_calls = [
+		call
+		for call in captured["calls"]
+		if call["task_name"] == "stage6_guided_chunk"
+	]
+	assert chunk_calls
+	assert all(len(call["task_network"]) <= 4 for call in chunk_calls)
+	assert all(call["task_network_ordered"] is False for call in chunk_calls)
+
+
+def assert_stage6_chunked_guided_execution_uses_longer_timeout_for_singleton_unordered_chunks():
+	problem_path = MARSROVER_PROBLEM_DIR / "pfile08.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing marsrover problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=MARSROVER_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		(
+			"Using lander general, modes colour, high_res, and low_res, rovers rover0, "
+			"rover1, rover2, and rover3, stores rover0store, rover1store, rover2store, "
+			"and rover3store, waypoints waypoint0, waypoint1, waypoint2, waypoint3, "
+			"waypoint4, and waypoint5, cameras camera0, camera1, camera2, and camera3, "
+			"and objectives objective0, objective1, and objective2, complete the tasks "
+			"get_soil_data(waypoint1), get_soil_data(waypoint3), get_soil_data(waypoint4), "
+			"get_rock_data(waypoint5), get_rock_data(waypoint4), "
+			"get_image_data(objective0, low_res), get_image_data(objective0, high_res), "
+			"and get_image_data(objective2, low_res)."
+		),
+	)
+	method_library = _official_domain_method_library(
+		"marsrover",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_network": task_network,
+					"timeout_seconds": kwargs.get("timeout_seconds"),
+				},
+			)
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full unordered guided search timed out")
+			if len(task_network) > 1:
+				raise RuntimeError("shrink to singleton chunks")
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="sample_soil",
+						args=("rover0", "rover0store", "waypoint1"),
+					),
+				],
+				work_dir="dummy-singleton-guided-plan",
+				raw_plan="==>\n1 sample_soil rover0 rover0store waypoint1\nroot 2\n2 get_soil_data waypoint1 -> m-get_soil_data 1\n",
+				actual_plan="==>\n1 sample_soil rover0 rover0store waypoint1\nroot 2\n2 get_soil_data waypoint1 -> m-get_soil_data 1\n",
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m-get_soil_data", "task_args": ["waypoint1"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["communicated_soil_data(waypoint1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	chunk_calls = [
+		call
+		for call in captured["calls"]
+		if call["task_name"] == "stage6_guided_chunk"
+	]
+	assert chunk_calls
+	assert any(len(call["task_network"]) > 1 for call in chunk_calls)
+	assert any(len(call["task_network"]) == 1 for call in chunk_calls)
+	multi_task_timeouts = {
+		call["timeout_seconds"]
+		for call in chunk_calls
+		if len(call["task_network"]) > 1
+	}
+	singleton_timeouts = {
+		call["timeout_seconds"]
+		for call in chunk_calls
+		if len(call["task_network"]) == 1
+	}
+	assert multi_task_timeouts == {5.0}
+	assert singleton_timeouts == {30.0}
+
+
+def assert_stage6_chunked_guided_execution_retains_reduced_chunk_ceiling_after_failures():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), then "
+		"do_put_on(b1, b4), then do_put_on(b3, b1), then do_put_on(b2, b3), then "
+		"do_put_on(b4, b1).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"chunk_sizes": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			goal_facts = tuple(kwargs.get("goal_facts") or ())
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if task_name == "stage6_guided_chunk":
+				captured["chunk_sizes"].append(len(task_network))
+			if len(task_network) >= 4 and goal_facts:
+				raise RuntimeError("large chunk timed out")
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				work_dir="dummy-adaptive-guided-plan",
+				raw_plan="==>\n1 stack b4 b2\nroot 2\n2 do_put_on b4 b2 -> m_do_put_on 1\n",
+				actual_plan="==>\n1 stack b4 b2\nroot 2\n2 do_put_on b4 b2 -> m_do_put_on 1\n",
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert captured["chunk_sizes"][:2] == [4, 2]
+	assert all(chunk_size <= 2 for chunk_size in captured["chunk_sizes"][1:])
+
+
+def assert_stage6_chunked_guided_execution_reorders_unordered_singleton_fallbacks_generically():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	instruction = (
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), "
+		"do_put_on(b1, b4), and do_put_on(b3, b1)."
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		instruction,
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(instruction)),
+	)
+	task_network = pipeline._stage6_query_task_network(ltl_spec, method_library)
+	assert task_network is not None
+	captured: Dict[str, Any] = {"singleton_calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network_arg = tuple(kwargs.get("task_network") or ())
+			if task_name == "stage6_guided_chunk" and len(task_network_arg) > 1:
+				raise RuntimeError("force singleton fallback")
+			if not task_network_arg:
+				raise AssertionError("expected singleton task network")
+			singleton = task_network_arg[0]
+			captured["singleton_calls"].append(singleton)
+			if singleton == task_network[0]:
+				raise RuntimeError("current head is not plannable")
+			task_name_value, task_args = singleton
+			args_text = " ".join(task_args)
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="stack",
+						args=task_args,
+					),
+				],
+				work_dir="dummy-unordered-singleton-reorder",
+				raw_plan=(
+					f"==>\n1 stack {args_text}\nroot 2\n"
+					f"2 {task_name_value} {args_text} -> m_{task_name_value} 1\n"
+				),
+				actual_plan=(
+					f"==>\n1 stack {args_text}\nroot 2\n"
+					f"2 {task_name_value} {args_text} -> m_{task_name_value} 1\n"
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			if "do_put_on b1 b4" in plan_text:
+				return [{"method_name": "m_do_put_on", "task_args": ["b1", "b4"]}]
+			if "do_put_on b3 b1" in plan_text:
+				return [{"method_name": "m_do_put_on", "task_args": ["b3", "b1"]}]
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	runner = JasonRunner()
+	action_schemas = pipeline._stage6_action_schemas()
+	predicate_name_map = runner._runtime_predicate_name_map(
+		action_schemas=action_schemas,
+		predicate_names=[
+			str(getattr(predicate, "name", "")).strip()
+			for predicate in getattr(pipeline.domain, "predicates", ()) or ()
+			if str(getattr(predicate, "name", "")).strip()
+		],
+	)
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_chunked_guided_execution(
+			ltl_spec,
+			task_network,
+			method_library,
+			planner=DummyPlanner(),
+			runner=runner,
+			typed_objects=pipeline._typed_object_entries(
+				tuple(pipeline.problem.objects),
+				dict(pipeline.problem.object_types),
+			),
+			runtime_objects=tuple(pipeline.problem.objects),
+			action_schemas=action_schemas,
+			seed_facts=tuple(
+				pipeline._render_problem_fact(fact)
+				for fact in pipeline.problem.init_facts
+			),
+			predicate_name_map=predicate_name_map,
+			task_network_ordered=False,
+			timeout_seconds=5.0,
+			single_task_timeout_seconds=30.0,
+			task_literal_signatures=tuple(ltl_spec.query_task_literal_signatures),
+			task_target_ids=("t1", "t2", "t3"),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] in {
+		"panda_chunked_query_tasks_with_goals",
+		"panda_chunked_query_tasks_tail_replan",
+	}
+	assert captured["singleton_calls"]
+	assert task_network[0] in captured["singleton_calls"]
+	assert task_network[1] in captured["singleton_calls"]
+	assert guided["method_trace"][0]["task_args"] == ["b1", "b4"]
 
 
 def assert_stage6_chunked_guided_execution_preserves_hddl_fact_spellings_after_replay():
@@ -3035,6 +3857,677 @@ def assert_stage6_chunked_guided_execution_preserves_hddl_fact_spellings_after_r
 	assert "(capacity-predecessor capacity-0 capacity-1)" in replayed_initial_facts
 	assert all("capacity_predecessor" not in fact for fact in replayed_initial_facts)
 	assert all('"capacity-0"' not in fact for fact in replayed_initial_facts)
+
+
+def assert_stage6_chunked_guided_execution_retries_task_network_when_goal_guided_chunk_is_empty():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), then "
+		"do_put_on(b1, b4).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			goal_facts = tuple(kwargs.get("goal_facts") or ())
+			allow_empty_plan = kwargs.get("allow_empty_plan")
+			transition_name = kwargs.get("transition_name")
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_network": task_network,
+					"goal_facts": goal_facts,
+					"allow_empty_plan": allow_empty_plan,
+					"transition_name": transition_name,
+				},
+			)
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if goal_facts:
+				return SimpleNamespace(
+					steps=[],
+					work_dir="dummy-empty-guided-plan",
+					raw_plan="==>\nroot\n",
+					actual_plan="==>\nroot\n",
+				)
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				work_dir="dummy-task-network-plan",
+				raw_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+				actual_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			if str(plan_text).strip() == "==>\nroot":
+				return []
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_chunked_query_tasks_with_goals"
+	task_network = tuple(
+		(task["task_name"], tuple(task["args"]))
+		for task in guided["task_network"]
+	)
+	chunk_goal_call = next(
+		call
+		for call in captured["calls"]
+		if call["task_name"] == "stage6_guided_chunk"
+		and call["task_network"] == task_network
+		and bool(call["goal_facts"])
+	)
+	chunk_fallback_call = next(
+		call
+		for call in captured["calls"]
+		if call["task_name"] == "stage6_guided_chunk"
+		and call["task_network"] == task_network
+		and not call["goal_facts"]
+	)
+	assert chunk_goal_call["allow_empty_plan"] is True
+	assert chunk_fallback_call["allow_empty_plan"] is False
+	assert chunk_fallback_call["transition_name"].endswith("_task_network")
+	assert guided["actual_plan"] is not None
+	assert "m_do_put_on" in guided["actual_plan"]
+
+
+def assert_stage6_chunked_guided_execution_retries_task_network_when_singleton_goal_guided_chunk_raises():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), then "
+		"do_put_on(b1, b4), then do_put_on(b3, b1).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			goal_facts = tuple(kwargs.get("goal_facts") or ())
+			transition_name = kwargs.get("transition_name")
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_network": task_network,
+					"goal_facts": goal_facts,
+					"transition_name": transition_name,
+				},
+			)
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if len(task_network) >= 3:
+				raise RuntimeError("large chunk timed out")
+			if len(task_network) == 1 and goal_facts:
+				raise RuntimeError("singleton goal-guided chunk failed")
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				work_dir="dummy-singleton-task-network-plan",
+				raw_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+				actual_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	singleton_goal_call = next(
+		call
+		for call in captured["calls"]
+		if call["task_name"] == "stage6_guided_chunk"
+		and len(call["task_network"]) == 1
+		and bool(call["goal_facts"])
+	)
+	singleton_fallback_call = next(
+		call
+		for call in captured["calls"]
+		if call["task_name"] == "stage6_guided_chunk"
+		and len(call["task_network"]) == 1
+		and not call["goal_facts"]
+	)
+	assert singleton_goal_call["transition_name"] == "stage6_guided_chunk_1_1"
+	assert singleton_fallback_call["transition_name"] == "stage6_guided_chunk_1_1_task_network"
+	assert guided["actual_plan"] is not None
+	assert "m_do_put_on" in guided["actual_plan"]
+
+
+def assert_stage6_chunked_guided_execution_splits_large_empty_goal_guided_chunks_before_task_network_fallback():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), then "
+		"do_put_on(b1, b4), then do_put_on(b3, b1).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			goal_facts = tuple(kwargs.get("goal_facts") or ())
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_network": task_network,
+					"goal_facts": goal_facts,
+					"transition_name": kwargs.get("transition_name"),
+				},
+			)
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if len(task_network) >= 3:
+				if not goal_facts:
+					raise AssertionError("large chunk should split before task-network fallback")
+				return SimpleNamespace(
+					steps=[],
+					work_dir="dummy-large-empty-guided-plan",
+					raw_plan="==>\nroot\n",
+					actual_plan="==>\nroot\n",
+				)
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				work_dir="dummy-small-guided-plan",
+				raw_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+				actual_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			if str(plan_text).strip() == "==>\nroot":
+				return []
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_chunked_query_tasks_with_goals"
+	assert any(len(call["task_network"]) == 3 for call in captured["calls"] if call["goal_facts"])
+	assert any(len(call["task_network"]) == 1 for call in captured["calls"])
+	assert not any(
+		len(call["task_network"]) == 3 and not call["goal_facts"]
+		for call in captured["calls"]
+	)
+
+
+def assert_stage6_chunked_guided_execution_preserves_partial_prefix_when_later_chunk_fails():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), "
+		"do_put_on(b1, b4), do_put_on(b3, b1), do_put_on(b2, b3), and do_put_on(b4, b1).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			transition_name = str(kwargs.get("transition_name") or "")
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if task_name == "stage6_guided_tail":
+				raise RuntimeError("tail replan unavailable")
+			if len(task_network) >= 4:
+				raise RuntimeError("large chunk timed out")
+			if transition_name.endswith("_5_5") or transition_name.endswith("_5_5_task_network"):
+				raise RuntimeError("final singleton chunk timed out")
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(
+						task_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				work_dir=f"dummy-{transition_name}",
+				raw_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+				actual_plan="\n".join(
+					[
+						"==>",
+						"1 stack b4 b2",
+						"root 2",
+						"2 do_put_on b4 b2 -> m_do_put_on 1",
+					],
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_chunked_query_tasks_partial_prefix"
+	assert guided["is_partial"] is True
+	assert guided["completed_task_count"] == 4
+	assert len(guided["action_path"]) == 2
+	assert len(guided["method_trace"]) == 2
+
+
+def assert_stage6_chunked_guided_execution_replans_small_tail_window_before_returning_partial():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), "
+		"do_put_on(b1, b4), do_put_on(b3, b1), do_put_on(b2, b3), and do_put_on(b4, b1).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_network = tuple(kwargs.get("task_network") or ())
+			transition_name = str(kwargs.get("transition_name") or "")
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if task_name == "stage6_guided_reordered_schedule":
+				raise RuntimeError("reordered guided probe timed out")
+			if transition_name == "stage6_guided_tail_1_5":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(task_name="stack", args=("b4", "b1")),
+					],
+					work_dir=f"dummy-{transition_name}",
+					raw_plan="\n".join(
+						[
+							"==>",
+							"1 stack b4 b1",
+							"root 2",
+							"2 do_put_on b4 b1 -> m_do_put_on 1",
+						],
+					),
+					actual_plan="\n".join(
+						[
+							"==>",
+							"1 stack b4 b1",
+							"root 2",
+							"2 do_put_on b4 b1 -> m_do_put_on 1",
+						],
+					),
+				)
+			if len(task_network) >= 4:
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(task_name="stack", args=("b4", "b2")),
+					],
+					work_dir=f"dummy-{transition_name}",
+					raw_plan="\n".join(
+						[
+							"==>",
+							"1 stack b4 b2",
+							"root 2",
+							"2 do_put_on b4 b2 -> m_do_put_on 1",
+						],
+					),
+					actual_plan="\n".join(
+						[
+							"==>",
+							"1 stack b4 b2",
+							"root 2",
+							"2 do_put_on b4 b2 -> m_do_put_on 1",
+						],
+					),
+				)
+			if transition_name.endswith("_5_5") or transition_name.endswith("_5_5_task_network"):
+				raise RuntimeError("final singleton chunk timed out")
+			return SimpleNamespace(
+				steps=[
+					SimpleNamespace(task_name="stack", args=("b1", "b4")),
+				],
+				work_dir=f"dummy-{transition_name}",
+				raw_plan="\n".join(
+					[
+						"==>",
+						"1 stack b1 b4",
+						"root 2",
+						"2 do_put_on b1 b4 -> m_do_put_on 1",
+					],
+				),
+				actual_plan="\n".join(
+					[
+						"==>",
+						"1 stack b1 b4",
+						"root 2",
+						"2 do_put_on b1 b4 -> m_do_put_on 1",
+					],
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b1"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {
+			"passed": True,
+			"world_facts": ["clear(b1)"],
+		},
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_chunked_query_tasks_tail_replan"
+	assert sorted(guided.get("completed_target_ids") or []) == ["t1", "t2", "t3", "t4", "t5"]
+	assert "is_partial" not in guided
+
+
+def assert_stage6_unordered_guided_execution_probes_medium_reordered_network_before_chunking():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b1, b2, b3, and b4, complete the tasks do_put_on(b4, b2), "
+		"do_put_on(b1, b4), do_put_on(b3, b1), do_put_on(b2, b3), and do_put_on(b4, b1).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			captured["calls"].append(
+				{
+					"task_name": kwargs.get("task_name"),
+					"task_network_ordered": kwargs.get("task_network_ordered"),
+					"task_network_size": len(tuple(kwargs.get("task_network") or ())),
+				},
+			)
+			task_name = kwargs.get("task_name")
+			if task_name == "stage6_guided_reordered_schedule":
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(task_name="stack", args=("b4", "b1")),
+					],
+					work_dir="dummy-reordered-guided-plan",
+					raw_plan="\n".join(
+						[
+							"==>",
+							"1 stack b4 b1",
+							"root 2",
+							"2 do_put_on b4 b1 -> m_do_put_on 1",
+						],
+					),
+					actual_plan="\n".join(
+						[
+							"==>",
+							"1 stack b4 b1",
+							"root 2",
+							"2 do_put_on b4 b1 -> m_do_put_on 1",
+						],
+					),
+				)
+			raise RuntimeError("other planner paths should not run")
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b1"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_reordered_query_task_network_with_goals"
+	assert captured["calls"]
+	assert captured["calls"][0] == {
+		"task_name": "stage6_guided_reordered_schedule",
+		"task_network_ordered": True,
+		"task_network_size": 5,
+	}
 
 
 def assert_stage6_query_goal_projection_drops_transient_ordered_support_effects():
@@ -3128,6 +4621,44 @@ def assert_stage6_chunked_hierarchical_plan_merge_preserves_structure():
 					"3 act_a a",
 					"root 10",
 					"10 task_a a -> m_task_a 3",
+				],
+			),
+			"\n".join(
+				[
+					"==>",
+					"3 act_b b",
+					"root 9",
+					"9 task_b b -> m_task_b 3",
+				],
+			),
+		],
+	)
+
+	assert merged is not None
+	lines = [line.strip() for line in merged.splitlines() if line.strip()]
+	assert lines[0] == "==>"
+	assert "1 act_a a" in lines
+	assert "3 act_b b" in lines
+	assert "root 2 4" in lines
+	assert "2 task_a a -> m_task_a 1" in lines
+	assert "4 task_b b -> m_task_b 3" in lines
+
+
+def assert_stage6_chunked_hierarchical_plan_merge_ignores_empty_root_only_chunks():
+	merged = LTL_BDI_Pipeline._stage6_merge_hierarchical_plan_texts(
+		[
+			"\n".join(
+				[
+					"==>",
+					"3 act_a a",
+					"root 10",
+					"10 task_a a -> m_task_a 3",
+				],
+			),
+			"\n".join(
+				[
+					"==>",
+					"root",
 				],
 			),
 			"\n".join(
@@ -3304,13 +4835,13 @@ def _run_query_case(
 	if execution.get("stage4_backend") != "pandaPI":
 		bug_messages.append("Stage 4 backend is not pandaPI")
 
-	stage3_library = execution.get("stage3_method_library") or {}
+	stage3_library = _load_stage3_method_library(execution, log_dir)
 	target_bindings = stage3_library.get("target_task_bindings") or []
 	if not target_bindings:
 		bug_messages.append("Stage 3 produced no target_task_bindings")
 	bug_messages.extend(_binding_semantic_messages(stage3_library))
 
-	stage5_code = execution.get("stage5_agentspeak") or ""
+	stage5_code = _load_stage5_agentspeak_code(execution, log_dir)
 	if "/* HTN Method Plans */" not in stage5_code:
 		bug_messages.append("Stage 5 code is missing rendered HTN method plans")
 	if "dfa_edge_label(" not in stage5_code:
@@ -3348,7 +4879,7 @@ def _run_query_case(
 	if "STAGE 7: Official IPC HTN Plan Verification" not in execution_txt:
 		bug_messages.append("execution.txt is missing Stage 7 section")
 
-	stage6_artifacts = execution.get("stage6_artifacts") or {}
+	stage6_artifacts = _load_stage6_artifacts(execution, log_dir)
 	if stage6_artifacts.get("status") != "success":
 		bug_messages.append("Stage 6 status payload is not success")
 	if stage6_artifacts.get("backend") != "RunLocalMAS":
@@ -3398,7 +4929,7 @@ def _run_query_case(
 	if (log_dir / "jason_runner_agent.asl").exists():
 		bug_messages.append("deprecated runtime-only jason_runner_agent.asl artifact still present")
 
-	stage7_artifacts = execution.get("stage7_artifacts") or {}
+	stage7_artifacts = _load_stage7_artifacts(execution, log_dir)
 	if stage7_artifacts.get("tool_available") is not True:
 		bug_messages.append("official IPC verifier is not available on PATH")
 	if stage7_artifacts.get("plan_kind") != "hierarchical":
@@ -3865,7 +5396,13 @@ def _print_cli_report(report: Dict[str, Any]) -> None:
 	query_id = report["query_id"]
 	case = report["case"]
 	execution = report["execution"] or {}
+	log_dir = Path(report["log_dir"]) if report.get("log_dir") else None
 	stage3_metadata = execution.get("stage3_metadata") or {}
+	stage3_library = (
+		_load_stage3_method_library(execution, log_dir)
+		if log_dir is not None
+		else (execution.get("stage3_method_library") or {})
+	)
 
 	print(f"{query_id}: {case['description']}")
 	print(f"Instruction: {case['instruction']}")
@@ -3874,7 +5411,7 @@ def _print_cli_report(report: Dict[str, Any]) -> None:
 	print(f"Stage 3 Target Literals: {stage3_metadata.get('target_literals', [])}")
 	print(
 		f"Stage 3 Target Task Bindings: "
-		f"{(execution.get('stage3_method_library') or {}).get('target_task_bindings', [])}",
+		f"{stage3_library.get('target_task_bindings', [])}",
 	)
 	official_verifier = report.get("official_verifier") or {}
 	if official_verifier:
