@@ -104,6 +104,20 @@ def test_parse_result_json_accepts_leading_json_object_with_trailing_garbage():
     }
 
 
+def test_parse_result_json_recovers_from_leading_junk_before_schema_key():
+    generator = NLToLTLfGenerator()
+
+    result = generator._parse_result_json(
+        '{"|","objects":[],"ltl_formulas":[],"atoms":[]}',
+    )
+
+    assert result == {
+        "objects": [],
+        "ltl_formulas": [],
+        "atoms": [],
+    }
+
+
 class _RecordingCompletions:
     def __init__(self, outcomes):
         self._outcomes = list(outcomes)

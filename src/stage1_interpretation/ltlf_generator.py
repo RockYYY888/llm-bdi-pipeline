@@ -738,6 +738,12 @@ class NLToLTLfGenerator:
             raw_decoded = self._decode_leading_json_object(result_text)
             if raw_decoded is not None:
                 return raw_decoded
+            schema_candidate = self._extract_schema_key_json_candidate(result_text)
+            if schema_candidate is not None:
+                try:
+                    return json.loads(schema_candidate)
+                except json.JSONDecodeError:
+                    pass
             candidate = self._extract_json_object_candidate(result_text)
             if candidate is not None:
                 try:
@@ -758,6 +764,31 @@ class NLToLTLfGenerator:
             return None
         candidate = result_text[start_index:end_index + 1].strip()
         return candidate or None
+
+    @staticmethod
+    def _extract_schema_key_json_candidate(result_text: str) -> str | None:
+        """
+        Recover a JSON object when the provider injects junk before the first schema key.
+
+        Some Stage 1 responses begin with stray tokens such as `{"|", ...}` before
+        resuming the required `objects` / `ltl_formulas` / `atoms` schema. When a
+        required top-level key is visible, rebuild the candidate object from that
+        key onward instead of failing immediately.
+        """
+        required_keys = ('"objects"', '"ltl_formulas"', '"atoms"')
+        key_positions = [
+            result_text.find(key)
+            for key in required_keys
+            if result_text.find(key) != -1
+        ]
+        if not key_positions:
+            return None
+        key_index = min(key_positions)
+        end_index = result_text.rfind("}")
+        if end_index == -1 or end_index <= key_index:
+            return None
+        candidate = "{" + result_text[key_index:end_index + 1]
+        return candidate.strip() or None
 
     @staticmethod
     def _decode_leading_json_object(result_text: str) -> dict | None:
