@@ -55,9 +55,25 @@ For official benchmark-backed acceptance:
    - Stage 6 runtime initialisation
    - Stage 7 official verification
 
-The current implementation of this rule lives in
-`tests/test_pipeline.py` via `_typed_object_phrase()`, `_build_case_from_problem()`,
-and `_load_problem_query_cases()`.
+## 5.1 Materialised Benchmark Query Manifest
+
+For reproducibility, the benchmark queries are not left as implicit runtime derivations.
+
+1. The checked-in materialisation lives at
+   `src/benchmark_data/official_problem_queries.json`.
+2. The canonical generator and loader live at
+   `src/utils/benchmark_query_manifest.py`.
+3. The manifest is produced deterministically from:
+   - the problem root HTN task network
+   - the typed object inventory exposed in the problem file
+   - the query protocol in this document
+4. The acceptance harness reads the manifest rather than regenerating query text inline.
+5. Unit tests verify that every manifest entry still matches the canonical reverse-generation
+   rule, so the stored data remains auditable rather than hand-edited folklore.
+
+This separation is deliberate: the document defines the protocol, the manifest stores the
+versioned benchmark instances, and the tests verify that the stored instances are justified by
+the canonical rule.
 
 ## 6. Current Examples
 
@@ -109,3 +125,4 @@ This document governs query writing only. It does not replace:
 - `PIPELINE_ASSUMPTIONS.md` for formal scope and validation boundaries
 - `src/stage1_interpretation/prompts.py` for the exact Stage 1 output contract
 - `src/stage3_method_synthesis/htn_prompts.py` for the exact Stage 3 synthesis contract
+- `src/benchmark_data/official_problem_queries.json` for the benchmark query instance inventory

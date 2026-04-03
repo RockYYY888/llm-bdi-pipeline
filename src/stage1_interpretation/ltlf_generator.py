@@ -113,14 +113,11 @@ class NLToLTLfGenerator:
 
         # Call LLM API with timeout handling
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            response = self._create_chat_completion(
+                [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.0,
-                timeout=60.0  # 60 seconds timeout for API call
             )
         except Exception as e:
             raise RuntimeError(
@@ -513,6 +510,52 @@ class NLToLTLfGenerator:
             spec.grounding_map = self._create_grounding_map(spec)
 
         return (spec, prompt_dict, result_text)
+
+    def _create_chat_completion(self, messages: list[dict[str, str]]):
+        """
+        Request a JSON-only Stage 1 completion with a compatibility fallback.
+
+        Prefer provider-enforced JSON output when available because Stage 1 is
+        schema-constrained. Fall back to the plain-text path only when the
+        backend explicitly rejects the `response_format` parameter.
+        """
+        request_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.0,
+            "timeout": 60.0,
+        }
+
+        try:
+            return self.client.chat.completions.create(
+                response_format={"type": "json_object"},
+                **request_kwargs,
+            )
+        except Exception as exc:
+            if self._is_unsupported_json_response_format_error(exc):
+                return self.client.chat.completions.create(**request_kwargs)
+            raise
+
+    @staticmethod
+    def _is_unsupported_json_response_format_error(exc: Exception) -> bool:
+        """
+        Detect provider errors that specifically reject `response_format`.
+
+        This keeps the fallback narrow: transport or authentication failures
+        must still surface as hard errors instead of silently degrading.
+        """
+        message = str(exc).lower()
+        if "response_format" not in message and "json_object" not in message:
+            return False
+        unsupported_markers = (
+            "unsupported",
+            "not supported",
+            "invalid parameter",
+            "unknown parameter",
+            "unrecognized request argument",
+            "extra inputs are not permitted",
+        )
+        return any(marker in message for marker in unsupported_markers)
 
     def _parse_result_json(self, result_text: str) -> dict:
         """Parse the LLM response, tolerating prose wrappers around one JSON object."""

@@ -210,6 +210,14 @@ def test_official_satellite_problem_query_case_generation_from_problem_tasks():
 	pipeline_tests.assert_official_satellite_problem_query_case_generation_from_problem_tasks()
 
 
+def test_benchmark_query_manifest_matches_canonical_problem_generation():
+	pipeline_tests.assert_benchmark_query_manifest_matches_canonical_problem_generation()
+
+
+def test_benchmark_query_manifest_instructions_respect_protocol():
+	pipeline_tests.assert_benchmark_query_manifest_instructions_respect_protocol()
+
+
 def test_query_task_anchor_extraction_uses_declared_tasks_only():
 	pipeline_tests.assert_query_task_anchor_extraction_uses_declared_tasks_only()
 

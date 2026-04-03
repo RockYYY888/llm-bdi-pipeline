@@ -1,13 +1,12 @@
 """
-Live end-to-end acceptance harness for reverse-generated official benchmark queries.
+Live end-to-end acceptance harness for official benchmark query manifests.
 
 This file is the canonical acceptance entry point:
 - pytest uses it only for end-to-end verification
 - CLI can run `python tests/test_pipeline.py query_2`, `all`, or `list`
-- current live query cases are reverse-generated from official IPC benchmark
-  problems for Blocksworld `p01`-`p03`, Marsrover `pfile01`-`pfile03`,
-  Satellite first three problems, and Transport `pfile01`-`pfile03`
-  into single-sentence natural-language instructions
+- current live query cases are loaded from a versioned manifest whose entries are
+  canonically reverse-generated from official IPC benchmark root HTN tasks and
+  typed object inventories
 - non-E2E pipeline unit tests live in `tests/test_pipeline_units.py`
 """
 
@@ -53,6 +52,16 @@ from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
+from utils.benchmark_query_manifest import (
+	DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS,
+	build_case_from_problem as _build_case_from_problem,
+	load_problem_query_cases as _load_problem_query_cases,
+	serialise_nl_list as _serialise_nl_list,
+	serialise_task_clause_sequence as _serialise_task_clause_sequence,
+	task_invocation_to_query_clause as _task_invocation_to_query_clause,
+	typed_object_phrase as _typed_object_phrase,
+	typed_object_phrase_for_objects as _typed_object_phrase_for_objects,
+)
 from utils.hddl_condition_parser import HDDLConditionParser
 from utils.hddl_parser import HDDLParser
 from utils.ipc_plan_verifier import IPCPlanVerifier
@@ -117,103 +126,6 @@ OFFICIAL_STAGE3_MASK_TASK_SOURCE_PREDICATES: Dict[str, Dict[str, tuple[str, ...]
 def _literal_signature(predicate: str, args: List[str], is_positive: bool = True) -> str:
 	atom = predicate if not args else f"{predicate}({', '.join(args)})"
 	return atom if is_positive else f"!{atom}"
-
-
-def _serialise_nl_list(items: List[str]) -> str:
-	if not items:
-		return ""
-	if len(items) == 1:
-		return items[0]
-	if len(items) == 2:
-		return f"{items[0]} and {items[1]}"
-	return f"{', '.join(items[:-1])}, and {items[-1]}"
-
-
-def _serialise_task_clause_sequence(task_clauses: List[str], *, ordered: bool) -> str:
-	if not ordered or len(task_clauses) <= 1:
-		return _serialise_nl_list(task_clauses)
-	return ", then ".join(task_clauses)
-
-
-def _task_invocation_to_query_clause(task_name: str, args: List[str]) -> str:
-	if not args:
-		return f"{task_name}()"
-	return f"{task_name}({', '.join(args)})"
-
-
-def _typed_object_phrase(problem: Any) -> str:
-	return _typed_object_phrase_for_objects(problem, problem.objects)
-
-
-def _typed_object_phrase_for_objects(problem: Any, objects: List[str]) -> str:
-	if not objects:
-		return "Using the task arguments"
-
-	grouped_objects: Dict[str, List[str]] = {}
-	type_order: List[str] = []
-	for obj in objects:
-		object_type = problem.object_types.get(obj) or "object"
-		if object_type not in grouped_objects:
-			grouped_objects[object_type] = []
-			type_order.append(object_type)
-		grouped_objects[object_type].append(obj)
-
-	if len(type_order) == 1 and type_order[0] != "object":
-		object_type = type_order[0]
-		type_phrase = object_type if object_type.endswith("s") else f"{object_type}s"
-		return f"Using {type_phrase} {_serialise_nl_list(grouped_objects[object_type])}"
-
-	group_phrases = []
-	for object_type in type_order:
-		members = grouped_objects[object_type]
-		if object_type == "object":
-			group_phrases.append(_serialise_nl_list(members))
-			continue
-		type_phrase = object_type if len(members) == 1 else (
-			object_type if object_type.endswith("s") else f"{object_type}s"
-		)
-		group_phrases.append(f"{type_phrase} {_serialise_nl_list(members)}")
-	return f"Using {_serialise_nl_list(group_phrases)}"
-
-
-def _build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
-	problem = HDDLParser.parse_problem(str(problem_path))
-	task_clauses = [
-		_task_invocation_to_query_clause(invocation.task_name, invocation.args)
-		for invocation in problem.htn_tasks
-	]
-	if not task_clauses:
-		return None
-
-	return {
-		"instruction": (
-			f"{_typed_object_phrase(problem)}, complete the tasks "
-			f"{_serialise_task_clause_sequence(task_clauses, ordered=problem.htn_ordered)}."
-		),
-		"required_task_clauses": task_clauses,
-		"problem_file": str(problem_path.resolve()),
-		"minimum_action_count": 1,
-		"description": f"Auto-generated from {problem_path.name} ({problem.name})",
-	}
-
-
-def _load_problem_query_cases(
-	problem_dir: Path,
-	*,
-	limit: int = 3,
-	pattern: str = "p*.hddl",
-) -> Dict[str, Dict[str, Any]]:
-	if not problem_dir.exists():
-		return {}
-	cases: Dict[str, Dict[str, Any]] = {}
-	problem_paths = sorted(problem_dir.glob(pattern))[:limit]
-	for index, problem_path in enumerate(problem_paths, start=1):
-		case = _build_case_from_problem(problem_path)
-		if case is None:
-			continue
-		cases[f"query_{index}"] = case
-	return cases
-
 
 BLOCKSWORLD_QUERY_CASES: Dict[str, Dict[str, Any]] = _load_problem_query_cases(
 	BLOCKSWORLD_PROBLEM_DIR,
@@ -2225,6 +2137,51 @@ def assert_official_satellite_problem_query_case_generation_from_problem_tasks()
 		"do_observation(Phenomenon4, thermograph0)",
 	]
 	assert case["problem_file"] == str(problem_path.resolve())
+
+
+def assert_benchmark_query_manifest_matches_canonical_problem_generation():
+	for domain_key, problem_dir in {
+		"blocksworld": BLOCKSWORLD_PROBLEM_DIR,
+		"marsrover": MARSROVER_PROBLEM_DIR,
+		"satellite": SATELLITE_PROBLEM_DIR,
+		"transport": TRANSPORT_PROBLEM_DIR,
+	}.items():
+		query_cases = _load_problem_query_cases(
+			problem_dir,
+			limit=10_000,
+			pattern=DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS[domain_key],
+		)
+		expected_cases: Dict[str, Dict[str, Any]] = {}
+		problem_paths = sorted(problem_dir.glob(DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS[domain_key]))
+		for index, problem_path in enumerate(problem_paths, start=1):
+			case = _build_case_from_problem(problem_path)
+			if case is None:
+				continue
+			expected_cases[f"query_{index}"] = case
+		assert query_cases == expected_cases
+
+
+def assert_benchmark_query_manifest_instructions_respect_protocol():
+	for query_cases in (
+		_load_problem_query_cases(BLOCKSWORLD_PROBLEM_DIR, limit=10_000),
+		_load_problem_query_cases(MARSROVER_PROBLEM_DIR, limit=10_000),
+		_load_problem_query_cases(SATELLITE_PROBLEM_DIR, limit=10_000, pattern="*.hddl"),
+		_load_problem_query_cases(TRANSPORT_PROBLEM_DIR, limit=10_000),
+	):
+		for query_id, case in query_cases.items():
+			instruction = case["instruction"]
+			lowered = instruction.lower()
+			assert "\n" not in instruction, query_id
+			assert instruction.endswith("."), query_id
+			assert "complete the tasks " in instruction, query_id
+			assert "problem.hddl" not in lowered, query_id
+			assert ":init" not in lowered, query_id
+			assert ":goal" not in lowered, query_id
+			assert "official initial state" not in lowered, query_id
+			assert "decomposition strategy" not in lowered, query_id
+			assert "repair" not in lowered, query_id
+			for clause in case["required_task_clauses"]:
+				assert clause in instruction, (query_id, clause)
 
 
 def assert_query_task_anchor_extraction_uses_declared_tasks_only():

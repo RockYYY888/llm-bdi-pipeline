@@ -10,6 +10,7 @@ Results are recorded in CSV format with actual outputs and reflections.
 
 import sys
 import csv
+from types import SimpleNamespace
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any
@@ -87,6 +88,81 @@ def test_parse_result_json_extracts_embedded_object_from_prose_wrapper():
         "ltl_formulas": [],
         "atoms": [],
     }
+
+
+class _RecordingCompletions:
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _RecordingClient:
+    def __init__(self, outcomes):
+        self.completions = _RecordingCompletions(outcomes)
+        self.chat = SimpleNamespace(completions=self.completions)
+
+
+def _stage1_json_response(content: str):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            ),
+        ],
+    )
+
+
+def _blocksworld_domain_file() -> str:
+    return str(
+        Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl",
+    )
+
+
+def test_generate_requests_provider_enforced_json_when_supported():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+    generator.client = _RecordingClient(
+        [
+            _stage1_json_response(
+                '{"objects":["b1","b2"],'
+                '"ltl_formulas":[{"type":"temporal","operator":"F","formula":{"on":["b1","b2"]}}],'
+                '"atoms":[{"symbol":"on_b1_b2","predicate":"on","args":["b1","b2"]}]}',
+            ),
+        ],
+    )
+
+    spec, _, _ = generator.generate("Goal: eventually b1 is on b2.")
+
+    assert spec.formulas[0].to_string() == "F(on(b1, b2))"
+    first_call = generator.client.completions.calls[0]
+    assert first_call["response_format"] == {"type": "json_object"}
+
+
+def test_generate_falls_back_when_provider_rejects_response_format():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+    generator.client = _RecordingClient(
+        [
+            RuntimeError("response_format is not supported by this model"),
+            _stage1_json_response(
+                '{"objects":["b1","b2"],'
+                '"ltl_formulas":[{"type":"temporal","operator":"F","formula":{"on":["b1","b2"]}}],'
+                '"atoms":[{"symbol":"on_b1_b2","predicate":"on","args":["b1","b2"]}]}',
+            ),
+        ],
+    )
+
+    spec, _, _ = generator.generate("Goal: eventually b1 is on b2.")
+
+    assert spec.formulas[0].to_string() == "F(on(b1, b2))"
+    assert len(generator.client.completions.calls) == 2
+    assert generator.client.completions.calls[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in generator.client.completions.calls[1]
 
 
 def test_ltl_spec_preserves_identical_top_level_formula_occurrences():
