@@ -123,9 +123,14 @@ class NLToLTLfGenerator:
         prefer_compact_output = bool(compact_task_clauses) and (
             self._should_prefer_compact_task_grounded_output(nl_instruction)
         )
+        prefer_skeletal_output = (
+            prefer_compact_output
+            and self._should_use_skeletal_task_grounded_output(compact_task_clauses)
+        )
         user_prompt = get_ltl_user_prompt_with_options(
             nl_instruction,
             prefer_compact_task_grounded_output=prefer_compact_output,
+            prefer_skeletal_task_grounded_output=prefer_skeletal_output,
             compact_task_clauses=compact_task_clauses if prefer_compact_output else (),
         )
 
@@ -151,7 +156,7 @@ class NLToLTLfGenerator:
                 f"Please check your API key, network connection, and model availability."
             ) from e
 
-        result_text = response.choices[0].message.content.strip()
+        result_text = self._extract_response_text(response)
 
         # Strip markdown code fences if present
         if result_text.startswith("```"):
@@ -561,6 +566,86 @@ class NLToLTLfGenerator:
                 return self.client.chat.completions.create(**request_kwargs)
             raise
 
+    def _extract_response_text(self, response: object) -> str:
+        """
+        Extract textual JSON content from provider-specific response shapes.
+
+        Different chat-completion backends can return Stage 1 payloads as a plain
+        string, a structured content-parts list, or a parsed JSON object. Stage 1
+        needs a single textual JSON blob, so normalise those variants here and
+        fail with a clear contract error if the backend returns no usable text.
+        """
+        choices = getattr(response, "choices", None) or ()
+        if not choices:
+            raise RuntimeError("LLM response did not include any choices.")
+
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            raise RuntimeError("LLM response choice did not include a message payload.")
+
+        for candidate in (
+            getattr(message, "content", None),
+            getattr(message, "parsed", None),
+        ):
+            extracted = self._normalise_response_content(candidate)
+            if extracted is not None:
+                return extracted
+
+        dumped_message = message.model_dump() if hasattr(message, "model_dump") else None
+        if isinstance(dumped_message, dict):
+            for key in ("content", "parsed", "output_text", "text"):
+                extracted = self._normalise_response_content(dumped_message.get(key))
+                if extracted is not None:
+                    return extracted
+            refusal = dumped_message.get("refusal")
+            refusal_text = self._normalise_response_content(refusal)
+            if refusal_text:
+                raise RuntimeError(f"LLM refused Stage 1 response: {refusal_text}")
+
+        finish_reason = getattr(choices[0], "finish_reason", None)
+        raise RuntimeError(
+            "LLM response did not contain usable textual JSON content. "
+            f"finish_reason={finish_reason!r}"
+        )
+
+    def _normalise_response_content(self, content: object) -> str | None:
+        """
+        Convert provider content variants into one stripped text blob.
+        """
+        if content is None:
+            return None
+        if isinstance(content, str):
+            text = content.strip()
+            return text or None
+        if isinstance(content, dict):
+            for key in ("text", "value", "content"):
+                extracted = self._normalise_response_content(content.get(key))
+                if extracted is not None:
+                    return extracted
+            try:
+                return json.dumps(content, ensure_ascii=False)
+            except TypeError:
+                return str(content).strip() or None
+        if isinstance(content, (list, tuple)):
+            parts: list[str] = []
+            for item in content:
+                extracted = self._normalise_response_content(item)
+                if extracted is not None:
+                    parts.append(extracted)
+            if not parts:
+                return None
+            return "\n".join(parts).strip() or None
+        text_attr = getattr(content, "text", None)
+        extracted = self._normalise_response_content(text_attr)
+        if extracted is not None:
+            return extracted
+        value_attr = getattr(content, "value", None)
+        extracted = self._normalise_response_content(value_attr)
+        if extracted is not None:
+            return extracted
+        stringified = str(content).strip()
+        return stringified or None
+
     @staticmethod
     def _is_unsupported_json_response_format_error(exc: Exception) -> bool:
         """
@@ -630,6 +715,20 @@ class NLToLTLfGenerator:
             else:
                 clauses.append(f"{match.group('task_name')}()")
         return tuple(clauses)
+
+    @staticmethod
+    def _should_use_skeletal_task_grounded_output(
+        compact_task_clauses: tuple[str, ...],
+    ) -> bool:
+        """
+        Enable skeletal output when the explicit task list is too large to unroll.
+
+        The pipeline already canonicalises explicit benchmark task lists from the
+        query anchors. For very large lists, asking the model to spell out every
+        shallow obligation only increases truncation risk without improving the
+        canonical Stage 1 contract.
+        """
+        return len(tuple(compact_task_clauses or ())) >= 64
 
     def _parse_result_json(self, result_text: str) -> dict:
         """Parse the LLM response, tolerating prose wrappers around one JSON object."""

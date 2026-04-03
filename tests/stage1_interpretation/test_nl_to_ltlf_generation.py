@@ -133,6 +133,68 @@ def _stage1_json_response(content: str):
     )
 
 
+def test_extract_response_text_reads_structured_content_parts():
+    generator = NLToLTLfGenerator()
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    content=[
+                        {"type": "text", "text": '{"objects":[],"ltl_formulas":[],"atoms":[]}'},
+                    ],
+                ),
+            ),
+        ],
+    )
+
+    assert generator._extract_response_text(response) == (
+        '{"objects":[],"ltl_formulas":[],"atoms":[]}'
+    )
+
+
+def test_extract_response_text_falls_back_to_parsed_payload_when_content_is_missing():
+    generator = NLToLTLfGenerator()
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(
+                    content=None,
+                    parsed={
+                        "objects": [],
+                        "ltl_formulas": [],
+                        "atoms": [],
+                    },
+                ),
+            ),
+        ],
+    )
+
+    assert generator._extract_response_text(response) == (
+        '{"objects": [], "ltl_formulas": [], "atoms": []}'
+    )
+
+
+def test_extract_response_text_raises_clear_error_when_response_has_no_text():
+    generator = NLToLTLfGenerator()
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=None, parsed=None),
+            ),
+        ],
+    )
+
+    try:
+        generator._extract_response_text(response)
+    except RuntimeError as exc:
+        assert "did not contain usable textual JSON content" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError for empty Stage 1 response")
+
+
 def _blocksworld_domain_file() -> str:
     return str(
         Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl",
@@ -193,6 +255,18 @@ def test_generator_does_not_force_compact_mode_for_non_task_queries():
 
     assert not generator._should_prefer_compact_task_grounded_output(
         "Eventually b1 is on b2 and b3 is clear.",
+    )
+
+
+def test_generator_uses_skeletal_mode_for_very_long_task_lists():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+
+    assert generator._should_use_skeletal_task_grounded_output(
+        tuple(f"do_clear(b{index})" for index in range(64)),
+    )
+
+    assert not generator._should_use_skeletal_task_grounded_output(
+        tuple(f"do_clear(b{index})" for index in range(63)),
     )
 
 

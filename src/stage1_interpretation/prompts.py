@@ -55,6 +55,8 @@ def get_ltl_system_prompt(
             "- For explicit benchmark-style task lists, keep the response compact: emit one "
             "headline predicate obligation per mentioned task in the same surface order "
             "instead of a deeply nested temporal tree.",
+            "- For very long explicit task lists, return a skeletal predicate-grounded summary "
+            "using only the first listed task instead of unrolling hundreds of obligations.",
             "",
             "SEMANTIC BOUNDARY:",
             "- Use only the provided predicates plus the propositional constants true and false.",
@@ -112,8 +114,8 @@ def get_ltl_system_prompt(
             "- Symbol naming rule: predicate_arg1_arg2_... in lowercase with underscores.",
             '- true and false must appear as plain strings, not dictionaries, and never in "atoms".',
             "- Compact-response exception: if the instruction already enumerates many explicit "
-            "task invocations, atoms may be [] and objects may contain only the constants used "
-            "in the emitted predicate obligations.",
+            "task invocations, set objects exactly to [] and atoms exactly to []. Downstream "
+            "grounding reconstruction will recover constants from the emitted formulas.",
             "",
             "FORMULA JSON SCHEMA:",
             '- Atomic predicate: {"linked": ["a", "b"]}',
@@ -285,6 +287,7 @@ def get_ltl_user_prompt_with_options(
     nl_instruction: str,
     *,
     prefer_compact_task_grounded_output: bool = False,
+    prefer_skeletal_task_grounded_output: bool = False,
     compact_task_clauses: tuple[str, ...] = (),
 ) -> str:
     """
@@ -295,18 +298,43 @@ def get_ltl_user_prompt_with_options(
     lines = [
         f"Goal: {nl_instruction}",
         (
-            "Compact task-query rule: when the goal explicitly enumerates declared task "
-            "invocations, return one compact top-level eventual predicate obligation per "
-            "task in mention order. Do not expand the full task list into deeply nested "
-            "temporal JSON."
+            "For this compact response, set \"objects\" exactly to [] and set "
+            "\"atoms\" exactly to []. Do not enumerate objects or atoms."
         ),
-        "For this compact response, set \"atoms\" exactly to []. Do not enumerate atoms.",
+        "Return minified JSON with no unnecessary whitespace.",
     ]
-    if compact_task_clauses:
-        lines.append("Declared task invocations in surface order:")
-        lines.extend(
-            f"{index}. {clause}"
-            for index, clause in enumerate(compact_task_clauses, start=1)
+    if prefer_skeletal_task_grounded_output:
+        lines.insert(
+            1,
+            (
+                "Skeletal task-query rule: the declared task list is very long. Return exactly "
+                "one shallow top-level eventual predicate obligation using only the first listed "
+                "task as the summary anchor. Do not enumerate the remaining tasks and do not "
+                "expand decompositions."
+            ),
         )
-        lines.append("Use the listed task order directly when forming compact obligations.")
+    else:
+        lines.insert(
+            1,
+            (
+                "Compact task-query rule: when the goal explicitly enumerates declared task "
+                "invocations, return one compact top-level eventual predicate obligation per "
+                "task in mention order. Do not expand the full task list into deeply nested "
+                "temporal JSON."
+            ),
+        )
+    if compact_task_clauses:
+        if prefer_skeletal_task_grounded_output:
+            lines.append(
+                f"The instruction contains {len(compact_task_clauses)} declared task invocations.",
+            )
+            lines.append("Use only item 1 below as the skeletal summary anchor:")
+            lines.append(f"1. {compact_task_clauses[0]}")
+        else:
+            lines.append("Declared task invocations in surface order:")
+            lines.extend(
+                f"{index}. {clause}"
+                for index, clause in enumerate(compact_task_clauses, start=1)
+            )
+            lines.append("Use the listed task order directly when forming compact obligations.")
     return "\n".join(lines)

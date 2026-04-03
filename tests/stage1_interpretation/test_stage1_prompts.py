@@ -55,7 +55,8 @@ def test_stage1_system_prompt_preserves_schema_and_boundary_rules():
     assert "complete the tasks A(...), B(...), and C(...)" in prompt
     assert "prefer a conjunction of independent eventual goals" in prompt
     assert "keep the response compact" in prompt
-    assert "atoms may be []" in prompt
+    assert "set objects exactly to [] and atoms exactly to []" in prompt
+    assert "skeletal predicate-grounded summary" in prompt
     assert '"A": ["a"]' in prompt
     assert 'do not collapse this into one {"type": "temporal", "operator": "F"' in prompt
 
@@ -86,6 +87,23 @@ def test_stage1_user_prompt_can_request_compact_task_grounded_output():
     assert prompt.startswith("Goal: Using blocks b1 and b2")
     assert "Compact task-query rule:" in prompt
     assert "one compact top-level eventual predicate obligation per task" in prompt
-    assert 'set "atoms" exactly to []' in prompt
+    assert 'set "objects" exactly to [] and set "atoms" exactly to []' in prompt
     assert "Declared task invocations in surface order:" in prompt
     assert "1. do_put_on(b1, b2)" in prompt
+    assert "Return minified JSON with no unnecessary whitespace." in prompt
+
+
+def test_stage1_user_prompt_can_request_skeletal_task_grounded_output():
+    prompt = get_ltl_user_prompt_with_options(
+        "Using blocks b1 and b2, complete the tasks do_put_on(b1, b2), then do_clear(b1).",
+        prefer_compact_task_grounded_output=True,
+        prefer_skeletal_task_grounded_output=True,
+        compact_task_clauses=("do_put_on(b1, b2)", "do_clear(b1)"),
+    )
+
+    assert "Skeletal task-query rule:" in prompt
+    assert "Return exactly one shallow top-level eventual predicate obligation" in prompt
+    assert "The instruction contains 2 declared task invocations." in prompt
+    assert "Use only item 1 below as the skeletal summary anchor:" in prompt
+    assert "1. do_put_on(b1, b2)" in prompt
+    assert "\n2. do_clear(b1)" not in prompt
