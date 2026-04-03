@@ -50,6 +50,41 @@ def typed_object_phrase(problem: Any) -> str:
 	return typed_object_phrase_for_objects(problem, list(problem.objects or ()))
 
 
+def _is_problem_variable_symbol(symbol: str) -> bool:
+	token = str(symbol or "").strip()
+	return bool(token) and token.startswith("?")
+
+
+def query_referenced_problem_objects(problem: Any) -> List[str]:
+	"""
+	Return the minimal object inventory justified by the root task network.
+
+	If every root-task argument is already grounded, the query only needs the
+	objects referenced in those task invocations. When any root task still uses a
+	variable, fall back to the full problem inventory so the natural-language
+	query still exposes the candidate grounded objects required for resolution.
+	"""
+	referenced_objects: List[str] = []
+	seen = set()
+	variable_present = False
+	for invocation in list(problem.htn_tasks or ()):
+		for raw_arg in list(getattr(invocation, "args", ()) or ()):
+			arg = str(raw_arg or "").strip()
+			if not arg:
+				continue
+			if _is_problem_variable_symbol(arg):
+				variable_present = True
+				continue
+			if arg in seen:
+				continue
+			seen.add(arg)
+			referenced_objects.append(arg)
+
+	if variable_present or not referenced_objects:
+		return list(problem.objects or ())
+	return referenced_objects
+
+
 def typed_object_phrase_for_objects(problem: Any, objects: List[str]) -> str:
 	if not objects:
 		return "Using the task arguments"
@@ -89,10 +124,11 @@ def build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 	]
 	if not task_clauses:
 		return None
+	query_objects = query_referenced_problem_objects(problem)
 
 	return {
 		"instruction": (
-			f"{typed_object_phrase(problem)}, complete the tasks "
+			f"{typed_object_phrase_for_objects(problem, query_objects)}, complete the tasks "
 			f"{serialise_task_clause_sequence(task_clauses, ordered=problem.htn_ordered)}."
 		),
 		"required_task_clauses": task_clauses,
@@ -104,9 +140,9 @@ def build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 
 def build_benchmark_query_manifest() -> Dict[str, Any]:
 	manifest: Dict[str, Any] = {
-		"version": 1,
+		"version": 2,
 		"protocol_document": "docs/nl_instruction_template.md",
-		"generator": "canonical_root_task_query_v1",
+		"generator": "canonical_root_task_query_v2",
 		"domains": {},
 	}
 	for domain_key, problem_dir in DEFAULT_BENCHMARK_QUERY_DOMAIN_PROBLEM_DIRS.items():
@@ -180,4 +216,3 @@ def load_problem_query_cases(
 		case["problem_file"] = str((PROJECT_ROOT / case["problem_file"]).resolve())
 		normalised_cases[query_id] = case
 	return normalised_cases
-

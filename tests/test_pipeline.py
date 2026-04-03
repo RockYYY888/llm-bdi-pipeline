@@ -56,6 +56,7 @@ from utils.benchmark_query_manifest import (
 	DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS,
 	build_case_from_problem as _build_case_from_problem,
 	load_problem_query_cases as _load_problem_query_cases,
+	query_referenced_problem_objects as _query_referenced_problem_objects,
 	serialise_nl_list as _serialise_nl_list,
 	serialise_task_clause_sequence as _serialise_task_clause_sequence,
 	task_invocation_to_query_clause as _task_invocation_to_query_clause,
@@ -2033,7 +2034,7 @@ def assert_official_blocksworld_problem_query_case_generation_from_problem_tasks
 	case = _build_case_from_problem(problem_path)
 	assert case is not None
 	assert case["instruction"] == (
-		"Using blocks b1, b2, b3, b4, and b5, "
+		"Using blocks b4, b2, b1, and b3, "
 		"complete the tasks do_put_on(b4, b2), then do_put_on(b1, b4), "
 		"then do_put_on(b3, b1)."
 	)
@@ -2076,7 +2077,7 @@ def assert_official_blocksworld_problem_query_case_generation_preserves_identica
 		"do_put_on(b7, b4)",
 	]
 	assert case["instruction"] == (
-		"Using blocks b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, and b11, "
+		"Using blocks b10, b6, b5, b2, b9, b1, b11, b4, and b7, "
 		"complete the tasks do_put_on(b10, b6), then do_put_on(b5, b10), "
 		"then do_put_on(b2, b5), then do_put_on(b9, b2), then do_put_on(b1, b9), "
 		"then do_put_on(b11, b1), then do_put_on(b10, b6), then do_put_on(b5, b10), "
@@ -2100,9 +2101,8 @@ def assert_official_marsrover_problem_query_case_generation_from_problem_tasks()
 	case = _build_case_from_problem(problem_path)
 	assert case is not None
 	assert case["instruction"] == (
-		"Using lander general, modes colour, high_res, and low_res, rover rover0, "
-		"store rover0store, waypoints waypoint0, waypoint1, waypoint2, and waypoint3, "
-		"camera camera0, and objectives objective0 and objective1, complete the tasks "
+		"Using waypoints waypoint2 and waypoint3, objective objective1, and mode high_res, "
+		"complete the tasks "
 		"get_soil_data(waypoint2), get_rock_data(waypoint3), and "
 		"get_image_data(objective1, high_res)."
 	)
@@ -2129,14 +2129,34 @@ def assert_official_satellite_problem_query_case_generation_from_problem_tasks()
 	case = _build_case_from_problem(problem_path)
 	assert case is not None
 	assert case["instruction"] == (
-		"Using instrument instrument0, satellite satellite0, mode thermograph0, "
-		"calib_direction GroundStation2, and image_directions Phenomenon4 and Phenomenon6, "
+		"Using image_direction Phenomenon4 and mode thermograph0, "
 		"complete the tasks do_observation(Phenomenon4, thermograph0)."
 	)
 	assert case["required_task_clauses"] == [
 		"do_observation(Phenomenon4, thermograph0)",
 	]
 	assert case["problem_file"] == str(problem_path.resolve())
+
+
+def assert_benchmark_query_generation_uses_only_query_referenced_objects_when_grounded():
+	problem_path = (
+		Path(__file__).parent.parent
+		/ "src"
+		/ "domains"
+		/ "marsrover"
+		/ "problems"
+		/ "pfile01.hddl"
+	)
+	if not problem_path.exists():
+		pytest.skip(f"Missing marsrover problem file: {problem_path}")
+
+	problem = HDDLParser.parse_problem(str(problem_path))
+	assert _query_referenced_problem_objects(problem) == [
+		"waypoint2",
+		"waypoint3",
+		"objective1",
+		"high_res",
+	]
 
 
 def assert_benchmark_query_manifest_matches_canonical_problem_generation():

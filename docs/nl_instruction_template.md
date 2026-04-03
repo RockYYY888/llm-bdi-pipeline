@@ -17,7 +17,7 @@ The query must therefore be compact, explicit, and free of hidden problem-instan
 For reliable Stage 1 interpretation and Stage 3 synthesis, use one single sentence in this form:
 
 ```text
-Using <typed available objects>, complete the tasks task_1(arg1, ...), task_2(arg1, ...), and task_3(arg1, ...).
+Using <typed query-referenced objects>, complete the tasks task_1(arg1, ...), task_2(arg1, ...), and task_3(arg1, ...).
 ```
 
 ## 3. Required Properties
@@ -27,7 +27,8 @@ Every query should satisfy all of the following.
 1. Single sentence.
 2. Uses the exact object identifiers that appear in the domain/problem vocabulary.
 3. Uses explicit task-invocation syntax for declared tasks.
-4. Includes the objects that the generated methods may need to reference.
+4. Includes the typed objects referenced by the root task network. If the root task network
+   still contains variables, include the typed candidate objects needed to ground them.
 5. Does not mention `problem.hddl`, `:init`, `:goal`, benchmark ids, or hidden initial-state facts.
 6. Does not describe desired methods, repairs, or decomposition strategies directly.
 
@@ -49,7 +50,7 @@ For official benchmark-backed acceptance:
 1. Each `problem.hddl` instance maps to exactly one query.
 2. The query is reverse-generated from:
    - the problem's root HTN tasks
-   - the typed object inventory available to execution
+   - the minimal typed object inventory justified by those task invocations
 3. The query is not manually authored per problem instance.
 4. `problem.hddl` remains reserved for:
    - Stage 6 runtime initialisation
@@ -65,7 +66,8 @@ For reproducibility, the benchmark queries are not left as implicit runtime deri
    `src/utils/benchmark_query_manifest.py`.
 3. The manifest is produced deterministically from:
    - the problem root HTN task network
-   - the typed object inventory exposed in the problem file
+   - the query-referenced typed object inventory, with full problem inventory only when root
+     task variables require grounding candidates
    - the query protocol in this document
 4. The acceptance harness reads the manifest rather than regenerating query text inline.
 5. Unit tests verify that every manifest entry still matches the canonical reverse-generation
@@ -80,13 +82,13 @@ the canonical rule.
 Blocksworld:
 
 ```text
-Using blocks b1, b2, b3, b4, and b5, complete the tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1).
+Using blocks b4, b2, b1, and b3, complete the tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1).
 ```
 
 Marsrover:
 
 ```text
-Using lander general, modes colour, high_res, and low_res, rover rover0, store rover0store, waypoints waypoint0, waypoint1, waypoint2, and waypoint3, camera camera0, and objectives objective0 and objective1, complete the tasks get_soil_data(waypoint2), get_rock_data(waypoint3), and get_image_data(objective1, high_res).
+Using waypoints waypoint2 and waypoint3, objective objective1, and mode high_res, complete the tasks get_soil_data(waypoint2), get_rock_data(waypoint3), and get_image_data(objective1, high_res).
 ```
 
 ## 7. Anti-Patterns
