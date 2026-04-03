@@ -81,6 +81,7 @@ class DFABuilder:
 
         if metadata.get("construction") in {
             "independent_eventually_atomic_fast_path",
+            "independent_eventually_symbolic_surrogate",
             "ordered_eventually_atomic_fast_path",
         }:
             return {

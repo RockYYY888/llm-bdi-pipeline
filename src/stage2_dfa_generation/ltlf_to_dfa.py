@@ -108,7 +108,7 @@ class LTLfToDFA:
     Pipeline: Predicate LTLf → Propositional LTLf → DFA (DOT format)
     """
 
-    MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_STATES = 1 << 12
+    MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_TRANSITIONS = 250_000
 
     def __init__(self):
         self.ltlf_parser = LTLfParser()
@@ -187,6 +187,19 @@ class LTLfToDFA:
                     "construction": "independent_eventually_atomic_fast_path",
                 }
                 return dfa_dot, metadata
+            if self._can_use_symbolic_unordered_independent_eventually_surrogate(ltl_spec):
+                dfa_dot = self._build_symbolic_unordered_independent_eventually_surrogate_dfa()
+                metadata = {
+                    "original_formula": original_formula,
+                    "propositional_formula": propositional_formula,
+                    "predicate_to_prop_mapping": self.encoder.get_mapping(),
+                    "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
+                    "num_states": 1,
+                    "num_transitions": 1,
+                    "alphabet": list(unique_atoms),
+                    "construction": "independent_eventually_symbolic_surrogate",
+                }
+                return dfa_dot, metadata
 
         # Parse and convert to DFA
         try:
@@ -216,7 +229,25 @@ class LTLfToDFA:
     def _can_materialize_exact_independent_eventually_dfa(self, unique_atoms: List[str]) -> bool:
         if not unique_atoms:
             return False
-        return (1 << len(unique_atoms)) <= self.MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_STATES
+        estimated_transitions = self._independent_eventually_transition_count(len(unique_atoms))
+        return estimated_transitions <= self.MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_TRANSITIONS
+
+    @staticmethod
+    def _can_use_symbolic_unordered_independent_eventually_surrogate(ltl_spec: Any) -> bool:
+        if bool(getattr(ltl_spec, "query_task_sequence_is_ordered", False)):
+            return False
+        query_signatures = [
+            str(signature).strip()
+            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
+            if str(signature).strip()
+        ]
+        return bool(query_signatures)
+
+    @staticmethod
+    def _independent_eventually_transition_count(atom_count: int) -> int:
+        if atom_count <= 0:
+            return 0
+        return atom_count * (1 << (atom_count - 1)) + 1
 
     def _extract_independent_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
         formulas = list(getattr(ltl_spec, "formulas", ()) or ())
@@ -353,6 +384,24 @@ class LTLfToDFA:
             lines.append(f" {from_state} -> {to_state} [label=\"{label}\"];")
         lines.append("}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_symbolic_unordered_independent_eventually_surrogate_dfa() -> str:
+        return "\n".join(
+            [
+                "digraph MONA_DFA {",
+                " rankdir = LR;",
+                " center = true;",
+                " size = \"7.5,10.5\";",
+                " edge [fontname = Courier];",
+                " node [height = .5, width = .5];",
+                " node [shape = doublecircle]; 1;",
+                " init [shape = plaintext, label = \"\"];",
+                " init -> 1;",
+                " 1 -> 1 [label=\"true\"];",
+                "}",
+            ],
+        )
 
     def _build_ordered_eventually_atomic_dfa(self, propositional_atoms: List[str]) -> str:
         accepting_state = str(len(propositional_atoms) + 1)

@@ -135,10 +135,32 @@ def test_dfa_builder_skips_bdd_simplification_for_independent_eventually_atomic_
     assert result["simplification_stats"]["skipped_simplifier"] is True
 
 
-def test_ltlf_to_dfa_falls_back_to_generic_converter_for_large_independent_eventually_sets():
+def test_ltlf_to_dfa_uses_fast_path_for_thirteen_independent_eventually_goals():
     spec = LTLSpecification()
     grounding_map = GroundingMap()
     for index in range(13):
+        predicate = f"goal_{index}"
+        spec.add_formula(_finally_formula(predicate, []))
+        grounding_map.add_atom(predicate, predicate, [])
+    spec.grounding_map = grounding_map
+
+    converter = LTLfToDFA()
+    converter.ltlf_parser = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("generic ltlf2dfa path should not be used for 13 atomic eventually goals"),
+    )
+
+    dfa_dot, metadata = converter.convert(spec)
+
+    assert metadata["construction"] == "independent_eventually_atomic_fast_path"
+    assert metadata["num_states"] == 8192
+    assert metadata["num_states"] == 1 << 13
+    assert '1 -> 2 [label="goal_0"]' in dfa_dot
+
+
+def test_ltlf_to_dfa_falls_back_to_generic_converter_for_sixteen_independent_eventually_goals():
+    spec = LTLSpecification()
+    grounding_map = GroundingMap()
+    for index in range(16):
         predicate = f"goal_{index}"
         spec.add_formula(_finally_formula(predicate, []))
         grounding_map.add_atom(predicate, predicate, [])
@@ -169,10 +191,36 @@ digraph MONA_DFA {
     assert '1 -> 2 [label="goal_0"]' in dfa_dot
 
 
-def test_dfa_builder_uses_generic_path_for_large_independent_eventually_sets():
+def test_ltlf_to_dfa_uses_symbolic_surrogate_for_large_unordered_query_task_sets():
     spec = LTLSpecification()
     grounding_map = GroundingMap()
-    for index in range(13):
+    signatures = []
+    for index in range(17):
+        predicate = f"goal_{index}"
+        spec.add_formula(_finally_formula(predicate, []))
+        grounding_map.add_atom(predicate, predicate, [])
+        signatures.append(predicate)
+    spec.grounding_map = grounding_map
+    spec.query_task_literal_signatures = signatures
+    spec.query_task_sequence_is_ordered = False
+
+    converter = LTLfToDFA()
+    converter.ltlf_parser = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("generic ltlf2dfa path should not be used for large unordered query-task sets"),
+    )
+
+    dfa_dot, metadata = converter.convert(spec)
+
+    assert metadata["construction"] == "independent_eventually_symbolic_surrogate"
+    assert metadata["num_states"] == 1
+    assert metadata["num_transitions"] == 1
+    assert '1 -> 1 [label="true"]' in dfa_dot
+
+
+def test_dfa_builder_uses_generic_path_for_sixteen_independent_eventually_sets():
+    spec = LTLSpecification()
+    grounding_map = GroundingMap()
+    for index in range(16):
         predicate = f"goal_{index}"
         spec.add_formula(_finally_formula(predicate, []))
         grounding_map.add_atom(predicate, predicate, [])
@@ -200,6 +248,34 @@ digraph MONA_DFA {
     assert result["original_num_transitions"] == 1
     assert result["num_transitions"] == 1
     assert result["simplification_stats"]["method"] == "stub"
+
+
+def test_dfa_builder_skips_bdd_simplification_for_symbolic_unordered_surrogate():
+    spec = LTLSpecification()
+    grounding_map = GroundingMap()
+    signatures = []
+    for index in range(17):
+        predicate = f"goal_{index}"
+        spec.add_formula(_finally_formula(predicate, []))
+        grounding_map.add_atom(predicate, predicate, [])
+        signatures.append(predicate)
+    spec.grounding_map = grounding_map
+    spec.query_task_literal_signatures = signatures
+    spec.query_task_sequence_is_ordered = False
+
+    builder = DFABuilder()
+    builder.simplifier.simplify = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("BDD simplifier should be skipped for the symbolic surrogate path"),
+    )
+
+    result = builder.build(spec)
+
+    assert result["original_num_states"] == 1
+    assert result["num_states"] == 1
+    assert result["original_num_transitions"] == 1
+    assert result["num_transitions"] == 1
+    assert result["simplification_stats"]["method"] == "independent_eventually_symbolic_surrogate"
+    assert result["simplification_stats"]["skipped_simplifier"] is True
 
 
 def test_ltlf_to_dfa_uses_fast_path_for_ordered_eventually_sequences():
