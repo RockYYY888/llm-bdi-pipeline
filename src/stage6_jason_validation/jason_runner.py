@@ -366,6 +366,14 @@ class JasonRunner:
 			return {"target_ids": [], "target_signatures": []}
 
 		schema_lookup = self._action_schema_lookup(action_schemas)
+		predicate_name_map = self._runtime_predicate_name_map(
+			action_schemas=action_schemas,
+			predicate_names=[
+				str(getattr(predicate, "name", "")).strip()
+				for predicate in getattr(planning_domain, "predicates", ()) or ()
+				if str(getattr(predicate, "name", "")).strip()
+			],
+		)
 		runtime_world = {
 			atom
 			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
@@ -410,7 +418,10 @@ class JasonRunner:
 						f"stage6_order_depth_{depth}_{target_id}_"
 						f"{self._sanitize_name(literal.predicate)}"
 					),
-					initial_facts=self._runtime_world_to_hddl_facts(current_world),
+					initial_facts=self._runtime_world_to_hddl_facts(
+						current_world,
+						predicate_name_map=predicate_name_map,
+					),
 					allow_empty_plan=False,
 				)
 			except Exception:
@@ -619,26 +630,80 @@ class JasonRunner:
 	def _runtime_world_to_hddl_facts(
 		self,
 		world: Sequence[str],
+		*,
+		predicate_name_map: Optional[Dict[str, str]] = None,
 	) -> Tuple[str, ...]:
 		return tuple(
-			self._runtime_atom_to_hddl_fact(atom)
+			self._runtime_atom_to_hddl_fact(
+				atom,
+				predicate_name_map=predicate_name_map,
+			)
 			for atom in sorted(world)
 			if atom
 		)
 
-	@staticmethod
-	def _runtime_atom_to_hddl_fact(atom: str) -> str:
+	@classmethod
+	def _runtime_atom_to_hddl_fact(
+		cls,
+		atom: str,
+		*,
+		predicate_name_map: Optional[Dict[str, str]] = None,
+	) -> str:
 		text = (atom or "").strip()
 		if not text:
 			return "()"
 		if "(" not in text:
-			return f"({text})"
+			predicate = (
+				predicate_name_map.get(text, text)
+				if predicate_name_map is not None
+				else text
+			)
+			return f"({predicate})"
 		functor, remainder = text.split("(", 1)
+		functor = functor.strip()
+		predicate = (
+			predicate_name_map.get(functor, functor)
+			if predicate_name_map is not None
+			else functor
+		)
 		args_text = remainder[:-1].strip()
 		if not args_text:
-			return f"({functor})"
-		args = [part.strip() for part in args_text.split(",") if part.strip()]
-		return f"({functor} {' '.join(args)})"
+			return f"({predicate})"
+		args = [
+			cls._canonical_runtime_token(part.strip())
+			for part in args_text.split(",")
+			if part.strip()
+		]
+		return f"({predicate} {' '.join(args)})"
+
+	@classmethod
+	def _runtime_predicate_name_map(
+		cls,
+		*,
+		action_schemas: Sequence[Dict[str, Any]] = (),
+		predicate_names: Sequence[str] = (),
+	) -> Dict[str, str]:
+		mapping: Dict[str, str] = {}
+
+		def register(name: Any) -> None:
+			source_name = str(name or "").strip()
+			if not source_name or source_name == "=":
+				return
+			mapping.setdefault(cls._sanitize_name(source_name), source_name)
+			mapping.setdefault(source_name, source_name)
+
+		for predicate_name in predicate_names or ():
+			register(predicate_name)
+		for schema in action_schemas or ():
+			for collection_name in ("preconditions", "effects"):
+				for literal in schema.get(collection_name) or ():
+					if isinstance(literal, dict):
+						register(literal.get("predicate"))
+			for clause in schema.get("precondition_clauses") or ():
+				for literal in clause or ():
+					if isinstance(literal, dict):
+						register(literal.get("predicate"))
+		return mapping
 
 	def toolchain_available(self) -> bool:
 		"""Return whether Java+Jason requirements are available for Stage 6."""

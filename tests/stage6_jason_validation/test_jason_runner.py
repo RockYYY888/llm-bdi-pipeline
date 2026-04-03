@@ -75,6 +75,26 @@ def test_hddl_fact_to_atom_sanitizes_hyphenated_predicates():
 	)
 
 
+def test_runtime_world_to_hddl_facts_restores_source_predicate_names_and_tokens():
+	runner = JasonRunner()
+
+	facts = runner._runtime_world_to_hddl_facts(
+		[
+			'capacity_predecessor("capacity-0","capacity-1")',
+			'at("package-0","city-loc-4")',
+		],
+		predicate_name_map={
+			"capacity_predecessor": "capacity-predecessor",
+			"at": "at",
+		},
+	)
+
+	assert facts == (
+		"(at package-0 city-loc-4)",
+		"(capacity-predecessor capacity-0 capacity-1)",
+	)
+
+
 def test_runner_asl_includes_accepting_and_target_validation_without_manual_seeding():
 	runner = JasonRunner()
 	asl = runner._build_runner_asl(

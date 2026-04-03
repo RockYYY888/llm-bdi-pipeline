@@ -3473,6 +3473,14 @@ class LTL_BDI_Pipeline:
         typed_objects = self._typed_object_entries(runtime_objects, object_types)
         ordered = self._query_task_sequence_is_ordered(ltl_spec)
         planner_timeout_seconds = 30.0
+        predicate_name_map = runner._runtime_predicate_name_map(
+            action_schemas=action_schemas,
+            predicate_names=[
+                str(getattr(predicate, "name", "")).strip()
+                for predicate in getattr(self.domain, "predicates", ()) or ()
+                if str(getattr(predicate, "name", "")).strip()
+            ],
+        )
         goal_facts = self._stage6_query_goal_facts(
             ltl_spec,
             task_network,
@@ -3532,6 +3540,7 @@ class LTL_BDI_Pipeline:
                 runtime_objects=runtime_objects,
                 action_schemas=action_schemas,
                 seed_facts=seed_facts,
+                predicate_name_map=predicate_name_map,
                 task_network_ordered=True,
                 timeout_seconds=planner_timeout_seconds,
             )
@@ -3580,6 +3589,7 @@ class LTL_BDI_Pipeline:
 
                 current_seed_facts = runner._runtime_world_to_hddl_facts(
                     replay.get("world_facts") or (),
+                    predicate_name_map=predicate_name_map,
                 )
                 action_path.extend(task_action_path)
                 method_trace.extend(
@@ -3656,6 +3666,7 @@ class LTL_BDI_Pipeline:
             runtime_objects=runtime_objects,
             action_schemas=action_schemas,
             seed_facts=seed_facts,
+            predicate_name_map=predicate_name_map,
             task_network_ordered=False,
             timeout_seconds=planner_timeout_seconds,
         )
@@ -3672,6 +3683,7 @@ class LTL_BDI_Pipeline:
         runtime_objects,
         action_schemas,
         seed_facts,
+        predicate_name_map,
         task_network_ordered: bool,
         timeout_seconds: float,
     ):
@@ -3754,6 +3766,7 @@ class LTL_BDI_Pipeline:
 
                 current_seed_facts = runner._runtime_world_to_hddl_facts(
                     replay.get("world_facts") or (),
+                    predicate_name_map=predicate_name_map,
                 )
                 action_path.extend(task_action_path)
                 method_trace.extend(

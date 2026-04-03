@@ -2967,6 +2967,76 @@ def assert_stage6_unordered_guided_execution_falls_back_to_chunked_query_tasks()
 	assert all(call["task_network_ordered"] is False for call in captured["calls"][1:])
 
 
+def assert_stage6_chunked_guided_execution_preserves_hddl_fact_spellings_after_replay():
+	problem_path = TRANSPORT_PROBLEM_DIR / "pfile14.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing transport problem file: {problem_path}")
+
+	query_cases = _load_problem_query_cases(TRANSPORT_PROBLEM_DIR, limit=16)
+	instruction = query_cases["query_14"]["instruction"]
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=TRANSPORT_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		instruction,
+	)
+	method_library = _official_domain_method_library(
+		"transport",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_network = tuple(kwargs.get("task_network") or ())
+			initial_facts = tuple(kwargs.get("initial_facts") or ())
+			captured["calls"].append(
+				{
+					"task_network": task_network,
+					"initial_facts": initial_facts,
+				},
+			)
+			if len(task_network) > 3:
+				raise RuntimeError("full guided search timed out")
+			return SimpleNamespace(
+				steps=[],
+				work_dir="dummy-transport-guided-plan",
+				raw_plan="==>\nroot 1\n1 deliver package-0 city-loc-0 -> m-deliver\n",
+				actual_plan="==>\nroot 1\n1 deliver package-0 city-loc-0 -> m-deliver\n",
+			)
+
+		def extract_method_trace(self, plan_text):
+			return [{"method_name": "m-deliver", "task_args": ["package-0", "city-loc-0"]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_chunked_query_tasks_with_goals"
+	assert len(captured["calls"]) >= 4
+	replayed_initial_facts = captured["calls"][-1]["initial_facts"]
+	assert "(capacity-predecessor capacity-0 capacity-1)" in replayed_initial_facts
+	assert all("capacity_predecessor" not in fact for fact in replayed_initial_facts)
+	assert all('"capacity-0"' not in fact for fact in replayed_initial_facts)
+
+
 def assert_stage6_query_goal_projection_drops_transient_ordered_support_effects():
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	method_library = HTNMethodLibrary(
