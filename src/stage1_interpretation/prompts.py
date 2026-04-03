@@ -285,20 +285,28 @@ def get_ltl_user_prompt_with_options(
     nl_instruction: str,
     *,
     prefer_compact_task_grounded_output: bool = False,
+    compact_task_clauses: tuple[str, ...] = (),
 ) -> str:
     """
     Generate the Stage 1 user prompt, optionally requesting compact task output.
     """
     if not prefer_compact_task_grounded_output:
         return f"Goal: {nl_instruction}"
-    return "\n".join(
-        [
-            f"Goal: {nl_instruction}",
-            (
-                "Compact task-query rule: when the goal explicitly enumerates declared task "
-                "invocations, return one compact top-level eventual predicate obligation per "
-                "task in mention order. Do not expand the full task list into deeply nested "
-                "temporal JSON."
-            ),
-        ],
-    )
+    lines = [
+        f"Goal: {nl_instruction}",
+        (
+            "Compact task-query rule: when the goal explicitly enumerates declared task "
+            "invocations, return one compact top-level eventual predicate obligation per "
+            "task in mention order. Do not expand the full task list into deeply nested "
+            "temporal JSON."
+        ),
+        "For this compact response, set \"atoms\" exactly to []. Do not enumerate atoms.",
+    ]
+    if compact_task_clauses:
+        lines.append("Declared task invocations in surface order:")
+        lines.extend(
+            f"{index}. {clause}"
+            for index, clause in enumerate(compact_task_clauses, start=1)
+        )
+        lines.append("Use the listed task order directly when forming compact obligations.")
+    return "\n".join(lines)

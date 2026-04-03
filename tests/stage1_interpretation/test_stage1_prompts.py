@@ -80,8 +80,12 @@ def test_stage1_user_prompt_can_request_compact_task_grounded_output():
     prompt = get_ltl_user_prompt_with_options(
         "Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
         prefer_compact_task_grounded_output=True,
+        compact_task_clauses=("do_put_on(b1, b2)",),
     )
 
     assert prompt.startswith("Goal: Using blocks b1 and b2")
     assert "Compact task-query rule:" in prompt
     assert "one compact top-level eventual predicate obligation per task" in prompt
+    assert 'set "atoms" exactly to []' in prompt
+    assert "Declared task invocations in surface order:" in prompt
+    assert "1. do_put_on(b1, b2)" in prompt

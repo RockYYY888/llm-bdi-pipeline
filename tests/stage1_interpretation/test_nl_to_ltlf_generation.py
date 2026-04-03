@@ -90,6 +90,20 @@ def test_parse_result_json_extracts_embedded_object_from_prose_wrapper():
     }
 
 
+def test_parse_result_json_accepts_leading_json_object_with_trailing_garbage():
+    generator = NLToLTLfGenerator()
+
+    result = generator._parse_result_json(
+        '{"objects":["a"],"ltl_formulas":[],"atoms":[]} trailing duplicate text',
+    )
+
+    assert result == {
+        "objects": ["a"],
+        "ltl_formulas": [],
+        "atoms": [],
+    }
+
+
 class _RecordingCompletions:
     def __init__(self, outcomes):
         self._outcomes = list(outcomes)
@@ -179,6 +193,17 @@ def test_generator_does_not_force_compact_mode_for_non_task_queries():
 
     assert not generator._should_prefer_compact_task_grounded_output(
         "Eventually b1 is on b2 and b3 is clear.",
+    )
+
+
+def test_generator_extracts_task_invocation_clauses_from_instruction():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+
+    assert generator._extract_task_invocation_clauses(
+        "Using blocks b1 and b2, complete the tasks do_put_on(b1, b2), then do_clear(b1).",
+    ) == (
+        "do_put_on(b1, b2)",
+        "do_clear(b1)",
     )
 
 

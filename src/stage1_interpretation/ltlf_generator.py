@@ -119,11 +119,14 @@ class NLToLTLfGenerator:
             actions_str,
             tasks_str,
         )
+        compact_task_clauses = self._extract_task_invocation_clauses(nl_instruction)
+        prefer_compact_output = bool(compact_task_clauses) and (
+            self._should_prefer_compact_task_grounded_output(nl_instruction)
+        )
         user_prompt = get_ltl_user_prompt_with_options(
             nl_instruction,
-            prefer_compact_task_grounded_output=self._should_prefer_compact_task_grounded_output(
-                nl_instruction,
-            ),
+            prefer_compact_task_grounded_output=prefer_compact_output,
+            compact_task_clauses=compact_task_clauses if prefer_compact_output else (),
         )
 
         # Store prompt for logging
@@ -590,13 +593,22 @@ class NLToLTLfGenerator:
         """
         if not self.domain:
             return False
+        clauses = self._extract_task_invocation_clauses(nl_instruction)
+        if not clauses:
+            return False
+        lowered = nl_instruction.lower()
+        return "complete the tasks" in lowered or len(clauses) >= 4
+
+    def _extract_task_invocation_clauses(self, nl_instruction: str) -> tuple[str, ...]:
+        if not self.domain:
+            return ()
         task_names = [
             getattr(task, "name", "")
             for task in getattr(self.domain, "tasks", ())
             if getattr(task, "name", "")
         ]
         if not task_names:
-            return False
+            return ()
         pattern = re.compile(
             r"(?P<task_name>"
             + "|".join(
@@ -605,17 +617,28 @@ class NLToLTLfGenerator:
             )
             + r")\((?P<args>[^()]*)\)",
         )
-        matches = tuple(pattern.finditer(nl_instruction))
-        if not matches:
-            return False
-        lowered = nl_instruction.lower()
-        return "complete the tasks" in lowered or len(matches) >= 4
+        clauses = []
+        for match in pattern.finditer(nl_instruction):
+            args_text = match.group("args").strip()
+            args = [
+                part.strip()
+                for part in args_text.split(",")
+                if part.strip()
+            ]
+            if args:
+                clauses.append(f"{match.group('task_name')}({', '.join(args)})")
+            else:
+                clauses.append(f"{match.group('task_name')}()")
+        return tuple(clauses)
 
     def _parse_result_json(self, result_text: str) -> dict:
         """Parse the LLM response, tolerating prose wrappers around one JSON object."""
         try:
             return json.loads(result_text)
         except json.JSONDecodeError as original_error:
+            raw_decoded = self._decode_leading_json_object(result_text)
+            if raw_decoded is not None:
+                return raw_decoded
             candidate = self._extract_json_object_candidate(result_text)
             if candidate is not None:
                 try:
@@ -636,6 +659,25 @@ class NLToLTLfGenerator:
             return None
         candidate = result_text[start_index:end_index + 1].strip()
         return candidate or None
+
+    @staticmethod
+    def _decode_leading_json_object(result_text: str) -> dict | None:
+        """
+        Decode the first complete JSON object and ignore trailing junk.
+
+        Some providers return a valid object followed by duplicated suffix text or
+        other non-JSON debris. When the first decoded value is a dictionary, that
+        already satisfies Stage 1's contract.
+        """
+        stripped = result_text.lstrip()
+        if not stripped.startswith("{"):
+            return None
+        try:
+            decoder = json.JSONDecoder()
+            parsed, _ = decoder.raw_decode(stripped)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _augment_objects_from_formulas_and_atoms(
         self,
