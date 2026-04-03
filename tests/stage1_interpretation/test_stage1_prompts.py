@@ -5,7 +5,11 @@ _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
-from stage1_interpretation.prompts import get_ltl_system_prompt, get_ltl_user_prompt
+from stage1_interpretation.prompts import (
+    get_ltl_system_prompt,
+    get_ltl_user_prompt,
+    get_ltl_user_prompt_with_options,
+)
 
 
 def test_stage1_system_prompt_retains_full_ltlf_operator_coverage():
@@ -50,6 +54,8 @@ def test_stage1_system_prompt_preserves_schema_and_boundary_rules():
     assert "Do not add unstated support predicates" in prompt
     assert "complete the tasks A(...), B(...), and C(...)" in prompt
     assert "prefer a conjunction of independent eventual goals" in prompt
+    assert "keep the response compact" in prompt
+    assert "atoms may be []" in prompt
     assert '"A": ["a"]' in prompt
     assert 'do not collapse this into one {"type": "temporal", "operator": "F"' in prompt
 
@@ -68,3 +74,14 @@ def test_stage1_system_prompt_keeps_high_risk_operator_disambiguation_examples()
 
 def test_stage1_user_prompt_keeps_goal_prefix():
     assert get_ltl_user_prompt("Do something.") == "Goal: Do something."
+
+
+def test_stage1_user_prompt_can_request_compact_task_grounded_output():
+    prompt = get_ltl_user_prompt_with_options(
+        "Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
+        prefer_compact_task_grounded_output=True,
+    )
+
+    assert prompt.startswith("Goal: Using blocks b1 and b2")
+    assert "Compact task-query rule:" in prompt
+    assert "one compact top-level eventual predicate obligation per task" in prompt

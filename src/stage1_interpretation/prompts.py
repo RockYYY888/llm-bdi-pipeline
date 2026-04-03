@@ -52,6 +52,9 @@ def get_ltl_system_prompt(
             "- If the instruction says to complete multiple task invocations, treat them as "
             "independent eventual requirements unless the wording explicitly requires "
             "simultaneity, ordering, or maintenance.",
+            "- For explicit benchmark-style task lists, keep the response compact: emit one "
+            "headline predicate obligation per mentioned task in the same surface order "
+            "instead of a deeply nested temporal tree.",
             "",
             "SEMANTIC BOUNDARY:",
             "- Use only the provided predicates plus the propositional constants true and false.",
@@ -108,6 +111,9 @@ def get_ltl_system_prompt(
             '- Each atom entry must be {"symbol": "...", "predicate": "...", "args": [...]}',
             "- Symbol naming rule: predicate_arg1_arg2_... in lowercase with underscores.",
             '- true and false must appear as plain strings, not dictionaries, and never in "atoms".',
+            "- Compact-response exception: if the instruction already enumerates many explicit "
+            "task invocations, atoms may be [] and objects may contain only the constants used "
+            "in the emitted predicate obligations.",
             "",
             "FORMULA JSON SCHEMA:",
             '- Atomic predicate: {"linked": ["a", "b"]}',
@@ -136,6 +142,9 @@ def get_ltl_system_prompt(
             '- For benchmark-style wording like "complete the tasks A(...), B(...), and C(...)", '
             "prefer a conjunction of independent eventual goals rather than a single eventual "
             "conjunction, unless the instruction explicitly says they must hold at the same time.",
+            '- For long ordered task lists, keep those top-level eventual goals shallow and in '
+            'surface order; do not build a recursively nested chain unless the instruction '
+            'requires a genuinely nested temporal relation beyond the explicit task sequence.',
             '- Example: "complete the tasks A(a), B(b), and C(c)" -> '
             '{"type": "conjunction", "formulas": [{"type": "temporal", "operator": "F", '
             '"formula": {"A": ["a"]}}, {"type": "temporal", "operator": "F", '
@@ -269,4 +278,27 @@ def get_ltl_user_prompt(nl_instruction: str) -> str:
     Returns:
         User prompt string.
     """
-    return f"Goal: {nl_instruction}"
+    return get_ltl_user_prompt_with_options(nl_instruction)
+
+
+def get_ltl_user_prompt_with_options(
+    nl_instruction: str,
+    *,
+    prefer_compact_task_grounded_output: bool = False,
+) -> str:
+    """
+    Generate the Stage 1 user prompt, optionally requesting compact task output.
+    """
+    if not prefer_compact_task_grounded_output:
+        return f"Goal: {nl_instruction}"
+    return "\n".join(
+        [
+            f"Goal: {nl_instruction}",
+            (
+                "Compact task-query rule: when the goal explicitly enumerates declared task "
+                "invocations, return one compact top-level eventual predicate obligation per "
+                "task in mention order. Do not expand the full task list into deeply nested "
+                "temporal JSON."
+            ),
+        ],
+    )

@@ -8,6 +8,7 @@ This module converts natural language instructions into LTLf formulas using LLM.
 
 from typing import Optional
 import json
+import re
 
 from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
 from .grounding_map import GroundingMap, create_propositional_symbol
@@ -25,7 +26,9 @@ class NLToLTLfGenerator:
                  api_key: Optional[str] = None,
                  model: Optional[str] = None,
                  base_url: Optional[str] = None,
-                 domain_file: Optional[str] = None):
+                 domain_file: Optional[str] = None,
+                 request_timeout: Optional[float] = None,
+                 response_max_tokens: Optional[int] = None):
         """
         Initialize generator with optional API key, model, base URL, and domain file
 
@@ -34,11 +37,15 @@ class NLToLTLfGenerator:
             model: Model name
             base_url: Custom API base URL
             domain_file: Path to HDDL domain file (for dynamic prompt construction)
+            request_timeout: Maximum per-request timeout in seconds
+            response_max_tokens: Maximum completion tokens for the JSON response
         """
         self.api_key = api_key
         self.model = model or "deepseek-chat"
         self.base_url = base_url
         self.domain_file = domain_file
+        self.request_timeout = float(request_timeout or 60.0)
+        self.response_max_tokens = int(response_max_tokens or 12000)
         self.client = None
 
         # Parse domain if provided
@@ -50,9 +57,18 @@ class NLToLTLfGenerator:
         if api_key:
             from openai import OpenAI
             if base_url:
-                self.client = OpenAI(api_key=api_key, base_url=base_url)
+                self.client = OpenAI(
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=self.request_timeout,
+                    max_retries=0,
+                )
             else:
-                self.client = OpenAI(api_key=api_key)
+                self.client = OpenAI(
+                    api_key=api_key,
+                    timeout=self.request_timeout,
+                    max_retries=0,
+                )
 
     def generate(self, nl_instruction: str):
         """
@@ -84,7 +100,7 @@ class NLToLTLfGenerator:
         Returns:
             Tuple of (LTLSpecification, prompt_dict, response_text)
         """
-        from .prompts import get_ltl_system_prompt, get_ltl_user_prompt
+        from .prompts import get_ltl_system_prompt, get_ltl_user_prompt_with_options
 
         # Build system prompt dynamically from the parsed domain.
         if not self.domain:
@@ -103,7 +119,12 @@ class NLToLTLfGenerator:
             actions_str,
             tasks_str,
         )
-        user_prompt = get_ltl_user_prompt(nl_instruction)
+        user_prompt = get_ltl_user_prompt_with_options(
+            nl_instruction,
+            prefer_compact_task_grounded_output=self._should_prefer_compact_task_grounded_output(
+                nl_instruction,
+            ),
+        )
 
         # Store prompt for logging
         prompt_dict = {
@@ -523,7 +544,8 @@ class NLToLTLfGenerator:
             "model": self.model,
             "messages": messages,
             "temperature": 0.0,
-            "timeout": 60.0,
+            "timeout": self.request_timeout,
+            "max_tokens": self.response_max_tokens,
         }
 
         try:
@@ -556,6 +578,38 @@ class NLToLTLfGenerator:
             "extra inputs are not permitted",
         )
         return any(marker in message for marker in unsupported_markers)
+
+    def _should_prefer_compact_task_grounded_output(self, nl_instruction: str) -> bool:
+        """
+        Prefer compact output for explicit declared-task queries.
+
+        Benchmark-style instructions explicitly name declared task invocations.
+        Downstream task canonicalisation already rebuilds the ordered predicate
+        targets deterministically, so asking the model to emit a deeply nested
+        temporal tree only increases latency and truncation risk.
+        """
+        if not self.domain:
+            return False
+        task_names = [
+            getattr(task, "name", "")
+            for task in getattr(self.domain, "tasks", ())
+            if getattr(task, "name", "")
+        ]
+        if not task_names:
+            return False
+        pattern = re.compile(
+            r"(?P<task_name>"
+            + "|".join(
+                re.escape(task_name)
+                for task_name in sorted(task_names, key=len, reverse=True)
+            )
+            + r")\((?P<args>[^()]*)\)",
+        )
+        matches = tuple(pattern.finditer(nl_instruction))
+        if not matches:
+            return False
+        lowered = nl_instruction.lower()
+        return "complete the tasks" in lowered or len(matches) >= 4
 
     def _parse_result_json(self, result_text: str) -> dict:
         """Parse the LLM response, tolerating prose wrappers around one JSON object."""

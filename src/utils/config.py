@@ -55,6 +55,17 @@ class Config:
         return max(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '20000')), 1)
 
     @property
+    def openai_stage1_max_tokens(self) -> int:
+        """
+        Get the Stage 1 response token budget.
+
+        Stage 1 can receive long benchmark queries that enumerate many task
+        invocations. Leaving output length to provider defaults can truncate the
+        returned JSON object even when the prompt is otherwise valid.
+        """
+        return max(int(os.getenv('OPENAI_STAGE1_MAX_TOKENS', '12000')), 1)
+
+    @property
     def openai_base_url(self) -> Optional[str]:
         """Get OpenAI base URL (for custom endpoints like DeepSeek)"""
         return os.getenv('OPENAI_BASE_URL')

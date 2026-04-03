@@ -126,7 +126,7 @@ def _blocksworld_domain_file() -> str:
 
 
 def test_generate_requests_provider_enforced_json_when_supported():
-    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file(), response_max_tokens=4321)
     generator.client = _RecordingClient(
         [
             _stage1_json_response(
@@ -142,6 +142,7 @@ def test_generate_requests_provider_enforced_json_when_supported():
     assert spec.formulas[0].to_string() == "F(on(b1, b2))"
     first_call = generator.client.completions.calls[0]
     assert first_call["response_format"] == {"type": "json_object"}
+    assert first_call["max_tokens"] == 4321
 
 
 def test_generate_falls_back_when_provider_rejects_response_format():
@@ -163,6 +164,22 @@ def test_generate_falls_back_when_provider_rejects_response_format():
     assert len(generator.client.completions.calls) == 2
     assert generator.client.completions.calls[0]["response_format"] == {"type": "json_object"}
     assert "response_format" not in generator.client.completions.calls[1]
+
+
+def test_generator_prefers_compact_task_grounded_output_for_explicit_task_queries():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+
+    assert generator._should_prefer_compact_task_grounded_output(
+        "Using blocks b1 and b2, complete the tasks do_put_on(b1, b2), then do_clear(b1).",
+    )
+
+
+def test_generator_does_not_force_compact_mode_for_non_task_queries():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+
+    assert not generator._should_prefer_compact_task_grounded_output(
+        "Eventually b1 is on b2 and b3 is clear.",
+    )
 
 
 def test_ltl_spec_preserves_identical_top_level_formula_occurrences():

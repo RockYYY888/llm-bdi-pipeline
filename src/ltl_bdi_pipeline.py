@@ -209,7 +209,9 @@ class LTL_BDI_Pipeline:
             api_key=self.config.openai_api_key,
             model=self.config.openai_model,
             base_url=self.config.openai_base_url,
-            domain_file=self.domain_file  # Pass domain file for dynamic prompt
+            domain_file=self.domain_file,  # Pass domain file for dynamic prompt
+            request_timeout=self.config.openai_timeout,
+            response_max_tokens=self.config.openai_stage1_max_tokens,
         )
 
         try:
