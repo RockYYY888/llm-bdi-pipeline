@@ -1959,6 +1959,67 @@ def assert_stage1_task_grounded_satellite_variable_arguments_use_typed_witness_g
 	)
 
 
+def assert_stage1_task_grounded_objects_prefer_query_inventory_over_placeholder_tokens():
+	pipeline = LTL_BDI_Pipeline(domain_file=str(MARSROVER_DOMAIN_FILE))
+	spec = LTLSpecification()
+	spec.objects = ["ROVER", "waypoint1"]
+	spec.query_object_inventory = [
+		{
+			"type": "waypoint",
+			"label": "waypoints",
+			"objects": ["waypoint1", "waypoint3", "waypoint4", "waypoint5"],
+		},
+		{
+			"type": "objective",
+			"label": "objectives",
+			"objects": ["objective0", "objective2"],
+		},
+		{
+			"type": "mode",
+			"label": "modes",
+			"objects": ["low_res", "high_res"],
+		},
+	]
+	spec.add_formula(
+		LTLFormula(
+			operator=TemporalOperator.FINALLY,
+			predicate=None,
+			sub_formulas=[
+				LTLFormula(
+					operator=None,
+					predicate={"communicated_soil_data": ["waypoint1"]},
+					sub_formulas=[],
+					logical_op=None,
+				),
+			],
+			logical_op=None,
+		),
+	)
+
+	pipeline._normalise_task_grounded_stage1_spec(
+		spec,
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint1"]},
+		),
+		query_text=(
+			"Using waypoints waypoint1, waypoint3, waypoint4, and waypoint5, "
+			"objectives objective0 and objective2, and modes low_res and "
+			"high_res, complete the tasks get_soil_data(waypoint1)."
+		),
+	)
+
+	assert spec.objects == [
+		"waypoint1",
+		"waypoint3",
+		"waypoint4",
+		"waypoint5",
+		"objective0",
+		"objective2",
+		"low_res",
+		"high_res",
+	]
+
+
 def assert_ipc_plan_verifier_grounds_parameterised_root_tasks_from_trace():
 	verifier = IPCPlanVerifier()
 	grounded = verifier._resolve_task_args_from_trace(

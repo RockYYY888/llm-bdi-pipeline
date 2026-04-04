@@ -599,6 +599,13 @@ class LTL_BDI_Pipeline:
                 ltl_spec.formulas = canonical_formulas
                 ltl_spec.grounding_map = NLToLTLfGenerator()._create_grounding_map(ltl_spec)
 
+        canonical_objects = self._canonical_task_grounded_semantic_objects(
+            ltl_spec,
+            query_object_inventory=query_object_inventory,
+        )
+        if canonical_objects:
+            ltl_spec.objects = list(canonical_objects)
+
     def _collect_eventual_task_clauses(
         self,
         formula,
@@ -758,6 +765,64 @@ class LTL_BDI_Pipeline:
         if predicate is None or operator is not None or logical_op is not None:
             return None
         return formula if isinstance(predicate, dict) else None
+
+    def _canonical_task_grounded_semantic_objects(
+        self,
+        ltl_spec,
+        *,
+        query_object_inventory: Sequence[Dict[str, Any]],
+    ) -> Tuple[str, ...]:
+        """
+        Prefer grounded query objects over free-form Stage 1 placeholder tokens.
+
+        Task-grounded benchmark queries already enumerate the relevant object
+        inventory in natural language. When the Stage 1 response echoes schema-like
+        placeholders such as `ROVER` inside `objects`, those placeholders should
+        not leak into Stage 5 or Stage 6. Rebuild the semantic object list from the
+        query inventory first, then add any extra grounded constants still present
+        in the canonicalised formulas.
+        """
+        ordered_objects: List[str] = []
+        seen: set[str] = set()
+
+        def add_object(value: object) -> None:
+            if not isinstance(value, str):
+                return
+            token = value.strip()
+            if not token or token.startswith("?"):
+                return
+            if token in seen:
+                return
+            seen.add(token)
+            ordered_objects.append(token)
+
+        for entry in query_object_inventory or ():
+            for object_name in entry.get("objects", ()) or ():
+                add_object(object_name)
+
+        formula_stack = list(reversed(list(getattr(ltl_spec, "formulas", ()) or ())))
+        while formula_stack:
+            formula = formula_stack.pop()
+            predicate = getattr(formula, "predicate", None)
+            if isinstance(predicate, dict):
+                special_keys = {
+                    "type",
+                    "formulas",
+                    "left_formula",
+                    "right_formula",
+                    "formula",
+                    "operator",
+                }
+                if all(key not in special_keys for key in predicate.keys()):
+                    for args in predicate.values():
+                        if isinstance(args, list):
+                            for arg in args:
+                                add_object(arg)
+            formula_stack.extend(
+                reversed(list(getattr(formula, "sub_formulas", ()) or ())),
+            )
+
+        return tuple(ordered_objects)
 
     @staticmethod
     def _build_atomic_formula_like(
