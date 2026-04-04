@@ -728,7 +728,7 @@ class NLToLTLfGenerator:
         shallow obligation only increases truncation risk without improving the
         canonical Stage 1 contract.
         """
-        return len(tuple(compact_task_clauses or ())) >= 64
+        return len(tuple(compact_task_clauses or ())) >= 8
 
     def _parse_result_json(self, result_text: str) -> dict:
         """Parse the LLM response, tolerating prose wrappers around one JSON object."""

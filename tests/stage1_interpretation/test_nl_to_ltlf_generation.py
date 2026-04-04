@@ -276,11 +276,11 @@ def test_generator_uses_skeletal_mode_for_very_long_task_lists():
     generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
 
     assert generator._should_use_skeletal_task_grounded_output(
-        tuple(f"do_clear(b{index})" for index in range(64)),
+        tuple(f"do_clear(b{index})" for index in range(8)),
     )
 
     assert not generator._should_use_skeletal_task_grounded_output(
-        tuple(f"do_clear(b{index})" for index in range(63)),
+        tuple(f"do_clear(b{index})" for index in range(7)),
     )
 
 
