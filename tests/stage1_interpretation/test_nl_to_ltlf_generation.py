@@ -118,6 +118,39 @@ def test_parse_result_json_recovers_from_leading_junk_before_schema_key():
     }
 
 
+def test_normalise_result_payload_accepts_alias_top_level_keys():
+    generator = NLToLTLfGenerator()
+
+    result = generator._normalise_result_payload(
+        {
+            "semantic_objects": ["b1", "b2"],
+            "formulas": [
+                {"type": "temporal", "operator": "F", "formula": {"on": ["b1", "b2"]}},
+            ],
+            "grounded_atoms": [
+                {"symbol": "on_b1_b2", "predicate": "on", "args": ["b1", "b2"]},
+            ],
+        },
+    )
+
+    assert result == {
+        "semantic_objects": ["b1", "b2"],
+        "formulas": [
+            {"type": "temporal", "operator": "F", "formula": {"on": ["b1", "b2"]}},
+        ],
+        "grounded_atoms": [
+            {"symbol": "on_b1_b2", "predicate": "on", "args": ["b1", "b2"]},
+        ],
+        "objects": ["b1", "b2"],
+        "ltl_formulas": [
+            {"type": "temporal", "operator": "F", "formula": {"on": ["b1", "b2"]}},
+        ],
+        "atoms": [
+            {"symbol": "on_b1_b2", "predicate": "on", "args": ["b1", "b2"]},
+        ],
+    }
+
+
 class _RecordingCompletions:
     def __init__(self, outcomes):
         self._outcomes = list(outcomes)

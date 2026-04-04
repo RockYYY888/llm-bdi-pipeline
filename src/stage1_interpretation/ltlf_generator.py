@@ -166,7 +166,7 @@ class NLToLTLfGenerator:
                 if closing_fence != -1 and closing_fence > first_newline:
                     result_text = result_text[first_newline+1:closing_fence].strip()
 
-        result = self._parse_result_json(result_text)
+        result = self._normalise_result_payload(self._parse_result_json(result_text))
 
         # Build LTL specification
         spec = LTLSpecification()
@@ -539,6 +539,42 @@ class NLToLTLfGenerator:
             spec.grounding_map = self._create_grounding_map(spec)
 
         return (spec, prompt_dict, result_text)
+
+    @staticmethod
+    def _normalise_result_payload(result: dict) -> dict:
+        """
+        Accept small schema-key drift in otherwise valid Stage 1 JSON payloads.
+
+        Some providers keep the requested structure but rename top-level keys such
+        as `ltl_formulas` -> `formulas` or `objects` -> `semantic_objects`. The
+        Stage 1 contract still requires the canonical keys internally, so map a
+        small set of equivalent aliases before building the specification.
+        """
+        if not isinstance(result, dict):
+            raise RuntimeError("Stage 1 JSON payload must decode to an object.")
+
+        normalised = dict(result)
+        if "objects" not in normalised:
+            for alias in ("semantic_objects", "query_objects"):
+                alias_value = normalised.get(alias)
+                if isinstance(alias_value, list):
+                    normalised["objects"] = alias_value
+                    break
+        normalised.setdefault("objects", [])
+
+        if "ltl_formulas" not in normalised:
+            for alias in ("formulas", "ltlf_formulas", "temporal_formulas"):
+                alias_value = normalised.get(alias)
+                if isinstance(alias_value, list):
+                    normalised["ltl_formulas"] = alias_value
+                    break
+
+        if "atoms" not in normalised:
+            alias_value = normalised.get("grounded_atoms")
+            if isinstance(alias_value, list):
+                normalised["atoms"] = alias_value
+        normalised.setdefault("atoms", [])
+        return normalised
 
     def _create_chat_completion(self, messages: list[dict[str, str]]):
         """
