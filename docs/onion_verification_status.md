@@ -82,9 +82,9 @@ Benchmark natural-language inputs are now materialised and versioned.
 
 Primary artifacts:
 
-- [official_problem_queries.json](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/benchmark_data/official_problem_queries.json)
-- [benchmark_query_manifest.py](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/utils/benchmark_query_manifest.py)
-- [nl_instruction_template.md](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/docs/nl_instruction_template.md)
+- [benchmark_queries.json](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/benchmark_data/benchmark_queries.json)
+- [benchmark_query_dataset.py](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/utils/benchmark_query_dataset.py)
+- [query_protocol.md](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/docs/query_protocol.md)
 
 Protocol properties:
 

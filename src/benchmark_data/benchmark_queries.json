@@ -1,6 +1,7 @@
 {
-  "version": 2,
-  "protocol_document": "docs/nl_instruction_template.md",
+  "version": 3,
+  "dataset_kind": "stored_benchmark_queries",
+  "query_protocol_document": "docs/query_protocol.md",
   "generator": "canonical_root_task_query_v2",
   "domains": {
     "blocksworld": {

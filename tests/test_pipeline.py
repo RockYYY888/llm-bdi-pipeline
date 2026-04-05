@@ -1,12 +1,12 @@
 """
-Live end-to-end acceptance harness for official benchmark query manifests.
+Live end-to-end acceptance harness for the stored benchmark query dataset.
 
 This file is the canonical acceptance entry point:
 - pytest uses it only for end-to-end verification
 - CLI can run `python tests/test_pipeline.py query_2`, `all`, or `list`
-- current live query cases are loaded from a versioned manifest whose entries are
-  canonically reverse-generated from official IPC benchmark root HTN tasks and
-  typed object inventories
+- current live query cases are loaded from a versioned stored query dataset whose
+  entries are canonically reverse-generated from official IPC benchmark root HTN
+  tasks and typed object inventories
 - non-E2E pipeline unit tests live in `tests/test_pipeline_units.py`
 """
 
@@ -52,9 +52,10 @@ from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
-from utils.benchmark_query_manifest import (
+from utils.benchmark_query_dataset import (
 	DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS,
 	build_case_from_problem as _build_case_from_problem,
+	load_benchmark_query_dataset as _load_benchmark_query_dataset,
 	load_problem_query_cases as _load_problem_query_cases,
 	query_referenced_problem_objects as _query_referenced_problem_objects,
 	serialise_nl_list as _serialise_nl_list,
@@ -2220,7 +2221,7 @@ def assert_benchmark_query_generation_uses_only_query_referenced_objects_when_gr
 	]
 
 
-def assert_benchmark_query_manifest_matches_canonical_problem_generation():
+def assert_benchmark_query_dataset_matches_canonical_problem_generation():
 	for domain_key, problem_dir in {
 		"blocksworld": BLOCKSWORLD_PROBLEM_DIR,
 		"marsrover": MARSROVER_PROBLEM_DIR,
@@ -2242,7 +2243,14 @@ def assert_benchmark_query_manifest_matches_canonical_problem_generation():
 		assert query_cases == expected_cases
 
 
-def assert_benchmark_query_manifest_instructions_respect_protocol():
+def assert_benchmark_query_dataset_metadata_points_to_query_protocol():
+	dataset = _load_benchmark_query_dataset()
+	assert dataset["dataset_kind"] == "stored_benchmark_queries"
+	assert dataset["query_protocol_document"] == "docs/query_protocol.md"
+	assert dataset["generator"] == "canonical_root_task_query_v2"
+
+
+def assert_benchmark_query_dataset_instructions_respect_protocol():
 	for query_cases in (
 		_load_problem_query_cases(BLOCKSWORLD_PROBLEM_DIR, limit=10_000),
 		_load_problem_query_cases(MARSROVER_PROBLEM_DIR, limit=10_000),
@@ -2462,24 +2470,20 @@ def assert_task_grounded_ordered_formulas_encode_sequential_task_events():
 	]
 
 
-def assert_query_object_inventory_extraction_preserves_full_benchmark_inventory():
+def assert_query_object_inventory_extraction_uses_minimal_query_referenced_inventory():
 	pipeline = LTL_BDI_Pipeline(domain_file=MARSROVER_DOMAIN_FILE)
 	inventory = pipeline._extract_query_object_inventory(
 		MARSROVER_QUERY_CASES["query_3"]["instruction"],
 	)
 
 	assert inventory == (
-		{"type": "lander", "label": "lander", "objects": ["general"]},
-		{"type": "mode", "label": "modes", "objects": ["colour", "high_res", "low_res"]},
-		{"type": "rover", "label": "rovers", "objects": ["rover0", "rover1"]},
-		{"type": "store", "label": "stores", "objects": ["rover0store", "rover1store"]},
 		{
 			"type": "waypoint",
 			"label": "waypoints",
-			"objects": ["waypoint0", "waypoint1", "waypoint2", "waypoint3"],
+			"objects": ["waypoint2", "waypoint0"],
 		},
-		{"type": "camera", "label": "cameras", "objects": ["camera0", "camera1"]},
-		{"type": "objective", "label": "objectives", "objects": ["objective0", "objective1"]},
+		{"type": "objective", "label": "objective", "objects": ["objective0"]},
+		{"type": "mode", "label": "mode", "objects": ["colour"]},
 	)
 
 
@@ -2592,27 +2596,15 @@ def assert_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_
 	assert stage3_data is not None
 	assert captured["semantic_objects"] == ("waypoint2", "waypoint0", "objective0", "colour")
 	assert captured["query_objects"] == (
-		"general",
-		"colour",
-		"high_res",
-		"low_res",
-		"rover0",
-		"rover1",
-		"rover0store",
-		"rover1store",
-		"waypoint0",
-		"waypoint1",
 		"waypoint2",
-		"waypoint3",
-		"camera0",
-		"camera1",
+		"waypoint0",
 		"objective0",
-		"objective1",
+		"colour",
 	)
-	assert captured["query_object_inventory"][2] == {
-		"type": "rover",
-		"label": "rovers",
-		"objects": ["rover0", "rover1"],
+	assert captured["query_object_inventory"][0] == {
+		"type": "waypoint",
+		"label": "waypoints",
+		"objects": ["waypoint2", "waypoint0"],
 	}
 
 
