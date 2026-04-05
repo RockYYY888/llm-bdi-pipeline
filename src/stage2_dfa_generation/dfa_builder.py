@@ -6,6 +6,7 @@ The DFA is used as context for Stage 3 AgentSpeak generation.
 """
 
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Any
 
@@ -57,6 +58,10 @@ class DFABuilder:
                 - original_num_transitions: Number of transitions in original DFA
                 - simplification_stats: Statistics about the simplification process
         """
+        total_start = time.perf_counter()
+        timing_profile: Dict[str, float] = {}
+
+        formula_render_start = time.perf_counter()
         if hasattr(ltl_spec, "combined_formula_string"):
             formula_str = ltl_spec.combined_formula_string()
         else:
@@ -69,21 +74,27 @@ class DFABuilder:
                     f"({formula.to_string()})"
                     for formula in ltl_spec.formulas
                 )
+        timing_profile["formula_render_seconds"] = time.perf_counter() - formula_render_start
 
         # Step 1: Generate DFA using the convert method (takes ltl_spec object)
+        convert_start = time.perf_counter()
         original_dfa_dot, metadata = self.converter.convert(ltl_spec)
+        timing_profile["convert_seconds"] = time.perf_counter() - convert_start
 
         # Parse original DFA to get statistics (BEFORE simplification)
+        original_stats_start = time.perf_counter()
         original_num_states = int(metadata.get("num_states") or self._count_states(original_dfa_dot))
         original_num_transitions = int(
             metadata.get("num_transitions") or self._count_transitions(original_dfa_dot)
         )
+        timing_profile["original_stats_seconds"] = time.perf_counter() - original_stats_start
 
         if metadata.get("construction") in {
             "independent_eventually_atomic_fast_path",
             "independent_eventually_symbolic_surrogate",
             "ordered_eventually_atomic_fast_path",
         }:
+            timing_profile["total_seconds"] = time.perf_counter() - total_start
             return {
                 "formula": formula_str,
                 "original_dfa_dot": original_dfa_dot,
@@ -101,6 +112,7 @@ class DFABuilder:
                     "num_new_transitions": original_num_transitions,
                     "skipped_simplifier": True,
                 },
+                "timing_profile": timing_profile,
             }
 
         # Step 2: Simplify DFA (mandatory)
@@ -108,11 +120,18 @@ class DFABuilder:
         if not hasattr(ltl_spec, 'grounding_map') or ltl_spec.grounding_map is None:
             raise ValueError("LTLSpecification must have a grounding_map for DFA simplification")
 
+        simplify_start = time.perf_counter()
         simplified_result = self.simplifier.simplify(original_dfa_dot, ltl_spec.grounding_map)
+        timing_profile["simplify_seconds"] = time.perf_counter() - simplify_start
 
         # Parse simplified DFA to get statistics (AFTER simplification)
+        simplified_stats_start = time.perf_counter()
         num_states = self._count_states(simplified_result.simplified_dot)
         num_transitions = self._count_transitions(simplified_result.simplified_dot)
+        timing_profile["simplified_stats_seconds"] = (
+            time.perf_counter() - simplified_stats_start
+        )
+        timing_profile["total_seconds"] = time.perf_counter() - total_start
 
         result = {
             "formula": formula_str,
@@ -122,7 +141,8 @@ class DFABuilder:
             "num_transitions": num_transitions,  # Simplified DFA transitions
             "original_num_states": original_num_states,  # NEW: Original DFA states
             "original_num_transitions": original_num_transitions,  # NEW: Original DFA transitions
-            "simplification_stats": simplified_result.stats
+            "simplification_stats": simplified_result.stats,
+            "timing_profile": timing_profile,
         }
 
         return result

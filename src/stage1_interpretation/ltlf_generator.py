@@ -6,9 +6,10 @@ This module converts natural language instructions into LTLf formulas using LLM.
 **LTLf Syntax Reference**: http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax
 """
 
-from typing import Optional
 import json
 import re
+import time
+from typing import Optional
 
 from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
 from .grounding_map import GroundingMap, create_propositional_symbol
@@ -47,6 +48,7 @@ class NLToLTLfGenerator:
         self.request_timeout = float(request_timeout or 60.0)
         self.response_max_tokens = int(response_max_tokens or 12000)
         self.client = None
+        self.last_generation_metadata: dict = {}
 
         # Parse domain if provided
         self.domain = None
@@ -102,10 +104,15 @@ class NLToLTLfGenerator:
         """
         from .prompts import get_ltl_system_prompt, get_ltl_user_prompt_with_options
 
+        stage_start = time.perf_counter()
+        self.last_generation_metadata = {}
+        timing_profile: dict[str, float] = {}
+
         # Build system prompt dynamically from the parsed domain.
         if not self.domain:
             raise RuntimeError("NLToLTLfGenerator requires parsed domain context.")
 
+        prompt_start = time.perf_counter()
         domain_name = self.domain.name
         types_str = ', '.join(self.domain.types) if self.domain.types else 'objects'
         predicates_str = '\n'.join([f"- {pred.to_signature()}" for pred in self.domain.predicates])
@@ -139,16 +146,29 @@ class NLToLTLfGenerator:
             "system": system_prompt,
             "user": user_prompt
         }
+        timing_profile["prompt_build_seconds"] = time.perf_counter() - prompt_start
 
         # Call LLM API with timeout handling
         try:
+            llm_request_start = time.perf_counter()
             response = self._create_chat_completion(
                 [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             )
+            timing_profile["llm_roundtrip_seconds"] = (
+                time.perf_counter() - llm_request_start
+            )
         except Exception as e:
+            timing_profile["total_seconds"] = time.perf_counter() - stage_start
+            self.last_generation_metadata = {
+                "timing_profile": dict(timing_profile),
+                "task_clause_count": len(compact_task_clauses),
+                "prefer_compact_task_grounded_output": prefer_compact_output,
+                "prefer_skeletal_task_grounded_output": prefer_skeletal_output,
+                "failure_stage": "llm_roundtrip",
+            }
             raise RuntimeError(
                 f"LLM API call failed: {type(e).__name__}: {str(e)}\n"
                 f"Model: {self.model}\n"
@@ -156,7 +176,11 @@ class NLToLTLfGenerator:
                 f"Please check your API key, network connection, and model availability."
             ) from e
 
+        response_extract_start = time.perf_counter()
         result_text = self._extract_response_text(response)
+        timing_profile["response_extract_seconds"] = (
+            time.perf_counter() - response_extract_start
+        )
 
         # Strip markdown code fences if present
         if result_text.startswith("```"):
@@ -166,9 +190,18 @@ class NLToLTLfGenerator:
                 if closing_fence != -1 and closing_fence > first_newline:
                     result_text = result_text[first_newline+1:closing_fence].strip()
 
-        result = self._normalise_result_payload(self._parse_result_json(result_text))
+        json_parse_start = time.perf_counter()
+        parsed_result = self._parse_result_json(result_text)
+        timing_profile["json_parse_seconds"] = time.perf_counter() - json_parse_start
+
+        payload_normalisation_start = time.perf_counter()
+        result = self._normalise_result_payload(parsed_result)
+        timing_profile["payload_normalisation_seconds"] = (
+            time.perf_counter() - payload_normalisation_start
+        )
 
         # Build LTL specification
+        spec_build_start = time.perf_counter()
         spec = LTLSpecification()
         spec.objects = list(result.get("objects", []))
         spec.initial_state = []
@@ -538,6 +571,14 @@ class NLToLTLfGenerator:
         else:
             spec.grounding_map = self._create_grounding_map(spec)
 
+        timing_profile["spec_build_seconds"] = time.perf_counter() - spec_build_start
+        timing_profile["total_seconds"] = time.perf_counter() - stage_start
+        self.last_generation_metadata = {
+            "timing_profile": dict(timing_profile),
+            "task_clause_count": len(compact_task_clauses),
+            "prefer_compact_task_grounded_output": prefer_compact_output,
+            "prefer_skeletal_task_grounded_output": prefer_skeletal_output,
+        }
         return (spec, prompt_dict, result_text)
 
     @staticmethod

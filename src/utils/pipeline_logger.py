@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -80,6 +80,7 @@ class PipelineRecord:
 	problem_file: Optional[str] = None
 	output_dir: str = "output"
 	execution_time_seconds: float = 0.0
+	timing_profile: Dict[str, Any] = field(default_factory=dict)
 
 
 class PipelineLogger:
@@ -150,6 +151,44 @@ class PipelineLogger:
 				except Exception:
 					pass
 		return candidate.name or str(candidate)
+
+	@staticmethod
+	def _normalise_timing_breakdown(breakdown: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+		if not breakdown:
+			return None
+		normalised: Dict[str, Any] = {}
+		for key, value in breakdown.items():
+			if value is None:
+				continue
+			try:
+				normalised[str(key)] = round(float(value), 6)
+			except (TypeError, ValueError):
+				continue
+		return normalised or None
+
+	def record_stage_timing(
+		self,
+		stage_name: str,
+		duration_seconds: float,
+		*,
+		breakdown: Optional[Dict[str, Any]] = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		if not self.current_record:
+			return
+
+		stage_timing: Dict[str, Any] = {
+			"duration_seconds": round(float(duration_seconds), 6),
+		}
+		normalised_breakdown = self._normalise_timing_breakdown(breakdown)
+		if normalised_breakdown:
+			stage_timing["breakdown_seconds"] = normalised_breakdown
+		if metadata:
+			stage_timing["metadata"] = dict(metadata)
+
+		self.current_record.timing_profile = dict(self.current_record.timing_profile or {})
+		self.current_record.timing_profile[str(stage_name)] = stage_timing
+		self._save_current_state()
 
 	def log_stage1_success(
 		self,
@@ -576,6 +615,8 @@ class PipelineLogger:
 			handle.write("-" * 80 + "\n")
 			handle.write(f"\"{record['natural_language']}\"\n\n")
 
+			self._write_timing_profile(handle, record)
+
 			self._write_stage1(handle, record)
 			self._write_stage2(handle, record)
 			self._write_stage3(handle, record)
@@ -588,11 +629,53 @@ class PipelineLogger:
 			handle.write("END OF RECORD\n")
 			handle.write("=" * 80 + "\n")
 
+	def _write_timing_profile(self, handle: Any, record: Dict[str, Any]) -> None:
+		timing_profile = dict(record.get("timing_profile") or {})
+		if not timing_profile:
+			return
+
+		handle.write("-" * 80 + "\n")
+		handle.write("TIMING PROFILE\n")
+		handle.write("-" * 80 + "\n")
+		for stage_name in (
+			"stage1",
+			"stage2",
+			"stage3",
+			"stage4",
+			"stage5",
+			"stage6",
+			"stage7",
+		):
+			stage_timing = timing_profile.get(stage_name)
+			if not isinstance(stage_timing, dict):
+				continue
+			duration_seconds = stage_timing.get("duration_seconds")
+			if duration_seconds is None:
+				continue
+			handle.write(f"{stage_name}: {duration_seconds:.3f}s\n")
+			for key, value in dict(stage_timing.get("breakdown_seconds") or {}).items():
+				handle.write(f"  - {key}: {value:.3f}s\n")
+		handle.write("\n")
+
+	def _write_stage_timing(self, handle: Any, record: Dict[str, Any], stage_name: str) -> None:
+		stage_timing = dict((record.get("timing_profile") or {}).get(stage_name) or {})
+		duration_seconds = stage_timing.get("duration_seconds")
+		if duration_seconds is None:
+			return
+		handle.write(f"Duration: {duration_seconds:.3f} seconds\n")
+		breakdown = dict(stage_timing.get("breakdown_seconds") or {})
+		if not breakdown:
+			return
+		handle.write("Breakdown:\n")
+		for key, value in breakdown.items():
+			handle.write(f"  - {key}: {value:.3f} seconds\n")
+
 	def _write_stage1(self, handle: Any, record: Dict[str, Any]) -> None:
 		handle.write("-" * 80 + "\n")
 		handle.write("STAGE 1: Natural Language → LTL Specification\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage1_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage1")
 		if record["stage1_used_llm"]:
 			handle.write(f"Parser: LLM ({record['stage1_model']})\n")
 		else:
@@ -637,6 +720,7 @@ class PipelineLogger:
 		handle.write("STAGE 2: LTL Specification → DFA Generation\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage2_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage2")
 
 		if record["stage2_status"] == "success" and record["stage2_dfa_result"]:
 			handle.write("\n" + "~" * 40 + "\n")
@@ -665,6 +749,7 @@ class PipelineLogger:
 		handle.write("STAGE 3: DFA → HTN Method Synthesis\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage3_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage3")
 		if record["stage3_used_llm"]:
 			handle.write(f"Generator: LLM ({record['stage3_model']})\n")
 		else:
@@ -721,6 +806,7 @@ class PipelineLogger:
 		handle.write("STAGE 4: HTN Method Library → PANDA Planning\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage4_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage4")
 		handle.write(f"Backend: {record['stage4_backend']}\n")
 
 		if record["stage4_metadata"]:
@@ -751,6 +837,7 @@ class PipelineLogger:
 		handle.write("STAGE 5: HTN Methods + DFA Wrappers → AgentSpeak Rendering\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage5_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage5")
 
 		if record["stage5_metadata"]:
 			handle.write("\n" + "~" * 40 + "\n")
@@ -776,6 +863,7 @@ class PipelineLogger:
 		handle.write("STAGE 6: AgentSpeak → Jason Runtime Validation\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage6_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage6")
 		handle.write(f"Backend: {record['stage6_backend']}\n")
 
 		if record["stage6_metadata"]:
@@ -807,6 +895,7 @@ class PipelineLogger:
 		handle.write("STAGE 7: Official IPC HTN Plan Verification\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage7_status'].upper()}\n")
+		self._write_stage_timing(handle, record, "stage7")
 		handle.write(f"Backend: {record['stage7_backend']}\n")
 
 		if record["stage7_metadata"]:

@@ -84,6 +84,9 @@ digraph G {
     assert result["original_num_transitions"] == 1
     assert result["num_states"] == 2
     assert result["num_transitions"] == 1
+    assert "timing_profile" in result
+    assert result["timing_profile"]["convert_seconds"] >= 0.0
+    assert result["timing_profile"]["total_seconds"] >= 0.0
 
 
 def test_ltlf_to_dfa_uses_fast_path_for_independent_eventually_conjunctions():

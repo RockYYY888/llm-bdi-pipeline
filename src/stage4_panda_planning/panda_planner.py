@@ -13,6 +13,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -80,6 +81,8 @@ class PANDAPlanner:
 		timeout_seconds: Optional[float] = None,
 	) -> PANDAPlanResult:
 		self._require_toolchain()
+		total_start = time.perf_counter()
+		timing_profile: Dict[str, float] = {}
 
 		task_args_tuple = tuple(
 			task_args if task_args is not None else (target_literal.args if target_literal else ())
@@ -92,6 +95,7 @@ class PANDAPlanner:
 		work_dir = self._resolve_work_dir(transition_name)
 		work_dir.mkdir(parents=True, exist_ok=True)
 
+		export_start = time.perf_counter()
 		domain_hddl = self._build_domain_hddl(
 			domain,
 			method_library,
@@ -109,6 +113,7 @@ class PANDAPlanner:
 			initial_facts=initial_facts,
 			goal_facts=goal_facts,
 		)
+		timing_profile["hddl_export_seconds"] = time.perf_counter() - export_start
 
 		domain_path = work_dir / "domain.hddl"
 		problem_path = work_dir / "problem.hddl"
@@ -117,27 +122,35 @@ class PANDAPlanner:
 		raw_plan_path = work_dir / "plan.original"
 		actual_plan_path = work_dir / "plan.actual"
 
+		write_files_start = time.perf_counter()
 		domain_path.write_text(domain_hddl)
 		problem_path.write_text(problem_hddl)
+		timing_profile["write_input_files_seconds"] = time.perf_counter() - write_files_start
 
+		parser_start = time.perf_counter()
 		parser_run = self._run_command(
 			self._build_command(self.parser_cmd, str(domain_path), str(problem_path), str(parsed_path)),
 			"parser",
 			work_dir,
 			timeout_seconds=timeout_seconds,
 		)
+		timing_profile["parser_seconds"] = time.perf_counter() - parser_start
+		grounder_start = time.perf_counter()
 		grounder_run = self._run_command(
 			self._build_command(self.grounder_cmd, str(parsed_path), str(grounded_path)),
 			"grounder",
 			work_dir,
 			timeout_seconds=timeout_seconds,
 		)
+		timing_profile["grounder_seconds"] = time.perf_counter() - grounder_start
+		engine_start = time.perf_counter()
 		engine_run = self._run_command(
 			self._build_command(self.engine_cmd, str(grounded_path)),
 			"engine",
 			work_dir,
 			timeout_seconds=timeout_seconds,
 		)
+		timing_profile["engine_seconds"] = time.perf_counter() - engine_start
 		raw_plan_text = engine_run["stdout"]
 		raw_plan_path.write_text(raw_plan_text)
 
@@ -151,11 +164,13 @@ class PANDAPlanner:
 			str(actual_plan_path),
 		)
 		try:
+			conversion_start = time.perf_counter()
 			conversion_result = self._run_subprocess(
 				conversion_command,
 				work_dir,
 				timeout_seconds=timeout_seconds,
 			)
+			timing_profile["conversion_seconds"] = time.perf_counter() - conversion_start
 			conversion_stdout = conversion_result["stdout"]
 			conversion_stderr = conversion_result["stderr"]
 		except PANDAPlanningError as exc:
@@ -178,7 +193,9 @@ class PANDAPlanner:
 		elif raw_plan_path.exists():
 			actual_plan_text = raw_plan_path.read_text()
 
+		parse_plan_start = time.perf_counter()
 		steps = self._parse_plan_steps(actual_plan_text or raw_plan_text, domain)
+		timing_profile["parse_plan_seconds"] = time.perf_counter() - parse_plan_start
 		if not steps and not allow_empty_plan and "->" not in actual_plan_text:
 			raise PANDAPlanningError(
 				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args_tuple)})",
@@ -203,6 +220,7 @@ class PANDAPlanner:
 				},
 			)
 
+		timing_profile["total_seconds"] = time.perf_counter() - total_start
 		return PANDAPlanResult(
 			task_name=task_name,
 			task_args=task_args_tuple,
@@ -219,6 +237,7 @@ class PANDAPlanner:
 			raw_plan=raw_plan_text,
 			actual_plan=actual_plan_text or raw_plan_text,
 			work_dir=str(work_dir),
+			timing_profile=timing_profile,
 		)
 
 	def extract_method_trace(self, plan_text: str) -> List[Dict[str, Any]]:

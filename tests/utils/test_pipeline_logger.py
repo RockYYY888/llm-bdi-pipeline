@@ -68,9 +68,9 @@ def test_stage3_success_summary_in_execution_json_is_derived_from_method_library
     execution = json.loads((log_dir / "execution.json").read_text())
 
     assert execution["stage3_status"] == "success"
-    assert execution["stage3_method_library"]["target_task_bindings"] == [
-        {"target_literal": "on(a, b)", "task_name": "place_on"},
-    ]
+    assert execution["stage3_method_library"] == {
+        "artifact_path": "htn_method_library.json",
+    }
     assert execution["stage3_metadata"]["target_literals"] == ["on(a, b)"]
     assert execution["stage3_metadata"]["target_task_bindings"] == [
         {"target_literal": "on(a, b)", "task_name": "place_on"},
@@ -251,3 +251,42 @@ def test_pipeline_logger_persists_stage7_verification_details(tmp_path):
     assert execution["stage7_artifacts"]["verification_result"] is True
     assert "STAGE 7: Official IPC HTN Plan Verification" in execution_txt
     assert "OFFICIAL VERIFICATION SUMMARY" in execution_txt
+
+
+def test_pipeline_logger_persists_structured_timing_profile(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path))
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        domain_name="BLOCKS",
+        problem_name="BW-rand-5",
+        output_dir=str(tmp_path),
+    )
+    logger.record_stage_timing(
+        "stage1",
+        1.234567,
+        breakdown={
+            "prompt_build_seconds": 0.111111,
+            "llm_roundtrip_seconds": 1.0,
+        },
+        metadata={"prefer_skeletal_task_grounded_output": True},
+    )
+    logger.end_pipeline(success=True)
+
+    log_dir = logger.current_log_dir
+    assert log_dir is not None
+    execution = json.loads((log_dir / "execution.json").read_text())
+    execution_txt = (log_dir / "execution.txt").read_text()
+
+    assert execution["timing_profile"]["stage1"]["duration_seconds"] == 1.234567
+    assert execution["timing_profile"]["stage1"]["breakdown_seconds"] == {
+        "prompt_build_seconds": 0.111111,
+        "llm_roundtrip_seconds": 1.0,
+    }
+    assert execution["timing_profile"]["stage1"]["metadata"] == {
+        "prefer_skeletal_task_grounded_output": True,
+    }
+    assert "TIMING PROFILE" in execution_txt
+    assert "stage1: 1.235s" in execution_txt
+    assert "prompt_build_seconds: 0.111s" in execution_txt

@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -54,6 +55,7 @@ class JasonValidationResult:
 	failure_class: Optional[str]
 	consistency_checks: Dict[str, Any]
 	artifacts: Dict[str, str]
+	timing_profile: Dict[str, Any]
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
@@ -74,6 +76,7 @@ class JasonValidationResult:
 			"failure_class": self.failure_class,
 			"consistency_checks": dict(self.consistency_checks),
 			"artifacts": dict(self.artifacts),
+			"timing_profile": dict(self.timing_profile),
 		}
 
 
@@ -132,6 +135,8 @@ class JasonRunner:
 		skip_method_trace_reconstruction: bool = False,
 	) -> JasonValidationResult:
 		"""Execute Jason validation and return a structured result."""
+		total_start = time.perf_counter()
+		timing_profile: Dict[str, float] = {}
 
 		if not action_schemas:
 			raise JasonValidationError(
@@ -142,10 +147,14 @@ class JasonRunner:
 		output_path = Path(output_dir).resolve()
 		output_path.mkdir(parents=True, exist_ok=True)
 
+		runtime_resolution_start = time.perf_counter()
 		java_bin, java_major = self._select_java_binary()
 		javac_bin = self._select_javac_binary(java_bin)
 		jason_jar = self._ensure_jason_jar(java_bin)
 		log_conf = self._resolve_log_config()
+		timing_profile["runtime_resolution_seconds"] = (
+			time.perf_counter() - runtime_resolution_start
+		)
 
 		runner_asl_path = output_path / "agentspeak_generated.asl"
 		runner_mas2j_path = output_path / "jason_runner.mas2j"
@@ -177,6 +186,7 @@ class JasonRunner:
 			and planning_domain is not None
 			and ordering_target_literals
 		):
+			ordering_start = time.perf_counter()
 			ordering = self._infer_unordered_target_execution_order(
 				target_literals=ordering_target_literals,
 				method_library=method_library,
@@ -195,7 +205,11 @@ class JasonRunner:
 					agentspeak_code,
 					unordered_target_order_ids,
 				)
+			timing_profile["unordered_target_ordering_seconds"] = (
+				time.perf_counter() - ordering_start
+			)
 
+		source_build_start = time.perf_counter()
 		runner_asl = self._build_runner_asl(
 			effective_agentspeak_code,
 			target_literals,
@@ -221,9 +235,13 @@ class JasonRunner:
 			seed_facts=seed_facts,
 			target_literals=target_literals,
 		)
+		timing_profile["source_build_seconds"] = time.perf_counter() - source_build_start
+		write_sources_start = time.perf_counter()
 		runner_asl_path.write_text(runner_asl)
 		runner_mas2j_path.write_text(runner_mas2j)
 		env_java_path.write_text(env_source)
+		timing_profile["write_sources_seconds"] = time.perf_counter() - write_sources_start
+		compile_start = time.perf_counter()
 		self._compile_environment_java(
 			java_bin=java_bin,
 			javac_bin=javac_bin,
@@ -231,6 +249,7 @@ class JasonRunner:
 			env_java_path=env_java_path,
 			output_path=output_path,
 		)
+		timing_profile["environment_compile_seconds"] = time.perf_counter() - compile_start
 		if not env_class_path.exists():
 			raise JasonValidationError(
 				"Stage 6 environment class compilation completed but class file is missing.",
@@ -257,6 +276,7 @@ class JasonRunner:
 		raw_stderr: str | bytes = ""
 
 		try:
+			mas_run_start = time.perf_counter()
 			result = subprocess.run(
 				command,
 				cwd=output_path,
@@ -268,11 +288,14 @@ class JasonRunner:
 			exit_code = result.returncode
 			raw_stdout = result.stdout
 			raw_stderr = result.stderr
+			timing_profile["mas_run_seconds"] = time.perf_counter() - mas_run_start
 		except subprocess.TimeoutExpired as exc:
 			timed_out = True
 			raw_stdout = exc.stdout or ""
 			raw_stderr = exc.stderr or ""
+			timing_profile["mas_run_seconds"] = time.perf_counter() - mas_run_start
 
+		output_processing_start = time.perf_counter()
 		stdout_text = self._normalise_process_output(raw_stdout)
 		stderr_text = self._normalise_process_output(raw_stderr)
 		stdout = self._combine_process_output(stdout_text, stderr_text)
@@ -286,11 +309,16 @@ class JasonRunner:
 		else:
 			method_trace = list(guided_method_trace) if guided_method_trace else extracted_method_trace
 		failed_goals = self._extract_failed_goals(stdout)
+		timing_profile["output_processing_seconds"] = (
+			time.perf_counter() - output_processing_start
+		)
 
+		artifact_write_start = time.perf_counter()
 		stdout_path.write_text(stdout)
 		stderr_path.write_text(stderr)
 		action_path_path.write_text(self._render_action_path(action_path))
 		method_trace_path.write_text(json.dumps(method_trace, indent=2))
+		timing_profile["artifact_write_seconds"] = time.perf_counter() - artifact_write_start
 
 		artifacts = {
 			"agentspeak_generated": str(runner_asl_path),
@@ -306,7 +334,12 @@ class JasonRunner:
 		if unordered_target_order_ids:
 			artifacts["unordered_target_order_ids"] = list(unordered_target_order_ids)
 			artifacts["unordered_target_order_signatures"] = list(unordered_target_order_signatures)
+		environment_validation_start = time.perf_counter()
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
+		timing_profile["environment_validation_seconds"] = (
+			time.perf_counter() - environment_validation_start
+		)
+		consistency_start = time.perf_counter()
 		consistency_checks = self._run_consistency_checks(
 			action_path=action_path,
 			method_trace=method_trace,
@@ -316,6 +349,7 @@ class JasonRunner:
 			problem_file=problem_file,
 			skip_method_trace_reconstruction=skip_method_trace_reconstruction,
 		)
+		timing_profile["consistency_checks_seconds"] = time.perf_counter() - consistency_start
 		is_success = self._is_successful_run(
 			stdout=stdout,
 			exit_code=exit_code,
@@ -331,6 +365,7 @@ class JasonRunner:
 			environment_result,
 			consistency_checks,
 		)
+		timing_profile["total_seconds"] = time.perf_counter() - total_start
 		result_payload = JasonValidationResult(
 			status=status,
 			backend=self.backend_name,
@@ -349,6 +384,7 @@ class JasonRunner:
 			failure_class=failure_class,
 			consistency_checks=consistency_checks,
 			artifacts=artifacts,
+			timing_profile=timing_profile,
 		)
 		validation_json_path.write_text(json.dumps(result_payload.to_dict(), indent=2))
 

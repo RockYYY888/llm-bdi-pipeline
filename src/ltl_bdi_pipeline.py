@@ -4,6 +4,7 @@ LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
 
 import json
 import re
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
@@ -78,6 +79,31 @@ class LTL_BDI_Pipeline:
 
         # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
+
+    def _record_stage_timing(
+        self,
+        stage_name: str,
+        stage_start: float,
+        *,
+        breakdown: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.logger.record_stage_timing(
+            stage_name,
+            time.perf_counter() - stage_start,
+            breakdown=breakdown,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _timing_breakdown_without_total(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not profile:
+            return {}
+        return {
+            str(key): value
+            for key, value in profile.items()
+            if key != "total_seconds" and value is not None
+        }
 
     def execute(self, nl_instruction: str, mode: str = "dfa_agentspeak") -> Dict[str, Any]:
         """
@@ -204,6 +230,7 @@ class LTL_BDI_Pipeline:
         """Stage 1: Natural Language -> LTLf Specification"""
         print("\n[STAGE 1] Natural Language -> LTLf Specification")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         generator = NLToLTLfGenerator(
             api_key=self.config.openai_api_key,
@@ -216,6 +243,7 @@ class LTL_BDI_Pipeline:
 
         try:
             ltl_spec, prompt_dict, response_text = generator.generate(nl_instruction)
+            postprocess_start = time.perf_counter()
             query_object_inventory = self._extract_query_object_inventory(nl_instruction)
             ltl_spec.query_object_inventory = list(query_object_inventory)
             query_task_anchors = self._extract_query_task_anchors(nl_instruction)
@@ -223,6 +251,25 @@ class LTL_BDI_Pipeline:
                 ltl_spec,
                 query_task_anchors=query_task_anchors,
                 query_text=nl_instruction,
+            )
+            generator_metadata = dict(getattr(generator, "last_generation_metadata", {}) or {})
+            stage1_breakdown = self._timing_breakdown_without_total(
+                generator_metadata.get("timing_profile"),
+            )
+            stage1_breakdown["postprocess_seconds"] = time.perf_counter() - postprocess_start
+            self._record_stage_timing(
+                "stage1",
+                stage_start,
+                breakdown=stage1_breakdown,
+                metadata={
+                    "task_clause_count": generator_metadata.get("task_clause_count"),
+                    "prefer_compact_task_grounded_output": generator_metadata.get(
+                        "prefer_compact_task_grounded_output",
+                    ),
+                    "prefer_skeletal_task_grounded_output": generator_metadata.get(
+                        "prefer_skeletal_task_grounded_output",
+                    ),
+                },
             )
             self.logger.log_stage1(
                 nl_instruction,
@@ -241,6 +288,17 @@ class LTL_BDI_Pipeline:
             return ltl_spec
 
         except Exception as e:
+            generator_metadata = dict(getattr(generator, "last_generation_metadata", {}) or {})
+            self._record_stage_timing(
+                "stage1",
+                stage_start,
+                breakdown=self._timing_breakdown_without_total(
+                    generator_metadata.get("timing_profile"),
+                ),
+                metadata={
+                    "failure_stage": generator_metadata.get("failure_stage"),
+                },
+            )
             self.logger.log_stage1(nl_instruction, None, "Failed", str(e))
             print(f"✗ Stage 1 Failed: {e}")
             return None
@@ -249,6 +307,7 @@ class LTL_BDI_Pipeline:
         """Stage 2: LTLf -> DFA Generation"""
         print("\n[STAGE 2] DFA Generation")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         builder = DFABuilder()
 
@@ -278,14 +337,34 @@ class LTL_BDI_Pipeline:
             import json
             # Remove the actual DOT strings from JSON to keep it readable
             # (DOT files are saved separately)
+            persist_start = time.perf_counter()
             json_data = {k: v for k, v in dfa_result.items()
                         if k not in ['dfa_dot', 'original_dfa_dot']}
             output_file.write_text(json.dumps(json_data, indent=2))
+            stage2_breakdown = self._timing_breakdown_without_total(
+                dfa_result.get("timing_profile"),
+            )
+            stage2_breakdown["persist_metadata_seconds"] = (
+                time.perf_counter() - persist_start
+            )
+            self._record_stage_timing(
+                "stage2",
+                stage_start,
+                breakdown=stage2_breakdown,
+                metadata={
+                    "construction": (
+                        (dfa_result.get("simplification_stats") or {}).get("method")
+                    ),
+                    "num_states": dfa_result.get("num_states"),
+                    "num_transitions": dfa_result.get("num_transitions"),
+                },
+            )
             print(f"\n  Metadata saved to: {output_file}")
 
             return dfa_result
 
         except Exception as e:
+            self._record_stage_timing("stage2", stage_start)
             self.logger.log_stage2_dfas(ltl_spec, None, "Failed", str(e))
             print(f"✗ Stage 2 Failed: {e}")
             import traceback
@@ -296,6 +375,7 @@ class LTL_BDI_Pipeline:
         """Stage 3: DFA -> HTN method synthesis."""
         print("\n[STAGE 3] HTN Method Synthesis")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         try:
             grounding_map = ltl_spec.grounding_map
@@ -321,6 +401,7 @@ class LTL_BDI_Pipeline:
                 max_tokens=int(self.config.openai_stage3_max_tokens),
             )
 
+            synthesis_start = time.perf_counter()
             method_library, synthesis_meta = synthesizer.synthesize(
                 domain=self.domain,
                 grounding_map=grounding_map,
@@ -334,6 +415,7 @@ class LTL_BDI_Pipeline:
                 ordered_literal_signatures=ordered_literal_signatures,
                 linearise_ordered_literals=self._query_task_sequence_is_ordered(ltl_spec),
             )
+            synthesis_seconds = time.perf_counter() - synthesis_start
             self._validate_method_library_typing(method_library)
             summary = {
                 "used_llm": synthesis_meta["used_llm"],
@@ -357,13 +439,28 @@ class LTL_BDI_Pipeline:
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
             }
+            transition_extract_start = time.perf_counter()
             transition_specs = synthesizer.extract_progressing_transitions(
                 grounding_map,
                 dfa_result,
                 ordered_literal_signatures=ordered_literal_signatures,
                 linearise_ordered_literals=self._query_task_sequence_is_ordered(ltl_spec),
             )
+            transition_extract_seconds = time.perf_counter() - transition_extract_start
             summary["dfa_progress_transitions"] = len(transition_specs)
+            self._record_stage_timing(
+                "stage3",
+                stage_start,
+                breakdown={
+                    "synthesis_seconds": synthesis_seconds,
+                    "transition_extraction_seconds": transition_extract_seconds,
+                    "llm_response_seconds": synthesis_meta.get("llm_response_time_seconds"),
+                },
+                metadata={
+                    "used_llm": synthesis_meta.get("used_llm"),
+                    "llm_attempted": synthesis_meta.get("llm_prompt") is not None,
+                },
+            )
 
             self.logger.log_stage3_method_synthesis(
                 method_library.to_dict(),
@@ -396,6 +493,7 @@ class LTL_BDI_Pipeline:
             }
 
         except Exception as e:
+            self._record_stage_timing("stage3", stage_start)
             self.logger.log_stage3_method_synthesis(
                 None,
                 "Failed",
@@ -1173,12 +1271,18 @@ class LTL_BDI_Pipeline:
         """Stage 4: HTN method library -> PANDA planning."""
         print("\n[STAGE 4] PANDA Planning")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         planner = PANDAPlanner(workspace=str(self.output_dir))
 
         try:
             plan_records = []
             transition_artifacts = []
+            stage4_breakdown: Dict[str, float] = {
+                "seed_scope_seconds": 0.0,
+                "witness_initial_facts_seconds": 0.0,
+                "planner_seconds": 0.0,
+            }
             for transition_spec in transition_specs:
                 literal = transition_spec["literal"]
                 transition_name = transition_spec["transition_name"]
@@ -1188,12 +1292,15 @@ class LTL_BDI_Pipeline:
                         "Stage 3 output is missing a target_task_binding for "
                         f"'{literal.to_signature()}'."
                     )
+                seed_scope_start = time.perf_counter()
                 witness_objects, witness_object_types = self._seed_validation_scope(
                     task_name,
                     method_library,
                     tuple(literal.args),
                     ltl_spec.objects,
                 )
+                stage4_breakdown["seed_scope_seconds"] += time.perf_counter() - seed_scope_start
+                witness_facts_start = time.perf_counter()
                 witness_initial_facts = self._task_witness_initial_facts(
                     planner,
                     task_name,
@@ -1207,6 +1314,10 @@ class LTL_BDI_Pipeline:
                     witness_initial_facts,
                     literal,
                 )
+                stage4_breakdown["witness_initial_facts_seconds"] += (
+                    time.perf_counter() - witness_facts_start
+                )
+                planner_start = time.perf_counter()
                 plan = planner.plan(
                     domain=self.domain,
                     method_library=method_library,
@@ -1221,6 +1332,14 @@ class LTL_BDI_Pipeline:
                     allow_empty_plan=True,
                     initial_facts=witness_initial_facts,
                 )
+                stage4_breakdown["planner_seconds"] += time.perf_counter() - planner_start
+                for timing_key, timing_value in dict(plan.timing_profile or {}).items():
+                    if timing_key == "total_seconds":
+                        continue
+                    stage4_breakdown[f"planner_{timing_key}"] = (
+                        stage4_breakdown.get(f"planner_{timing_key}", 0.0)
+                        + float(timing_value)
+                    )
                 label = literal.to_signature()
                 plan_records.append(
                     {
@@ -1276,6 +1395,14 @@ class LTL_BDI_Pipeline:
                 ),
                 "planned_tasks": [record["plan"].task_name for record in plan_records],
             }
+            self._record_stage_timing(
+                "stage4",
+                stage_start,
+                breakdown=stage4_breakdown,
+                metadata={
+                    "transition_count": len(transition_artifacts),
+                },
+            )
 
             self.logger.log_stage4_panda_planning(
                 {
@@ -1299,6 +1426,7 @@ class LTL_BDI_Pipeline:
             }
 
         except Exception as e:
+            self._record_stage_timing("stage4", stage_start)
             self.logger.log_stage4_panda_planning(
                 None,
                 "Failed",
@@ -2523,10 +2651,12 @@ class LTL_BDI_Pipeline:
         """Stage 5: HTN methods + validated DFA wrappers -> AgentSpeak rendering."""
         print("\n[STAGE 5] AgentSpeak Rendering")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         try:
             renderer = AgentSpeakRenderer()
             typed_objects = self._stage5_query_typed_objects(ltl_spec)
+            render_start = time.perf_counter()
             asl_code = renderer.generate(
                 domain=self.domain,
                 objects=ltl_spec.objects,
@@ -2535,6 +2665,7 @@ class LTL_BDI_Pipeline:
                 plan_records=plan_records,
                 ordered_query_sequence=self._query_task_sequence_is_ordered(ltl_spec),
             )
+            render_seconds = time.perf_counter() - render_start
             metadata = {
                 "transition_count": len(plan_records),
                 "rendered_methods": len(method_library.methods),
@@ -2554,12 +2685,26 @@ class LTL_BDI_Pipeline:
                     print(f"    {index:2d}. {line}")
 
             output_file = self.output_dir / "agentspeak_generated.asl"
+            write_start = time.perf_counter()
             output_file.write_text(asl_code)
+            self._record_stage_timing(
+                "stage5",
+                stage_start,
+                breakdown={
+                    "render_seconds": render_seconds,
+                    "write_output_seconds": time.perf_counter() - write_start,
+                },
+                metadata={
+                    "transition_count": len(plan_records),
+                    "rendered_methods": len(method_library.methods),
+                },
+            )
             print(f"\n  ✓ Complete AgentSpeak code saved to: {output_file}")
 
             return asl_code, metadata
 
         except Exception as e:
+            self._record_stage_timing("stage5", stage_start)
             self.logger.log_stage5_agentspeak_rendering(
                 None,
                 "Failed",
@@ -2581,10 +2726,12 @@ class LTL_BDI_Pipeline:
         """Stage 6: run generated AgentSpeak with Jason (RunLocalMAS)."""
         print("\n[STAGE 6] Jason Runtime Validation")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         try:
             stage6_dir = Path(__file__).parent / "stage6_jason_validation"
             runner = JasonRunner(stage6_dir=stage6_dir)
+            preparation_start = time.perf_counter()
             seed_facts, seed_transition = self._stage6_runtime_seed_facts(
                 plan_records,
                 method_library.target_literals,
@@ -2597,6 +2744,8 @@ class LTL_BDI_Pipeline:
                 problem_object_types=self.problem.object_types if self.problem is not None else None,
             )
             action_schemas = self._stage6_action_schemas()
+            preparation_seconds = time.perf_counter() - preparation_start
+            guided_execution_start = time.perf_counter()
             guided_execution = self._stage6_planner_guided_execution(
                 ltl_spec,
                 method_library,
@@ -2605,6 +2754,8 @@ class LTL_BDI_Pipeline:
                 object_types=stage6_object_types,
                 seed_facts=seed_facts,
             )
+            guided_execution_seconds = time.perf_counter() - guided_execution_start
+            validation_start = time.perf_counter()
             result = runner.validate(
                 agentspeak_code=asl_code,
                 target_literals=method_library.target_literals,
@@ -2652,6 +2803,7 @@ class LTL_BDI_Pipeline:
                     )
                 ),
             )
+            validation_seconds = time.perf_counter() - validation_start
             summary = {
                 "backend": result.backend,
                 "status": result.status,
@@ -2679,6 +2831,23 @@ class LTL_BDI_Pipeline:
                 "guided_execution_method_count": len((guided_execution or {}).get("method_trace") or ()),
                 "guided_execution_work_dir": (guided_execution or {}).get("work_dir"),
             }
+            stage6_breakdown = {
+                "preparation_seconds": preparation_seconds,
+                "guided_execution_seconds": guided_execution_seconds,
+                "runtime_validation_seconds": validation_seconds,
+            }
+            stage6_breakdown.update(
+                self._timing_breakdown_without_total(result.timing_profile),
+            )
+            self._record_stage_timing(
+                "stage6",
+                stage_start,
+                breakdown=stage6_breakdown,
+                metadata={
+                    "guided_execution_source": (guided_execution or {}).get("source"),
+                    "guided_execution_is_partial": bool((guided_execution or {}).get("is_partial")),
+                },
+            )
             artifacts = result.to_dict()
             if (
                 guided_execution
@@ -2730,6 +2899,14 @@ class LTL_BDI_Pipeline:
                     "failure_class": metadata.get("failure_class"),
                     "consistency_checks": metadata.get("consistency_checks"),
                 })
+            self._record_stage_timing(
+                "stage6",
+                stage_start,
+                breakdown=self._timing_breakdown_without_total(metadata.get("timing_profile")),
+                metadata={
+                    "failure_class": metadata.get("failure_class"),
+                },
+            )
             self.logger.log_stage6_jason_validation(
                 metadata if metadata else None,
                 "Failed",
@@ -2739,6 +2916,7 @@ class LTL_BDI_Pipeline:
             print(f"✗ Stage 6 Failed: {e}")
             return None
         except Exception as e:
+            self._record_stage_timing("stage6", stage_start)
             self.logger.log_stage6_jason_validation(
                 None,
                 "Failed",
@@ -2757,6 +2935,7 @@ class LTL_BDI_Pipeline:
         """Stage 7: verify the generated hierarchical plan with the official IPC verifier."""
         print("\n[STAGE 7] Official IPC HTN Plan Verification")
         print("-"*80)
+        stage_start = time.perf_counter()
 
         if self.problem is None or not self.problem_file:
             summary = {
@@ -2776,6 +2955,7 @@ class LTL_BDI_Pipeline:
                 "Skipped",
                 metadata=summary,
             )
+            self._record_stage_timing("stage7", stage_start)
             print("• Skipped: no problem file was provided")
             return {
                 "summary": summary,
@@ -2794,12 +2974,16 @@ class LTL_BDI_Pipeline:
                     "status": "failed",
                 },
             )
+            self._record_stage_timing("stage7", stage_start)
             print(f"✗ Stage 7 Failed: {error}")
             return None
 
         stage6_artifacts = stage6_data.get("artifacts") or {}
+        domain_build_start = time.perf_counter()
         verification_domain_file = self._stage7_build_verification_domain(method_library)
+        domain_build_seconds = time.perf_counter() - domain_build_start
         guided_plan_text = stage6_artifacts.get("guided_hierarchical_plan_text")
+        verifier_start = time.perf_counter()
         if guided_plan_text:
             verifier_result = verifier.verify_plan_text(
                 domain_file=verification_domain_file,
@@ -2818,6 +3002,7 @@ class LTL_BDI_Pipeline:
                 method_trace=stage6_artifacts.get("method_trace") or [],
                 output_dir=self.output_dir,
             )
+        verifier_seconds = time.perf_counter() - verifier_start
         artifacts = verifier_result.to_dict()
         summary = {
             "backend": "pandaPIparser",
@@ -2848,6 +3033,18 @@ class LTL_BDI_Pipeline:
                 error=error,
                 metadata=summary,
             )
+            self._record_stage_timing(
+                "stage7",
+                stage_start,
+                breakdown={
+                    "verification_domain_build_seconds": domain_build_seconds,
+                    "official_verifier_seconds": verifier_seconds,
+                },
+                metadata={
+                    "plan_kind": verifier_result.plan_kind,
+                    "verification_result": verifier_result.verification_result,
+                },
+            )
             print(f"✗ Stage 7 Failed: {error}")
             return None
 
@@ -2855,6 +3052,18 @@ class LTL_BDI_Pipeline:
             artifacts,
             "Success",
             metadata=summary,
+        )
+        self._record_stage_timing(
+            "stage7",
+            stage_start,
+            breakdown={
+                "verification_domain_build_seconds": domain_build_seconds,
+                "official_verifier_seconds": verifier_seconds,
+            },
+            metadata={
+                "plan_kind": verifier_result.plan_kind,
+                "verification_result": verifier_result.verification_result,
+            },
         )
         print("✓ Official IPC verification complete")
         print(f"  Plan kind: {verifier_result.plan_kind}")

@@ -47,6 +47,7 @@ class PANDAPlanResult:
 	raw_plan: str = ""
 	actual_plan: str = ""
 	work_dir: Optional[str] = None
+	timing_profile: Dict[str, Any] = field(default_factory=dict)
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
@@ -65,4 +66,5 @@ class PANDAPlanResult:
 			"raw_plan": self.raw_plan,
 			"actual_plan": self.actual_plan,
 			"work_dir": self.work_dir,
+			"timing_profile": dict(self.timing_profile),
 		}
