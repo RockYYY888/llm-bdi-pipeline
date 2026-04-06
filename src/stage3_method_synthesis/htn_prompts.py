@@ -1711,7 +1711,7 @@ def _constructive_template_summary_for_task(
 			action_parameter_types=pattern.get("action_parameter_types") or [],
 		)
 
-		rendered_preconditions = []
+		extra_role_preconditions = []
 		for signature in pattern.get("dynamic_precondition_signatures") or []:
 			rendered_signature = _render_signature_with_mapping(signature, token_mapping)
 			parsed_signature = _parse_literal_signature(rendered_signature)
@@ -1720,17 +1720,17 @@ def _constructive_template_summary_for_task(
 			_, rendered_args, rendered_positive = parsed_signature
 			if not rendered_positive:
 				continue
-			if rendered_args and not set(rendered_args) & set(task_parameters):
+			if rendered_args and set(rendered_args).issubset(set(task_parameters)):
 				continue
-			rendered_preconditions.append(rendered_signature)
+			extra_role_preconditions.append(rendered_signature)
 
 		rendered_call = _task_invocation_signature(
 			pattern["action_name"],
 			rendered_action_args,
 		)
 		precondition_suffix = (
-			f" [needs {', '.join(rendered_preconditions)}]"
-			if rendered_preconditions
+			f" [extra needs {', '.join(extra_role_preconditions)}]"
+			if extra_role_preconditions
 			else ""
 		)
 		rendered_patterns.append(f"{rendered_call}{precondition_suffix}")
@@ -5232,6 +5232,7 @@ def _render_contract_blocks(
 			for line in payload.get("contract_lines", ())
 			if str(line).strip()
 		]
+		lines = _select_salient_contract_lines(tag_name, lines)
 		if not lines and tag_name != "query_task_contract":
 			continue
 		header_lines = []
@@ -5249,6 +5250,66 @@ def _render_contract_blocks(
 			f"<{tag_name} name=\"{payload.get('display_name')}\">\n{body}\n</{tag_name}>"
 		)
 	return "\n".join(blocks) if blocks else f"<{tag_name}s>\n- none\n</{tag_name}s>"
+
+
+def _select_salient_contract_lines(
+	tag_name: str,
+	lines: Sequence[str],
+) -> list[str]:
+	"""
+	Keep the contract block compact while preserving the highest-value synthesis cues.
+
+	The live prompt follows a schema-driven, structure-guided layout. To keep the
+	one-shot synthesis step stable, retain the minimal set of contract lines that
+	define headline producers, caller-shared prerequisites, recursive support, and
+	exact packaging obligations, while trimming repetitive explanatory variants.
+	"""
+	normalised_lines = [str(line).strip() for line in lines if str(line).strip()]
+	if not normalised_lines:
+		return []
+	limit_by_tag = {
+		"query_task_contract": 9,
+		"support_task_contract": 7,
+	}
+	limit = limit_by_tag.get(tag_name)
+	if limit is None or len(normalised_lines) <= limit:
+		return normalised_lines
+
+	def priority(line: str) -> tuple[int, int]:
+		if "exact same-arity packaging contract" in line or "exact same-arity packaging child" in line:
+			return (0, 0)
+		if "targets " in line and "templates:" in line:
+			return (1, 0)
+		if "Support options:" in line or " requires " in line:
+			return (2, 0)
+		if "before any helper or child call" in line:
+			return (3, 0)
+		if "caller-shared dynamic prerequisites" in line:
+			return (4, 0)
+		if "if a constructive sibling uses" in line:
+			return (5, 0)
+		if "recursive support is valid" in line:
+			return (6, 0)
+		if "recursive template" in line:
+			return (7, 0)
+		if "cleanup template" in line:
+			return (8, 0)
+		if "introduces extra roles" in line:
+			return (9, 0)
+		if "acts as a non-leading support/base role" in line:
+			return (10, 0)
+		if "can serve as a declared support task" in line:
+			return (11, 0)
+		return (12, 0)
+
+	selected_indices = sorted(
+		index
+		for _, index in sorted(
+			((priority(line), index) for index, line in enumerate(normalised_lines)),
+			key=lambda item: (item[0], item[1]),
+		)[:limit]
+	)
+	return [normalised_lines[index] for index in selected_indices]
 
 
 def _compact_contract_line(line: str) -> str:
@@ -5467,10 +5528,13 @@ def build_htn_system_prompt() -> str:
 		"GLOBAL RULES:\n"
 		"- Preserve query-mentioned declared tasks as the top-level skeleton whenever they match the ordered targets.\n"
 		"- Prefer declared support tasks over fresh helpers; create a fresh helper only for a dynamic predicate that no declared task can responsibly cover.\n"
+		"- If a query or support contract already lists explicit support options for a prerequisite, use those listed options or declared support tasks instead of inventing a fresh helper for that same prerequisite.\n"
 		"- Static predicates are context constraints only; never create helpers for them.\n"
 		"- Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks; target_task_bindings already define the top-level roots.\n"
 		"- Each target-bound task needs an already-satisfied/noop method with the headline literal in context.\n"
+		"- If the prompt lists an exact same-arity packaging contract for a target-bound task, the constructive branch must call that packaging child instead of bypassing it with a direct final producer.\n"
 		"- Every primitive dynamic precondition must be supported by method context or earlier subtasks.\n"
+		"- For constructive branches, do not move unmet dynamic prerequisites into method.context merely to avoid decomposition when a listed declared support task, packaging child, or recursive support template can establish them.\n"
 		"- Every compound child call must satisfy the child's shared dynamic prerequisites before the child is called.\n"
 		"- Only rely on a previous compound child's own headline effect and explicitly shared envelope, never incidental internal side effects.\n"
 		"- Use same-arity packaging only when the user prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or new caller-shared envelopes on your own.\n"
@@ -5585,10 +5649,11 @@ def build_htn_user_prompt(
 		f"- {predicate_name}"
 		for predicate_name in relevant_dynamic_predicates
 	] or ["- none"]
-	action_lines = _render_relevant_action_lines(
-		domain,
-		_relevant_action_names_for_prompt(relevant_dynamic_predicates, analysis),
+	relevant_action_names = _relevant_action_names_for_prompt(
+		relevant_dynamic_predicates,
+		analysis,
 	)
+	action_lines = [f"- {action_name}" for action_name in relevant_action_names] or ["- none"]
 
 	grounding_block = "\n".join(
 		[
@@ -5627,20 +5692,20 @@ def build_htn_user_prompt(
 			"relevant_dynamic_predicates:",
 			*dynamic_predicate_lines,
 			"",
-			"primitive_actions:",
+			"relevant_primitive_actions:",
 			*action_lines,
 		]
 	)
 	instructions_block = "\n".join(
 		[
-			"1. Read query_task_contracts first. They are the canonical synthesis skeleton.",
-			"2. Read support_task_contracts second. If a parent calls a support child, satisfy every listed caller-shared prerequisite before the child call, and keep the child's internal support inside that child.",
-			"3. Preserve ordered query task names in target_task_bindings and as top-level compound tasks when they are supplied. Do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top to sequence those query tasks.",
-			"4. Every task that appears in target_task_bindings must include an already-satisfied/noop method whose context contains that task's headline literal and whose subtasks are empty.",
-			"5. Prefer declared support tasks over fresh helpers. Fresh helpers are allowed only when no declared task can responsibly own the dynamic predicate.",
-			"6. Same-arity packaging is allowed only when an exact packaging contract is listed. If selected, support its listed caller-shared prerequisites first and then let that child own the final producer.",
+			"1. Read query_task_contracts first; they are the canonical synthesis skeleton.",
+			"2. Read support_task_contracts second. Before a support child call, satisfy every listed caller-shared prerequisite and keep child-internal support inside that child.",
+			"3. Preserve ordered query task names in target_task_bindings and as top-level compound tasks. Do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top.",
+			"4. Every target-bound task needs an already-satisfied/noop method whose context contains the headline literal and whose subtasks are empty.",
+			"5. Prefer declared support tasks. Fresh helpers are last resort, and if a contract already lists support options for a prerequisite, use those listed options or a listed declared support task instead of inventing a new helper.",
+			"6. If an exact same-arity packaging contract is listed for a target-bound task, the constructive branch must use that child, support its listed caller-shared prerequisites first, and let that child own the final producer.",
 			"7. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Grounded query object names may appear only in target_task_bindings and ordered top-level bindings, never inside methods. Type names are not predicates.",
-			"8. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support all of p, q, and r before ACTION. Multi-step methods require explicit pairwise ordering edges. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient.",
+			"8. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support all of p, q, and r before ACTION. Do not copy those unmet dynamic prerequisites into constructive context if a listed support or recursive template can establish them. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient. Multi-step methods require explicit pairwise ordering edges.",
 			"9. ordering: for subtasks s1 then s2 then s3, emit [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit [[\"s1\",\"s2\",\"s3\"]].",
 			"10. packaging_envelope: if child(ARG1, ARG2) has constructive siblings with contexts {ready(ARG1), clear(ARG2)} and {ready(ARG1), linked(ARG2)}, then the caller-shared envelope is ready(ARG1) only.",
 			"11. Never invent type predicates.",

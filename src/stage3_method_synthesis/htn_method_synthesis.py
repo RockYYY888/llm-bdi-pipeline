@@ -74,9 +74,18 @@ class HTNMethodSynthesizer:
 			from openai import OpenAI
 
 			if base_url:
-				self.client = OpenAI(api_key=api_key, base_url=base_url)
+				self.client = OpenAI(
+					api_key=api_key,
+					base_url=base_url,
+					timeout=self.timeout,
+					max_retries=0,
+				)
 			else:
-				self.client = OpenAI(api_key=api_key)
+				self.client = OpenAI(
+					api_key=api_key,
+					timeout=self.timeout,
+					max_retries=0,
+				)
 
 	def synthesize(
 		self,
@@ -970,7 +979,19 @@ class HTNMethodSynthesizer:
 		*,
 		max_tokens: Optional[int] = None,
 	) -> Tuple[str, Optional[str]]:
-		response = self.client.chat.completions.create(
+		response = self._create_chat_completion(prompt, max_tokens=max_tokens)
+		choice = response.choices[0]
+		finish_reason = getattr(choice, "finish_reason", None)
+		content = self._extract_response_text(response)
+		return content, finish_reason
+
+	def _create_chat_completion(
+		self,
+		prompt: Dict[str, str],
+		*,
+		max_tokens: Optional[int] = None,
+	):
+		return self.client.chat.completions.create(
 			model=self.model,
 			messages=[
 				{"role": "system", "content": prompt["system"]},
@@ -980,10 +1001,76 @@ class HTNMethodSynthesizer:
 			max_tokens=max_tokens or self.max_tokens,
 			timeout=self.timeout,
 		)
-		choice = response.choices[0]
-		finish_reason = getattr(choice, "finish_reason", None)
-		content = (choice.message.content or "").strip()
-		return content, finish_reason
+
+	def _extract_response_text(self, response: object) -> str:
+		choices = getattr(response, "choices", None) or ()
+		if not choices:
+			raise RuntimeError("LLM response did not include any choices.")
+
+		message = getattr(choices[0], "message", None)
+		if message is None:
+			raise RuntimeError("LLM response choice did not include a message payload.")
+
+		for candidate in (
+			getattr(message, "content", None),
+			getattr(message, "parsed", None),
+		):
+			extracted = self._normalise_response_content(candidate)
+			if extracted is not None:
+				return extracted
+
+		dumped_message = message.model_dump() if hasattr(message, "model_dump") else None
+		if isinstance(dumped_message, dict):
+			for key in ("content", "parsed", "output_text", "text"):
+				extracted = self._normalise_response_content(dumped_message.get(key))
+				if extracted is not None:
+					return extracted
+			refusal = dumped_message.get("refusal")
+			refusal_text = self._normalise_response_content(refusal)
+			if refusal_text:
+				raise RuntimeError(f"LLM refused Stage 3 response: {refusal_text}")
+
+		finish_reason = getattr(choices[0], "finish_reason", None)
+		raise RuntimeError(
+			"LLM response did not contain usable textual JSON content. "
+			f"finish_reason={finish_reason!r}",
+		)
+
+	@staticmethod
+	def _normalise_response_content(content: object) -> str | None:
+		if content is None:
+			return None
+		if isinstance(content, str):
+			text = content.strip()
+			return text or None
+		if isinstance(content, dict):
+			for key in ("text", "value", "content"):
+				extracted = HTNMethodSynthesizer._normalise_response_content(content.get(key))
+				if extracted is not None:
+					return extracted
+			try:
+				return json.dumps(content, ensure_ascii=False)
+			except TypeError:
+				return str(content).strip() or None
+		if isinstance(content, (list, tuple)):
+			parts: list[str] = []
+			for item in content:
+				extracted = HTNMethodSynthesizer._normalise_response_content(item)
+				if extracted is not None:
+					parts.append(extracted)
+			if not parts:
+				return None
+			return "\n".join(parts).strip() or None
+		text_attr = getattr(content, "text", None)
+		extracted = HTNMethodSynthesizer._normalise_response_content(text_attr)
+		if extracted is not None:
+			return extracted
+		value_attr = getattr(content, "value", None)
+		extracted = HTNMethodSynthesizer._normalise_response_content(value_attr)
+		if extracted is not None:
+			return extracted
+		stringified = str(content).strip()
+		return stringified or None
 
 	def _parse_llm_library(self, response_text: str) -> HTNMethodLibrary:
 		clean_text = self._strip_code_fences(response_text)
@@ -992,7 +1079,25 @@ class HTNMethodSynthesizer:
 				"LLM response appears truncated before the JSON object closed. "
 				"The HTN library was cut off mid-response.",
 			)
-		payload = json.loads(clean_text)
+		try:
+			payload = json.loads(clean_text)
+		except json.JSONDecodeError as original_error:
+			raw_decoded = self._decode_leading_json_object(clean_text)
+			if raw_decoded is not None:
+				payload = raw_decoded
+			else:
+				candidate = self._extract_json_object_candidate(clean_text)
+				if candidate is None:
+					raise ValueError(
+						f"HTN synthesis response could not be parsed as JSON: {original_error}"
+					) from original_error
+				try:
+					payload = json.loads(candidate)
+				except json.JSONDecodeError as candidate_error:
+					raise ValueError(
+						"HTN synthesis response could not be parsed as JSON: "
+						f"{candidate_error}"
+					) from original_error
 		if not isinstance(payload, dict):
 			raise ValueError("HTN synthesis response must be a JSON object")
 		return HTNMethodLibrary.from_dict(payload)
@@ -1008,6 +1113,27 @@ class HTNMethodSynthesizer:
 		if open_square > close_square:
 			return True
 		return False
+
+	@staticmethod
+	def _extract_json_object_candidate(result_text: str) -> str | None:
+		start_index = result_text.find("{")
+		end_index = result_text.rfind("}")
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return None
+		candidate = result_text[start_index:end_index + 1].strip()
+		return candidate or None
+
+	@staticmethod
+	def _decode_leading_json_object(result_text: str) -> dict | None:
+		stripped = result_text.lstrip()
+		if not stripped.startswith("{"):
+			return None
+		try:
+			decoder = json.JSONDecoder()
+			parsed, _ = decoder.raw_decode(stripped)
+		except json.JSONDecodeError:
+			return None
+		return parsed if isinstance(parsed, dict) else None
 
 	@staticmethod
 	def _method_step_semantic_signature(step: HTNMethodStep) -> Tuple[Any, ...]:

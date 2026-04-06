@@ -651,6 +651,9 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "never invent type predicates such as block(X) or rover(R)" in system_prompt
 	assert "Do not infer new packaging candidates or new caller-shared envelopes on your own." in system_prompt
 	assert "Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks" in system_prompt
+	assert "the constructive branch must call that packaging child" in system_prompt
+	assert "do not move unmet dynamic prerequisites into method.context merely to avoid decomposition" in system_prompt
+	assert "use those listed options or declared support tasks instead of inventing a fresh helper" in system_prompt
 
 	assert derived_analysis["query_task_contracts"]
 	assert derived_analysis["support_task_contracts"]
@@ -680,6 +683,8 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Type names are not predicates." in user_prompt
 	assert "Do not copy grounded constants from the original sentence into methods." in user_prompt
 	assert "ACTION [needs p, q, r]" in user_prompt
+	assert "Do not copy those unmet dynamic prerequisites into constructive context" in user_prompt
+	assert "use those listed options or a listed declared support task instead of inventing a new helper" in user_prompt
 	assert "inferred_task_headline_candidates:" not in user_prompt
 	assert "likely headline predicates" not in user_prompt
 
@@ -708,6 +713,7 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "do_move(?x, ?y): exact same-arity packaging child for on(?x, ?y) when called by do_put_on(?x, ?y)." in user_prompt
 	assert "Parent-side caller-shared prerequisites: holding(?x)." in user_prompt
 	assert "do_clear(?x) targets clear(?x);" in user_prompt
+	assert "stack(?x, AUX_BLOCK1) [extra needs clear(AUX_BLOCK1)]" in user_prompt
 	assert "if a constructive sibling uses unstack(AUX_BLOCK1, ?x) to make clear(?x)" in user_prompt
 	assert "AUX_BLOCK1" in user_prompt
 	assert "do_clear(?x): caller-shared dynamic prerequisites" not in user_prompt
@@ -716,6 +722,7 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "Type names are not predicates." in user_prompt
 	assert "the caller-shared envelope is ready(ARG1) only." in user_prompt
 	assert "If a contract line lists ACTION [needs p, q, r]" in user_prompt
+	assert "the constructive branch must use that child" in user_prompt
 
 
 def test_render_signature_with_mapping_does_not_cascade_replacements():
@@ -835,8 +842,12 @@ def test_stage3_prompt_stays_compact_for_marsrover_benchmark_case():
 	assert "<query_task_contract name=\"get_soil_data\">" in user_prompt
 	assert "<support_task_contract name=\"send_soil_data\">" in user_prompt
 	assert "send_soil_data(?rover, ?waypoint): caller-shared dynamic prerequisites at_soil_sample(?waypoint)." in user_prompt
-	assert "sample_soil(?rover, AUX_STORE1, ?waypoint)" in user_prompt
-	assert "take_image(?rover, AUX_WAYPOINT1, ?objective, AUX_CAMERA1, ?mode)" in user_prompt
+	assert "sample_soil(" in user_prompt
+	assert "[extra needs" in user_prompt
+	assert "empty(AUX_STORE1)" in user_prompt
+	assert "take_image(" in user_prompt
+	assert "calibrated(AUX_CAMERA1, AUX_ROVER1)" in user_prompt
+	assert "at(AUX_ROVER1, AUX_WAYPOINT1)" in user_prompt
 
 
 def test_stage3_prompt_filters_same_arity_packaging_by_parameter_types():
@@ -1151,8 +1162,9 @@ def test_stage3_user_prompt_carries_branchy_action_schemas_into_domain_summary()
 	)
 
 	assert "<domain_summary>" in user_prompt
-	assert "probe(?x): needs clear(?x) | holding(?x); effects checked(?x)" in user_prompt
-	assert "seal_if_clear(?x - object)" not in user_prompt
+	assert "relevant_primitive_actions:" in user_prompt
+	assert "- probe" in user_prompt
+	assert "- seal_if_clear" not in user_prompt
 	assert "needs clear(?x) -> holding(?x)" not in user_prompt
 
 
@@ -3522,6 +3534,51 @@ def test_request_complete_llm_library_fails_on_truncated_json():
 	assert metadata["llm_attempts"] == 1
 	assert len(metadata["llm_attempt_durations_seconds"]) == 1
 	assert metadata["llm_response_time_seconds"] >= 0
+
+
+class _FakeStage3Completions:
+	def __init__(self, scripted_results):
+		self.scripted_results = list(scripted_results)
+		self.calls = []
+
+	def create(self, **kwargs):
+		self.calls.append(kwargs)
+		next_result = self.scripted_results.pop(0)
+		if isinstance(next_result, Exception):
+			raise next_result
+		return next_result
+
+
+def _stage3_response(
+	*,
+	content=None,
+	parsed=None,
+	finish_reason="stop",
+):
+	message = SimpleNamespace(content=content, parsed=parsed)
+	return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish_reason)])
+
+
+def test_stage3_create_chat_completion_uses_plain_text_json_contract():
+	synthesizer = HTNMethodSynthesizer()
+	completions = _FakeStage3Completions([
+		_stage3_response(content='{"target_task_bindings":[],"compound_tasks":[],"methods":[]}'),
+	])
+	synthesizer.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+	synthesizer._create_chat_completion({"system": "system", "user": "user"}, max_tokens=321)
+
+	assert completions.calls[0]["max_tokens"] == 321
+	assert "response_format" not in completions.calls[0]
+
+
+def test_parse_llm_library_accepts_leading_json_object_with_trailing_junk():
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		'{"target_task_bindings":[],"compound_tasks":[],"methods":[]} trailing duplicated text',
+	)
+
+	assert isinstance(library, HTNMethodLibrary)
 
 
 def test_negative_target_binding_rejects_helper_call_with_hidden_support_role():
