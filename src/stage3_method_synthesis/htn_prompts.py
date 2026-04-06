@@ -1712,14 +1712,14 @@ def _constructive_template_summary_for_task(
 		)
 
 		extra_role_preconditions = []
-		for signature in pattern.get("dynamic_precondition_signatures") or []:
-			rendered_signature = _render_signature_with_mapping(signature, token_mapping)
+		for rendered_signature in _render_positive_dynamic_requirements(
+			pattern,
+			token_mapping,
+		):
 			parsed_signature = _parse_literal_signature(rendered_signature)
 			if parsed_signature is None:
 				continue
-			_, rendered_args, rendered_positive = parsed_signature
-			if not rendered_positive:
-				continue
+			_, rendered_args, _ = parsed_signature
 			if rendered_args and set(rendered_args).issubset(set(task_parameters)):
 				continue
 			extra_role_preconditions.append(rendered_signature)
@@ -1739,6 +1739,25 @@ def _constructive_template_summary_for_task(
 		return None
 
 	return "; ".join(rendered_patterns)
+
+
+def _render_positive_dynamic_requirements(
+	pattern: Dict[str, Any],
+	token_mapping: Dict[str, str],
+) -> list[str]:
+	"""Render the selected producer mode's positive dynamic prerequisites."""
+
+	requirements: list[str] = []
+	for signature in pattern.get("dynamic_precondition_signatures") or []:
+		rendered_signature = _render_signature_with_mapping(signature, token_mapping)
+		parsed_signature = _parse_literal_signature(rendered_signature)
+		if parsed_signature is None:
+			continue
+		_, _, is_positive = parsed_signature
+		if not is_positive:
+			continue
+		requirements.append(rendered_signature)
+	return requirements
 
 
 def _constructive_template_line_for_task(
@@ -3041,6 +3060,10 @@ def _query_task_role_frame_lines(
 			if not extra_roles:
 				continue
 
+			rendered_requirements = _render_positive_dynamic_requirements(
+				pattern,
+				token_mapping,
+			)
 			line = (
 				f"- {_task_invocation_signature(display_name, task_parameters)}: "
 				f"{render_prefix}{_task_invocation_signature(pattern['action_name'], rendered_action_args)} "
@@ -3048,6 +3071,11 @@ def _query_task_role_frame_lines(
 				"method.parameters or earlier schematic child bindings; never substitute "
 				"grounded query objects."
 			)
+			if rendered_requirements:
+				line += (
+					f" If you choose this mode, support "
+					f"{', '.join(rendered_requirements)} before that step."
+				)
 			if line in seen:
 				continue
 			seen.add(line)
@@ -4074,6 +4102,7 @@ def _query_task_support_producer_lines(
 					[],
 				)
 				rendered_support_options: list[str] = []
+				mode_obligation_lines: list[str] = []
 				for support_pattern in support_patterns[:3]:
 					support_effect_args = list(support_pattern.get("effect_args") or [])
 					if len(support_effect_args) != len(precondition_args):
@@ -4091,8 +4120,11 @@ def _query_task_support_producer_lines(
 					)
 
 					support_preconditions = [
-						_render_signature_with_mapping(signature, support_mapping)
-						for signature in (support_pattern.get("dynamic_precondition_signatures") or [])
+						signature
+						for signature in _render_positive_dynamic_requirements(
+							support_pattern,
+							support_mapping,
+						)
 					]
 					support_suffix = (
 						f" [needs {', '.join(support_preconditions)}]"
@@ -4103,6 +4135,20 @@ def _query_task_support_producer_lines(
 						f"{_task_invocation_signature(support_pattern['action_name'], rendered_support_action_args)}"
 						f"{support_suffix}"
 					)
+					extra_roles = [
+						arg
+						for arg in rendered_support_action_args
+						if arg not in precondition_args
+					]
+					if support_preconditions and not extra_roles:
+						mode_line = (
+							f"- {_task_invocation_signature(display_name, task_args)}: if the "
+							f"constructive branch uses "
+							f"{_task_invocation_signature(support_pattern['action_name'], rendered_support_action_args)} "
+							f"to establish {precondition_predicate}({', '.join(precondition_args)}), "
+							f"support {', '.join(support_preconditions)} before that step."
+						)
+						mode_obligation_lines.append(mode_line)
 
 				if not rendered_support_options:
 					continue
@@ -4117,6 +4163,11 @@ def _query_task_support_producer_lines(
 					continue
 				seen.add(line)
 				lines.append(line)
+				for mode_line in mode_obligation_lines:
+					if mode_line in seen:
+						continue
+					seen.add(mode_line)
+					lines.append(mode_line)
 
 				candidate_declared_tasks = _candidate_support_task_names(
 					domain,
@@ -4145,6 +4196,15 @@ def _query_task_support_producer_lines(
 
 
 def build_htn_system_prompt() -> str:
+	# Prompt structure follows a deliberately declarative design:
+	# 1. tagged structured blocks and fixed output contracts help models recover
+	#    latent structure more reliably (Blevins et al., ACL 2023; Beurer-Kellner
+	#    et al., PLDI 2023),
+	# 2. prompt-based semantic parsers are sensitive to avoidable variation, so we
+	#    canonicalise the instruction layout and keep only salient constraints
+	#    (Zhuo et al., EACL 2023),
+	# 3. declarative specifications stay closer to the task than free-form
+	#    procedural explanations (Ye et al., NeurIPS 2023).
 	return (
 		"You generate a compact, executable query-specific HTN method library for a symbolic planning domain.\n"
 		"The domain methods are unavailable. Infer methods only from the natural-language query, "
@@ -5286,7 +5346,7 @@ def _select_salient_contract_lines(
 			return (3, 0)
 		if "caller-shared dynamic prerequisites" in line:
 			return (4, 0)
-		if "if a constructive sibling uses" in line:
+		if "if a constructive sibling uses" in line or "if the constructive branch uses" in line:
 			return (5, 0)
 		if "recursive support is valid" in line:
 			return (6, 0)
@@ -5516,7 +5576,11 @@ def _render_relevant_action_lines(
 		)
 	return lines or ["- none"]
 
-
+# Active prompt builder. The layout is intentionally declarative and tagged:
+# structured prompt blocks and fixed output contracts improve structured
+# prediction reliability (Blevins et al., ACL 2023; Beurer-Kellner et al.,
+# PLDI 2023), and prompt robustness for semantic parsing improves when
+# avoidable prompt variation is reduced (Zhuo et al., EACL 2023).
 def build_htn_system_prompt() -> str:
 	return (
 		"You synthesize one compact, executable HTN method library from the query, declared tasks, "
@@ -5528,25 +5592,28 @@ def build_htn_system_prompt() -> str:
 		"GLOBAL RULES:\n"
 		"- Preserve query-mentioned declared tasks as the top-level skeleton whenever they match the ordered targets.\n"
 		"- Prefer declared support tasks over fresh helpers; create a fresh helper only for a dynamic predicate that no declared task can responsibly cover.\n"
-		"- If a query or support contract already lists explicit support options for a prerequisite, use those listed options or declared support tasks instead of inventing a fresh helper for that same prerequisite.\n"
+		"- If a contract already lists support options for a prerequisite, use those listed options or declared support tasks instead of inventing a fresh helper for it.\n"
 		"- Static predicates are context constraints only; never create helpers for them.\n"
 		"- Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks; target_task_bindings already define the top-level roots.\n"
 		"- Each target-bound task needs an already-satisfied/noop method with the headline literal in context.\n"
 		"- If the prompt lists an exact same-arity packaging contract for a target-bound task, the constructive branch must call that packaging child instead of bypassing it with a direct final producer.\n"
 		"- Every primitive dynamic precondition must be supported by method context or earlier subtasks.\n"
-		"- For constructive branches, do not move unmet dynamic prerequisites into method.context merely to avoid decomposition when a listed declared support task, packaging child, or recursive support template can establish them.\n"
+		"- In constructive branches, do not hide unmet dynamic prerequisites in method.context when a listed support task, packaging child, or recursive template can establish them.\n"
 		"- Every compound child call must satisfy the child's shared dynamic prerequisites before the child is called.\n"
 		"- Only rely on a previous compound child's own headline effect and explicitly shared envelope, never incidental internal side effects.\n"
-		"- Use same-arity packaging only when the user prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or new caller-shared envelopes on your own.\n"
+		"- Use same-arity packaging only when the prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or caller-shared envelopes.\n"
 		"- Auxiliary variables must remain schematic, appear in method.parameters, and be constrained before use by declared predicates, equality constraints, or earlier subtask bindings; never invent type predicates such as block(X) or rover(R) unless the domain explicitly declares them.\n"
 		"- Grounded query objects may appear in target literals and ordered top-level bindings only. If query inventory and Stage 1 semantic hints conflict, the query inventory is authoritative for top-level grounding only.\n"
 		"- When a method chooses one producer mode or primitive branch, it must support the full listed dynamic preconditions of that selected mode before the step.\n"
+		"- For an extra-role mode ACTION(ARG1, AUX1, ...), any dynamic prerequisite linking AUX1 to a task argument or shared resource is mandatory, not optional.\n"
 		"\n"
 		"OUTPUT CONTRACT:\n"
 		"- task_name and method_name must match [a-z][a-z0-9_]*.\n"
 		"- method_name must be exactly m_{task_name}_{strategy}.\n"
 		"- task_args is optional; if omitted, the leading declared-task-arity method.parameters are the task arguments in order.\n"
 		"- Primitive subtasks must use the provided runtime primitive aliases.\n"
+		"- Every compound child you call must also appear in compound_tasks and have at least one method in methods.\n"
+		"- If you call a declared support task from the contracts below, materialize that task in compound_tasks and define its methods in the same JSON.\n"
 		"- Zero-subtask methods must have non-empty context and empty subtasks/orderings.\n"
 		"- If a method has two or more subtasks, ordering must be explicit pairwise edges such as [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]].\n"
 		"- Compactness is part of correctness: default to one noop branch and one constructive branch per task, and add siblings only for real producer-mode differences.\n"
@@ -5705,10 +5772,11 @@ def build_htn_user_prompt(
 			"5. Prefer declared support tasks. Fresh helpers are last resort, and if a contract already lists support options for a prerequisite, use those listed options or a listed declared support task instead of inventing a new helper.",
 			"6. If an exact same-arity packaging contract is listed for a target-bound task, the constructive branch must use that child, support its listed caller-shared prerequisites first, and let that child own the final producer.",
 			"7. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Grounded query object names may appear only in target_task_bindings and ordered top-level bindings, never inside methods. Type names are not predicates.",
-			"8. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support all of p, q, and r before ACTION. Do not copy those unmet dynamic prerequisites into constructive context if a listed support or recursive template can establish them. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient. Multi-step methods require explicit pairwise ordering edges.",
+			"8. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support p, q, and r before ACTION. Do not copy unmet dynamic prerequisites into constructive context if a listed support or recursive template can establish them. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient. Multi-step methods require explicit pairwise ordering edges.",
 			"9. ordering: for subtasks s1 then s2 then s3, emit [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit [[\"s1\",\"s2\",\"s3\"]].",
 			"10. packaging_envelope: if child(ARG1, ARG2) has constructive siblings with contexts {ready(ARG1), clear(ARG2)} and {ready(ARG1), linked(ARG2)}, then the caller-shared envelope is ready(ARG1) only.",
 			"11. Never invent type predicates.",
+			"12. For extra-role modes, relation literals that bind AUX_* to task arguments, such as rel(ARG1, AUX1), are mandatory mode prerequisites and must be supported before the step or kept explicit when the mode consumes them.",
 		]
 	)
 

@@ -17,6 +17,7 @@ import inspect
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -4729,7 +4730,7 @@ def assert_stage7_prefers_guided_hierarchical_plan_text():
 		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
 		problem_file=str(problem_path.resolve()),
 	)
-	pipeline.output_dir = Path(problem_path).parent
+	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage7_verifier_"))
 	method_library = _official_domain_method_library(
 		"blocksworld",
 		target_literal_signatures=["on(b1, b2)"],
@@ -4790,6 +4791,75 @@ def assert_stage7_prefers_guided_hierarchical_plan_text():
 	assert captured["verify_plan_text"] == 1
 	assert captured["verify_plan"] == 0
 	assert captured["plan_text"] == "==>\n0 stack b1 b2\nroot\n"
+
+
+def assert_stage6_unordered_ordering_fallback_does_not_write_to_repo_root(monkeypatch):
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = None
+
+	ltl_spec = SimpleNamespace(
+		source_instruction="Complete the tasks do_put_on(b1, b2), do_put_on(b2, b3).",
+		query_task_sequence_is_ordered=False,
+		query_task_literal_signatures=("on(b1, b2)", "on(b2, b3)"),
+	)
+	method_library = SimpleNamespace(
+		target_literals=(
+			HTNLiteral("on", ("b1", "b2"), True, None),
+			HTNLiteral("on", ("b2", "b3"), True, None),
+		),
+	)
+
+	monkeypatch.setattr(
+		LTL_BDI_Pipeline,
+		"_stage6_query_task_network",
+		lambda self, *_args, **_kwargs: (
+			{"task_id": "t1", "task_name": "do_put_on", "args": ("b1", "b2")},
+			{"task_id": "t2", "task_name": "do_put_on", "args": ("b2", "b3")},
+		),
+	)
+	monkeypatch.setattr(
+		LTL_BDI_Pipeline,
+		"_stage6_query_goal_facts",
+		lambda self, *_args, **_kwargs: (),
+	)
+
+	captured: Dict[str, Any] = {}
+
+	class OrderingPathCaptured(RuntimeError):
+		pass
+
+	def _capture_ordering_path(self, **kwargs):
+		captured["output_path"] = kwargs["output_path"]
+		raise OrderingPathCaptured()
+
+	monkeypatch.setattr(
+		JasonRunner,
+		"_infer_unordered_target_execution_order",
+		_capture_ordering_path,
+	)
+
+	with pytest.raises(OrderingPathCaptured):
+		pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas={},
+			runtime_objects=(),
+			object_types={},
+			seed_facts=(),
+		)
+
+	output_path = captured["output_path"]
+	assert output_path != Path.cwd() / ".stage6_ordering"
+	assert output_path.is_absolute()
+	assert output_path.name.startswith("stage6_ordering_")
+
 
 def _run_query_case(
 	query_id: str,

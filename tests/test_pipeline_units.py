@@ -210,6 +210,12 @@ def test_stage7_prefers_guided_hierarchical_plan_text():
 	pipeline_tests.assert_stage7_prefers_guided_hierarchical_plan_text()
 
 
+def test_stage6_unordered_ordering_fallback_does_not_write_to_repo_root(monkeypatch):
+	pipeline_tests.assert_stage6_unordered_ordering_fallback_does_not_write_to_repo_root(
+		monkeypatch,
+	)
+
+
 def test_official_satellite_problem_query_case_generation_from_problem_tasks():
 	pipeline_tests.assert_official_satellite_problem_query_case_generation_from_problem_tasks()
 

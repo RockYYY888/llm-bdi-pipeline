@@ -649,11 +649,14 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "query inventory is authoritative for top-level grounding only" in system_prompt
 	assert "Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]]" in system_prompt
 	assert "never invent type predicates such as block(X) or rover(R)" in system_prompt
-	assert "Do not infer new packaging candidates or new caller-shared envelopes on your own." in system_prompt
+	assert "Do not infer new packaging candidates or caller-shared envelopes." in system_prompt
+	assert "Every compound child you call must also appear in compound_tasks and have at least one method in methods." in system_prompt
+	assert "If you call a declared support task from the contracts below, materialize that task in compound_tasks" in system_prompt
 	assert "Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks" in system_prompt
 	assert "the constructive branch must call that packaging child" in system_prompt
-	assert "do not move unmet dynamic prerequisites into method.context merely to avoid decomposition" in system_prompt
+	assert "do not hide unmet dynamic prerequisites in method.context" in system_prompt
 	assert "use those listed options or declared support tasks instead of inventing a fresh helper" in system_prompt
+	assert "any dynamic prerequisite linking AUX1 to a task argument or shared resource is mandatory" in system_prompt
 
 	assert derived_analysis["query_task_contracts"]
 	assert derived_analysis["support_task_contracts"]
@@ -683,7 +686,7 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Type names are not predicates." in user_prompt
 	assert "Do not copy grounded constants from the original sentence into methods." in user_prompt
 	assert "ACTION [needs p, q, r]" in user_prompt
-	assert "Do not copy those unmet dynamic prerequisites into constructive context" in user_prompt
+	assert "Do not copy unmet dynamic prerequisites into constructive context" in user_prompt
 	assert "use those listed options or a listed declared support task instead of inventing a new helper" in user_prompt
 	assert "inferred_task_headline_candidates:" not in user_prompt
 	assert "likely headline predicates" not in user_prompt
@@ -708,11 +711,13 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "<support_task_contract name=\"do_clear\">" in user_prompt
 	assert "<support_task_contract name=\"do_move\">" in user_prompt
 	assert "before any helper or child call intended to establish holding(ARG1), first support its shared prerequisites clear(ARG1), handempty" in user_prompt
+	assert "if the constructive branch uses pick_up(ARG1) to establish holding(ARG1), support clear(ARG1), ontable(ARG1), handempty before that step." in user_prompt
 	assert "do_put_on(?x, ?y): exact same-arity packaging contract for on(?x, ?y) is do_move(?x, ?y)." in user_prompt
 	assert "Support caller-shared prerequisites holding(?x) before the child call" in user_prompt
 	assert "do_move(?x, ?y): exact same-arity packaging child for on(?x, ?y) when called by do_put_on(?x, ?y)." in user_prompt
 	assert "Parent-side caller-shared prerequisites: holding(?x)." in user_prompt
 	assert "do_clear(?x) targets clear(?x);" in user_prompt
+	assert "unstack(?x, AUX_BLOCK1) introduces extra roles AUX_BLOCK1 - BLOCK. Keep those extra roles schematic. If you choose this mode, support on(?x, AUX_BLOCK1), clear(?x), handempty before that step." in user_prompt
 	assert "stack(?x, AUX_BLOCK1) [extra needs clear(AUX_BLOCK1)]" in user_prompt
 	assert "if a constructive sibling uses unstack(AUX_BLOCK1, ?x) to make clear(?x)" in user_prompt
 	assert "AUX_BLOCK1" in user_prompt
@@ -723,6 +728,7 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "the caller-shared envelope is ready(ARG1) only." in user_prompt
 	assert "If a contract line lists ACTION [needs p, q, r]" in user_prompt
 	assert "the constructive branch must use that child" in user_prompt
+	assert "relation literals that bind AUX_* to task arguments" in user_prompt
 
 
 def test_render_signature_with_mapping_does_not_cascade_replacements():

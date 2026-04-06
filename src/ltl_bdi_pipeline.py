@@ -4,6 +4,7 @@ LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
 
 import json
 import re
+import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -3805,7 +3806,7 @@ class LTL_BDI_Pipeline:
             ordering_output_path = (
                 self.output_dir
                 if self.output_dir is not None
-                else Path.cwd() / ".stage6_ordering"
+                else Path(tempfile.mkdtemp(prefix="stage6_ordering_"))
             )
             ordering = runner._infer_unordered_target_execution_order(
                 target_literals=method_library.target_literals,
