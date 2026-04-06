@@ -641,6 +641,7 @@ def _query_task_same_arity_packaging_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task_schema = task_schemas.get(task_name)
 		if task_schema is None:
 			continue
@@ -676,7 +677,8 @@ def _query_task_same_arity_packaging_lines(
 				f"{_task_invocation_signature(candidate_name, candidate_parameters)}. Support "
 				f"caller-shared prerequisites {requirement_text} before the child call, then let "
 				f"{_task_invocation_signature(candidate_name, candidate_parameters)} own the final "
-				f"producer for {predicate_name}({', '.join(task_parameters)})."
+				f"producer for {predicate_name}({', '.join(task_parameters)}). The listed "
+				"caller-shared set is exhaustive at child entry."
 			)
 			if line in seen:
 				continue
@@ -828,6 +830,7 @@ def _query_task_same_arity_child_support_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task_schema = task_schemas.get(task_name)
 		if task_schema is None:
 			continue
@@ -889,6 +892,7 @@ def _query_task_zero_ary_parent_context_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task_schema = task_schemas.get(task_name)
 		if task_schema is None:
 			continue
@@ -997,6 +1001,7 @@ def _query_task_packaging_skeleton_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task_schema = task_schemas.get(task_name)
 		if task_schema is None:
 			continue
@@ -1778,7 +1783,7 @@ def _constructive_template_line_for_task(
 	return (
 		f"- {_task_invocation_signature(display_name, task_parameters)} targets "
 		f"{predicate_name}({', '.join(task_parameters)}); constructive templates: "
-		f"{rendered_patterns}"
+		f"{rendered_patterns}. Use one listed template as the final producer."
 	)
 
 
@@ -1797,6 +1802,7 @@ def _declared_task_producer_template_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = anchor.get("task_name")
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task = task_schemas.get(str(task_name))
 		if task is None:
 			continue
@@ -1810,6 +1816,16 @@ def _declared_task_producer_template_lines(
 			continue
 
 		task_parameters = tuple(_parameter_token(parameter) for parameter in task.parameters)
+		same_arity_candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			task_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		if same_arity_candidates and not force_internal_contract:
+			continue
 		line = _constructive_template_line_for_task(
 			display_name,
 			task_parameters,
@@ -2180,7 +2196,10 @@ def _declared_support_task_applicability_lines(
 								f"{support_requirement_predicate}({', '.join(candidate_parameters)})"
 							)
 							if template_summary is not None:
-								line += f"; constructive templates: {template_summary}"
+								line += (
+									f"; constructive templates: {template_summary}. Use one listed "
+									"template as the final producer"
+								)
 							if shared_requirements:
 								line += (
 									"; if a parent calls it, first provide shared prerequisites "
@@ -2315,6 +2334,7 @@ def _relevant_support_task_internal_obligation_lines(
 						requirement_fragments: list[str] = []
 						task_parameter_set = set(candidate_parameters)
 						extra_role_set = set(extra_roles)
+						needs_availability_split_guidance = False
 						for rendered_requirement in rendered_requirements:
 							parsed_requirement = _parse_literal_signature(rendered_requirement)
 							if parsed_requirement is None:
@@ -2338,7 +2358,14 @@ def _relevant_support_task_internal_obligation_lines(
 							]
 							has_task_parameter = any(arg in task_parameter_set for arg in req_args)
 							has_extra_role = any(arg in extra_role_set for arg in req_args)
-							if requirement_task_candidates and not has_task_parameter:
+							if requirement_task_candidates and has_extra_role:
+								needs_availability_split_guidance = True
+								requirement_fragments.append(
+									f"{rendered_requirement} via "
+									f"{' or '.join(_task_invocation_signature(candidate, req_args) for candidate in requirement_task_candidates[:2])} "
+									f"before {_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}, not in method.context"
+								)
+							elif requirement_task_candidates and not has_task_parameter:
 								requirement_fragments.append(
 									f"{rendered_requirement} via "
 									f"{' or '.join(_task_invocation_signature(candidate, req_args) for candidate in requirement_task_candidates[:2])} "
@@ -2374,6 +2401,12 @@ def _relevant_support_task_internal_obligation_lines(
 						if extra_roles:
 							line += (
 								f"; declare extra roles {', '.join(extra_roles)} in method.parameters"
+							)
+						if needs_availability_split_guidance:
+							line += (
+								"; if that extra-role requirement may already hold or require "
+								"recursive support, keep those as separate constructive siblings "
+								"rather than one precondition-only branch"
 							)
 						line += ". Prefer simpler modes with fewer extra roles when they remain suitable."
 						if line in seen:
@@ -3084,6 +3117,7 @@ def _query_task_role_frame_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task_schema = task_schemas.get(task_name)
 		if task_schema is None:
 			continue
@@ -3096,6 +3130,20 @@ def _query_task_role_frame_lines(
 			continue
 
 		task_parameters = tuple(_parameter_token(parameter) for parameter in task_schema.parameters)
+		same_arity_candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			task_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		packaging_shared_requirements = {
+			str(requirement).strip()
+			for candidate in same_arity_candidates
+			for requirement in candidate.get("shared_requirements", ())
+			if str(requirement).strip()
+		}
 		candidate_support_tasks = _candidate_support_task_names(
 			domain,
 			predicate_name,
@@ -3117,9 +3165,18 @@ def _query_task_role_frame_lines(
 				for token, task_parameter in zip(effect_args, task_parameters)
 			}
 			for signature in pattern.get("dynamic_precondition_signatures") or []:
-				parsed_support = _parse_literal_signature(
-					_render_signature_with_mapping(signature, token_mapping)
+				rendered_support_signature = _render_signature_with_mapping(
+					signature,
+					token_mapping,
 				)
+				if (
+					not force_internal_contract
+					and
+					packaging_shared_requirements
+					and rendered_support_signature not in packaging_shared_requirements
+				):
+					continue
+				parsed_support = _parse_literal_signature(rendered_support_signature)
 				if parsed_support is None:
 					continue
 				support_predicate, support_args, support_positive = parsed_support
@@ -3768,6 +3825,7 @@ def _query_task_support_obligation_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		task = task_schemas.get(task_name)
 		if task is None:
 			continue
@@ -3780,6 +3838,22 @@ def _query_task_support_obligation_lines(
 			continue
 
 		task_parameters = tuple(_parameter_token(parameter) for parameter in task.parameters)
+		same_arity_candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			task_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		packaging_shared_requirements = {
+			str(requirement).strip()
+			for candidate in same_arity_candidates
+			for requirement in candidate.get("shared_requirements", ())
+			if str(requirement).strip()
+		}
+		if packaging_shared_requirements and not force_internal_contract:
+			continue
 		patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(predicate_name, [])
 		for pattern in patterns:
 			effect_args = list(pattern.get("effect_args") or [])
@@ -3799,6 +3873,11 @@ def _query_task_support_obligation_lines(
 			rendered_preconditions = []
 			for signature in pattern.get("dynamic_precondition_signatures") or []:
 				rendered_signature = _render_signature_with_mapping(signature, token_mapping)
+				if (
+					packaging_shared_requirements
+					and rendered_signature not in packaging_shared_requirements
+				):
+					continue
 				parsed_signature = _parse_literal_signature(rendered_signature)
 				if parsed_signature is None:
 					continue
@@ -4040,6 +4119,7 @@ def _query_task_support_producer_lines(
 	for target_signature, anchor in zip(target_literals, query_task_anchors):
 		task_name = str(anchor.get("task_name", "")).strip()
 		display_name = _anchor_display_name(anchor)
+		force_internal_contract = bool(anchor.get("force_internal_contract"))
 		parsed_target = _parse_literal_signature(target_signature)
 		if parsed_target is None:
 			continue
@@ -4058,6 +4138,19 @@ def _query_task_support_producer_lines(
 			task_schemas,
 			action_analysis,
 		)
+		if force_internal_contract and anchor.get("caller_shared_requirements"):
+			packaging_shared_requirements = {
+				str(requirement).strip()
+				for requirement in anchor.get("caller_shared_requirements", ())
+				if str(requirement).strip()
+			}
+		else:
+			packaging_shared_requirements = {
+				str(requirement).strip()
+				for candidate in same_arity_candidates
+				for requirement in candidate.get("shared_requirements", ())
+				if str(requirement).strip()
+			}
 
 		task_args = tuple(f"ARG{index}" for index in range(1, len(target_args) + 1))
 		if anchor.get("args") and len(anchor.get("args", [])) == len(target_args):
@@ -4086,8 +4179,19 @@ def _query_task_support_producer_lines(
 			)
 
 			for precondition_signature in headline_pattern.get("dynamic_precondition_signatures") or []:
+				rendered_precondition_signature = _render_signature_with_mapping(
+					precondition_signature,
+					headline_mapping,
+				)
+				if (
+					not force_internal_contract
+					and
+					packaging_shared_requirements
+					and rendered_precondition_signature not in packaging_shared_requirements
+				):
+					continue
 				parsed_precondition = _parse_literal_signature(
-					_render_signature_with_mapping(precondition_signature, headline_mapping)
+					rendered_precondition_signature
 				)
 				if parsed_precondition is None:
 					continue
@@ -4097,12 +4201,53 @@ def _query_task_support_producer_lines(
 				if not set(precondition_args) & set(task_args):
 					continue
 
+				candidate_declared_tasks = [
+					candidate
+					for candidate in _candidate_support_task_names(
+						domain,
+						precondition_predicate,
+						precondition_args,
+						action_analysis.get("producer_actions_by_predicate", {}).get(
+							precondition_predicate,
+							[],
+						),
+					)
+					if len(getattr(task_schemas.get(candidate), "parameters", ())) == len(precondition_args)
+				]
+
 				support_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
 					precondition_predicate,
 					[],
 				)
 				rendered_support_options: list[str] = []
 				mode_obligation_lines: list[str] = []
+				for candidate_task in candidate_declared_tasks[:2]:
+					candidate_schema = task_schemas.get(candidate_task)
+					if candidate_schema is None:
+						continue
+					candidate_parameters = tuple(
+						_parameter_token(parameter)
+						for parameter in candidate_schema.parameters
+					)
+					rendered_support_options.append(
+						_task_invocation_signature(candidate_task, precondition_args)
+					)
+					shared_requirements = _support_task_precise_shared_requirements(
+						domain,
+						candidate_task,
+						precondition_predicate,
+						candidate_parameters,
+						task_schemas,
+						action_analysis,
+					)
+					if shared_requirements:
+						mode_obligation_lines.append(
+							f"- {_task_invocation_signature(display_name, task_args)}: if the "
+							f"constructive branch uses "
+							f"{_task_invocation_signature(candidate_task, precondition_args)} "
+							f"to establish {precondition_predicate}({', '.join(precondition_args)}), "
+							f"support {', '.join(shared_requirements)} before that step."
+						)
 				for support_pattern in support_patterns[:3]:
 					support_effect_args = list(support_pattern.get("effect_args") or [])
 					if len(support_effect_args) != len(precondition_args):
@@ -4149,6 +4294,40 @@ def _query_task_support_producer_lines(
 							f"support {', '.join(support_preconditions)} before that step."
 						)
 						mode_obligation_lines.append(mode_line)
+						for support_requirement in support_preconditions:
+							parsed_requirement = _parse_literal_signature(support_requirement)
+							if parsed_requirement is None:
+								continue
+							requirement_predicate, requirement_args, requirement_positive = parsed_requirement
+							if not requirement_positive:
+								continue
+							requirement_support_tasks = [
+								candidate
+								for candidate in _candidate_support_task_names(
+									domain,
+									requirement_predicate,
+									requirement_args,
+									action_analysis.get("producer_actions_by_predicate", {}).get(
+										requirement_predicate,
+										[],
+									),
+								)
+								if len(getattr(task_schemas.get(candidate), "parameters", ())) == len(requirement_args)
+							]
+							if not requirement_support_tasks:
+								continue
+							split_line = (
+								f"- {_task_invocation_signature(display_name, task_args)}: if "
+								f"{support_requirement} may either already hold or require support "
+								f"before "
+								f"{_task_invocation_signature(support_pattern['action_name'], rendered_support_action_args)}, "
+								f"use separate constructive siblings: one may require "
+								f"{support_requirement} at entry, another should use "
+								f"{_task_invocation_signature(requirement_support_tasks[0], requirement_args)} "
+								f"before {_task_invocation_signature(support_pattern['action_name'], rendered_support_action_args)}. "
+								"Do not collapse both cases into one precondition-only branch."
+							)
+							mode_obligation_lines.append(split_line)
 
 				if not rendered_support_options:
 					continue
@@ -4163,21 +4342,55 @@ def _query_task_support_producer_lines(
 					continue
 				seen.add(line)
 				lines.append(line)
+				if (
+					force_internal_contract
+					and rendered_precondition_signature not in packaging_shared_requirements
+				):
+					if candidate_declared_tasks:
+						preferred_support_task = candidate_declared_tasks[0]
+						explicit_support_line = (
+							f"- {_task_invocation_signature(display_name, task_args)}: because "
+							f"{precondition_predicate}({', '.join(precondition_args)}) is not "
+							f"caller-shared here, constructive branches must establish "
+							f"{precondition_predicate}({', '.join(precondition_args)}) via "
+							f"{_task_invocation_signature(preferred_support_task, precondition_args)} "
+							f"before {rendered_headline_call} instead of leaving it in branch "
+							"context."
+						)
+						if explicit_support_line not in seen:
+							seen.add(explicit_support_line)
+							lines.append(explicit_support_line)
+						availability_split_line = (
+							f"- {_task_invocation_signature(display_name, task_args)}: if "
+							f"{precondition_predicate}({', '.join(precondition_args)}) may either "
+							f"already hold or require internal support, use separate constructive "
+							f"siblings: one may require {precondition_predicate}({', '.join(precondition_args)}) "
+							f"at entry, another should use "
+							f"{_task_invocation_signature(preferred_support_task, precondition_args)} "
+							f"before {rendered_headline_call}. Do not collapse both cases into one "
+							"precondition-only branch."
+						)
+						if availability_split_line not in seen:
+							seen.add(availability_split_line)
+							lines.append(availability_split_line)
+					else:
+						internal_line = (
+							f"- {_task_invocation_signature(display_name, task_args)}: because "
+							f"{precondition_predicate}({', '.join(precondition_args)}) has listed "
+							"support options here and is not caller-shared, constructive branches "
+							f"must establish {precondition_predicate}({', '.join(precondition_args)}) "
+							"with earlier subtasks inside this task instead of leaving it in branch "
+							"context."
+						)
+						if internal_line not in seen:
+							seen.add(internal_line)
+							lines.append(internal_line)
 				for mode_line in mode_obligation_lines:
 					if mode_line in seen:
 						continue
 					seen.add(mode_line)
 					lines.append(mode_line)
 
-				candidate_declared_tasks = _candidate_support_task_names(
-					domain,
-					precondition_predicate,
-					precondition_args,
-					action_analysis.get("producer_actions_by_predicate", {}).get(
-						precondition_predicate,
-						[],
-					),
-				)
 				if candidate_declared_tasks:
 					continue
 				if same_arity_candidates:
@@ -5053,6 +5266,12 @@ def _build_query_task_contract_payloads(
 			query_task_anchors,
 			action_analysis,
 		),
+		_query_task_packaging_shared_requirement_support_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
 		_query_task_role_frame_lines(
 			domain,
 			target_literals,
@@ -5123,6 +5342,129 @@ def _build_query_task_contract_payloads(
 	return payloads
 
 
+def _query_task_packaging_shared_requirement_support_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		display_name = _anchor_display_name(anchor)
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_signature_parameters = tuple(
+			_parameter_token(parameter)
+			for parameter in getattr(task_schema, "parameters", ()) or ()
+		)
+		task_args = tuple(f"ARG{index}" for index, _ in enumerate(target_args, start=1))
+		candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			task_signature_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		for candidate in candidates:
+			candidate_name = str(candidate.get("candidate", "")).strip()
+			candidate_parameters = tuple(candidate.get("parameters", ()))
+			candidate_mapping = {
+				_parameter_token(raw_parameter): task_arg
+				for raw_parameter, task_arg in zip(candidate_parameters, task_args)
+			}
+			for raw_requirement in candidate.get("shared_requirements", ()):
+				rendered_requirement = _render_signature_with_mapping(
+					str(raw_requirement),
+					candidate_mapping,
+				)
+				parsed_requirement = _parse_literal_signature(rendered_requirement)
+				if parsed_requirement is None:
+					continue
+				requirement_predicate, requirement_args, requirement_positive = parsed_requirement
+				if not requirement_positive:
+					continue
+				support_patterns = action_analysis.get("producer_patterns_by_predicate", {}).get(
+					requirement_predicate,
+					[],
+				)
+				rendered_support_options: list[str] = []
+				mode_obligation_lines: list[str] = []
+				for support_pattern in support_patterns[:3]:
+					support_effect_args = list(support_pattern.get("effect_args") or [])
+					if len(support_effect_args) != len(requirement_args):
+						continue
+					support_mapping = {
+						token: arg
+						for token, arg in zip(support_effect_args, requirement_args)
+					}
+					rendered_action_args = _extend_mapping_with_action_parameters(
+						support_mapping,
+						support_pattern.get("action_parameters") or [],
+						action_parameter_types=support_pattern.get("action_parameter_types")
+						or [],
+					)
+					support_preconditions = list(
+						_render_positive_dynamic_requirements(
+							support_pattern,
+							support_mapping,
+						),
+					)
+					support_suffix = (
+						f" [needs {', '.join(support_preconditions)}]"
+						if support_preconditions
+						else ""
+					)
+					rendered_support_options.append(
+						f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)}"
+						f"{support_suffix}"
+					)
+					extra_roles = [
+						arg
+						for arg in rendered_action_args
+						if arg not in requirement_args
+					]
+					if support_preconditions and not extra_roles:
+						mode_obligation_lines.append(
+							f"- {_task_invocation_signature(display_name, task_args)}: if the parent uses "
+							f"{_task_invocation_signature(support_pattern['action_name'], rendered_action_args)} "
+							f"before {_task_invocation_signature(candidate_name, task_args)} to establish "
+							f"{requirement_predicate}({', '.join(requirement_args)}), support "
+							f"{', '.join(support_preconditions)} before that step."
+						)
+				if not rendered_support_options:
+					continue
+				line = (
+					f"- {_task_invocation_signature(display_name, task_args)}: "
+					f"{_task_invocation_signature(candidate_name, task_args)} expects caller-shared "
+					f"{requirement_predicate}({', '.join(requirement_args)}). Before the child call, "
+					f"establish {requirement_predicate}({', '.join(requirement_args)}) via "
+					f"{' or '.join(rendered_support_options)}."
+				)
+				if line in seen:
+					continue
+				seen.add(line)
+				lines.append(line)
+				for mode_line in mode_obligation_lines:
+					if mode_line in seen:
+						continue
+					seen.add(mode_line)
+					lines.append(mode_line)
+	return lines
+
+
 def _support_task_summary_lines(
 	domain: Any,
 	target_literals: Sequence[str],
@@ -5168,7 +5510,8 @@ def _support_task_summary_lines(
 				f"- {_task_invocation_signature(candidate_name, child_parameters)}: exact same-arity "
 				f"packaging child for {predicate_name}({', '.join(parent_parameters)}) when called by "
 				f"{_task_invocation_signature(display_name, parent_parameters)}. Parent-side "
-				f"caller-shared prerequisites: {requirement_text}. This child must own the final "
+				f"caller-shared prerequisites: {requirement_text}. This set is exhaustive at "
+				f"child entry. This child must own the final "
 				f"producer for {predicate_name}({', '.join(parent_parameters)})."
 			)
 			if line not in seen:
@@ -5201,6 +5544,12 @@ def _build_support_task_contract_payloads(
 
 	line_sources = [
 		_support_task_summary_lines(
+			domain,
+			target_literals,
+			query_task_anchors,
+			action_analysis,
+		),
+		_packaging_child_internal_contract_lines(
 			domain,
 			target_literals,
 			query_task_anchors,
@@ -5274,6 +5623,85 @@ def _build_support_task_contract_payloads(
 	return payloads
 
 
+def _packaging_child_internal_contract_lines(
+	domain: Any,
+	target_literals: Sequence[str],
+	query_task_anchors: Sequence[Dict[str, Any]],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	if not query_task_anchors or len(query_task_anchors) != len(target_literals):
+		return []
+
+	task_schemas = _declared_task_schema_map(domain)
+	lines: list[str] = []
+	seen: set[str] = set()
+
+	for target_signature, anchor in zip(target_literals, query_task_anchors):
+		task_name = str(anchor.get("task_name", "")).strip()
+		task_schema = task_schemas.get(task_name)
+		parsed_target = _parse_literal_signature(target_signature)
+		if task_schema is None or parsed_target is None:
+			continue
+		predicate_name, target_args, is_positive = parsed_target
+		if not is_positive:
+			continue
+
+		task_parameters = tuple(
+			_parameter_token(parameter)
+			for parameter in getattr(task_schema, "parameters", ()) or ()
+		)
+		candidates = _same_arity_packaging_candidates_for_query_task(
+			domain,
+			task_name,
+			predicate_name,
+			task_parameters,
+			task_schemas,
+			action_analysis,
+		)
+		if not candidates:
+			continue
+
+		child_target_signature = f"{predicate_name}({', '.join(f'ARG{index}' for index, _ in enumerate(target_args, start=1))})"
+		for candidate in candidates:
+			candidate_name = str(candidate.get("candidate", "")).strip()
+			candidate_parameters = tuple(candidate.get("parameters", ()))
+			caller_shared_mapping = {
+				_parameter_token(raw_parameter): f"ARG{index}"
+				for index, raw_parameter in enumerate(candidate_parameters, start=1)
+			}
+			rendered_shared_requirements: list[str] = []
+			for raw_requirement in candidate.get("shared_requirements", ()):
+				rendered_shared_requirements.append(
+					_render_signature_with_mapping(
+						str(raw_requirement),
+						caller_shared_mapping,
+					),
+				)
+			pseudo_anchor = {
+				"task_name": candidate_name,
+				"source_name": candidate_name,
+				"args": list(candidate_parameters),
+				"force_internal_contract": True,
+				"caller_shared_requirements": rendered_shared_requirements,
+			}
+			for source in (
+				_declared_task_producer_template_lines,
+				_query_task_support_producer_lines,
+			):
+				for line in source(
+					domain,
+					(child_target_signature,),
+					(pseudo_anchor,),
+					action_analysis,
+				):
+					if line in seen:
+						continue
+					seen.add(line)
+					lines.append(line)
+
+	return lines
+
+
 def _format_tagged_block(tag_name: str, body: str) -> str:
 	content = body.strip()
 	if not content:
@@ -5329,7 +5757,7 @@ def _select_salient_contract_lines(
 		return []
 	limit_by_tag = {
 		"query_task_contract": 9,
-		"support_task_contract": 7,
+		"support_task_contract": 6,
 	}
 	limit = limit_by_tag.get(tag_name)
 	if limit is None or len(normalised_lines) <= limit:
@@ -5338,29 +5766,35 @@ def _select_salient_contract_lines(
 	def priority(line: str) -> tuple[int, int]:
 		if "exact same-arity packaging contract" in line or "exact same-arity packaging child" in line:
 			return (0, 0)
-		if "targets " in line and "templates:" in line:
+		if "expects caller-shared" in line and "Before the child call, establish" in line:
 			return (1, 0)
-		if "Support options:" in line or " requires " in line:
+		if "targets " in line and "templates:" in line:
 			return (2, 0)
-		if "before any helper or child call" in line:
+		if "Support options:" in line or " requires " in line:
 			return (3, 0)
-		if "caller-shared dynamic prerequisites" in line:
+		if "must establish" in line and "instead of leaving it in branch context" in line:
 			return (4, 0)
-		if "if a constructive sibling uses" in line or "if the constructive branch uses" in line:
+		if "Do not collapse both cases into one precondition-only branch." in line:
 			return (5, 0)
-		if "recursive support is valid" in line:
+		if "before any helper or child call" in line:
 			return (6, 0)
-		if "recursive template" in line:
+		if "caller-shared dynamic prerequisites" in line:
 			return (7, 0)
-		if "cleanup template" in line:
+		if "if a constructive sibling uses" in line or "if the constructive branch uses" in line:
 			return (8, 0)
-		if "introduces extra roles" in line:
+		if "recursive support is valid" in line:
 			return (9, 0)
-		if "acts as a non-leading support/base role" in line:
+		if "recursive template" in line:
 			return (10, 0)
-		if "can serve as a declared support task" in line:
+		if "cleanup template" in line:
 			return (11, 0)
-		return (12, 0)
+		if "introduces extra roles" in line:
+			return (12, 0)
+		if "acts as a non-leading support/base role" in line:
+			return (13, 0)
+		if "can serve as a declared support task" in line:
+			return (14, 0)
+		return (15, 0)
 
 	selected_indices = sorted(
 		index
@@ -5393,7 +5827,27 @@ def _compact_contract_line(line: str) -> str:
 		),
 		(
 			" explicit in method.context as the selected producer mode condition",
+			" explicit in branch context",
+		),
+		(
 			" explicit in method.context",
+			" explicit in branch context",
+		),
+		(
+			" in method.context",
+			" in branch context",
+		),
+		(
+			"method.context",
+			"branch context",
+		),
+		(
+			"method.parameters",
+			"parameters",
+		),
+		(
+			"inside methods",
+			"inside task definitions",
 		),
 		(
 			" via parent context or earlier parent subtasks.",
@@ -5583,40 +6037,35 @@ def _render_relevant_action_lines(
 # avoidable prompt variation is reduced (Zhuo et al., EACL 2023).
 def build_htn_system_prompt() -> str:
 	return (
-		"You synthesize one compact, executable HTN method library from the query, declared tasks, "
-		"predicates, and primitive action schemas only.\n"
-		"No second pass exists. No repair pass exists. No hidden methods exist.\n"
-		"Return JSON only. No markdown, no prose, no comments.\n"
-		"Return exactly one object with top-level keys target_task_bindings and tasks.\n"
+		"You synthesize one executable HTN method library from the query contracts, declared "
+		"tasks, predicates, and primitive action schemas only.\n"
+		"Emit the final JSON object immediately. No analysis, no markdown, no prose, no reasoning trace.\n"
+		"Single shot only: no second pass, no repair pass, no hidden methods.\n"
+		"Return exactly one JSON object with top-level keys target_task_bindings and tasks.\n"
 		"\n"
-		"GLOBAL RULES:\n"
-		"- Preserve query-mentioned declared tasks as the top-level skeleton whenever they match the ordered targets.\n"
-		"- Prefer declared support tasks over fresh helpers; create a fresh helper only for a dynamic predicate that no declared task can responsibly cover.\n"
-		"- If a contract already lists support options for a prerequisite, use those listed options or declared support tasks instead of inventing a fresh helper for it.\n"
-		"- Static predicates are context constraints only; never create helpers for them.\n"
-		"- Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks; target_task_bindings already define the top-level roots.\n"
-		"- Each target-bound task needs an already-satisfied/noop method with the headline literal in context.\n"
-		"- If the prompt lists an exact same-arity packaging contract for a target-bound task, the constructive branch must call that packaging child instead of bypassing it with a direct final producer.\n"
-		"- Every primitive dynamic precondition must be supported by method context or earlier subtasks.\n"
-		"- In constructive branches, do not hide unmet dynamic prerequisites in method.context when a listed support task, packaging child, or recursive template can establish them.\n"
-		"- Every compound child call must satisfy the child's shared dynamic prerequisites before the child is called.\n"
-		"- Only rely on a previous compound child's own headline effect and explicitly shared envelope, never incidental internal side effects.\n"
-		"- Use same-arity packaging only when the prompt provides an exact packaging contract. If selected, support only the listed caller-shared prerequisites before the child call and let that child own the final producer. Do not infer new packaging candidates or caller-shared envelopes.\n"
-		"- Auxiliary variables must remain schematic, appear in method.parameters, and be constrained before use by declared predicates, equality constraints, or earlier subtask bindings; never invent type predicates such as block(X) or rover(R) unless the domain explicitly declares them.\n"
-		"- Grounded query objects may appear in target literals and ordered top-level bindings only. If query inventory and Stage 1 semantic hints conflict, the query inventory is authoritative for top-level grounding only.\n"
-		"- When a method chooses one producer mode or primitive branch, it must support the full listed dynamic preconditions of that selected mode before the step.\n"
-		"- For an extra-role mode ACTION(ARG1, AUX1, ...), any dynamic prerequisite linking AUX1 to a task argument or shared resource is mandatory, not optional.\n"
+		"INVARIANTS:\n"
+		"- Preserve the ordered query skeleton and define every task named in required_tasks exactly once.\n"
+		"- Prefer declared support tasks. Add a fresh helper only if no listed task can discharge a required dynamic predicate.\n"
+		"- Each target-bound task needs a noop branch whose precondition/context already contains its headline literal.\n"
+		"- Support every dynamic prerequisite before the consuming step.\n"
+		"- Treat each constructive branch like one HDDL :method: precondition only states entry facts, not supportable extra-needs that should be achieved inside the branch.\n"
+		"- Before a compound child call, satisfy only its listed caller-shared prerequisites; the child owns internal support and the final producer.\n"
+		"- Use ARG* for task-signature roles and AUX_* for extra witness roles. AUX_* must stay schematic and be constrained before use.\n"
+		"- If a branch chooses ACTION(...), it must support every listed need for that mode before ACTION.\n"
+		"- If a listed need or extra need mentions AUX_*, and a declared support task can establish it, add that support earlier in ordered_subtasks instead of leaving it in precondition/context.\n"
+		"- Template argument positions are exact. If a listed template is ACTION(AUX1, ARG1), do not swap it to ACTION(ARG1, AUX1); only calls whose effect-argument positions align with the headline ARG roles count as valid final producers.\n"
+		"- Think in HDDL method grammar: each branch corresponds to one method with :task, :precondition, and ordered subtasks.\n"
+		"- Pattern: if final producer PLACE(ARG1, ARG2) needs READY(ARG2) and a declared support task can establish READY(ARG2), use separate constructive siblings like [holding(ARG1), ready(ARG2)] -> [PLACE(ARG1, ARG2)] and [holding(ARG1)] -> [support_task(ARG2), PLACE(ARG1, ARG2)] instead of one precondition-only branch.\n"
+		"- Pattern: if an extra-role producer PLACE(ARG1, AUX1) needs READY(AUX1), use a sibling with recursive/internal support [support_task(AUX1), PLACE(ARG1, AUX1)] instead of leaving READY(AUX1) only in branch precondition/context.\n"
 		"\n"
-		"OUTPUT CONTRACT:\n"
-		"- Each tasks entry defines one compound task once, with fields name, parameters, source_predicates, noop, constructive.\n"
-		"- task names and branch labels must match [a-z][a-z0-9_]*.\n"
-		"- Every task entry needs a noop branch whose context already contains the headline literal and whose steps are empty.\n"
-		"- constructive must be a list of one or more branch objects. Use one branch by default, add siblings only for real producer-mode differences.\n"
-		"- Branch parameters are optional; if omitted, they default to the task parameters. Add AUX_* only when the selected mode genuinely needs extra roles.\n"
-		"- Primitive steps must use kind=\"primitive\" and call equal to the runtime primitive alias. Compound steps must use kind=\"compound\" and call equal to another task name defined in tasks.\n"
-		"- Every compound child you call must also appear as another task entry in tasks. If you call a declared support task from the contracts below, materialize it as its own task entry with branches in the same JSON.\n"
-		"- Zero-step branches must have non-empty context. If a branch has two or more steps, ordering must be explicit pairwise edges such as [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]].\n"
-		"- Omit optional empty/default fields when possible, but never omit required structural fields. Every literal-bearing field must use JSON object form with predicate/args/is_positive.\n"
+		"OUTPUT SHAPE:\n"
+		"- One tasks entry per compound task with fields name, parameters, noop, constructive. source_predicates is optional and may be omitted when recoverable from bindings/contracts.\n"
+		"- constructive is non-empty. Add sibling branches when producer-mode or support-availability differences change the branch precondition or ordered-subtask skeleton.\n"
+		"- Branch precondition may be written as precondition or context.\n"
+		"- Prefer ordered_subtasks for totally ordered branches. Use explicit ordering only when the branch is not totally ordered.\n"
+		"- Literal fields may use JSON literal objects or compact strings such as on(ARG1, ARG2) or !clear(ARG1).\n"
+		"- ordered_subtasks items may use compact invocation strings such as do_clear(AUX1) or stack(ARG1, ARG2). Step ids and kinds are optional there and will be inferred.\n"
+		"- Every called compound child must appear in tasks.\n"
 	)
 
 
@@ -5710,6 +6159,7 @@ def build_htn_user_prompt(
 			if str(payload.get("task_signature", "")).strip()
 		]
 	)
+	required_task_lines = [f"- {line}" for line in task_scope_signatures] or ["- none"]
 	relevant_dynamic_predicates = _relevant_dynamic_predicates_for_prompt(targets, analysis)
 	dynamic_predicate_lines = [
 		f"- {predicate_name}"
@@ -5744,6 +6194,16 @@ def build_htn_user_prompt(
 			*ordered_target_binding_entries,
 		]
 	)
+	required_tasks_block = "\n".join(
+		[
+			"required_tasks:",
+			*required_task_lines,
+			"",
+			"task_rules:",
+			"- Define each listed task exactly once in tasks.",
+			"- Add a fresh helper only if no listed task can responsibly discharge a required dynamic predicate.",
+		]
+	)
 	query_task_contract_block = _render_contract_blocks(
 		"query_task_contract",
 		query_task_contracts,
@@ -5764,41 +6224,40 @@ def build_htn_user_prompt(
 	)
 	instructions_block = "\n".join(
 		[
-			"1. Read query_task_contracts first; they are the canonical synthesis skeleton.",
-			"2. Read support_task_contracts second. Before a support child call, satisfy every listed caller-shared prerequisite and keep child-internal support inside that child.",
-			"3. Preserve ordered query task names in target_task_bindings and as top-level compound tasks. Do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top.",
-			"4. Every target-bound task needs an already-satisfied/noop method whose context contains the headline literal and whose subtasks are empty.",
-			"5. Prefer declared support tasks. Fresh helpers are last resort, and if a contract already lists support options for a prerequisite, use those listed options or a listed declared support task instead of inventing a new helper.",
-			"6. If an exact same-arity packaging contract is listed for a target-bound task, the constructive branch must use that child, support its listed caller-shared prerequisites first, and let that child own the final producer.",
-			"7. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Grounded query object names may appear only in target_task_bindings and ordered top-level bindings, never inside methods. Type names are not predicates.",
-			"8. If a contract line lists ACTION [needs p, q, r], a method that chooses ACTION must support p, q, and r before ACTION. Do not copy unmet dynamic prerequisites into constructive context if a listed support or recursive template can establish them. Every AUX_* variable must be constrained before use; declaring AUX_* in method.parameters alone is insufficient. Multi-step methods require explicit pairwise ordering edges.",
-			"9. ordering: for subtasks s1 then s2 then s3, emit [[\"s1\",\"s2\"],[\"s2\",\"s3\"]]. Never emit [[\"s1\",\"s2\",\"s3\"]].",
-			"10. packaging_envelope: if child(ARG1, ARG2) has constructive siblings with contexts {ready(ARG1), clear(ARG2)} and {ready(ARG1), linked(ARG2)}, then the caller-shared envelope is ready(ARG1) only.",
-			"11. Never invent type predicates.",
-			"12. For extra-role modes, relation literals that bind AUX_* to task arguments, such as rel(ARG1, AUX1), are mandatory mode prerequisites and must be supported before the step or kept explicit when the mode consumes them.",
+			"1. Read query_task_contracts first; they define the top-level synthesis skeleton.",
+			"2. Read support_task_contracts second; keep child-internal support inside the child.",
+			"3. If an exact same-arity packaging contract is listed, parent supports only the listed caller-shared prerequisites, then calls that child.",
+			"4. If a line lists ACTION [needs ...] or [extra needs ...], satisfy those needs before ACTION. For supportable AUX_* needs, use earlier subtasks inside the same task instead of leaving them in constructive precondition/context.",
+			"5. Use ARG1..ARGn for task-signature roles and AUX_* for extra roles. Declaring AUX_* is not enough; constrain it before first use.",
+			"6. Keep template argument positions exact. If a listed template says ACTION(AUX1, ARG1), do not swap it to ACTION(ARG1, AUX1).",
+			"7. Every called compound child must be materialized in tasks. Do not invent aggregate/root wrappers.",
+			"8. Use one constructive branch by default; add siblings when producer-mode or support-availability differences change the valid entry precondition or ordered-subtask skeleton.",
+			"9. Prefer ordered_subtasks for total orders; otherwise ordering uses pairwise edges only: [[\"s1\",\"s2\"],[\"s2\",\"s3\"]].",
 		]
 	)
 
 	sections = [
 		_format_tagged_block(
 			"task",
-			"Generate one compact but executable JSON HTN library that compiles into valid AgentSpeak.",
+			"Generate one executable JSON HTN library that compiles into valid AgentSpeak. Keep it compact only after all method obligations are explicit.",
 		),
 		_format_tagged_block(
 			"query_summary",
 			"Use the ordered query bindings below as the canonical query decomposition. "
-			"Do not copy grounded constants from the original sentence into methods.",
+			"Do not copy grounded constants from the original sentence into task definitions.",
 		),
 		_format_tagged_block("grounding", grounding_block),
 		_format_tagged_block("ordered_query_bindings", ordered_bindings_block),
+		_format_tagged_block("required_tasks", required_tasks_block),
 		_format_tagged_block("query_task_contracts", query_task_contract_block),
 		_format_tagged_block("support_task_contracts", support_task_contract_block),
 		_format_tagged_block("domain_summary", domain_summary_block),
 		_format_tagged_block("instructions", instructions_block),
-		_format_tagged_block(
-			"output_schema",
-			"Only define target_task_bindings, compound_tasks, and methods; primitive tasks are injected automatically.\n"
-			f"{schema_hint}",
-		),
+			_format_tagged_block(
+				"output_schema",
+				"Only define target_task_bindings and tasks; primitive tasks are injected automatically.\n"
+				"Each noop or constructive entry compiles to one HDDL method. Prefer precondition/subtasks/ordering field names because they mirror HDDL grammar. Omit source_predicates when unsure; the compiler can recover task headlines from bindings/contracts.\n"
+				f"{schema_hint}",
+			),
 	]
 	return "\n\n".join(section for section in sections if section).strip() + "\n"

@@ -396,9 +396,9 @@ class LTL_BDI_Pipeline:
             )
             synthesizer = HTNMethodSynthesizer(
                 api_key=self.config.openai_api_key,
-                model=self.config.openai_model,
+                model=self.config.openai_stage3_model,
                 base_url=self.config.openai_base_url,
-                timeout=float(self.config.openai_timeout),
+                timeout=float(self.config.openai_stage3_timeout),
                 max_tokens=int(self.config.openai_stage3_max_tokens),
             )
 

@@ -9,7 +9,9 @@ and validate executable AgentSpeak wrappers.
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
 import time
 from collections import deque
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -212,6 +214,7 @@ class HTNMethodSynthesizer:
 			prompt,
 			domain,
 			metadata,
+			prompt_analysis=prompt_analysis,
 		)
 
 		metadata["llm_response"] = response_text
@@ -928,6 +931,8 @@ class HTNMethodSynthesizer:
 		prompt: Dict[str, str],
 		domain: Any,
 		metadata: Dict[str, Any],
+		*,
+		prompt_analysis: Optional[Dict[str, Any]] = None,
 	) -> Tuple[HTNMethodLibrary, str, Optional[str]]:
 		total_start = time.monotonic()
 		metadata["llm_attempts"] = 1
@@ -971,7 +976,11 @@ class HTNMethodSynthesizer:
 				f"LLM response could not be parsed as a valid HTN library: {exc}",
 			) from exc
 
-		return self._normalise_llm_library(parsed_library, domain), response_text, finish_reason
+		return self._normalise_llm_library(
+			parsed_library,
+			domain,
+			prompt_analysis=prompt_analysis,
+		), response_text, finish_reason
 
 	def _call_llm(
 		self,
@@ -979,11 +988,51 @@ class HTNMethodSynthesizer:
 		*,
 		max_tokens: Optional[int] = None,
 	) -> Tuple[str, Optional[str]]:
-		response = self._create_chat_completion(prompt, max_tokens=max_tokens)
+		response = self._call_llm_with_wall_clock_timeout(
+			prompt,
+			max_tokens=max_tokens,
+		)
 		choice = response.choices[0]
 		finish_reason = getattr(choice, "finish_reason", None)
 		content = self._extract_response_text(response)
 		return content, finish_reason
+
+	def _call_llm_with_wall_clock_timeout(
+		self,
+		prompt: Dict[str, str],
+		*,
+		max_tokens: Optional[int] = None,
+	):
+		if self.timeout <= 0:
+			return self._create_chat_completion(prompt, max_tokens=max_tokens)
+
+		result_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue(maxsize=1)
+
+		def _worker() -> None:
+			try:
+				response = self._create_chat_completion(prompt, max_tokens=max_tokens)
+			except Exception as exc:  # pragma: no cover - exercised via queue boundary
+				result_queue.put(("error", exc))
+				return
+			result_queue.put(("ok", response))
+
+		thread = threading.Thread(
+			target=_worker,
+			name="stage3-llm-request",
+			daemon=True,
+		)
+		thread.start()
+
+		try:
+			status, payload = result_queue.get(timeout=float(self.timeout))
+		except queue.Empty as exc:
+			raise TimeoutError(
+				f"Stage 3 LLM wall-clock timeout after {self.timeout:.1f}s.",
+			) from exc
+
+		if status == "error":
+			raise payload  # type: ignore[misc]
+		return payload
 
 	def _create_chat_completion(
 		self,
@@ -991,16 +1040,56 @@ class HTNMethodSynthesizer:
 		*,
 		max_tokens: Optional[int] = None,
 	):
-		return self.client.chat.completions.create(
-			model=self.model,
-			messages=[
+		request_kwargs = {
+			"model": self.model,
+			"messages": [
 				{"role": "system", "content": prompt["system"]},
 				{"role": "user", "content": prompt["user"]},
 			],
-			temperature=0.0,
-			max_tokens=max_tokens or self.max_tokens,
-			timeout=self.timeout,
+			"temperature": 0.0,
+			"max_tokens": max_tokens or self.max_tokens,
+			"timeout": self.timeout,
+		}
+		request_variants = (
+			{
+				"response_format": {"type": "json_object"},
+				"extra_body": {
+					"reasoning": {
+						"effort": "none",
+						"exclude": True,
+					},
+				},
+			},
+			{
+				"response_format": {"type": "json_object"},
+				"extra_body": {
+					"reasoning": {
+						"exclude": True,
+					},
+				},
+			},
+			{
+				"response_format": {"type": "json_object"},
+			},
+			{},
 		)
+		last_optional_error: Optional[Exception] = None
+		for variant in request_variants:
+			try:
+				return self.client.chat.completions.create(
+					**request_kwargs,
+					**variant,
+				)
+			except Exception as exc:
+				if not (
+					self._is_unsupported_json_response_format_error(exc)
+					or self._is_unsupported_reasoning_parameter_error(exc)
+				):
+					raise
+				last_optional_error = exc
+		if last_optional_error is not None:
+			raise last_optional_error
+		raise RuntimeError("Stage 3 could not create a chat completion request.")
 
 	def _extract_response_text(self, response: object) -> str:
 		choices = getattr(response, "choices", None) or ()
@@ -1035,6 +1124,42 @@ class HTNMethodSynthesizer:
 			"LLM response did not contain usable textual JSON content. "
 			f"finish_reason={finish_reason!r}",
 		)
+
+	@staticmethod
+	def _is_unsupported_json_response_format_error(exc: Exception) -> bool:
+		message = str(exc).lower()
+		if "response_format" not in message and "json_object" not in message:
+			return False
+		unsupported_markers = (
+			"unsupported",
+			"not supported",
+			"invalid parameter",
+			"unknown parameter",
+			"unrecognized request argument",
+			"extra inputs are not permitted",
+		)
+		return any(marker in message for marker in unsupported_markers)
+
+	@staticmethod
+	def _is_unsupported_reasoning_parameter_error(exc: Exception) -> bool:
+		message = str(exc).lower()
+		if not any(
+			token in message
+			for token in ("reasoning", "effort", "exclude", "enabled", "disabled")
+		):
+			return False
+		unsupported_markers = (
+			"unsupported",
+			"not supported",
+			"invalid parameter",
+			"unknown parameter",
+			"unrecognized request argument",
+			"extra inputs are not permitted",
+			"cannot be disabled",
+			"reasoning is mandatory",
+			"mandatory",
+		)
+		return any(marker in message for marker in unsupported_markers)
 
 	@staticmethod
 	def _normalise_response_content(content: object) -> str | None:
@@ -1161,6 +1286,8 @@ class HTNMethodSynthesizer:
 		self,
 		library: HTNMethodLibrary,
 		domain: Any,
+		*,
+		prompt_analysis: Optional[Dict[str, Any]] = None,
 	) -> HTNMethodLibrary:
 		action_schemas = self._action_schema_map(domain)
 		raw_task_to_alias, alias_to_raw_task = self._declared_task_alias_maps(domain)
@@ -1195,6 +1322,15 @@ class HTNMethodSynthesizer:
 					source_name=source_name,
 				)
 			)
+		compound_tasks = self._infer_missing_task_source_predicates(
+			compound_tasks,
+			library.target_task_bindings,
+			library.methods,
+			predicate_arity=predicate_arity,
+			raw_to_alias=raw_task_to_alias,
+			alias_to_raw=alias_to_raw_task,
+			prompt_analysis=prompt_analysis,
+		)
 		compound_task_names = {task.name for task in compound_tasks}
 		primitive_task_names = {self._sanitize_name(action.name) for action in domain.actions}
 
@@ -1324,6 +1460,87 @@ class HTNMethodSynthesizer:
 				for binding in library.target_task_bindings
 			],
 		)
+
+	def _infer_missing_task_source_predicates(
+		self,
+		compound_tasks: Sequence[HTNTask],
+		target_task_bindings: Sequence[HTNTargetTaskBinding],
+		methods: Sequence[HTNMethod],
+		*,
+		predicate_arity: Dict[str, int],
+		raw_to_alias: Dict[str, str],
+		alias_to_raw: Dict[str, str],
+		prompt_analysis: Optional[Dict[str, Any]] = None,
+	) -> List[HTNTask]:
+		binding_predicates_by_task: Dict[str, List[str]] = {}
+		for binding in target_task_bindings:
+			literal = self._literal_from_signature_text(binding.target_literal)
+			if literal is None:
+				continue
+			task_name, _ = self._normalise_declared_task_identifier(
+				binding.task_name,
+				raw_to_alias=raw_to_alias,
+				alias_to_raw=alias_to_raw,
+			)
+			binding_predicates_by_task.setdefault(task_name, [])
+			if literal.predicate not in binding_predicates_by_task[task_name]:
+				binding_predicates_by_task[task_name].append(literal.predicate)
+
+		noop_predicates_by_task: Dict[str, List[str]] = {}
+		for method in methods:
+			if method.subtasks:
+				continue
+			positive_context_literals = [
+				literal
+				for literal in method.context
+				if literal.is_positive
+			]
+			if len(positive_context_literals) != 1:
+				continue
+			headline_literal = positive_context_literals[0]
+			if len(headline_literal.args) != len(method.parameters):
+				continue
+			noop_predicates_by_task.setdefault(method.task_name, [])
+			if headline_literal.predicate not in noop_predicates_by_task[method.task_name]:
+				noop_predicates_by_task[method.task_name].append(headline_literal.predicate)
+
+		headline_candidates_by_task: Dict[str, Tuple[str, ...]] = {}
+		for raw_task_name, predicates in (prompt_analysis or {}).get("task_headline_candidates", {}).items():
+			task_name, _ = self._normalise_declared_task_identifier(
+				raw_task_name,
+				raw_to_alias=raw_to_alias,
+				alias_to_raw=alias_to_raw,
+			)
+			headline_candidates_by_task[task_name] = tuple(
+				str(predicate_name)
+				for predicate_name in predicates
+				if str(predicate_name).strip()
+			)
+
+		enriched_tasks: List[HTNTask] = []
+		for task in compound_tasks:
+			if task.source_predicates:
+				enriched_tasks.append(task)
+				continue
+			inferred_predicates = tuple(
+				predicate_name
+				for predicate_name in (
+					binding_predicates_by_task.get(task.name, ())
+					or noop_predicates_by_task.get(task.name, ())
+					or headline_candidates_by_task.get(task.name, ())
+				)
+				if predicate_arity.get(predicate_name) == len(task.parameters)
+			)
+			enriched_tasks.append(
+				HTNTask(
+					name=task.name,
+					parameters=task.parameters,
+					is_primitive=task.is_primitive,
+					source_predicates=inferred_predicates[:1],
+					source_name=task.source_name,
+				)
+			)
+		return enriched_tasks
 
 	def _coerce_step_kind(
 		self,
@@ -2953,10 +3170,22 @@ class HTNMethodSynthesizer:
 			parameter: arg
 			for parameter, arg in zip(schema_parameters, step_args)
 		}
+		local_aliases: Dict[str, str] = {}
+
+		def materialise_symbol(symbol: str) -> str:
+			if symbol in bindings:
+				return bindings[symbol]
+			if symbol in schema_parameters:
+				return local_aliases.setdefault(
+					symbol,
+					f"__child_local_{len(local_aliases) + 1}_{symbol}",
+				)
+			return symbol
+
 		return tuple(
 			HTNLiteral(
 				predicate=literal.predicate,
-				args=tuple(bindings.get(arg, arg) for arg in literal.args),
+				args=tuple(materialise_symbol(arg) for arg in literal.args),
 				is_positive=literal.is_positive,
 				source_symbol=None,
 			)
@@ -3740,10 +3969,10 @@ class HTNMethodSynthesizer:
 	def _schema_hint() -> str:
 		return (
 			'{"target_task_bindings":[{"target_literal":"linked(A, B)","task_name":"do_link"}],'
-			'"tasks":[{"name":"do_link","parameters":["A","B"],"source_predicates":["linked"],'
-			'"noop":{"context":[{"predicate":"linked","args":["A","B"],"is_positive":true}]},'
-			'"constructive":[{"parameters":["A","B"],"context":[{"predicate":"ready","args":["B"],"is_positive":true}],'
-			'"steps":[{"id":"s1","kind":"primitive","call":"attach","args":["A","B"]}]}]}]}'
+			'"tasks":[{"name":"do_link","parameters":["A","B"],'
+			'"noop":{"precondition":["linked(A, B)"]},'
+			'"constructive":[{"precondition":["ready(B)"],'
+			'"ordered_subtasks":["attach(A, B)"]}]}]}'
 		)
 
 	@staticmethod
