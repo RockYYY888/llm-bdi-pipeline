@@ -140,7 +140,7 @@ def build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 
 def build_benchmark_query_dataset() -> Dict[str, Any]:
 	dataset: Dict[str, Any] = {
-		"version": 3,
+		"version": 4,
 		"dataset_kind": "stored_benchmark_queries",
 		"query_protocol_document": "docs/query_protocol.md",
 		"generator": "canonical_root_task_query_v2",
@@ -148,19 +148,13 @@ def build_benchmark_query_dataset() -> Dict[str, Any]:
 	}
 	for domain_key, problem_dir in DEFAULT_BENCHMARK_QUERY_DOMAIN_PROBLEM_DIRS.items():
 		pattern = DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS[domain_key]
-		cases: Dict[str, Dict[str, Any]] = {}
+		cases: Dict[str, str] = {}
 		for index, problem_path in enumerate(sorted(problem_dir.glob(pattern)), start=1):
 			case = build_case_from_problem(problem_path)
 			if case is None:
 				continue
-			stored_case = dict(case)
-			stored_case["problem_file"] = problem_path.relative_to(PROJECT_ROOT).as_posix()
-			cases[f"query_{index}"] = stored_case
-		dataset["domains"][domain_key] = {
-			"problem_dir": problem_dir.relative_to(PROJECT_ROOT).as_posix(),
-			"problem_pattern": pattern,
-			"cases": cases,
-		}
+			cases[f"query_{index}"] = str(case["instruction"])
+		dataset["domains"][domain_key] = {"cases": cases}
 	return dataset
 
 
@@ -203,7 +197,6 @@ def load_problem_query_cases(
 	pattern: str = "p*.hddl",
 	dataset_path: Path | None = None,
 ) -> Dict[str, Dict[str, Any]]:
-	del pattern  # The stored dataset already fixes the canonical pattern per domain.
 	domain_key = _infer_domain_key_from_problem_dir(problem_dir)
 	dataset = load_benchmark_query_dataset(dataset_path)
 	domain_record = dataset["domains"].get(domain_key, {})
@@ -211,9 +204,33 @@ def load_problem_query_cases(
 	if limit > 0:
 		case_items = case_items[:limit]
 
+	problem_pattern = DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS.get(domain_key, pattern)
+	problem_paths = [
+		path
+		for path in sorted(problem_dir.glob(problem_pattern))
+		if build_case_from_problem(path) is not None
+	]
+
 	normalised_cases: Dict[str, Dict[str, Any]] = {}
 	for query_id, stored_case in case_items:
-		case = dict(stored_case)
-		case["problem_file"] = str((PROJECT_ROOT / case["problem_file"]).resolve())
+		case_index = int(str(query_id).split("_", 1)[1]) - 1
+		if case_index < 0 or case_index >= len(problem_paths):
+			raise IndexError(
+				f"Stored benchmark query id '{query_id}' has no matching problem file in {problem_dir}.",
+			)
+		problem_path = problem_paths[case_index]
+		canonical_case = build_case_from_problem(problem_path)
+		if canonical_case is None:
+			raise ValueError(
+				f"Problem file '{problem_path}' does not produce a benchmark query case.",
+			)
+		stored_instruction = (
+			str(stored_case)
+			if isinstance(stored_case, str)
+			else str((stored_case or {}).get("instruction", "")).strip()
+		)
+		case = dict(canonical_case)
+		case["instruction"] = stored_instruction or canonical_case["instruction"]
+		case["problem_file"] = str(problem_path.resolve())
 		normalised_cases[query_id] = case
 	return normalised_cases

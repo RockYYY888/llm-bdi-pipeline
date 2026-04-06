@@ -2250,6 +2250,14 @@ def assert_benchmark_query_dataset_metadata_points_to_query_protocol():
 	assert dataset["generator"] == "canonical_root_task_query_v2"
 
 
+def assert_benchmark_query_dataset_cases_store_only_natural_language_inputs():
+	dataset = _load_benchmark_query_dataset()
+	for domain_record in dataset["domains"].values():
+		for stored_case in (domain_record.get("cases") or {}).values():
+			assert isinstance(stored_case, str)
+			assert stored_case.strip()
+
+
 def assert_benchmark_query_dataset_instructions_respect_protocol():
 	for query_cases in (
 		_load_problem_query_cases(BLOCKSWORLD_PROBLEM_DIR, limit=10_000),

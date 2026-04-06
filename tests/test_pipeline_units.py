@@ -226,6 +226,10 @@ def test_benchmark_query_dataset_metadata_points_to_query_protocol():
 	pipeline_tests.assert_benchmark_query_dataset_metadata_points_to_query_protocol()
 
 
+def test_benchmark_query_dataset_cases_store_only_natural_language_inputs():
+	pipeline_tests.assert_benchmark_query_dataset_cases_store_only_natural_language_inputs()
+
+
 def test_benchmark_query_dataset_instructions_respect_protocol():
 	pipeline_tests.assert_benchmark_query_dataset_instructions_respect_protocol()
 
