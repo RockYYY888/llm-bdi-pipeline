@@ -3740,13 +3740,10 @@ class HTNMethodSynthesizer:
 	def _schema_hint() -> str:
 		return (
 			'{"target_task_bindings":[{"target_literal":"linked(A, B)","task_name":"do_link"}],'
-			'"compound_tasks":[{"name":"do_link","parameters":["A","B"],"is_primitive":false,'
-			'"source_predicates":["linked"]}],'
-			'"methods":[{"method_name":"m_do_link_noop","task_name":"do_link","parameters":["A","B"],'
-			'"context":[{"predicate":"linked","args":["A","B"],"is_positive":true}]},{"method_name":"m_do_link_constructive","task_name":"do_link",'
-			'"parameters":["A","B"],"context":[{"predicate":"ready","args":["B"],"is_positive":true}],'
-			'"subtasks":[{"step_id":"s1","task_name":"attach","args":["A","B"],"kind":"primitive",'
-			'"action_name":"attach"}]}]}'
+			'"tasks":[{"name":"do_link","parameters":["A","B"],"source_predicates":["linked"],'
+			'"noop":{"context":[{"predicate":"linked","args":["A","B"],"is_positive":true}]},'
+			'"constructive":[{"parameters":["A","B"],"context":[{"predicate":"ready","args":["B"],"is_positive":true}],'
+			'"steps":[{"id":"s1","kind":"primitive","call":"attach","args":["A","B"]}]}]}]}'
 		)
 
 	@staticmethod

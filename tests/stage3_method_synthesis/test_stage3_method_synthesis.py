@@ -650,8 +650,10 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]]" in system_prompt
 	assert "never invent type predicates such as block(X) or rover(R)" in system_prompt
 	assert "Do not infer new packaging candidates or caller-shared envelopes." in system_prompt
-	assert "Every compound child you call must also appear in compound_tasks and have at least one method in methods." in system_prompt
-	assert "If you call a declared support task from the contracts below, materialize that task in compound_tasks" in system_prompt
+	assert "top-level keys target_task_bindings and tasks" in system_prompt
+	assert "Each tasks entry defines one compound task once, with fields name, parameters, source_predicates, noop, constructive." in system_prompt
+	assert "Every compound child you call must also appear as another task entry in tasks." in system_prompt
+	assert "materialize it as its own task entry with branches in the same JSON." in system_prompt
 	assert "Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks" in system_prompt
 	assert "the constructive branch must call that packaging child" in system_prompt
 	assert "do not hide unmet dynamic prerequisites in method.context" in system_prompt
@@ -3463,6 +3465,56 @@ def test_parse_llm_library_accepts_ordering_edges_alias():
 	)
 
 	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_accepts_ast_style_task_branches():
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		json.dumps(
+			{
+				"target_task_bindings": [
+					{"target_literal": "on(a, b)", "task_name": "place_on"},
+				],
+				"tasks": [
+					{
+						"name": "place_on",
+						"parameters": ["A", "B"],
+						"source_predicates": ["on"],
+						"noop": {
+							"context": [
+								{"predicate": "on", "args": ["A", "B"], "is_positive": True},
+							],
+						},
+						"constructive": [
+							{
+								"label": "stack_mode",
+								"context": [
+									{"predicate": "holding", "args": ["A"], "is_positive": True},
+								],
+								"steps": [
+									{
+										"id": "s1",
+										"kind": "primitive",
+										"call": "stack",
+										"args": ["A", "B"],
+									},
+								],
+							},
+						],
+					},
+				],
+			},
+		),
+	)
+
+	assert [task.name for task in library.compound_tasks] == ["place_on"]
+	assert [method.method_name for method in library.methods] == [
+		"m_place_on_noop",
+		"m_place_on_stack_mode",
+	]
+	assert library.methods[0].context[0].to_signature() == "on(A, B)"
+	assert library.methods[1].subtasks[0].task_name == "stack"
+	assert library.methods[1].subtasks[0].action_name == "stack"
 
 
 def test_validate_library_rejects_semantically_duplicate_methods():
