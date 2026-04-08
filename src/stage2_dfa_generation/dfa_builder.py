@@ -19,30 +19,18 @@ from utils.setup_mona_path import setup_mona
 setup_mona()
 
 from stage2_dfa_generation.ltlf_to_dfa import LTLfToDFA
-from stage2_dfa_generation.dfa_simplifier import DFASimplifier
-
-
 class DFABuilder:
     """
-    DFA builder that converts LTLf formula to DFA and simplifies it
-
-    Converts the complete LTLf formula to a DFA, then applies BDD Shannon Expansion
-    to simplify transition labels to atomic literals (var or !var). This is a
-    mandatory step that ensures each transition has a single atomic predicate.
+    DFA builder that converts LTLf formula to the raw DFA used downstream.
     """
 
     def __init__(self):
-        """Initialize DFA builder with simplifier"""
+        """Initialize DFA builder."""
         self.converter = LTLfToDFA()
-        self.simplifier = DFASimplifier()
     
     def build(self, ltl_spec) -> Dict[str, Any]:
         """
-        Build and simplify DFA from LTLf specification
-
-        This method performs two steps:
-        1. Generate DFA from LTLf formula using ltlf2dfa
-        2. Simplify DFA by applying BDD Shannon Expansion to transition labels
+        Build the raw DFA from the LTLf specification.
 
         Args:
             ltl_spec: LTLSpecification object with formulas and grounding_map
@@ -51,12 +39,12 @@ class DFABuilder:
             Dict with:
                 - formula: Original LTLf formula string
                 - original_dfa_dot: Original DFA in DOT format (before simplification)
-                - dfa_dot: Simplified DFA in DOT format (with atomic literals)
-                - num_states: Number of states in simplified DFA
-                - num_transitions: Number of transitions in simplified DFA (may increase after simplification)
+                - dfa_dot: Raw DFA in DOT format
+                - num_states: Number of states in the raw DFA
+                - num_transitions: Number of transitions in the raw DFA
                 - original_num_states: Number of states in original DFA
                 - original_num_transitions: Number of transitions in original DFA
-                - simplification_stats: Statistics about the simplification process
+                - simplification_stats: Compatibility metadata describing raw export
         """
         total_start = time.perf_counter()
         timing_profile: Dict[str, float] = {}
@@ -89,59 +77,28 @@ class DFABuilder:
         )
         timing_profile["original_stats_seconds"] = time.perf_counter() - original_stats_start
 
-        if metadata.get("construction") in {
-            "independent_eventually_atomic_fast_path",
-            "independent_eventually_symbolic_surrogate",
-            "ordered_eventually_atomic_fast_path",
-        }:
-            timing_profile["total_seconds"] = time.perf_counter() - total_start
-            return {
-                "formula": formula_str,
-                "original_dfa_dot": original_dfa_dot,
-                "dfa_dot": original_dfa_dot,
-                "num_states": original_num_states,
-                "num_transitions": original_num_transitions,
-                "original_num_states": original_num_states,
-                "original_num_transitions": original_num_transitions,
-                "simplification_stats": {
-                    "method": metadata.get("construction"),
-                    "num_predicates": len(metadata.get("alphabet", [])),
-                    "num_original_states": original_num_states,
-                    "num_new_states": original_num_states,
-                    "num_original_transitions": original_num_transitions,
-                    "num_new_transitions": original_num_transitions,
-                    "skipped_simplifier": True,
-                },
-                "timing_profile": timing_profile,
-            }
-
-        # Step 2: Simplify DFA (mandatory)
-        # This replaces complex boolean expressions with atomic literals (var or !var)
-        if not hasattr(ltl_spec, 'grounding_map') or ltl_spec.grounding_map is None:
-            raise ValueError("LTLSpecification must have a grounding_map for DFA simplification")
-
-        simplify_start = time.perf_counter()
-        simplified_result = self.simplifier.simplify(original_dfa_dot, ltl_spec.grounding_map)
-        timing_profile["simplify_seconds"] = time.perf_counter() - simplify_start
-
-        # Parse simplified DFA to get statistics (AFTER simplification)
-        simplified_stats_start = time.perf_counter()
-        num_states = self._count_states(simplified_result.simplified_dot)
-        num_transitions = self._count_transitions(simplified_result.simplified_dot)
-        timing_profile["simplified_stats_seconds"] = (
-            time.perf_counter() - simplified_stats_start
-        )
+        num_states = original_num_states
+        num_transitions = original_num_transitions
         timing_profile["total_seconds"] = time.perf_counter() - total_start
 
         result = {
             "formula": formula_str,
-            "original_dfa_dot": original_dfa_dot,  # NEW: Original DFA before simplification
-            "dfa_dot": simplified_result.simplified_dot,  # Simplified DFA
-            "num_states": num_states,  # Simplified DFA states
-            "num_transitions": num_transitions,  # Simplified DFA transitions
-            "original_num_states": original_num_states,  # NEW: Original DFA states
-            "original_num_transitions": original_num_transitions,  # NEW: Original DFA transitions
-            "simplification_stats": simplified_result.stats,
+            "original_dfa_dot": original_dfa_dot,
+            "dfa_dot": original_dfa_dot,
+            "num_states": num_states,
+            "num_transitions": num_transitions,
+            "original_num_states": original_num_states,
+            "original_num_transitions": original_num_transitions,
+            "simplification_stats": {
+                "method": metadata.get("construction") or "raw_original_dfa",
+                "num_predicates": len(metadata.get("alphabet", [])),
+                "num_original_states": original_num_states,
+                "num_new_states": original_num_states,
+                "num_original_transitions": original_num_transitions,
+                "num_new_transitions": original_num_transitions,
+                "skipped_simplifier": True,
+                "raw_dfa_only": True,
+            },
             "timing_profile": timing_profile,
         }
 

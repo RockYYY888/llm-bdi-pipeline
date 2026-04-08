@@ -592,12 +592,16 @@ class IPCPlanVerifier:
 			task.name: task
 			for task in method_library.compound_tasks + method_library.primitive_tasks
 		}
-		internal_task_by_source: Dict[str, str] = {}
+		internal_tasks_by_source: Dict[str, List[str]] = {}
 		source_task_by_internal: Dict[str, str] = {}
 		for task in method_library.compound_tasks + method_library.primitive_tasks:
 			source_name = getattr(task, "source_name", None) or task.name
-			internal_task_by_source.setdefault(source_name, task.name)
-			internal_task_by_source.setdefault(task.name, task.name)
+			internal_tasks_by_source.setdefault(source_name, [])
+			if task.name not in internal_tasks_by_source[source_name]:
+				internal_tasks_by_source[source_name].append(task.name)
+			internal_tasks_by_source.setdefault(task.name, [])
+			if task.name not in internal_tasks_by_source[task.name]:
+				internal_tasks_by_source[task.name].append(task.name)
 			source_task_by_internal[task.name] = source_name
 
 		method_lookup = {
@@ -725,22 +729,60 @@ class IPCPlanVerifier:
 				next_trace_index,
 			)
 
+		def candidate_internal_task_names(
+			source_task_name: str,
+			occurrence_index: int = 0,
+		) -> List[str]:
+			candidates = list(
+				internal_tasks_by_source.get(source_task_name, [source_task_name])
+			)
+			if not candidates:
+				return [source_task_name]
+			if len(candidates) == 1:
+				return candidates
+			if 0 <= occurrence_index < len(candidates):
+				preferred = candidates[occurrence_index]
+				return [preferred] + [name for name in candidates if name != preferred]
+			return candidates
+
 		root_nodes: List[_AbstractNode] = []
 		next_action_index = 0
 		next_trace_index = 0
 		if root_tasks_ordered:
+			source_occurrence_counts: Dict[str, int] = {}
 			for task in root_tasks:
 				source_task_name = getattr(task, "task_name")
 				task_args = tuple(getattr(task, "args"))
-				internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
-				root_node, next_action_index, next_trace_index = reconstruct_task(
-					internal_task_name,
-					task_args,
+				occurrence_index = source_occurrence_counts.get(source_task_name, 0)
+				source_occurrence_counts[source_task_name] = occurrence_index + 1
+				last_error: Optional[Exception] = None
+				matched = False
+				for internal_task_name in candidate_internal_task_names(
 					source_task_name,
-					next_action_index,
-					next_trace_index,
-				)
-				root_nodes.append(root_node)
+					occurrence_index,
+				):
+					try:
+						root_node, candidate_action_index, candidate_trace_index = reconstruct_task(
+							internal_task_name,
+							task_args,
+							source_task_name,
+							next_action_index,
+							next_trace_index,
+						)
+					except Exception as exc:
+						last_error = exc
+						continue
+					root_nodes.append(root_node)
+					next_action_index = candidate_action_index
+					next_trace_index = candidate_trace_index
+					matched = True
+					break
+				if not matched:
+					if last_error is not None:
+						raise last_error
+					raise ValueError(
+						f"failed to match ordered root task {source_task_name}{task_args}",
+					)
 			return root_nodes, next_action_index, next_trace_index
 
 		remaining_root_tasks = list(root_tasks)
@@ -751,16 +793,16 @@ class IPCPlanVerifier:
 			for task in remaining_root_tasks:
 				source_task_name = getattr(task, "task_name")
 				task_args = tuple(getattr(task, "args"))
-				internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
 				method = method_lookup.get(current_entry.method_name) if current_entry is not None else None
-				if (
-					method is not None
-					and self._method_trace_entry_matches_task(
+				candidate_names = candidate_internal_task_names(source_task_name)
+				if method is not None and any(
+					self._method_trace_entry_matches_task(
 						method=method,
 						entry=current_entry,
 						task_name=internal_task_name,
 						task_args=task_args,
 					)
+					for internal_task_name in candidate_names
 				):
 					prioritised_tasks.append(task)
 				else:
@@ -772,23 +814,25 @@ class IPCPlanVerifier:
 			for task in candidate_tasks:
 				source_task_name = getattr(task, "task_name")
 				task_args = tuple(getattr(task, "args"))
-				internal_task_name = internal_task_by_source.get(source_task_name, source_task_name)
-				try:
-					root_node, candidate_action_index, candidate_trace_index = reconstruct_task(
-						internal_task_name,
-						task_args,
-						source_task_name,
-						next_action_index,
-						next_trace_index,
-					)
-				except Exception as exc:
-					last_error = exc
-					continue
-				root_nodes.append(root_node)
-				next_action_index = candidate_action_index
-				next_trace_index = candidate_trace_index
-				matched_task = task
-				break
+				for internal_task_name in candidate_internal_task_names(source_task_name):
+					try:
+						root_node, candidate_action_index, candidate_trace_index = reconstruct_task(
+							internal_task_name,
+							task_args,
+							source_task_name,
+							next_action_index,
+							next_trace_index,
+						)
+					except Exception as exc:
+						last_error = exc
+						continue
+					root_nodes.append(root_node)
+					next_action_index = candidate_action_index
+					next_trace_index = candidate_trace_index
+					matched_task = task
+					break
+				if matched_task is not None:
+					break
 
 			if matched_task is None:
 				if last_error is not None:

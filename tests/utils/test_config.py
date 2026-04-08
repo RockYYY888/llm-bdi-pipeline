@@ -50,3 +50,20 @@ def test_stage3_model_defaults_to_shared_model(monkeypatch):
     config = Config()
 
     assert config.openai_stage3_model == "shared-model"
+
+
+def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("OPENAI_MODEL", "shell-model")
+    monkeypatch.delenv("OPENAI_STAGE3_MODEL", raising=False)
+
+    config = Config()
+    config._merge_env_lines(
+        [
+            "OPENAI_MODEL=file-model",
+            "OPENAI_STAGE3_MODEL=file-stage3-model",
+        ]
+    )
+
+    assert config.openai_model == "shell-model"
+    assert config.openai_stage3_model == "file-stage3-model"

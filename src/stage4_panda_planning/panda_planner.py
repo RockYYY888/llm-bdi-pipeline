@@ -100,6 +100,7 @@ class PANDAPlanner:
 			domain,
 			method_library,
 			domain_name,
+			export_source_names=False,
 		)
 		problem_hddl = self.problem_builder.build_problem_hddl(
 			domain=domain,
@@ -349,6 +350,8 @@ class PANDAPlanner:
 		domain: Any,
 		method_library: HTNMethodLibrary,
 		domain_name: str,
+		*,
+		export_source_names: bool = False,
 	) -> str:
 		task_type_map = self._infer_task_type_map(domain, method_library)
 		requirements = list(domain.requirements or [])
@@ -367,9 +370,15 @@ class PANDAPlanner:
 		lines.append("  )")
 		lines.append("")
 
+		rendered_task_names: set[tuple[str, tuple[str, ...]]] = set()
 		for task in method_library.compound_tasks:
+			exported_task_name = self._export_task_name(task, export_source_names)
 			task_signature = task_type_map.get(task.name) or task_type_map.get(task.source_name or "")
-			lines.append(f"  (:task {task.source_name or task.name}")
+			rendered_key = (exported_task_name, tuple(task_signature or ()))
+			if rendered_key in rendered_task_names:
+				continue
+			rendered_task_names.add(rendered_key)
+			lines.append(f"  (:task {exported_task_name}")
 			lines.append(
 				f"    :parameters ({self._render_typed_variables(task.parameters, domain.types, task_signature)})"
 			)
@@ -386,6 +395,7 @@ class PANDAPlanner:
 					task_type_map,
 					self._predicate_type_map(domain),
 					self._action_type_map(domain),
+					export_source_names=export_source_names,
 				)
 			)
 			lines.append("")
@@ -411,6 +421,8 @@ class PANDAPlanner:
 		task_type_map: Dict[str, Tuple[str, ...]],
 		predicate_types: Dict[str, Tuple[str, ...]],
 		action_types: Dict[str, Tuple[str, ...]],
+		*,
+		export_source_names: bool = False,
 	) -> List[str]:
 		method_parameters = self._method_parameter_order(method, task_lookup.get(method.task_name))
 		task_signature = task_type_map.get(method.task_name, ())
@@ -435,7 +447,7 @@ class PANDAPlanner:
 			f"    :parameters ({self._render_typed_variables(method_parameters, domain_types, method_parameter_types)})"
 		)
 		lines.append(
-			f"    :task ({getattr(task_schema, 'source_name', None) or method.task_name}"
+			f"    :task ({self._export_task_name(task_schema, export_source_names, fallback=method.task_name)}"
 			f"{self._render_invocation_tokens(task_args, variable_map)})"
 		)
 		lines.append(
@@ -445,6 +457,14 @@ class PANDAPlanner:
 		lines.append(f"    {subtasks_keyword} (and")
 		for step in method.subtasks:
 			step_name = self._render_method_step_name(step, task_lookup)
+			if step.kind == "compound":
+				step_name = self._render_method_step_name(
+					step,
+					task_lookup,
+					export_source_names=export_source_names,
+				)
+			else:
+				step_name = self._render_method_step_name(step, task_lookup)
 			lines.append(
 				f"      ({step.step_id} ({step_name}"
 				f"{self._render_invocation_tokens(step.args, variable_map)}))"
@@ -475,13 +495,27 @@ class PANDAPlanner:
 			return leading_parameters
 		return declared_parameters
 
-	def _render_method_step_name(self, step: Any, task_lookup: Dict[str, Any]) -> str:
+	def _render_method_step_name(
+		self,
+		step: Any,
+		task_lookup: Dict[str, Any],
+		*,
+		export_source_names: bool = False,
+	) -> str:
 		if getattr(step, "kind", None) == "primitive":
 			if getattr(step, "action_name", None):
 				return step.action_name
 			return step.task_name.replace("_", "-")
 		task_schema = task_lookup.get(step.task_name)
-		return getattr(task_schema, "source_name", None) or step.task_name
+		return self._export_task_name(task_schema, export_source_names, fallback=step.task_name)
+
+	@staticmethod
+	def _export_task_name(task_schema: Any, export_source_names: bool, *, fallback: str = "") -> str:
+		if task_schema is None:
+			return fallback
+		if export_source_names and getattr(task_schema, "source_name", None):
+			return getattr(task_schema, "source_name")
+		return getattr(task_schema, "name", None) or fallback
 
 	def _parse_plan_steps(self, plan_text: str, domain: Any) -> List[PANDAPlanStep]:
 		action_names = {action.name for action in domain.actions}

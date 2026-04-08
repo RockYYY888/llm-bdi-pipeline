@@ -216,6 +216,7 @@ class HTNTask:
     parameters: Tuple[str, ...]
     is_primitive: bool
     source_predicates: Tuple[str, ...] = ()
+    headline_literal: Optional[HTNLiteral] = None
     source_name: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -224,6 +225,7 @@ class HTNTask:
             "parameters": list(self.parameters),
             "is_primitive": self.is_primitive,
             "source_predicates": list(self.source_predicates),
+            "headline": self.headline_literal.to_dict() if self.headline_literal else None,
             "source_name": self.source_name,
         }
 
@@ -342,6 +344,7 @@ class HTNMethodLibrary:
                 parameters=tuple(item.get("parameters", [])),
                 is_primitive=bool(item.get("is_primitive", False)),
                 source_predicates=tuple(item.get("source_predicates", [])),
+                headline_literal=_load_literal(item.get("headline")),
                 source_name=item.get("source_name"),
             )
 
@@ -406,9 +409,19 @@ class HTNMethodLibrary:
             )
 
         def load_binding(item: Dict[str, Any]) -> HTNTargetTaskBinding:
+            raw_task_name = item.get("task_name")
+            parsed_task_invocation = (
+                _parse_invocation_signature(raw_task_name)
+                if isinstance(raw_task_name, str)
+                else None
+            )
             return HTNTargetTaskBinding(
                 target_literal=item["target_literal"],
-                task_name=item["task_name"],
+                task_name=(
+                    parsed_task_invocation["call"]
+                    if parsed_task_invocation is not None
+                    else item["task_name"]
+                ),
             )
 
         return HTNMethodLibrary(
@@ -458,6 +471,7 @@ class HTNMethodLibrary:
                     "parameter_score": task_parameter_score,
                     "task_parameters": list(raw_task_parameters),
                     "source_predicates": [],
+                    "headline": task_entry.get("headline"),
                     "source_name": task_entry.get("source_name"),
                     "noop": None,
                     "constructive": [],
@@ -471,6 +485,16 @@ class HTNMethodLibrary:
                     grouped_entry["source_predicates"].append(predicate_name)
             if grouped_entry.get("source_name") in (None, "") and task_entry.get("source_name") not in (None, ""):
                 grouped_entry["source_name"] = task_entry.get("source_name")
+            task_headline = task_entry.get("headline")
+            if task_headline is not None:
+                existing_headline = grouped_entry.get("headline")
+                if existing_headline is None:
+                    grouped_entry["headline"] = task_headline
+                elif existing_headline != task_headline:
+                    raise ValueError(
+                        f"Stage 3 task '{task_name}' contains conflicting headline literals "
+                        "across duplicate task entries."
+                    )
 
             noop_branch = task_entry.get("noop")
             if noop_branch is not None:
@@ -489,20 +513,40 @@ class HTNMethodLibrary:
             else:
                 grouped_entry["constructive"].extend(list(constructive_payload or []))
 
+            task_level_constructive = HTNMethodLibrary._extract_task_level_constructive_branch(
+                task_entry,
+            )
+            if task_level_constructive is not None:
+                grouped_entry["constructive"].append(task_level_constructive)
+
         for task_name, grouped_entry in grouped_task_entries.items():
             task_parameters = [
                 _canonical_parameter_symbol(value)
                 for value in grouped_entry.get("task_parameters", [])
             ]
+            task_symbol_aliases = _parameter_aliases(task_parameters)
             compound_tasks.append(
                 {
                     "name": task_name,
                     "parameters": task_parameters,
                     "is_primitive": False,
                     "source_predicates": list(grouped_entry.get("source_predicates", [])),
+                    "headline": HTNMethodLibrary._normalise_ast_literal(
+                        grouped_entry.get("headline"),
+                        task_symbol_aliases,
+                    ),
                     "source_name": grouped_entry.get("source_name"),
                 },
             )
+            compiled_task = compound_tasks[-1]
+            if (
+                not compiled_task["source_predicates"]
+                and isinstance(compiled_task.get("headline"), dict)
+                and str(compiled_task["headline"].get("predicate", "")).strip()
+            ):
+                compiled_task["source_predicates"] = [
+                    str(compiled_task["headline"]["predicate"]).strip()
+                ]
 
             noop_branch = grouped_entry.get("noop")
             if noop_branch is not None:
@@ -537,6 +581,39 @@ class HTNMethodLibrary:
         }
 
     @staticmethod
+    def _extract_task_level_constructive_branch(
+        task_entry: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        branch_keys = (
+            "label",
+            "parameters",
+            "task_args",
+            "precondition",
+            "context",
+            "ordered_subtasks",
+            "ordering",
+            "orderings",
+            "ordering_edges",
+            "subtasks",
+            "steps",
+            "support_before",
+            "producer",
+            "produce",
+            "followup",
+            "followups",
+        )
+        if task_entry.get("constructive") not in (None, [], {}):
+            return None
+        if not any(key in task_entry for key in branch_keys):
+            return None
+
+        branch_payload: Dict[str, Any] = {}
+        for key in branch_keys:
+            if key in task_entry:
+                branch_payload[key] = task_entry[key]
+        return branch_payload
+
+    @staticmethod
     def _compile_ast_branch(
         *,
         task_name: str,
@@ -555,6 +632,13 @@ class HTNMethodLibrary:
         ]
         symbol_aliases = _parameter_aliases(task_parameters)
         symbol_aliases.update(_parameter_aliases(raw_branch_parameters))
+        default_task_args = [
+            _normalise_symbol_with_aliases(value, symbol_aliases)
+            for value in (
+                branch_payload.get("task_args")
+                or task_parameters
+            )
+        ]
 
         label = str(branch_payload.get("label", "")).strip()
         if branch_key == "noop":
@@ -568,6 +652,7 @@ class HTNMethodLibrary:
 
         raw_ordered_subtasks = branch_payload.get("ordered_subtasks")
         raw_ordering = branch_payload.get("ordering")
+        used_compact_linear_slots = False
         if raw_ordering in (None, []):
             for alias in ("orderings", "ordering_edges"):
                 alias_value = branch_payload.get(alias)
@@ -583,66 +668,55 @@ class HTNMethodLibrary:
             raw_steps_payload = branch_payload.get("subtasks")
         if raw_steps_payload in (None, []):
             raw_steps_payload = raw_ordered_subtasks
+        if raw_steps_payload in (None, []):
+            raw_support_before = branch_payload.get("support_before")
+            if isinstance(raw_support_before, (str, dict)):
+                support_before_payload = [raw_support_before]
+            else:
+                support_before_payload = list(raw_support_before or [])
+
+            raw_producer = branch_payload.get("producer")
+            if raw_producer in (None, ""):
+                raw_producer = branch_payload.get("produce")
+
+            raw_followup = branch_payload.get("followup")
+            if raw_followup in (None, []):
+                raw_followup = branch_payload.get("followups")
+            if isinstance(raw_followup, (str, dict)):
+                followup_payload = [raw_followup]
+            else:
+                followup_payload = list(raw_followup or [])
+
+            if support_before_payload or raw_producer not in (None, "") or followup_payload:
+                used_compact_linear_slots = True
+                if isinstance(raw_producer, str):
+                    parsed_producer = _parse_invocation_signature(raw_producer)
+                    if parsed_producer is not None and not parsed_producer.get("args"):
+                        raw_producer = {
+                            "call": parsed_producer["call"],
+                            "args": list(default_task_args),
+                        }
+                raw_steps_payload = [
+                    *support_before_payload,
+                    *([raw_producer] if raw_producer not in (None, "") else []),
+                    *followup_payload,
+                ]
 
         for step_payload in raw_steps_payload or []:
-            if isinstance(step_payload, str):
-                parsed_step_payload = _parse_invocation_signature(step_payload)
-                if parsed_step_payload is None:
-                    raise ValueError(f"Stage 3 step for task '{task_name}' cannot be empty.")
-                step_payload = parsed_step_payload
-            if not isinstance(step_payload, dict):
-                raise ValueError(
-                    f"Stage 3 steps for task '{task_name}' must be objects or invocation strings."
-                )
-            step_kind = str(step_payload.get("kind", "")).strip() or "compound"
-            call_name = (
-                step_payload.get("call")
-                or step_payload.get("task_name")
-                or step_payload.get("task")
-                or step_payload.get("action_name")
-                or step_payload.get("action")
-            )
-            if not call_name:
-                raise ValueError(f"Stage 3 step for task '{task_name}' is missing call/task_name.")
-            action_name = None
-            if step_kind == "primitive":
-                action_name = (
-                    step_payload.get("action_name")
-                    or step_payload.get("action")
-                    or call_name
-                )
             compiled_steps.append(
-                {
-                    "step_id": (
-                        step_payload.get("id")
-                        or step_payload.get("step_id")
-                        or f"s{len(compiled_steps) + 1}"
-                    ),
-                    "task_name": call_name,
-                    "args": [
-                        _normalise_symbol_with_aliases(value, symbol_aliases)
-                        for value in step_payload.get("args", [])
-                    ],
-                    "kind": step_kind,
-                    "action_name": action_name,
-                    "literal": HTNMethodLibrary._normalise_ast_literal(
-                        step_payload.get("literal"),
-                        symbol_aliases,
-                    ),
-                    "preconditions": [
-                        HTNMethodLibrary._normalise_ast_literal(value, symbol_aliases)
-                        for value in step_payload.get("preconditions", [])
-                    ],
-                    "effects": [
-                        HTNMethodLibrary._normalise_ast_literal(value, symbol_aliases)
-                        for value in step_payload.get("effects", [])
-                    ],
-                },
+                HTNMethodLibrary._compile_ast_step(
+                    step_payload,
+                    task_name=task_name,
+                    symbol_aliases=symbol_aliases,
+                    step_index=len(compiled_steps) + 1,
+                ),
             )
 
         if raw_ordering in (None, []):
             raw_ordering = []
-        if not raw_ordering and raw_ordered_subtasks not in (None, []):
+        if not raw_ordering and (
+            raw_ordered_subtasks not in (None, []) or used_compact_linear_slots
+        ):
             ordered_step_ids = [
                 str(step.get("step_id") or "").strip()
                 for step in compiled_steps
@@ -671,6 +745,88 @@ class HTNMethodLibrary:
             ],
             "subtasks": compiled_steps,
             "ordering": list(raw_ordering or []),
+        }
+
+    @staticmethod
+    def _compile_ast_step(
+        step_payload: Any,
+        *,
+        task_name: str,
+        symbol_aliases: Dict[str, str],
+        step_index: int,
+    ) -> Dict[str, Any]:
+        if isinstance(step_payload, str):
+            parsed_step_payload = _parse_invocation_signature(step_payload)
+            if parsed_step_payload is None:
+                raise ValueError(f"Stage 3 step for task '{task_name}' cannot be empty.")
+            step_payload = parsed_step_payload
+        if not isinstance(step_payload, dict):
+            raise ValueError(
+                f"Stage 3 steps for task '{task_name}' must be objects or invocation strings."
+            )
+
+        raw_call = (
+            step_payload.get("call")
+            or step_payload.get("task_name")
+            or step_payload.get("task")
+            or step_payload.get("action_name")
+            or step_payload.get("action")
+            or step_payload.get("producer")
+        )
+        parsed_invocation = (
+            _parse_invocation_signature(raw_call)
+            if isinstance(raw_call, str)
+            else None
+        )
+        call_name = (
+            parsed_invocation["call"]
+            if parsed_invocation is not None
+            else raw_call
+        )
+        if not call_name:
+            raise ValueError(f"Stage 3 step for task '{task_name}' is missing call/task_name.")
+
+        raw_args = step_payload.get("args")
+        if raw_args in (None, []):
+            if parsed_invocation is not None and parsed_invocation.get("args"):
+                raw_args = parsed_invocation["args"]
+            else:
+                raw_args = step_payload.get("parameters", [])
+
+        step_kind = str(step_payload.get("kind", "")).strip() or "compound"
+        action_name = None
+        if step_kind == "primitive":
+            action_name = (
+                step_payload.get("action_name")
+                or step_payload.get("action")
+                or call_name
+            )
+
+        return {
+            "step_id": (
+                step_payload.get("id")
+                or step_payload.get("step_id")
+                or f"s{step_index}"
+            ),
+            "task_name": str(call_name).strip(),
+            "args": [
+                _normalise_symbol_with_aliases(value, symbol_aliases)
+                for value in (raw_args or [])
+            ],
+            "kind": step_kind,
+            "action_name": action_name,
+            "literal": HTNMethodLibrary._normalise_ast_literal(
+                step_payload.get("literal"),
+                symbol_aliases,
+            ),
+            "preconditions": [
+                HTNMethodLibrary._normalise_ast_literal(value, symbol_aliases)
+                for value in step_payload.get("preconditions", [])
+            ],
+            "effects": [
+                HTNMethodLibrary._normalise_ast_literal(value, symbol_aliases)
+                for value in step_payload.get("effects", [])
+            ],
         }
 
     @staticmethod

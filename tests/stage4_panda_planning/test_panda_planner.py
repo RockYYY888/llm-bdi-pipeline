@@ -380,6 +380,7 @@ def test_panda_domain_export_preserves_declared_typed_task_and_method_signatures
 			target_task_bindings=[],
 		),
 		domain_name="satellite_transition_1",
+		export_source_names=True,
 	)
 
 	assert "(:task do_observation" in domain_hddl

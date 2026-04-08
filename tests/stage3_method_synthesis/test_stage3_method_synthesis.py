@@ -25,6 +25,12 @@ from stage1_interpretation.ltlf_formula import (
 )
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer, HTNSynthesisError
 from stage3_method_synthesis.htn_prompts import (
+	_candidate_support_task_names,
+	_declared_task_schema_map,
+	_candidate_headline_predicates_for_task,
+	_required_helper_specs_for_query_targets,
+	_same_arity_caller_shared_requirements,
+	_same_arity_packaging_candidates_for_query_task,
 	build_prompt_analysis_payload,
 	build_htn_system_prompt,
 	build_htn_user_prompt,
@@ -37,6 +43,11 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethodStep,
 	HTNTask,
 	HTNTargetTaskBinding,
+)
+from stage3_method_synthesis.transition_native import (
+	build_transition_native_prompt_analysis,
+	build_transition_native_system_prompt,
+	build_transition_native_user_prompt,
 )
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
@@ -164,7 +175,7 @@ def test_extract_target_literals_discards_non_progressing_transitions():
 	]
 
 
-def test_extract_progressing_transitions_can_follow_explicit_literal_order():
+def test_extract_progressing_transitions_preserves_raw_dfa_edge_order():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
 	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
@@ -203,13 +214,13 @@ def test_extract_progressing_transitions_can_follow_explicit_literal_order():
 		)
 		for spec in transition_specs
 	] == [
-		("dfa_step_q1_q2_on_b4_b2", "q1", "q2", "on(b4, b2)"),
-		("dfa_step_q2_q3_on_b1_b4", "q2", "q3", "on(b1, b4)"),
-		("dfa_step_q3_q4_on_b3_b1", "q3", "q4", "on(b3, b1)"),
+		("dfa_step_q1_q2_on_b1_b4", "q1", "q2", "on(b1, b4)"),
+		("dfa_step_q2_q3_on_b3_b1", "q2", "q3", "on(b3, b1)"),
+		("dfa_step_q3_q4_on_b4_b2", "q3", "q4", "on(b4, b2)"),
 	]
 
 
-def test_extract_progressing_transitions_preserves_duplicate_literal_occurrences_in_query_order():
+def test_extract_progressing_transitions_preserves_raw_duplicate_edges_only_once_per_edge():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
 	grounding_map.add_atom("on_b10_b6", "on", ["b10", "b6"])
@@ -247,12 +258,11 @@ def test_extract_progressing_transitions_preserves_duplicate_literal_occurrences
 		for spec in transition_specs
 	] == [
 		("dfa_step_q1_q2_on_b10_b6", "q1", "q2", "on(b10, b6)"),
-		("dfa_step_q2_q3_on_b5_b10", "q2", "q3", "on(b5, b10)"),
-		("dfa_step_q3_q4_on_b10_b6", "q3", "q4", "on(b10, b6)"),
+		("dfa_step_q1_q2_on_b5_b10", "q1", "q2", "on(b5, b10)"),
 	]
 
 
-def test_extract_progressing_transitions_can_drop_auxiliary_dfa_labels_when_query_order_is_known():
+def test_extract_progressing_transitions_rejects_negative_raw_transition_labels():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
 	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
@@ -273,34 +283,40 @@ def test_extract_progressing_transitions_can_drop_auxiliary_dfa_labels_when_quer
 		),
 	}
 
-	transition_specs = synthesizer.extract_progressing_transitions(
-		grounding_map,
-		dfa_result,
-		ordered_literal_signatures=[
-			"on(b4, b2)",
-			"on(b1, b4)",
-			"on(b3, b1)",
-		],
-	)
-
-	assert [spec["label"] for spec in transition_specs] == [
-		"on(b4, b2)",
-		"on(b1, b4)",
-		"on(b3, b1)",
-	]
+	with pytest.raises(ValueError, match="raw non-atomic transition label unsupported"):
+		synthesizer.extract_progressing_transitions(
+			grounding_map,
+			dfa_result,
+			ordered_literal_signatures=[
+				"on(b4, b2)",
+				"on(b1, b4)",
+				"on(b3, b1)",
+			],
+		)
 
 
-def test_extract_progressing_transitions_can_linearise_ordered_literals_without_parsing_dfa():
+def test_extract_progressing_transitions_uses_raw_dfa_graph_even_when_ordered_literals_are_known():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
 
-	def fail_parse(_dfa_dot):
-		raise AssertionError("DFA graph parsing should be skipped when ordered literals are explicit")
-
-	synthesizer._parse_dfa_graph = fail_parse  # type: ignore[method-assign]
+	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
+	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
+	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
 	transition_specs = synthesizer.extract_progressing_transitions(
 		grounding_map,
-		{"dfa_dot": "digraph HUGE_DFA { ... }"},
+		{
+			"dfa_dot": (
+				"digraph MONA_DFA {\n"
+				"  node [shape = doublecircle]; 3;\n"
+				"  node [shape = circle]; 1 s1 s2;\n"
+				"  init [shape = plaintext, label = \"\"];\n"
+				"  init -> 1;\n"
+				"  1 -> s1 [label=\"on_b1_b4\"];\n"
+				"  s1 -> s2 [label=\"on_b3_b1\"];\n"
+				"  s2 -> 3 [label=\"on_b4_b2\"];\n"
+				"}\n"
+			),
+		},
 		ordered_literal_signatures=[
 			"on(b4, b2)",
 			"on(b1, b4)",
@@ -317,26 +333,32 @@ def test_extract_progressing_transitions_can_linearise_ordered_literals_without_
 		)
 		for spec in transition_specs
 	] == [
-		("dfa_step_q1_q2_on_b4_b2", "q1", "q2", "on(b4, b2)"),
-		("dfa_step_q2_q3_on_b1_b4", "q2", "q3", "on(b1, b4)"),
-		("dfa_step_q3_q4_on_b3_b1", "q3", "q4", "on(b3, b1)"),
+		("dfa_step_q1_q2_on_b1_b4", "q1", "q2", "on(b1, b4)"),
+		("dfa_step_q2_q3_on_b3_b1", "q2", "q3", "on(b3, b1)"),
+		("dfa_step_q3_q4_on_b4_b2", "q3", "q4", "on(b4, b2)"),
 	]
 
 
-def test_extract_progressing_transitions_builds_compact_unordered_specs_without_dfa_parse():
+def test_extract_progressing_transitions_uses_raw_dfa_graph_for_unordered_queries():
 	synthesizer = HTNMethodSynthesizer()
 	grounding_map = GroundingMap()
 	grounding_map.add_atom("goal_a", "goal", ["a"])
 	grounding_map.add_atom("goal_b", "goal", ["b"])
 
-	def fail_parse(_dfa_dot):
-		raise AssertionError("unordered literal compaction should avoid DFA graph parsing")
-
-	synthesizer._parse_dfa_graph = fail_parse  # type: ignore[method-assign]
-
 	transition_specs = synthesizer.extract_progressing_transitions(
 		grounding_map,
-		{"dfa_dot": "digraph HUGE_DFA { ... }"},
+		{
+			"dfa_dot": (
+				"digraph MONA_DFA {\n"
+				"  node [shape = doublecircle]; 2;\n"
+				"  node [shape = circle]; 1;\n"
+				"  init [shape = plaintext, label = \"\"];\n"
+				"  init -> 1;\n"
+				"  1 -> 2 [label=\"goal_a\"];\n"
+				"  1 -> 2 [label=\"goal_b\"];\n"
+				"}\n"
+			),
+		},
 		ordered_literal_signatures=[
 			"goal(a)",
 			"goal(b)",
@@ -353,8 +375,8 @@ def test_extract_progressing_transitions_builds_compact_unordered_specs_without_
 		)
 		for spec in transition_specs
 	] == [
-		("dfa_step_q1_q1_t1_goal_a", "q1", "q1", "goal(a)"),
-		("dfa_step_q1_q1_t2_goal_b", "q1", "q1", "goal(b)"),
+		("dfa_step_q1_q2_goal_a", "q1", "q2", "goal(a)"),
+		("dfa_step_q1_q2_goal_b", "q1", "q2", "goal(b)"),
 	]
 
 
@@ -494,6 +516,321 @@ def test_method_synthesizer_requires_target_task_binding_for_each_target_literal
 
 	with pytest.raises(ValueError, match="missing a target_task_binding"):
 		synthesizer._validate_library(library, domain)
+
+
+def test_validate_library_no_longer_requires_obsolete_helper_contract_tasks():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	prompt_analysis = build_prompt_analysis_payload(
+		domain,
+		target_literals=["on(a, b)"],
+		query_task_anchors=(
+			{"task_name": "do_put_on", "args": ["a", "b"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("ARG1", "ARG2"), False, ("on",)),
+			HTNTask("do_move", ("ARG1", "ARG2"), False, ("on",)),
+			HTNTask("do_clear", ("ARG1",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_noop",
+				task_name="do_put_on",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("on", ("ARG1", "ARG2"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_move_constructive",
+				task_name="do_move",
+				parameters=("ARG1", "ARG2"),
+				context=(
+					HTNLiteral("holding", ("ARG1",), True, None),
+					HTNLiteral("clear", ("ARG2",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("ARG1", "ARG2"),
+						kind="primitive",
+						action_name="stack",
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_noop",
+				task_name="do_clear",
+				parameters=("ARG1",),
+				context=(HTNLiteral("clear", ("ARG1",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="on(a, b)", task_name="do_put_on"),
+		],
+	)
+
+	synthesizer._validate_library(
+		library,
+		domain,
+		prompt_analysis=prompt_analysis,
+	)
+
+
+def test_validate_library_accepts_direct_parent_support_when_no_required_helper_exists():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	prompt_analysis = build_prompt_analysis_payload(
+		domain,
+		target_literals=["on(a, b)"],
+		query_task_anchors=(
+			{"task_name": "do_put_on", "args": ["a", "b"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("ARG1", "ARG2"), False, ("on",)),
+			HTNTask("do_move", ("ARG1", "ARG2"), False, ("on",)),
+			HTNTask("do_clear", ("ARG1",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_noop",
+				task_name="do_put_on",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("on", ("ARG1", "ARG2"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_put_on_direct",
+				task_name="do_put_on",
+				parameters=("ARG1", "ARG2"),
+				context=(
+					HTNLiteral("ontable", ("ARG1",), True, None),
+					HTNLiteral("handempty", tuple(), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_clear",
+						args=("ARG1",),
+						kind="compound",
+						action_name=None,
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="do_clear",
+						args=("ARG2",),
+						kind="compound",
+						action_name=None,
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="pick_up",
+						args=("ARG1",),
+						kind="primitive",
+						action_name="pick-up",
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+					HTNMethodStep(
+						step_id="s4",
+						task_name="do_move",
+						args=("ARG1", "ARG2"),
+						kind="compound",
+						action_name=None,
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3"), ("s3", "s4")),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_move_constructive",
+				task_name="do_move",
+				parameters=("ARG1", "ARG2"),
+				context=(
+					HTNLiteral("holding", ("ARG1",), True, None),
+					HTNLiteral("clear", ("ARG2",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("ARG1", "ARG2"),
+						kind="primitive",
+						action_name="stack",
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_noop",
+				task_name="do_clear",
+				parameters=("ARG1",),
+				context=(HTNLiteral("clear", ("ARG1",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="on(a, b)", task_name="do_put_on"),
+		],
+	)
+
+	synthesizer._validate_library(
+		library,
+		domain,
+		prompt_analysis=prompt_analysis,
+	)
+
+
+def test_validate_library_accepts_required_helper_with_parent_local_parameter_names():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	prompt_analysis = build_prompt_analysis_payload(
+		domain,
+		target_literals=["on(a, b)"],
+		query_task_anchors=(
+			{"task_name": "do_put_on", "args": ["a", "b"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_put_on", ("X", "Y"), False, ("on",)),
+			HTNTask("do_move", ("X", "Y"), False, ("on",)),
+			HTNTask("do_clear", ("X",), False, ("clear",)),
+			HTNTask("do_holding", ("X",), False, ("holding",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_noop",
+				task_name="do_put_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("on", ("X", "Y"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_put_on_constructive",
+				task_name="do_put_on",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("clear", ("Y",), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_holding",
+						args=("X",),
+						kind="compound",
+						action_name=None,
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="do_move",
+						args=("X", "Y"),
+						kind="compound",
+						action_name=None,
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_move_constructive",
+				task_name="do_move",
+				parameters=("X", "Y"),
+				context=(
+					HTNLiteral("holding", ("X",), True, None),
+					HTNLiteral("clear", ("Y",), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="stack",
+						args=("X", "Y"),
+						kind="primitive",
+						action_name="stack",
+						literal=None,
+						preconditions=(),
+						effects=(),
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_noop",
+				task_name="do_clear",
+				parameters=("X",),
+				context=(HTNLiteral("clear", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_holding_noop",
+				task_name="do_holding",
+				parameters=("X",),
+				context=(HTNLiteral("holding", ("X",), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[HTNLiteral("on", ("a", "b"), True, None)],
+		target_task_bindings=[
+			HTNTargetTaskBinding(target_literal="on(a, b)", task_name="do_put_on"),
+		],
+	)
+
+	synthesizer._validate_library(
+		library,
+		domain,
+		prompt_analysis=prompt_analysis,
+	)
 
 
 def test_normalise_library_repairs_subtask_kind_by_declared_task_sets():
@@ -652,14 +989,18 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "never invent type predicates such as block(X) or rover(R)" in system_prompt
 	assert "Do not infer new packaging candidates or caller-shared envelopes." in system_prompt
 	assert "top-level keys target_task_bindings and tasks" in system_prompt
-	assert "Each tasks entry defines one compound task once, with fields name, parameters, source_predicates, noop, constructive." in system_prompt
+	assert "Each tasks entry defines one compound task once, with fields name, parameters, noop, constructive." in system_prompt
+	assert "source_predicates is optional compiler metadata and may be omitted." in system_prompt
 	assert "Every compound child you call must also appear as another task entry in tasks." in system_prompt
 	assert "materialize it as its own task entry with branches in the same JSON." in system_prompt
 	assert "Never invent aggregate/root wrapper tasks that merely sequence the ordered query tasks" in system_prompt
 	assert "the constructive branch must call that packaging child" in system_prompt
+	assert "the parent boundary is exactly the listed caller-shared set" in system_prompt
 	assert "do not hide unmet dynamic prerequisites in branch context" in system_prompt
 	assert "use those listed options or declared support tasks instead of inventing a fresh helper" in system_prompt
 	assert "any dynamic prerequisite linking AUX1 to a task argument or shared resource is mandatory" in system_prompt
+	assert "If that need binds AUX_* to ARG*" in system_prompt
+	assert "Support tasks should return in a reusable stable state." in system_prompt
 
 	assert derived_analysis["query_task_contracts"]
 	assert derived_analysis["support_task_contracts"]
@@ -682,15 +1023,22 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "<query_task_contract name=\"get_soil_data\">" in user_prompt
 	assert "<support_task_contract name=\"send_soil_data\">" in user_prompt
 	assert "AUX_STORE1" in user_prompt
-	assert "send_soil_data(?rover, ?waypoint): caller-shared dynamic prerequisites at_soil_sample(?waypoint)." in user_prompt
-	assert "if a constructive sibling uses sample_soil(?rover, AUX_STORE1, ?waypoint)" in user_prompt
+	assert (
+		'send_soil_data(?rover, ?waypoint): exact producer slots '
+		'[{"producer":"sample_soil(ARG1, AUX_STORE1, ARG2)"}].'
+	) in user_prompt
+	assert "valid internal-support sibling for the false-at(ARG1, ARG2) case" in user_prompt
+	assert (
+		"send_soil_data(?rover, ?waypoint) targets have_soil_analysis(?rover, ?waypoint); "
+		"templates: sample_soil(?rover, AUX_STORE1, ?waypoint)"
+	) in user_prompt
 	assert "Use ARG1..ARGn for task-signature roles and AUX_* for extra roles." in user_prompt
 	assert "Do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top" in user_prompt
 	assert "Type names are not predicates." in user_prompt
 	assert "Do not copy grounded constants from the original sentence into task definitions." in user_prompt
-	assert "ACTION [needs p, q, r]" in user_prompt
-	assert "Do not copy unmet dynamic prerequisites into constructive context" in user_prompt
-	assert "use those listed options or a listed declared support task instead of inventing a new helper" in user_prompt
+	assert "ACTION [needs ...] or [extra needs ...]" in user_prompt
+	assert "use earlier subtasks instead of leaving unmet dynamic prerequisites in constructive context" in user_prompt
+	assert "If a contract line already gives precondition/context, producer, and followup but no support_before, do not invent extra support_before steps" in user_prompt
 	assert "inferred_task_headline_candidates:" not in user_prompt
 	assert "likely headline predicates" not in user_prompt
 
@@ -713,34 +1061,228 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "<query_task_contract name=\"do_put_on\">" in user_prompt
 	assert "<support_task_contract name=\"do_clear\">" in user_prompt
 	assert "<support_task_contract name=\"do_move\">" in user_prompt
-	assert "before any helper or child call intended to establish holding(ARG1), first support its shared prerequisites clear(ARG1), handempty" in user_prompt
+	assert "Support caller-shared prerequisites clear(?x), clear(?y), handempty before the child call" in user_prompt
 	assert "do_put_on(?x, ?y): support holding(?x) before stack(?x, ?y)." not in user_prompt
 	assert "do_put_on(?x, ?y): exact same-arity packaging contract for on(?x, ?y) is do_move(?x, ?y)." in user_prompt
-	assert "Support caller-shared prerequisites holding(?x) before the child call" in user_prompt
-	assert "do_put_on(ARG1, ARG2): stack(ARG1, ARG2) requires clear(ARG2)." not in user_prompt
+	assert "do_put_on(?x, ?y): required noop branch precondition/context on(ARG1, ARG2). Include noop explicitly in the task entry; tasks missing noop are invalid." in user_prompt
+	assert "do_put_on(?x, ?y): once you choose do_move(?x, ?y) as same-arity packaging for on(?x, ?y), use a parent skeleton" in user_prompt
+	assert "required helper task do_holding(ARG1)" not in user_prompt
+	assert "producer do_holding(ARG1); followup do_move(ARG1, ARG2)." not in user_prompt
+	assert "Do not place pick_up(ARG1) or unstack(ARG1, AUX_BLOCK1) directly in the parent branch." not in user_prompt
+	assert "in any compact support_before/producer/followup branch where holding(ARG1) is not already in branch precondition/context, the producer slot itself must establish it" not in user_prompt
+	assert "valid constructive sibling for pick_up(ARG1): precondition/context clear(ARG1), ontable(ARG1), handempty, clear(ARG2); producer pick_up(ARG1); followup stack(ARG1, ARG2)." in user_prompt
+	assert "valid support-then-produce sibling for the false-clear(ARG1) case with pick_up(ARG1): precondition/context ontable(ARG1), handempty, clear(ARG2); support_before do_clear(ARG1); producer pick_up(ARG1); followup stack(ARG1, ARG2)." in user_prompt
+	assert "valid support-then-produce sibling for the false-clear(ARG1) case with unstack(ARG1, AUX_BLOCK1)" not in user_prompt
+	assert "non-leading support/base role" not in user_prompt
 	assert "do_move(?x, ?y): exact same-arity packaging child for on(?x, ?y) when called by do_put_on(?x, ?y)." in user_prompt
-	assert "Parent-side caller-shared prerequisites: holding(?x)." in user_prompt
-	assert "do_move(ARG1, ARG2): stack(ARG1, ARG2) requires holding(ARG1)." in user_prompt
-	assert "do_move(ARG1, ARG2): stack(ARG1, ARG2) requires clear(ARG2). Support options: do_clear(ARG2);" in user_prompt
-	assert "do_move(ARG1, ARG2): stack(ARG1, ARG2) requires clear(ARG2)." in user_prompt
-	assert "do_move(ARG1, ARG2): because clear(ARG2) is not caller-shared here, constructive branches must establish clear(ARG2) via do_clear(ARG2) before stack(ARG1, ARG2) instead of leaving it in branch context." in user_prompt
-	assert "Do not collapse both cases into one precondition-only branch." in user_prompt
-	assert "if clear(ARG1) may either already hold or require support before pick_up(ARG1), use separate constructive siblings" in user_prompt
-	assert "do_clear(?x) targets clear(?x);" in user_prompt
-	assert "unstack(?x, AUX_BLOCK1) introduces extra roles AUX_BLOCK1 - BLOCK. Keep those extra roles schematic. If you choose this mode, support on(?x, AUX_BLOCK1), clear(?x), handempty before that step." in user_prompt
-	assert "stack(?x, AUX_BLOCK1) [extra needs clear(AUX_BLOCK1)]" in user_prompt
-	assert "clear(AUX_BLOCK1) via do_clear(AUX_BLOCK1) before stack(?x, AUX_BLOCK1), not in branch context" in user_prompt
-	assert "if that extra-role requirement may already hold or require recursive support, keep those as separate constructive siblings rather than one precondition-only branch" in user_prompt
-	assert "if a constructive sibling uses unstack(AUX_BLOCK1, ?x) to make clear(?x)" in user_prompt
+	assert "Parent-side caller-shared prerequisites: clear(?x), clear(?y), handempty." in user_prompt
+	assert 'do_move(?x, ?y): exact producer slots' not in user_prompt
+	assert "do_move(?x, ?y): with parent-side caller-shared prerequisites holding(?x), keep the remaining shared final-producer prerequisites clear(?y) explicit in the constructive branch precondition/context at child entry unless earlier child subtasks establish them." not in user_prompt
+	assert "Inside this task, support holding(?x) before the final producer" in user_prompt
+	assert "do_move(ARG1, ARG2): stack(ARG1, ARG2) requires clear(ARG2)." not in user_prompt
+	assert "do_move(ARG1, ARG2): valid internal-support sibling for the false-clear(ARG2)" not in user_prompt
+	assert "valid support-then-produce sibling for the false-clear(ARG1) case with pick_up(ARG1): precondition/context ontable(ARG1), handempty, clear(ARG2); support_before do_clear(ARG1); producer pick_up(ARG1); followup stack(ARG1, ARG2)." in user_prompt
+	assert 'AST slot shape for that constructive sibling: {"precondition":["clear(ARG1)", "ontable(ARG1)", "handempty", "clear(ARG2)"],"producer":"pick_up(ARG1)","followup":"stack(ARG1, ARG2)"}.' in user_prompt
+	assert 'AST slot shape for that support-then-produce sibling: {"precondition":["ontable(ARG1)", "handempty", "clear(ARG2)"],"support_before":["do_clear(ARG1)"],"producer":"pick_up(ARG1)","followup":"stack(ARG1, ARG2)"}.' in user_prompt
+	assert "split already-supported and support-then-produce siblings." in user_prompt
+	assert "do_clear(?x) targets clear(?x);" not in user_prompt
+	assert "do_clear(?x): required stable/noop branch precondition/context clear(ARG1)." in user_prompt
+	assert "put_down(?x) [needs holding(?x)]" not in user_prompt
+	assert "stack(?x, AUX_BLOCK1) [needs holding(?x); extra needs clear(AUX_BLOCK1)]" not in user_prompt
+	assert "do_clear(?x): valid constructive sibling for put_down(ARG1): precondition/context holding(ARG1); producer put_down(ARG1)." in user_prompt
+	assert "do_clear(?x): valid constructive sibling for stack(ARG1, AUX_BLOCK1): precondition/context holding(ARG1); clear(AUX_BLOCK1); producer stack(ARG1, AUX_BLOCK1)." in user_prompt
+	assert "valid constructive sibling for put_down(ARG1): precondition/context holding(ARG1); producer put_down(ARG1)." in user_prompt
+	assert 'AST slot shape for that recursive sibling: {"precondition":["holding(?x)"],"support_before":["do_clear(AUX_BLOCK1)"],"producer":"stack(?x, AUX_BLOCK1)"}.' not in user_prompt
+	assert 'AST slot shape for that recursive sibling: {"precondition":["on(AUX_BLOCK1, ?x)", "handempty"],"support_before":["do_clear(AUX_BLOCK1)"],"producer":"unstack(AUX_BLOCK1, ?x)","followup":"put_down(AUX_BLOCK1)"}.' in user_prompt
+	assert 'AST slot shape for the already-supported recursive sibling: {"precondition":["on(AUX_BLOCK1, ?x)", "handempty", "clear(AUX_BLOCK1)"],"producer":"unstack(AUX_BLOCK1, ?x)","followup":"put_down(AUX_BLOCK1)"}.' in user_prompt
+	assert "support on(AUX_BLOCK1, ?x) via do_put_on(AUX_BLOCK1, ?x) before unstack(AUX_BLOCK1, ?x)" not in user_prompt
+	assert "valid constructive sibling for unstack(AUX_BLOCK1, ARG1): precondition/context on(AUX_BLOCK1, ARG1); clear(AUX_BLOCK1); handempty; producer unstack(AUX_BLOCK1, ARG1)." not in user_prompt
+	assert "if a constructive sibling adds do_clear(AUX_BLOCK1) before unstack(AUX_BLOCK1, ?x), keep that mode's other unmet needs on(AUX_BLOCK1, ?x), handempty in the same sibling precondition/context" not in user_prompt
+	assert 'AST slot shape for that recursive sibling: {"precondition":["on(AUX_BLOCK1, ?x)", "handempty"],"support_before":["do_clear(AUX_BLOCK1)"],"producer":"unstack(AUX_BLOCK1, ?x)","followup":"put_down(AUX_BLOCK1)"}.' in user_prompt
+	assert "if support_before do_clear(AUX_BLOCK1) handles false-clear(AUX_BLOCK1) before unstack(AUX_BLOCK1, ?x), do not also keep clear(AUX_BLOCK1) in that same sibling precondition/context; split already-supported and recursive-support siblings." in user_prompt
+	assert "Binding literals among those needs still constrain the AUX role and cannot be dropped." not in user_prompt
+	assert "valid recursive slot sibling for unstack(AUX_BLOCK1, ?x): precondition/context on(AUX_BLOCK1, ?x); handempty; support_before do_clear(AUX_BLOCK1); producer unstack(AUX_BLOCK1, ?x)." not in user_prompt
+	assert "do_clear(?x): cleanup followup after unstack(AUX_BLOCK1, ?x). If this branch should return with handempty restored, use followup put_down(AUX_BLOCK1) before returning." in user_prompt
 	assert "AUX_BLOCK1" in user_prompt
 	assert "do_clear(?x): caller-shared dynamic prerequisites" not in user_prompt
 	assert "Prefer ordered_subtasks for total orders" in user_prompt
 	assert "ordering uses pairwise edges only" in user_prompt
 	assert "If a line lists ACTION [needs ...] or [extra needs ...]" in user_prompt
+	assert "If support_before TASK(...) handles false-P, do not also keep P in that sibling precondition/context; split already-P and false-P siblings." in user_prompt
 	assert "parent supports only the listed caller-shared prerequisites, then calls that child" in user_prompt
+	assert "treat the listed caller-shared set as the complete parent boundary" in user_prompt
 	assert "Declaring AUX_* is not enough; constrain it before first use." in user_prompt
 	assert "Keep template argument positions exact." in user_prompt
-	assert "For supportable AUX_* needs, use earlier subtasks inside the same task instead of leaving them in constructive precondition/context." in user_prompt
+	assert "For supportable AUX_* needs, use earlier subtasks instead of leaving unmet dynamic prerequisites in constructive context." in user_prompt
+	assert "If a listed need binds ARG* to AUX_* for the chosen mode" in user_prompt
+	assert "copy that slot shape directly into the constructive branch" in user_prompt
+	assert "copy one producer invocation verbatim into producer and still keep the listed branch obligations" in user_prompt
+	assert "support-task contract names a cleanup followup after the producer" in user_prompt
+
+
+def test_same_arity_packaging_contract_uses_refined_parent_envelope():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	action_analysis = synthesizer._analyse_domain_actions(domain)
+	task_schemas = _declared_task_schema_map(domain)
+	candidates = [
+		candidate
+		for candidate in _same_arity_packaging_candidates_for_query_task(
+			domain,
+			"do_put_on",
+			"on",
+			("ARG1", "ARG2"),
+			task_schemas,
+			action_analysis,
+		)
+		if candidate.get("candidate") == "do_move"
+	]
+
+	assert len(candidates) == 1
+	assert _same_arity_caller_shared_requirements(
+		domain,
+		"on",
+		("ARG1", "ARG2"),
+		action_analysis,
+		candidates[0],
+	) == ("clear(ARG1)", "clear(ARG2)", "handempty")
+
+
+def test_prune_unreachable_task_structures_preserves_required_contract_tasks():
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("root_task", ("ARG1",), False, ("goal_predicate",)),
+			HTNTask("required_helper", ("ARG1",), False, ("helper_predicate",)),
+			HTNTask("unused_task", ("ARG1",), False, ("unused_predicate",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_root_noop",
+				task_name="root_task",
+				parameters=("ARG1",),
+				task_args=("ARG1",),
+				context=(HTNLiteral("goal_predicate", ("ARG1",), True),),
+				subtasks=(),
+				ordering=(),
+			),
+			HTNMethod(
+				method_name="m_required_helper_noop",
+				task_name="required_helper",
+				parameters=("ARG1",),
+				task_args=("ARG1",),
+				context=(HTNLiteral("helper_predicate", ("ARG1",), True),),
+				subtasks=(),
+				ordering=(),
+			),
+			HTNMethod(
+				method_name="m_unused_noop",
+				task_name="unused_task",
+				parameters=("ARG1",),
+				task_args=("ARG1",),
+				context=(HTNLiteral("unused_predicate", ("ARG1",), True),),
+				subtasks=(),
+				ordering=(),
+			),
+		],
+		target_literals=[HTNLiteral("goal_predicate", ("obj",), True)],
+		target_task_bindings=[HTNTargetTaskBinding("goal_predicate(obj)", "root_task")],
+	)
+
+	pruned_library, pruned_count = HTNMethodSynthesizer._prune_unreachable_task_structures(
+		library,
+		prompt_analysis={
+			"support_task_contracts": [
+				{"task_name": "required_helper"},
+			],
+		},
+	)
+
+	assert {task.name for task in pruned_library.compound_tasks} == {
+		"root_task",
+		"required_helper",
+	}
+	assert {method.task_name for method in pruned_library.methods} == {
+		"root_task",
+		"required_helper",
+	}
+	assert pruned_count == 2
+
+
+def test_required_helper_specs_skip_internal_packaging_support_when_parent_envelope_is_refined():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	action_analysis = synthesizer._analyse_domain_actions(domain)
+
+	helper_specs = _required_helper_specs_for_query_targets(
+		domain,
+		["on(a, b)"],
+		({"task_name": "do_put_on", "args": ["a", "b"]},),
+		action_analysis,
+	)
+
+	assert helper_specs == []
+
+
+def test_stage3_validation_rejects_compound_child_calls_with_no_reachable_child_method():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_move", ("BLOCK", "BLOCK"), False, ("on",)),
+			HTNTask("do_clear", ("BLOCK",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_move_noop",
+				task_name="do_move",
+				parameters=("X", "Y"),
+				context=(HTNLiteral("on", ("X", "Y"), True, None),),
+			),
+			HTNMethod(
+				method_name="m_do_move_constructive",
+				task_name="do_move",
+				parameters=("X", "Y"),
+				context=(
+					HTNLiteral("holding", ("X",), True, None),
+					HTNLiteral("clear", ("Y",), False, None),
+					HTNLiteral("handempty", (), False, None),
+				),
+				subtasks=(
+					HTNMethodStep("s1", "do_clear", ("Y",), "compound"),
+					HTNMethodStep("s2", "stack", ("X", "Y"), "primitive", action_name="stack"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+			HTNMethod(
+				method_name="m_do_clear_noop",
+				task_name="do_clear",
+				parameters=("ARG1",),
+				context=(HTNLiteral("clear", ("ARG1",), True, None),),
+			),
+			HTNMethod(
+				method_name="m_do_clear_constructive_2",
+				task_name="do_clear",
+				parameters=("ARG1", "AUX1"),
+				context=(
+					HTNLiteral("on", ("AUX1", "ARG1"), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep("s1", "do_clear", ("AUX1",), "compound"),
+					HTNMethodStep("s2", "unstack", ("AUX1", "ARG1"), "primitive", action_name="unstack"),
+					HTNMethodStep("s3", "put_down", ("AUX1",), "primitive", action_name="put-down"),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+			),
+		],
+		target_literals=[HTNLiteral("on", ("b1", "b2"), True, None)],
+		target_task_bindings=[HTNTargetTaskBinding("on(b1, b2)", "do_move")],
+	)
+
+	with pytest.raises(ValueError, match="no child method for 'do_clear' is compatible"):
+		synthesizer._validate_library(library, domain)
 
 
 def test_render_signature_with_mapping_does_not_cascade_replacements():
@@ -768,7 +1310,7 @@ def test_stage3_prompt_uses_declared_source_names_for_hyphenated_task_anchors():
 		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
-	assert "#1: empty-store(s0, rover0)" in user_prompt
+	assert "ordered_binding #1: empty(s0) -> empty-store(s0, rover0)" in user_prompt
 	assert "ordered_binding #1: empty(s0) -> empty-store(s0, rover0)" in user_prompt
 	assert "<query_task_contract name=\"empty-store\">" in user_prompt
 	assert "empty_store(s0, rover0)" not in user_prompt
@@ -808,7 +1350,7 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 12250
+	assert len(system_prompt) + len(user_prompt) < 30100
 	assert "Pattern: if final producer PLACE(ARG1, ARG2) needs READY(ARG2)" in system_prompt
 	assert "If a listed template is ACTION(AUX1, ARG1), do not swap it to ACTION(ARG1, AUX1)" in system_prompt
 	assert user_prompt.count("<query_task_contract name=\"do_put_on\">") == 1
@@ -819,17 +1361,107 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 	assert "- do_clear(X)" in user_prompt
 	assert "<support_task_contract name=\"do_clear\">" in user_prompt
 	assert "<support_task_contract name=\"do_move\">" in user_prompt
+	assert "<support_task_contract name=\"do_on_table\">" in user_prompt
 	assert "Use ARG1..ARGn for task-signature roles and AUX_* for extra roles." in user_prompt
 	assert "Prefer ordered_subtasks for total orders" in user_prompt
-	assert "Support caller-shared prerequisites holding(?x) before the child call" in user_prompt
-	assert "do_move(ARG1, ARG2) expects caller-shared holding(ARG1). Before the child call, establish holding(ARG1)" in user_prompt
-	assert "if the parent uses pick_up(ARG1) before do_move(ARG1, ARG2) to establish holding(ARG1)" in user_prompt
-	assert "if clear(ARG1) may either already hold or require support before pick_up(ARG1), use separate constructive siblings" in user_prompt
-	assert "must establish clear(ARG2) via do_clear(ARG2) before stack(ARG1, ARG2) instead of leaving it in branch context" in user_prompt
-	assert "Do not collapse both cases into one precondition-only branch." in user_prompt
+	assert "Support caller-shared prerequisites clear(?x), clear(?y), handempty before the child call" in user_prompt
+	assert "do_move(ARG1, ARG2) expects caller-shared clear(ARG2). Before the child call, establish clear(ARG2)" in user_prompt
+	assert "required helper task do_holding(ARG1) before do_move(ARG1, ARG2)." not in user_prompt
+	assert "do_move(ARG1, ARG2) expects caller-shared holding(ARG1). Before the child call, establish holding(ARG1)" not in user_prompt
+	assert "valid support-then-produce sibling for the false-clear(ARG1) case with pick_up(ARG1): precondition/context ontable(ARG1), handempty, clear(ARG2); support_before do_clear(ARG1); producer pick_up(ARG1); followup stack(ARG1, ARG2)." in user_prompt
+	assert "ARG2 acts as a non-leading support/base role in the repeated query skeleton." in user_prompt
+	assert "do_on_table(ARG2) can stabilize ARG2 beyond the headline producer's direct prerequisites" in user_prompt
+	assert "keep that stabilizer as a real sibling step before same-arity packaging child do_move(ARG1, ARG2)" in user_prompt
+	assert "when used as a role stabilizer, required stable/noop branch precondition/context clear(ARG1) instead of requiring ontable(ARG1)" in user_prompt
+	assert "if used as a role stabilizer, its constructive branch must internally close ontable(ARG2)" in user_prompt
+	assert "valid constructive sibling for put_down(ARG1): precondition/context holding(ARG1); producer put_down(ARG1)." in user_prompt
+	assert "support_before do_clear(?x); do_clear(?y); do_on_table(?y); producer do_move(?x, ?y)" in user_prompt
+	assert "exact same-arity packaging child for on(?x, ?y) when called by do_put_on(?x, ?y)" in user_prompt
+	assert "Parent-side caller-shared prerequisites: clear(?x), clear(?y), handempty. This set is exhaustive at child entry." in user_prompt
+	assert "do_move(?x, ?y): if used as same-arity packaging for on(?x, ?y), its own constructive branch must internally close the headline effect via stack(?x, ?y) [needs holding(?x), clear(?y)]." in user_prompt
+	assert "do_move(?x, ?y): when used as same-arity packaging for on(?x, ?y), every constructive sibling should keep clear(?x), clear(?y), handempty explicit in branch context" not in user_prompt
+	assert "do_move(?x, ?y): with parent-side caller-shared prerequisites holding(?x)" not in user_prompt
+	assert "must establish clear(ARG2) via do_clear(ARG2) before stack(ARG1, ARG2) instead of leaving it in branch context" not in user_prompt
 	assert "Declaring AUX_* is not enough; constrain it before first use." in user_prompt
 	assert "Keep template argument positions exact." in user_prompt
 	assert "inferred_task_headline_candidates:" not in user_prompt
+
+
+def test_prompt_analysis_payload_keeps_role_stabilizer_and_packaging_child_contracts_live():
+	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
+	synthesizer = HTNMethodSynthesizer()
+	analysis = synthesizer._analyse_domain_actions(domain)
+	prompt_analysis = build_prompt_analysis_payload(
+		domain,
+		target_literals=[
+			"on(b3, b5)",
+			"on(b6, b3)",
+			"on(b1, b6)",
+			"on(b2, b1)",
+			"on(b4, b2)",
+			"on(b7, b4)",
+		],
+		query_task_anchors=tuple(
+			{"task_name": "do_put_on", "args": list(args)}
+			for args in (
+				("b3", "b5"),
+				("b6", "b3"),
+				("b1", "b6"),
+				("b2", "b1"),
+				("b4", "b2"),
+				("b7", "b4"),
+			)
+		),
+		action_analysis=analysis,
+	)
+
+	assert prompt_analysis["query_task_contracts"]
+	query_contract = prompt_analysis["query_task_contracts"][0]
+	assert any(
+		"do_on_table(ARG2) can stabilize ARG2 beyond the headline producer's direct prerequisites"
+		in line
+		for line in query_contract["contract_lines"]
+	)
+	assert any(
+		"keep that stabilizer as a real sibling step before same-arity packaging child do_move(ARG1, ARG2)"
+		in line
+		for line in query_contract["contract_lines"]
+	)
+	assert any(
+		"first support child shared prerequisites clear(?x) via do_clear(?x); clear(?y) via do_clear(?y); handempty explicitly in parent context"
+		in line
+		for line in query_contract["contract_lines"]
+	)
+
+	support_contracts = {
+		payload["display_name"]: payload["contract_lines"]
+		for payload in prompt_analysis["support_task_contracts"]
+	}
+	assert "do_on_table" in support_contracts
+	assert "do_move" in support_contracts
+	assert any(
+		"when used as a role stabilizer, required stable/noop branch precondition/context clear(ARG1) instead of requiring ontable(ARG1)"
+		for line in support_contracts["do_on_table"]
+	)
+	assert all(
+		"required stable/noop branch precondition/context ontable(ARG1)" not in line
+		for line in support_contracts["do_on_table"]
+	)
+	assert any(
+		"if used as a role stabilizer, its constructive branch must internally close ontable(ARG2)"
+		in line
+		for line in support_contracts["do_on_table"]
+	)
+	assert any(
+		"valid constructive sibling for put_down(ARG1): precondition/context holding(ARG1); producer put_down(ARG1)."
+		in line
+		for line in support_contracts["do_clear"]
+	)
+	assert any(
+		"its own constructive branch must internally close the headline effect via stack(?x, ?y) [needs holding(?x), clear(?y)]"
+		in line
+		for line in support_contracts["do_move"]
+	)
 
 
 def test_stage3_prompt_stays_compact_for_marsrover_benchmark_case():
@@ -868,11 +1500,15 @@ def test_stage3_prompt_stays_compact_for_marsrover_benchmark_case():
 		action_analysis=synthesizer._analyse_domain_actions(domain),
 	)
 
-	assert len(system_prompt) + len(user_prompt) < 16250
+	assert len(system_prompt) + len(user_prompt) < 30100
 	assert "<query_task_contract name=\"get_soil_data\">" in user_prompt
 	assert "<required_tasks>" in user_prompt
 	assert "<support_task_contract name=\"send_soil_data\">" in user_prompt
-	assert "send_soil_data(?rover, ?waypoint): caller-shared dynamic prerequisites at_soil_sample(?waypoint)." in user_prompt
+	assert (
+		'send_soil_data(?rover, ?waypoint): exact producer slots '
+		'[{"producer":"sample_soil(ARG1, AUX_STORE1, ARG2)"}].'
+	) in user_prompt
+	assert "valid internal-support sibling for the false-at(ARG1, ARG2) case" in user_prompt
 	assert "sample_soil(" in user_prompt
 	assert "[extra needs" in user_prompt
 	assert "empty(AUX_STORE1)" in user_prompt
@@ -912,6 +1548,261 @@ def test_stage3_prompt_filters_same_arity_packaging_by_parameter_types():
 	assert "when chosen by get_image_data(?objective, ?mode) as same-arity packaging" not in user_prompt
 
 
+def test_same_arity_packaging_candidates_require_real_headline_match():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	task_schemas = _declared_task_schema_map(domain)
+
+	candidates = _same_arity_packaging_candidates_for_query_task(
+		domain,
+		"get_soil_data",
+		"communicated_soil_data",
+		("WAYPOINT",),
+		task_schemas,
+		synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert candidates == []
+
+
+def test_rover_support_task_headline_inference_prefers_discriminative_semantic_tokens():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	action_analysis = synthesizer._analyse_domain_actions(domain)
+
+	assert _candidate_headline_predicates_for_task(
+		"send_soil_data",
+		2,
+		action_analysis,
+	)[0] == "have_soil_analysis"
+	assert _candidate_headline_predicates_for_task(
+		"send_rock_data",
+		2,
+		action_analysis,
+	)[0] == "have_rock_analysis"
+	assert _candidate_headline_predicates_for_task(
+		"get_soil_data",
+		1,
+		action_analysis,
+	)[0] == "communicated_soil_data"
+
+
+def test_rover_support_task_contracts_render_effect_aligned_headline_roles():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["communicated_image_data(objective0, colour)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using objective objective0 and mode colour, complete the tasks "
+			"get_image_data(objective0, colour)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_image_data", "args": ["objective0", "colour"]},
+		),
+		query_object_inventory=(
+			{"type": "objective", "objects": ["objective0"]},
+			{"type": "mode", "objects": ["colour"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert (
+		"calibrate_abs(?rover, ?camera): required stable/noop branch "
+		"precondition/context calibrated(ARG2, ARG1)."
+	) in user_prompt
+	assert (
+		"calibrate_abs(?rover, ?camera) supports calibrated(?camera, ?rover); "
+		"templates: calibrate(?rover, ?camera"
+	) in user_prompt
+
+
+def test_rover_support_task_internal_support_siblings_include_child_shared_requirements():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["communicated_image_data(objective0, colour)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using objective objective0 and mode colour, complete the tasks "
+			"get_image_data(objective0, colour)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_image_data", "args": ["objective0", "colour"]},
+		),
+		query_object_inventory=(
+			{"type": "objective", "objects": ["objective0"]},
+			{"type": "mode", "objects": ["colour"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert (
+		"calibrate_abs(?rover, ?camera): valid internal-support sibling for the false-"
+		"at(ARG1, AUX_WAYPOINT1) case: precondition/context "
+	) in user_prompt
+	assert "available(ARG1); support_before navigate_abs(ARG1, AUX_WAYPOINT1);" in user_prompt
+	assert (
+		'AST slot shape for that internal-support sibling: {"precondition":['
+	) in user_prompt
+	assert '"available(ARG1)"],"support_before":["navigate_abs(ARG1, AUX_WAYPOINT1)"],"producer":"calibrate(' in user_prompt
+
+
+def test_rover_support_task_contracts_expose_full_caller_shared_envelope():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["communicated_soil_data(waypoint2)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using waypoint waypoint2, complete the tasks get_soil_data(waypoint2)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+		),
+		query_object_inventory=(
+			{"type": "waypoint", "objects": ["waypoint2"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert (
+		'send_soil_data(?rover, ?waypoint): exact producer slots '
+		'[{"producer":"sample_soil(ARG1, AUX_STORE1, ARG2)"}].'
+	) in user_prompt
+	assert "valid internal-support sibling for the false-at(ARG1, ARG2) case" in user_prompt
+	assert "available(ARG1); support_before navigate_abs(ARG1, ARG2);" in user_prompt
+
+
+def test_rover_support_task_invocations_align_with_task_signature_order():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["communicated_image_data(objective0, colour)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using objective objective0 and mode colour, complete the tasks "
+			"get_image_data(objective0, colour)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_image_data", "args": ["objective0", "colour"]},
+		),
+		query_object_inventory=(
+			{"type": "objective", "objects": ["objective0"]},
+			{"type": "mode", "objects": ["colour"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert "support_before calibrate_abs(ARG1, AUX_CAMERA1);" in user_prompt
+	assert "support_before calibrate_abs(AUX_CAMERA1, ARG1);" not in user_prompt
+	assert (
+		"support_before calibrate_abs(ARG1, AUX_CAMERA1); navigate_abs(ARG1, AUX_WAYPOINT1); "
+		"producer take_image(ARG1, AUX_WAYPOINT1, ARG2, AUX_CAMERA1, ARG3)."
+	) in user_prompt
+	assert (
+		'"support_before":["calibrate_abs(ARG1, AUX_CAMERA1)", "navigate_abs(ARG1, AUX_WAYPOINT1)"],'
+	) in user_prompt
+	assert (
+		"valid internal-support sibling for the false-at(ARG1, AUX_WAYPOINT1) case: "
+		"precondition/context calibrated(AUX_CAMERA1, ARG1); on_board(AUX_CAMERA1, ARG1); "
+		"equipped_for_imaging(ARG1); supports(AUX_CAMERA1, ARG3); visible_from(ARG2, AUX_WAYPOINT1); "
+		"available(ARG1); support_before navigate_abs(ARG1, AUX_WAYPOINT1); "
+		"producer take_image(ARG1, AUX_WAYPOINT1, ARG2, AUX_CAMERA1, ARG3)."
+	) in user_prompt
+
+
+def test_rover_query_task_contract_materialises_declared_support_sibling_slots():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["communicated_soil_data(waypoint2)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using waypoint waypoint2, complete the tasks get_soil_data(waypoint2)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+		),
+		query_object_inventory=(
+			{"type": "waypoint", "objects": ["waypoint2"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert (
+		"get_soil_data(ARG1): valid support-then-produce sibling for the "
+		"false-have_soil_analysis(AUX_ROVER1, ARG1) case with send_soil_data(AUX_ROVER1, ARG1)"
+	) not in user_prompt
+	assert (
+		"get_soil_data(ARG1): valid support-then-produce sibling for the "
+		"false-at(AUX_ROVER1, AUX_WAYPOINT1) case with navigate_abs(AUX_ROVER1, AUX_WAYPOINT1)"
+	) not in user_prompt
+	assert (
+		"get_soil_data(ARG1): complete constructive sibling for "
+		"communicate_soil_data(AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2): "
+		"precondition/context available(AUX_ROVER1), at(AUX_ROVER1, ARG1), "
+		"at_soil_sample(ARG1), channel_free(AUX_LANDER1), "
+		"at_lander(AUX_LANDER1, AUX_WAYPOINT2), visible(AUX_WAYPOINT1, AUX_WAYPOINT2); support_before "
+		"navigate_abs(AUX_ROVER1, AUX_WAYPOINT1); send_soil_data(AUX_ROVER1, ARG1); "
+		"producer communicate_soil_data(AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)."
+	) in user_prompt
+	assert (
+		'get_soil_data(ARG1): AST slot shape for that complete constructive sibling: '
+		'{"precondition":["available(AUX_ROVER1)", "at(AUX_ROVER1, ARG1)", '
+		'"at_soil_sample(ARG1)", "channel_free(AUX_LANDER1)", '
+		'"at_lander(AUX_LANDER1, AUX_WAYPOINT2)", "visible(AUX_WAYPOINT1, AUX_WAYPOINT2)"],'
+		'"support_before":["navigate_abs(AUX_ROVER1, AUX_WAYPOINT1)", '
+		'"send_soil_data(AUX_ROVER1, ARG1)"],"producer":"communicate_soil_data('
+		'AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)"}.'
+	) in user_prompt
+
+
+def test_support_task_candidates_do_not_overmatch_generic_data_tokens():
+	domain = _marsrover_domain()
+	assert _candidate_support_task_names(
+		domain,
+		"channel_free",
+		("AUX_LANDER1",),
+		("communicate_soil_data", "communicate_rock_data", "communicate_image_data"),
+	) == []
+
+
+def test_stage3_prompt_does_not_invent_cross_task_packaging_for_rover_data_queries():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["communicated_soil_data(waypoint2)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text=(
+			"Using rover rover0, lander general, store rover0store, and waypoint waypoint2, "
+			"complete the tasks get_soil_data(waypoint2)."
+		),
+		query_task_anchors=(
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+		),
+		query_object_inventory=(
+			{"type": "rover", "objects": ["rover0"]},
+			{"type": "lander", "objects": ["general"]},
+			{"type": "store", "objects": ["rover0store"]},
+			{"type": "waypoint", "objects": ["waypoint2"]},
+		),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert "exact same-arity packaging contract for communicated_soil_data(?waypoint)" not in user_prompt
+	assert (
+		"get_rock_data(?waypoint): if used as same-arity packaging for "
+		"communicated_soil_data(?waypoint)"
+	) not in user_prompt
+
+
 def test_stage3_prompt_forbids_grounded_constants_and_type_predicates_in_methods():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -936,11 +1827,11 @@ def test_stage3_prompt_forbids_grounded_constants_and_type_predicates_in_methods
 		action_analysis=synthesizer._analyse_domain_actions(domain),
 	)
 
-	assert "Grounded query objects may appear only in target_task_bindings and ordered top-level bindings." in system_prompt
+	assert "Grounded query objects may appear only in target_task_bindings and ordered bindings." in system_prompt
 	assert "Never invent type predicates unless the domain declares them." in system_prompt
 	assert "Do not copy grounded object names into methods; methods must stay schematic." in user_prompt
-	assert "Use the ordered query bindings below as the canonical query decomposition." in user_prompt
-	assert "Do not invent aggregate/root wrappers." in user_prompt
+	assert "Use the ordered query bindings below as the canonical decomposition." in user_prompt
+	assert "do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top." in user_prompt.lower()
 
 
 def test_common_child_constructive_requirements_ignore_extra_role_blockers():
@@ -2037,7 +2928,7 @@ def test_negative_target_binding_must_match_negative_semantics():
 		synthesizer._validate_library(library, domain)
 
 
-def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
+def test_synthesize_rejects_negative_raw_transition_labels(monkeypatch):
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	synthesizer.client = object()
@@ -2105,6 +2996,8 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 		prompt,
 		domain_obj,
 		metadata,
+		*,
+		prompt_analysis=None,
 	):
 		return llm_library, '{"ok": true}', "stop"
 
@@ -2114,19 +3007,13 @@ def test_synthesize_forces_negative_literals_to_naf_signatures(monkeypatch):
 		_fake_request_complete_llm_library,
 	)
 
-	library, metadata = synthesizer.synthesize(
-		domain=domain,
-		grounding_map=grounding_map,
-		dfa_result=dfa_result,
-		query_text="Keep on(a,b) explicitly false.",
-	)
-
-	assert library.target_literals[0].negation_mode == "naf"
-	assert library.target_literals[0].to_signature() == "!on(a, b)"
-	assert metadata["target_literals"] == ["!on(a, b)"]
-	assert metadata["negation_resolution"]["mode_by_predicate"] == {"on/2": "naf"}
-	assert metadata["negation_resolution"]["policy"] == "all_naf"
-	assert library.target_task_bindings[0].target_literal == "!on(a, b)"
+	with pytest.raises(ValueError, match="raw non-atomic transition label unsupported"):
+		synthesizer.synthesize(
+			domain=domain,
+			grounding_map=grounding_map,
+			dfa_result=dfa_result,
+			query_text="Keep on(a,b) explicitly false.",
+		)
 
 
 def test_target_binding_normalisation_accepts_object_form_literal():
@@ -2335,6 +3222,121 @@ def test_method_validation_allows_auxiliary_method_parameters_constrained_in_con
 	synthesizer._validate_library(library, domain)
 
 
+def test_transition_native_query_root_bridge_may_delegate_child_entry_support():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	target_literal = HTNLiteral("on", ("a", "b"), True, None)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[target_literal],
+		query_task_anchors=[
+			{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q2_on_a_b",
+				"literal": target_literal,
+				"source_state": "q1",
+				"target_state": "q2",
+				"accepting_states": ["q2"],
+			},
+		],
+	)
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(
+				"query_root_1_do_put_on",
+				("ARG1", "ARG2"),
+				False,
+				("on",),
+				HTNLiteral("on", ("ARG1", "ARG2"), True, None),
+				"do_put_on",
+			),
+			HTNTask(
+				"dfa_step_q1_q2_on_a_b",
+				("ARG1", "ARG2"),
+				False,
+				("on",),
+				HTNLiteral("on", ("ARG1", "ARG2"), True, None),
+			),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_query_root_1_do_put_on_noop",
+				task_name="query_root_1_do_put_on",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("on", ("ARG1", "ARG2"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_query_root_1_do_put_on_constructive",
+				task_name="query_root_1_do_put_on",
+				parameters=("ARG1", "ARG2"),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="dfa_step_q1_q2_on_a_b",
+						args=("ARG1", "ARG2"),
+						kind="compound",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_dfa_step_q1_q2_on_a_b_noop",
+				task_name="dfa_step_q1_q2_on_a_b",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("on", ("ARG1", "ARG2"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_dfa_step_q1_q2_on_a_b_constructive",
+				task_name="dfa_step_q1_q2_on_a_b",
+				parameters=("ARG1", "ARG2"),
+				context=(
+					HTNLiteral("clear", ("ARG1",), True, None),
+					HTNLiteral("clear", ("ARG2",), True, None),
+					HTNLiteral("ontable", ("ARG1",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="pick_up",
+						args=("ARG1",),
+						kind="primitive",
+						action_name="pick-up",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="stack",
+						args=("ARG1", "ARG2"),
+						kind="primitive",
+						action_name="stack",
+					),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+		],
+		target_literals=[target_literal],
+		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "query_root_1_do_put_on")],
+	)
+
+	synthesizer._validate_library(
+		library,
+		domain,
+		query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
+		prompt_analysis=prompt_analysis,
+		static_predicates=(),
+	)
+
+
 def test_method_validation_rejects_auxiliary_method_parameters_used_before_constraint():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -2370,7 +3372,6 @@ def test_method_validation_rejects_auxiliary_method_parameters_used_before_const
 
 	with pytest.raises(ValueError, match="uses auxiliary parameter 'SUPPORT'"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_method_validation_rejects_constructive_branch_that_does_not_support_headline_literal():
 	domain = _domain()
@@ -2601,6 +3602,95 @@ def test_method_validation_allows_consumed_mode_selector_to_stay_in_context():
 	)
 
 	synthesizer._validate_library(library, domain)
+
+
+def test_method_validation_rejects_recursive_support_literal_left_in_same_context():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("do_clear", ("B",), False, ("clear",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_do_clear_already",
+				task_name="do_clear",
+				parameters=("B",),
+				context=(
+					HTNLiteral("clear", ("B",), True, None),
+				),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_do_clear_recursive_bad_context",
+				task_name="do_clear",
+				parameters=("B", "SUPPORT"),
+				context=(
+					HTNLiteral("on", ("SUPPORT", "B"), True, None),
+					HTNLiteral("clear", ("SUPPORT",), True, None),
+					HTNLiteral("handempty", (), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="do_clear",
+						args=("SUPPORT",),
+						kind="compound",
+					),
+					HTNMethodStep(
+						step_id="s2",
+						task_name="unstack",
+						args=("SUPPORT", "B"),
+						kind="primitive",
+						action_name="unstack",
+					),
+					HTNMethodStep(
+						step_id="s3",
+						task_name="put_down",
+						args=("SUPPORT",),
+						kind="primitive",
+						action_name="put-down",
+					),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	with pytest.raises(
+		ValueError,
+		match=r"keeps supportable dynamic prerequisite 'clear\(SUPPORT\)' in context",
+	):
+		synthesizer._validate_library(library, domain)
+
+
+def test_stage3_prompt_promotes_same_arity_final_producer_prerequisites_to_child_entry():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	user_prompt = build_htn_user_prompt(
+		domain,
+		["on(a, b)"],
+		HTNMethodSynthesizer._schema_hint(),
+		query_text="Using blocks a and b, complete the tasks do_put_on(a, b).",
+		query_task_anchors=(
+			{"task_name": "do_put_on", "args": ["a", "b"]},
+		),
+		query_objects=("a", "b"),
+		action_analysis=synthesizer._analyse_domain_actions(domain),
+	)
+
+	assert "support_before do_clear(ARG2); producer do_holding(ARG1); followup do_move(ARG1, ARG2)." not in user_prompt
+	assert "support_before do_clear(ARG1); do_clear(ARG2); producer pick_up(ARG1); followup do_move(ARG1, ARG2)." not in user_prompt
+	assert "if you use do_clear(ARG2) to support clear(ARG2)" not in user_prompt
+	assert "non-leading support/base role" not in user_prompt
+	assert "Parent-side caller-shared prerequisites: clear(?x), clear(?y), handempty." in user_prompt
+	assert "do_move(?x, ?y): with parent-side caller-shared prerequisites holding(?x)" not in user_prompt
 
 
 def test_primitive_alias_cannot_use_non_primitive_subtask_kind():
@@ -3391,6 +4481,174 @@ def test_method_type_validation_prefers_declared_task_signature_over_source_pred
 	)
 
 
+def test_parse_llm_library_ast_task_preserves_explicit_headline_literal():
+	synthesizer = HTNMethodSynthesizer()
+
+	library = synthesizer._parse_llm_library(
+		json.dumps(
+			{
+				"target_task_bindings": [],
+				"tasks": [
+					{
+						"name": "calibrate_abs",
+						"parameters": ["ROVER", "CAMERA"],
+						"headline": "calibrated(CAMERA, ROVER)",
+						"source_predicates": ["calibrated"],
+						"noop": {"precondition": ["calibrated(CAMERA, ROVER)"]},
+						"constructive": [
+							{
+								"precondition": ["at(ROVER, AUX_WAYPOINT1)"],
+								"producer": "calibrate(ROVER, CAMERA, AUX_OBJECTIVE1, AUX_WAYPOINT1)",
+							},
+						],
+					},
+				],
+			},
+		)
+	)
+
+	assert library.compound_tasks[0].headline_literal is not None
+	assert (
+		library.compound_tasks[0].headline_literal.to_signature()
+		== "calibrated(CAMERA, ROVER)"
+	)
+
+
+def test_validate_library_infers_reordered_task_headline_from_noop_context():
+	synthesizer = HTNMethodSynthesizer()
+	domain = _marsrover_domain()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("calibrate_abs", ("ARG1", "ARG2"), False, ("calibrated",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_calibrate_abs_noop",
+				task_name="calibrate_abs",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("calibrated", ("ARG2", "ARG1"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_calibrate_abs_constructive",
+				task_name="calibrate_abs",
+				parameters=("ARG1", "ARG2", "AUX_OBJECTIVE1", "AUX_WAYPOINT1"),
+				context=(HTNLiteral("at", ("ARG1", "AUX_WAYPOINT1"), True, None),),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="calibrate",
+						args=("ARG1", "ARG2", "AUX_OBJECTIVE1", "AUX_WAYPOINT1"),
+						kind="primitive",
+						action_name="calibrate",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+	task = normalised.task_for_name("calibrate_abs")
+	assert task is not None
+	assert task.headline_literal is not None
+	assert task.headline_literal.to_signature() == "calibrated(ARG2, ARG1)"
+	synthesizer._validate_library(normalised, domain)
+
+
+def test_method_validation_allows_mixed_arg_aux_mode_selector_in_context():
+	synthesizer = HTNMethodSynthesizer()
+	domain = _marsrover_domain()
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(
+				"calibrate_abs",
+				("ARG1", "ARG2"),
+				False,
+				("calibrated",),
+				headline_literal=HTNLiteral("calibrated", ("ARG2", "ARG1"), True, None),
+			),
+			HTNTask("navigate_abs", ("ARG1", "ARG2"), False, ("at",)),
+		],
+		primitive_tasks=synthesizer._build_primitive_tasks(domain),
+		methods=[
+			HTNMethod(
+				method_name="m_calibrate_abs_noop",
+				task_name="calibrate_abs",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("calibrated", ("ARG2", "ARG1"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_calibrate_abs_constructive",
+				task_name="calibrate_abs",
+				parameters=("ARG1", "ARG2", "AUX_OBJECTIVE1", "AUX_WAYPOINT1"),
+				context=(
+					HTNLiteral("at", ("ARG1", "AUX_WAYPOINT1"), True, None),
+					HTNLiteral("equipped_for_imaging", ("ARG1",), True, None),
+					HTNLiteral("calibration_target", ("ARG2", "AUX_OBJECTIVE1"), True, None),
+					HTNLiteral("visible_from", ("AUX_OBJECTIVE1", "AUX_WAYPOINT1"), True, None),
+					HTNLiteral("on_board", ("ARG2", "ARG1"), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="calibrate",
+						args=("ARG1", "ARG2", "AUX_OBJECTIVE1", "AUX_WAYPOINT1"),
+						kind="primitive",
+						action_name="calibrate",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_navigate_abs_noop",
+				task_name="navigate_abs",
+				parameters=("ARG1", "ARG2"),
+				context=(HTNLiteral("at", ("ARG1", "ARG2"), True, None),),
+				subtasks=(),
+				ordering=(),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_navigate_abs_constructive",
+				task_name="navigate_abs",
+				parameters=("ARG1", "ARG2", "AUX_WAYPOINT1"),
+				context=(
+					HTNLiteral("available", ("ARG1",), True, None),
+					HTNLiteral("at", ("ARG1", "AUX_WAYPOINT1"), True, None),
+					HTNLiteral("can_traverse", ("ARG1", "AUX_WAYPOINT1", "ARG2"), True, None),
+					HTNLiteral("visible", ("AUX_WAYPOINT1", "ARG2"), True, None),
+				),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="navigate",
+						args=("ARG1", "AUX_WAYPOINT1", "ARG2"),
+						kind="primitive",
+						action_name="navigate",
+					),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	synthesizer._validate_library(library, domain)
+
+
 def test_method_validation_accepts_supported_equality_constraints():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3895,6 +5153,235 @@ def test_normalise_llm_library_inferrs_missing_source_predicates_from_contracts(
 	assert task_lookup["do_clear"].source_predicates == ("clear",)
 
 
+def test_ast_payload_accepts_support_before_producer_followup_shortcut():
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	parsed_library = synthesizer._parse_llm_library(
+		json.dumps(
+			{
+				"target_task_bindings": [
+					{"target_literal": "on(a, b)", "task_name": "do_put_on"},
+				],
+				"tasks": [
+					{
+						"name": "do_put_on",
+						"parameters": ["ARG1", "ARG2"],
+						"noop": {"precondition": ["on(ARG1, ARG2)"]},
+						"constructive": [
+							{
+								"precondition": ["ontable(ARG1)", "handempty"],
+								"support_before": ["do_clear(ARG1)"],
+								"producer": "pick_up(ARG1)",
+								"followup": "do_move(ARG1, ARG2)",
+							},
+						],
+					},
+				],
+			},
+		),
+	)
+
+	methods = [method for method in parsed_library.methods if method.task_name == "do_put_on"]
+	assert len(methods) == 2
+	constructive = next(method for method in methods if method.method_name.endswith("constructive"))
+	assert [step.task_name for step in constructive.subtasks] == ["do_clear", "pick_up", "do_move"]
+	assert constructive.ordering == (("s1", "s2"), ("s2", "s3"))
+
+
+def test_ast_payload_accepts_bare_branch_level_producer_with_task_argument_passthrough():
+	library = HTNMethodLibrary.from_dict(
+		{
+			"target_task_bindings": [
+				{"target_literal": "on(a, b)", "task_name": "query_root_1_do_put_on"},
+			],
+			"tasks": [
+				{
+					"name": "query_root_1_do_put_on",
+					"parameters": ["ARG1", "ARG2"],
+					"headline": "on(ARG1, ARG2)",
+					"source_name": "do_put_on",
+					"constructive": [
+						{"producer": "dfa_step_q1_q2_on_a_b"},
+					],
+				},
+				{
+					"name": "dfa_step_q1_q2_on_a_b",
+					"parameters": ["ARG1", "ARG2"],
+					"headline": "on(ARG1, ARG2)",
+					"constructive": [
+						{"ordered_subtasks": ["stack(ARG1, ARG2)"]},
+					],
+				},
+			],
+		},
+	)
+
+	query_root_method = next(
+		method
+		for method in library.methods
+		if method.task_name == "query_root_1_do_put_on"
+		and method.method_name.endswith("constructive")
+	)
+	assert [step.task_name for step in query_root_method.subtasks] == ["dfa_step_q1_q2_on_a_b"]
+	assert [step.args for step in query_root_method.subtasks] == [("ARG1", "ARG2")]
+
+
+def test_ast_payload_accepts_task_level_single_method_shorthand():
+	library = HTNMethodLibrary.from_dict(
+		{
+			"tasks": [
+				{
+					"name": "query_root_1_do_put_on",
+					"parameters": ["ARG1", "ARG2"],
+					"headline": "on(ARG1, ARG2)",
+					"source_name": "do_put_on",
+					"ordered_subtasks": [
+						{"call": "dfa_step_q1_q2_on_a_b", "args": ["ARG1", "ARG2"]},
+					],
+				},
+				{
+					"name": "dfa_step_q1_q2_on_a_b",
+					"parameters": ["ARG1", "ARG2"],
+					"headline": "on(ARG1, ARG2)",
+					"ordered_subtasks": [
+						{"call": "stack", "args": ["ARG1", "ARG2"]},
+					],
+				},
+			],
+		},
+	)
+
+	query_root_method = next(
+		method
+		for method in library.methods
+		if method.task_name == "query_root_1_do_put_on"
+	)
+	assert [step.task_name for step in query_root_method.subtasks] == ["dfa_step_q1_q2_on_a_b"]
+	assert [step.args for step in query_root_method.subtasks] == [("ARG1", "ARG2")]
+
+
+def test_ast_payload_accepts_ordered_subtask_objects_with_producer_and_parameters():
+	library = HTNMethodLibrary.from_dict(
+		{
+			"tasks": [
+				{
+					"name": "dfa_step_q1_q2_on_a_b",
+					"parameters": ["ARG1", "ARG2"],
+					"headline": "on(ARG1, ARG2)",
+					"constructive": [
+						{
+							"precondition": ["clear(ARG2)", "clear(ARG1)", "ontable(ARG1)", "handempty"],
+							"ordered_subtasks": [
+								{"producer": "pick_up", "parameters": ["ARG1"]},
+								{"producer": "stack", "parameters": ["ARG1", "ARG2"]},
+							],
+						},
+					],
+				},
+			],
+		},
+	)
+
+	method = next(
+		method
+		for method in library.methods
+		if method.task_name == "dfa_step_q1_q2_on_a_b"
+		and method.method_name.endswith("constructive")
+	)
+	assert [step.task_name for step in method.subtasks] == ["pick_up", "stack"]
+	assert [step.args for step in method.subtasks] == [("ARG1",), ("ARG1", "ARG2")]
+
+
+def test_transition_native_prompt_includes_canonical_hddl_shaped_step_examples():
+	domain = _domain()
+	target_literals = [
+		HTNLiteral("on", ("b4", "b2"), True, None),
+	]
+	query_task_anchors = [
+		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
+	]
+	transition_specs = [
+		{
+			"transition_name": "dfa_step_q1_q2_on_b4_b2",
+			"literal": HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2"),
+			"source_state": "q1",
+			"target_state": "q2",
+			"accepting_states": ["q4"],
+		},
+	]
+
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=target_literals,
+		query_task_anchors=query_task_anchors,
+		transition_specs=transition_specs,
+	)
+	system_prompt = build_transition_native_system_prompt()
+	user_prompt = build_transition_native_user_prompt(
+		domain,
+		query_text=(
+			"Using blocks b4 and b2, complete the task do_put_on(b4, b2)."
+		),
+		target_literals=target_literals,
+		query_task_anchors=query_task_anchors,
+		transition_specs=transition_specs,
+		prompt_analysis=prompt_analysis,
+		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
+		query_object_inventory=[{"type": "block", "objects": ["b4", "b2"]}],
+	)
+
+	assert "Canonical subtask form inside ordered_subtasks" in system_prompt
+	assert "Use compact support_before/producer/followup only at the branch level" in system_prompt
+	assert "Every query-root alias task must include a noop branch" in system_prompt
+	assert "never transpose ARG and AUX positions inside a required relation" in system_prompt
+	assert "Support obligations recurse" in system_prompt
+	assert 'query-root alias task: {"noop":{"precondition":["HEADLINE(ARG1, ARG2)"]},"constructive":[{"ordered_subtasks":[{"call":"REQUIRED_TRANSITION_TASK"' in user_prompt
+	assert 'transition constructive branch: {"precondition":["NEED1","NEED2"],"ordered_subtasks":[{"call":"RUNTIME_OR_HELPER_TASK"' in user_prompt
+	assert "inside ordered_subtasks, do not use nested support_before/producer/followup" in user_prompt
+	assert "Every query-root alias task must include a noop branch whose precondition/context is exactly its listed headline literal." in user_prompt
+	assert "Direct producer modes: stack(ARG1, ARG2) [needs holding(ARG1), clear(ARG2)]." in user_prompt
+	assert "Support holding(ARG1) with one of: pick_up(ARG1) [needs clear(ARG1), ontable(ARG1), handempty]; unstack(ARG1, AUX_BLOCK1) [needs on(ARG1, AUX_BLOCK1), clear(ARG1), handempty]." in user_prompt
+	assert "Support clear(ARG1) with one of: put_down(ARG1) [needs holding(ARG1)]; stack(ARG1, AUX_BLOCK1) [needs holding(ARG1), clear(AUX_BLOCK1)]; unstack(AUX_BLOCK1, ARG1) [needs on(AUX_BLOCK1, ARG1), clear(AUX_BLOCK1), handempty]." in user_prompt
+	assert "ALLOWED HELPER TASK CANDIDATES:" in user_prompt
+	assert "- helper_holding_arg1 | headline=holding(ARG1) | parameters=(ARG1)" in user_prompt
+	assert "- helper_clear_arg1 | headline=clear(ARG1) | parameters=(ARG1)" in user_prompt
+	assert "do not transpose it to on(ARG2, AUX1)." in user_prompt
+	assert prompt_analysis["query_root_alias_tasks"][0]["headline_literal"]["source_symbol"] is None
+	assert prompt_analysis["transition_tasks"][0]["headline_literal"]["source_symbol"] is None
+
+
+def test_ast_payload_accepts_compact_target_task_binding_invocation_strings():
+	library = HTNMethodLibrary.from_dict(
+		{
+			"target_task_bindings": [
+				{"target_literal": "on(a, b)", "task_name": "do_put_on(a, b)"},
+			],
+			"tasks": [
+				{
+					"name": "do_put_on",
+					"parameters": ["ARG1", "ARG2"],
+					"noop": {"precondition": ["on(ARG1, ARG2)"]},
+					"constructive": [
+						{"ordered_subtasks": ["do_move(ARG1, ARG2)"]},
+					],
+				},
+				{
+					"name": "do_move",
+					"parameters": ["ARG1", "ARG2"],
+					"noop": {"precondition": ["on(ARG1, ARG2)"]},
+					"constructive": [
+						{
+							"precondition": ["holding(ARG1)", "clear(ARG2)"],
+							"ordered_subtasks": ["stack(ARG1, ARG2)"],
+						},
+					],
+				},
+			],
+		},
+	)
+
+	assert [binding.task_name for binding in library.target_task_bindings] == ["do_put_on"]
+
+
 def test_stage3_prompt_forbids_leaving_supportable_extra_needs_in_constructive_context():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3915,7 +5402,7 @@ def test_stage3_prompt_forbids_leaving_supportable_extra_needs_in_constructive_c
 		in user_prompt
 	)
 	assert (
-		"For supportable AUX_* needs, use earlier subtasks inside the same task instead of leaving them in constructive precondition/context."
+		"For supportable AUX_* needs, use earlier subtasks instead of leaving unmet dynamic prerequisites in constructive context."
 		in user_prompt
 	)
 
@@ -4020,7 +5507,7 @@ def _stage3_response(
 	return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish_reason)])
 
 
-def test_stage3_create_chat_completion_prefers_json_contract_and_reasoning_off():
+def test_stage3_create_chat_completion_prefers_plain_json_prompt_and_reasoning_off():
 	synthesizer = HTNMethodSynthesizer()
 	completions = _FakeStage3Completions([
 		_stage3_response(content='{"target_task_bindings":[],"compound_tasks":[],"methods":[]}'),
@@ -4030,7 +5517,7 @@ def test_stage3_create_chat_completion_prefers_json_contract_and_reasoning_off()
 	synthesizer._create_chat_completion({"system": "system", "user": "user"}, max_tokens=321)
 
 	assert completions.calls[0]["max_tokens"] == 321
-	assert completions.calls[0]["response_format"] == {"type": "json_object"}
+	assert "response_format" not in completions.calls[0]
 	assert completions.calls[0]["extra_body"] == {
 		"reasoning": {
 			"effort": "none",
@@ -4044,7 +5531,6 @@ def test_stage3_create_chat_completion_falls_back_when_optional_provider_paramet
 	completions = _FakeStage3Completions([
 		RuntimeError("Reasoning is mandatory for this endpoint and cannot be disabled."),
 		RuntimeError("unsupported parameter: reasoning"),
-		RuntimeError("response_format is not supported by this model"),
 		_stage3_response(content='{"target_task_bindings":[],"tasks":[]}'),
 	])
 	synthesizer.client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -4055,23 +5541,20 @@ def test_stage3_create_chat_completion_falls_back_when_optional_provider_paramet
 	)
 
 	assert response.choices[0].finish_reason == "stop"
-	assert completions.calls[0]["response_format"] == {"type": "json_object"}
+	assert "response_format" not in completions.calls[0]
 	assert completions.calls[0]["extra_body"] == {
 		"reasoning": {
 			"effort": "none",
 			"exclude": True,
 		},
 	}
-	assert completions.calls[1]["response_format"] == {"type": "json_object"}
+	assert "response_format" not in completions.calls[1]
 	assert completions.calls[1]["extra_body"] == {
 		"reasoning": {
 			"exclude": True,
 		},
 	}
-	assert completions.calls[2]["response_format"] == {"type": "json_object"}
 	assert "extra_body" not in completions.calls[2]
-	assert "response_format" not in completions.calls[3]
-	assert "extra_body" not in completions.calls[3]
 
 
 def test_stage3_call_llm_enforces_wall_clock_timeout():

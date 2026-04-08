@@ -3204,8 +3204,8 @@ def assert_stage6_guided_execution_uses_query_task_anchors_not_problem_root_task
 	assert len(captured["calls"]) == 1
 	first_call = captured["calls"][0]
 	assert (
-		(first_call["task_name"] == "do_put_on" and first_call["task_args"] == ("b1", "b2"))
-		or first_call["task_network"] == (("do_put_on", ("b1", "b2")),)
+		(first_call["task_name"] == "query_root_1_do_put_on" and first_call["task_args"] == ("b1", "b2"))
+		or first_call["task_network"] == (("query_root_1_do_put_on", ("b1", "b2")),)
 	)
 	assert guided is not None
 	assert guided["source"] in {
@@ -3216,6 +3216,180 @@ def assert_stage6_guided_execution_uses_query_task_anchors_not_problem_root_task
 	}
 	assert guided["action_path"] == ["pick_up(b1)"]
 	assert guided["method_trace"] == [{"method_name": "m_do_put_on", "task_args": ["b1", "b2"]}]
+
+
+def assert_stage6_incremental_guided_execution_reuses_stage4_plan_record_when_task_plan_is_empty():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p02.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		"Using blocks b3, b5, and b6, complete the tasks do_put_on(b3, b5), then "
+		"do_put_on(b6, b3).",
+	)
+	method_library = _official_domain_method_library(
+		"blocksworld",
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+	)
+	captured: Dict[str, Any] = {"calls": []}
+	stage4_first_plan = SimpleNamespace(
+		steps=[
+			SimpleNamespace(task_name="pick_up", args=("b3",)),
+			SimpleNamespace(task_name="stack", args=("b3", "b5")),
+		],
+		work_dir="dummy-stage4-first-task",
+		raw_plan="\n".join(
+			[
+				"==>",
+				"1 pick_up b3",
+				"2 stack b3 b5",
+				"root 3",
+				"3 do_put_on b3 b5 -> m_do_put_on_constructive_1 1 2",
+			],
+		),
+		actual_plan="\n".join(
+			[
+				"==>",
+				"1 pick_up b3",
+				"2 stack b3 b5",
+				"root 3",
+				"3 do_put_on b3 b5 -> m_do_put_on_constructive_1 1 2",
+			],
+		),
+	)
+	plan_records = [
+		{
+			"transition_name": "dfa_step_q1_q2_on_b3_b5",
+			"target_literal": HTNLiteral("on", ("b3", "b5"), True, None),
+			"plan": stage4_first_plan,
+		},
+	]
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = kwargs.get("task_name")
+			task_args = tuple(kwargs.get("task_args") or ())
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_args": task_args,
+					"initial_facts": tuple(kwargs.get("initial_facts") or ()),
+				},
+			)
+			if task_name == "stage6_guided_schedule":
+				raise RuntimeError("full guided search timed out")
+			if task_name == "query_root_1_do_put_on" and task_args == ("b3", "b5"):
+				return SimpleNamespace(
+					steps=[],
+					work_dir="dummy-empty-guided-plan",
+					raw_plan="==>\nroot\n",
+					actual_plan="==>\nroot\n",
+				)
+			if task_name == "query_root_2_do_put_on" and task_args == ("b6", "b3"):
+				return SimpleNamespace(
+					steps=[
+						SimpleNamespace(task_name="pick_up", args=("b6",)),
+						SimpleNamespace(task_name="stack", args=("b6", "b3")),
+					],
+					work_dir="dummy-second-guided-plan",
+					raw_plan="\n".join(
+						[
+							"==>",
+							"1 pick_up b6",
+							"2 stack b6 b3",
+							"root 3",
+							"3 do_put_on b6 b3 -> m_do_put_on_constructive_2 1 2",
+						],
+					),
+					actual_plan="\n".join(
+						[
+							"==>",
+							"1 pick_up b6",
+							"2 stack b6 b3",
+							"root 3",
+							"3 do_put_on b6 b3 -> m_do_put_on_constructive_2 1 2",
+						],
+					),
+				)
+			raise AssertionError(f"unexpected planner call: task_name={task_name} args={task_args}")
+
+		def extract_method_trace(self, plan_text):
+			text = str(plan_text)
+			if "b3 b5" in text:
+				return [{"method_name": "m_do_put_on_constructive_1", "task_args": ["b3", "b5"]}]
+			if "b6 b3" in text:
+				return [{"method_name": "m_do_put_on_constructive_2", "task_args": ["b6", "b3"]}]
+			return []
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		LTL_BDI_Pipeline,
+		"_stage6_chunked_guided_execution",
+		lambda self, *_args, **_kwargs: None,
+	)
+
+	def _replay(self, **kwargs):
+		action_path = tuple(kwargs.get("action_path") or ())
+		if action_path == ():
+			return {
+				"passed": True,
+				"world_facts": ["clear(b3)", "clear(b5)", "clear(b6)"],
+			}
+		if action_path == ("pick_up(b3)", "stack(b3, b5)"):
+			return {
+				"passed": True,
+				"world_facts": ["on(b3,b5)", "clear(b3)", "clear(b6)"],
+			}
+		if action_path == ("pick_up(b6)", "stack(b6, b3)"):
+			return {
+				"passed": True,
+				"world_facts": ["on(b3,b5)", "on(b6,b3)", "clear(b6)"],
+			}
+		raise AssertionError(f"unexpected replay path: {action_path}")
+
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		_replay,
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			plan_records=plan_records,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_incremental_query_tasks"
+	assert guided["action_path"][:2] == ["pick_up(b3)", "stack(b3, b5)"]
+	assert guided["method_trace"][:2] == [
+		{"method_name": "m_do_put_on_constructive_1", "task_args": ["b3", "b5"]},
+		{"method_name": "m_do_put_on_constructive_2", "task_args": ["b6", "b3"]},
+	]
+	assert [
+		call["task_args"]
+		for call in captured["calls"]
+		if call["task_name"] in {"query_root_1_do_put_on", "query_root_2_do_put_on"}
+	] == [
+		("b3", "b5"),
+		("b6", "b3"),
+	]
 
 
 def assert_stage6_query_task_network_grounds_parameterised_query_anchors_from_literal_contract():
@@ -3244,7 +3418,7 @@ def assert_stage6_query_task_network_grounds_parameterised_query_anchors_from_li
 
 	task_network = pipeline._stage6_query_task_network(ltl_spec, method_library)
 
-	assert task_network == (("do_observation", ("star5", "image1")),)
+	assert task_network == (("query_root_1_do_observation", ("star5", "image1")),)
 
 
 def assert_stage3_mask_transition_extraction_compat_supports_legacy_delegate_signature():

@@ -6,7 +6,7 @@ Handles loading environment variables and API keys from .env file.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 
 class Config:
@@ -22,11 +22,22 @@ class Config:
 
         if env_path.exists():
             with open(env_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        key, value = line.split('=', 1)
-                        os.environ[key.strip()] = value.strip()
+                self._merge_env_lines(f)
+
+    def _merge_env_lines(self, lines: Iterable[str]) -> None:
+        """
+        Merge dotenv-style lines without overriding explicit shell environment.
+
+        This keeps `.env` as a repository-local default source while preserving
+        per-run overrides such as benchmark model selection exported in the
+        invoking shell.
+        """
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith('#'):
+                continue
+            key, value = line.split('=', 1)
+            os.environ.setdefault(key.strip(), value.strip())
 
     @property
     def openai_api_key(self) -> Optional[str]:

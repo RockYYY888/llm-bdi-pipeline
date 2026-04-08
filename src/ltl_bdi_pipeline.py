@@ -4,11 +4,17 @@ LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
 
 import json
 import re
+import sys
 import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Sequence, Set, Tuple
+
+_src_dir = str(Path(__file__).resolve().parent)
+if _src_dir in sys.path:
+    sys.path.remove(_src_dir)
+sys.path.insert(0, _src_dir)
 
 from utils.config import get_config
 from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
@@ -16,6 +22,7 @@ from stage1_interpretation.ltlf_formula import LTLFormula, LogicalOperator, Temp
 from stage2_dfa_generation.dfa_builder import DFABuilder
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
 from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary
+from stage3_method_synthesis.transition_native import query_root_alias_task_name
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
@@ -324,14 +331,15 @@ class LTL_BDI_Pipeline:
 
             print(f"✓ DFA Generation Complete")
             print(f"  Formula: {dfa_result['formula']}")
-            print(f"\n  Original DFA (before simplification):")
+            print(f"\n  Raw DFA:")
             print(f"    States: {dfa_result['original_num_states']}")
             print(f"    Transitions: {dfa_result['original_num_transitions']}")
             print(f"    Saved to: {self.output_dir / 'dfa_original.dot'}")
-            print(f"\n  Simplified DFA (after simplification):")
-            print(f"    States: {dfa_result['num_states']}")
-            print(f"    Transitions: {dfa_result['num_transitions']}")
-            print(f"    Saved to: {self.output_dir / 'dfa_simplified.dot'}")
+            if dfa_result.get("dfa_dot") != dfa_result.get("original_dfa_dot"):
+                print(f"\n  Additional DFA export:")
+                print(f"    States: {dfa_result['num_states']}")
+                print(f"    Transitions: {dfa_result['num_transitions']}")
+                print(f"    Saved to: {self.output_dir / 'dfa_simplified.dot'}")
 
             # Save complete DFA result to JSON
             output_file = self.output_dir / "dfa.json"
@@ -1287,11 +1295,11 @@ class LTL_BDI_Pipeline:
             for transition_spec in transition_specs:
                 literal = transition_spec["literal"]
                 transition_name = transition_spec["transition_name"]
-                task_name = method_library.task_name_for_literal(literal)
-                if not task_name:
+                task_name = str(transition_name).strip()
+                if not task_name or method_library.task_for_name(task_name) is None:
                     raise ValueError(
-                        "Stage 3 output is missing a target_task_binding for "
-                        f"'{literal.to_signature()}'."
+                        "Stage 3 output is missing the required transition task "
+                        f"'{transition_name}' for '{literal.to_signature()}'."
                     )
                 seed_scope_start = time.perf_counter()
                 witness_objects, witness_object_types = self._seed_validation_scope(
@@ -1326,6 +1334,7 @@ class LTL_BDI_Pipeline:
                     target_literal=literal,
                     task_name=task_name,
                     transition_name=transition_name,
+                    task_args=tuple(literal.args),
                     typed_objects=self._typed_object_entries(
                         witness_objects,
                         witness_object_types,
@@ -2750,6 +2759,7 @@ class LTL_BDI_Pipeline:
             guided_execution = self._stage6_planner_guided_execution(
                 ltl_spec,
                 method_library,
+                plan_records=plan_records,
                 action_schemas=action_schemas,
                 runtime_objects=stage6_objects,
                 object_types=stage6_object_types,
@@ -3082,6 +3092,7 @@ class LTL_BDI_Pipeline:
             self.domain,
             method_library,
             self.domain.name,
+            export_source_names=True,
         )
         verification_domain_path = self.output_dir / "ipc_verification_domain.hddl"
         verification_domain_path.write_text(verification_domain_hddl)
@@ -3107,10 +3118,11 @@ class LTL_BDI_Pipeline:
         task_network = []
         variable_assignments: Dict[str, str] = {}
         for anchor in query_task_anchors:
-            task_name = str(anchor.get("task_name", "")).strip()
+            source_task_name = str(anchor.get("task_name", "")).strip()
             raw_task_args = tuple(str(arg).strip() for arg in (anchor.get("args") or ()))
-            if not task_name or any(not arg for arg in raw_task_args):
+            if not source_task_name or any(not arg for arg in raw_task_args):
                 return ()
+            task_name = query_root_alias_task_name(len(task_network) + 1, source_task_name)
             task_args = self._stage6_ground_query_task_arguments(
                 task_name=task_name,
                 task_args=raw_task_args,
@@ -3441,6 +3453,62 @@ class LTL_BDI_Pipeline:
         )
 
     @staticmethod
+    def _stage6_literal_holds_in_seed_facts(
+        literal: Optional[HTNLiteral],
+        seed_facts: Sequence[str],
+    ) -> bool:
+        if literal is None:
+            return False
+        if literal.is_equality:
+            if len(literal.args) != 2:
+                return False
+            equal = literal.args[0] == literal.args[1]
+            return equal if literal.is_positive else not equal
+
+        known_positive_facts = {
+            parsed
+            for parsed in (
+                LTL_BDI_Pipeline._parse_positive_hddl_fact(fact)
+                for fact in (seed_facts or ())
+            )
+            if parsed is not None
+        }
+        fact_signature = (literal.predicate, tuple(literal.args))
+        if literal.is_positive:
+            return fact_signature in known_positive_facts
+        return fact_signature not in known_positive_facts
+
+    @staticmethod
+    def _stage6_plan_record_queues_by_literal(
+        plan_records,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        queues: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for record in tuple(plan_records or ()):
+            literal = record.get("target_literal")
+            if literal is None:
+                continue
+            signature_getter = getattr(literal, "to_signature", None)
+            if not callable(signature_getter):
+                continue
+            signature = str(signature_getter() or "").strip()
+            if not signature:
+                continue
+            queues[signature].append(record)
+        return dict(queues)
+
+    @staticmethod
+    def _stage6_pop_plan_record_for_literal(
+        plan_record_queues: Dict[str, List[Dict[str, Any]]],
+        literal: Optional[HTNLiteral],
+    ) -> Optional[Dict[str, Any]]:
+        if literal is None:
+            return None
+        queued = plan_record_queues.get(literal.to_signature())
+        if not queued:
+            return None
+        return queued.pop(0)
+
+    @staticmethod
     def _stage6_project_effect_args(
         task_args: Sequence[str],
         task_types: Sequence[str],
@@ -3766,6 +3834,7 @@ class LTL_BDI_Pipeline:
         ltl_spec,
         method_library,
         *,
+        plan_records=None,
         action_schemas,
         runtime_objects,
         object_types,
@@ -3965,7 +4034,18 @@ class LTL_BDI_Pipeline:
             action_path: List[str] = []
             method_trace: List[Dict[str, Any]] = []
             work_dirs: List[str] = []
+            headline_literals = self._stage6_query_task_headline_literals(
+                ltl_spec,
+                task_network,
+                method_library,
+            )
+            plan_record_queues = self._stage6_plan_record_queues_by_literal(plan_records)
             for index, (task_name, task_args) in enumerate(task_network, start=1):
+                headline_literal = (
+                    headline_literals[index - 1]
+                    if index - 1 < len(headline_literals)
+                    else None
+                )
                 try:
                     guided_plan = planner.plan(
                         domain=self.domain,
@@ -3988,28 +4068,97 @@ class LTL_BDI_Pipeline:
                     JasonRunner._runtime_call(step.task_name, step.args)
                     for step in guided_plan.steps
                 ]
+                task_method_trace = planner.extract_method_trace(
+                    guided_plan.actual_plan or guided_plan.raw_plan,
+                )
                 replay = runner._replay_action_path_against_schemas(
                     action_path=task_action_path,
                     action_schemas=action_schemas,
                     seed_facts=current_seed_facts,
                 )
-                if replay.get("passed") is not True:
-                    print(
-                        "  • Incremental guided replay failed at task "
-                        f"{index}: {replay.get('message')}"
+                next_seed_facts = None
+                headline_satisfied = False
+                if replay.get("passed") is True:
+                    next_seed_facts = runner._runtime_world_to_hddl_facts(
+                        replay.get("world_facts") or (),
+                        predicate_name_map=predicate_name_map,
                     )
+                    headline_satisfied = self._stage6_literal_holds_in_seed_facts(
+                        headline_literal,
+                        next_seed_facts,
+                    )
+
+                if (
+                    replay.get("passed") is not True
+                    or (
+                        headline_literal is not None
+                        and headline_satisfied is not True
+                    )
+                ):
+                    fallback_record = self._stage6_pop_plan_record_for_literal(
+                        plan_record_queues,
+                        headline_literal,
+                    )
+                    if fallback_record is not None:
+                        fallback_plan = fallback_record.get("plan")
+                        fallback_action_path = [
+                            JasonRunner._runtime_call(step.task_name, step.args)
+                            for step in getattr(fallback_plan, "steps", ()) or ()
+                        ]
+                        fallback_replay = runner._replay_action_path_against_schemas(
+                            action_path=fallback_action_path,
+                            action_schemas=action_schemas,
+                            seed_facts=current_seed_facts,
+                        )
+                        fallback_seed_facts = None
+                        fallback_satisfied = False
+                        if fallback_replay.get("passed") is True:
+                            fallback_seed_facts = runner._runtime_world_to_hddl_facts(
+                                fallback_replay.get("world_facts") or (),
+                                predicate_name_map=predicate_name_map,
+                            )
+                            fallback_satisfied = self._stage6_literal_holds_in_seed_facts(
+                                headline_literal,
+                                fallback_seed_facts,
+                            )
+                        if (
+                            fallback_replay.get("passed") is True
+                            and (
+                                headline_literal is None
+                                or fallback_satisfied is True
+                            )
+                        ):
+                            current_seed_facts = tuple(fallback_seed_facts or ())
+                            action_path.extend(fallback_action_path)
+                            method_trace.extend(
+                                planner.extract_method_trace(
+                                    fallback_plan.actual_plan or fallback_plan.raw_plan,
+                                ),
+                            )
+                            if getattr(fallback_plan, "work_dir", None):
+                                work_dirs.append(str(fallback_plan.work_dir))
+                            continue
+
+                    if replay.get("passed") is not True:
+                        print(
+                            "  • Incremental guided replay failed at task "
+                            f"{index}: {replay.get('message')}"
+                        )
+                    else:
+                        print(
+                            "  • Incremental guided plan did not achieve task "
+                            f"{index} headline"
+                            + (
+                                f" '{headline_literal.to_signature()}'"
+                                if headline_literal is not None
+                                else ""
+                            )
+                        )
                     return None
 
-                current_seed_facts = runner._runtime_world_to_hddl_facts(
-                    replay.get("world_facts") or (),
-                    predicate_name_map=predicate_name_map,
-                )
+                current_seed_facts = tuple(next_seed_facts or ())
                 action_path.extend(task_action_path)
-                method_trace.extend(
-                    planner.extract_method_trace(
-                        guided_plan.actual_plan or guided_plan.raw_plan,
-                    ),
-                )
+                method_trace.extend(task_method_trace)
                 if guided_plan.work_dir:
                     work_dirs.append(str(guided_plan.work_dir))
 
