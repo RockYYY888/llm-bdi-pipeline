@@ -265,6 +265,7 @@ def test_generate_requests_provider_enforced_json_when_supported():
     assert spec.formulas[0].to_string() == "F(on(b1, b2))"
     first_call = generator.client.completions.calls[0]
     assert first_call["response_format"] == {"type": "json_object"}
+    assert first_call["extra_body"]["reasoning"]["exclude"] is True
     assert first_call["max_tokens"] == 4321
 
 
@@ -287,6 +288,28 @@ def test_generate_falls_back_when_provider_rejects_response_format():
     assert len(generator.client.completions.calls) == 2
     assert generator.client.completions.calls[0]["response_format"] == {"type": "json_object"}
     assert "response_format" not in generator.client.completions.calls[1]
+
+
+def test_generate_falls_back_when_provider_rejects_reasoning_controls():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+    generator.client = _RecordingClient(
+        [
+            RuntimeError("Unsupported parameter: reasoning"),
+            _stage1_json_response(
+                '{"objects":["b1","b2"],'
+                '"ltl_formulas":[{"type":"temporal","operator":"F","formula":{"on":["b1","b2"]}}],'
+                '"atoms":[{"symbol":"on_b1_b2","predicate":"on","args":["b1","b2"]}]}',
+            ),
+        ],
+    )
+
+    spec, _, _ = generator.generate("Goal: eventually b1 is on b2.")
+
+    assert spec.formulas[0].to_string() == "F(on(b1, b2))"
+    assert len(generator.client.completions.calls) == 2
+    assert generator.client.completions.calls[0]["extra_body"]["reasoning"]["exclude"] is True
+    assert "extra_body" not in generator.client.completions.calls[1]
+    assert generator.client.completions.calls[1]["response_format"] == {"type": "json_object"}
 
 
 def test_generator_prefers_compact_task_grounded_output_for_explicit_task_queries():

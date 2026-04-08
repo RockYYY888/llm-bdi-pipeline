@@ -166,6 +166,7 @@ OPENAI_API_KEY=
 
 # Optional: Model selection
 OPENAI_MODEL=deepseek-chat
+OPENAI_STAGE1_MODEL=deepseek/deepseek-chat-v3-0324
 
 # Optional: Base URL (for DeepSeek or other custom endpoints)
 OPENAI_BASE_URL=https://api.deepseek.com
@@ -306,7 +307,8 @@ python src/main.py \
 Notes:
 
 - Stage 1 requires an LLM API key.
-- Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
+- Stage 1 uses `OPENAI_STAGE1_MODEL` and defaults to the DeepSeek V3.2 chat model.
+- Stage 3 may use `OPENAI_STAGE3_MODEL`; otherwise it falls back to `OPENAI_MODEL`.
 - `--domain-file` is required. The pipeline does not use an implicit default domain.
 - For benchmark-backed or Stage 3-sensitive runs, prefer the single-sentence task-anchored query
   format documented in `docs/query_protocol.md`.

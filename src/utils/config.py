@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 from typing import Iterable, Optional
 
+DEFAULT_STAGE1_MODEL = "deepseek/deepseek-chat-v3-0324"
+DEFAULT_SHARED_MODEL = "deepseek-chat"
+
 
 class Config:
     """Configuration manager for the LLM-BDI Pipeline"""
@@ -47,7 +50,19 @@ class Config:
     @property
     def openai_model(self) -> str:
         """Get OpenAI model (default: deepseek-chat)"""
-        return os.getenv('OPENAI_MODEL', 'deepseek-chat')
+        return os.getenv('OPENAI_MODEL', DEFAULT_SHARED_MODEL)
+
+    @property
+    def openai_stage1_model(self) -> str:
+        """
+        Get the Stage 1 model identifier.
+
+        Stage 1 must not inherit the shared model selection used by other stages.
+        Keep it pinned to the DeepSeek chat model family by default so benchmark
+        runs remain stable even when Stage 3 experiments temporarily switch the
+        shared model to another provider.
+        """
+        return os.getenv('OPENAI_STAGE1_MODEL', DEFAULT_STAGE1_MODEL)
 
     @property
     def openai_stage3_model(self) -> str:

@@ -13,6 +13,7 @@ from typing import Optional
 
 from .ltlf_formula import LTLFormula, LTLSpecification, TemporalOperator, LogicalOperator
 from .grounding_map import GroundingMap, create_propositional_symbol
+from utils.config import DEFAULT_STAGE1_MODEL
 
 
 class NLToLTLfGenerator:
@@ -42,7 +43,7 @@ class NLToLTLfGenerator:
             response_max_tokens: Maximum completion tokens for the JSON response
         """
         self.api_key = api_key
-        self.model = model or "deepseek-chat"
+        self.model = model or DEFAULT_STAGE1_MODEL
         self.base_url = base_url
         self.domain_file = domain_file
         self.request_timeout = float(request_timeout or 60.0)
@@ -633,15 +634,57 @@ class NLToLTLfGenerator:
             "max_tokens": self.response_max_tokens,
         }
 
-        try:
-            return self.client.chat.completions.create(
-                response_format={"type": "json_object"},
-                **request_kwargs,
-            )
-        except Exception as exc:
-            if self._is_unsupported_json_response_format_error(exc):
-                return self.client.chat.completions.create(**request_kwargs)
-            raise
+        request_variants = [
+            {
+                "response_format": {"type": "json_object"},
+                "extra_body": {
+                    "reasoning": {
+                        "effort": "none",
+                        "exclude": True,
+                    },
+                },
+            },
+            {
+                "response_format": {"type": "json_object"},
+                "extra_body": {
+                    "reasoning": {
+                        "exclude": True,
+                    },
+                },
+            },
+            {
+                "response_format": {"type": "json_object"},
+            },
+            {},
+        ]
+        last_optional_error: Exception | None = None
+        index = 0
+        while index < len(request_variants):
+            variant = request_variants[index]
+            try:
+                return self.client.chat.completions.create(
+                    **request_kwargs,
+                    **variant,
+                )
+            except Exception as exc:
+                if self._is_unsupported_json_response_format_error(exc):
+                    last_optional_error = exc
+                    request_variants = [{}]
+                    index = 0
+                    continue
+                if self._is_unsupported_reasoning_parameter_error(exc):
+                    last_optional_error = exc
+                    request_variants = [
+                        {"response_format": {"type": "json_object"}},
+                        {},
+                    ]
+                    index = 0
+                    continue
+                raise
+            index += 1
+        if last_optional_error is not None:
+            raise last_optional_error
+        raise RuntimeError("Stage 1 could not create a chat completion request.")
 
     def _extract_response_text(self, response: object) -> str:
         """
@@ -733,6 +776,22 @@ class NLToLTLfGenerator:
         """
         message = str(exc).lower()
         if "response_format" not in message and "json_object" not in message:
+            return False
+        unsupported_markers = (
+            "unsupported",
+            "not supported",
+            "invalid parameter",
+            "unknown parameter",
+            "unrecognized request argument",
+            "extra inputs are not permitted",
+        )
+        return any(marker in message for marker in unsupported_markers)
+
+    @staticmethod
+    def _is_unsupported_reasoning_parameter_error(exc: Exception) -> bool:
+        """Detect provider errors that reject explicit reasoning controls."""
+        message = str(exc).lower()
+        if "reasoning" not in message:
             return False
         unsupported_markers = (
             "unsupported",

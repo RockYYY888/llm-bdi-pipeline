@@ -242,7 +242,7 @@ class LTL_BDI_Pipeline:
 
         generator = NLToLTLfGenerator(
             api_key=self.config.openai_api_key,
-            model=self.config.openai_model,
+            model=self.config.openai_stage1_model,
             base_url=self.config.openai_base_url,
             domain_file=self.domain_file,  # Pass domain file for dynamic prompt
             request_timeout=self.config.openai_timeout,
@@ -283,7 +283,7 @@ class LTL_BDI_Pipeline:
                 nl_instruction,
                 ltl_spec,
                 "Success",
-                model=self.config.openai_model,
+                model=self.config.openai_stage1_model,
                 llm_prompt=prompt_dict,
                 llm_response=response_text
             )
@@ -307,7 +307,13 @@ class LTL_BDI_Pipeline:
                     "failure_stage": generator_metadata.get("failure_stage"),
                 },
             )
-            self.logger.log_stage1(nl_instruction, None, "Failed", str(e))
+            self.logger.log_stage1(
+                nl_instruction,
+                None,
+                "Failed",
+                str(e),
+                model=self.config.openai_stage1_model,
+            )
             print(f"✗ Stage 1 Failed: {e}")
             return None
 
@@ -2988,6 +2994,10 @@ class LTL_BDI_Pipeline:
         guided_plan_text = stage6_artifacts.get("guided_hierarchical_plan_text")
         verifier_start = time.perf_counter()
         if guided_plan_text:
+            guided_plan_text = self._stage7_rewrite_guided_plan_source_names(
+                guided_plan_text,
+                method_library,
+            )
             verifier_result = verifier.verify_plan_text(
                 domain_file=verification_domain_file,
                 problem_file=self.problem_file,
@@ -3077,6 +3087,43 @@ class LTL_BDI_Pipeline:
             "summary": summary,
             "artifacts": artifacts,
         }
+
+    @staticmethod
+    def _stage7_rewrite_guided_plan_source_names(plan_text, method_library):
+        task_name_map = {
+            task.name: str(task.source_name).strip()
+            for task in getattr(method_library, "compound_tasks", ())
+            if str(getattr(task, "source_name", "") or "").strip()
+        }
+        if not task_name_map:
+            return plan_text
+
+        trailing_newline = str(plan_text).endswith("\n")
+        rewritten_lines = []
+        for raw_line in str(plan_text).splitlines():
+            stripped = raw_line.strip()
+            if "->" not in stripped:
+                rewritten_lines.append(raw_line)
+                continue
+            before, _, after = stripped.partition("->")
+            head_tokens = before.split()
+            if len(head_tokens) < 2 or not head_tokens[0].isdigit():
+                rewritten_lines.append(raw_line)
+                continue
+            source_name = task_name_map.get(head_tokens[1])
+            if not source_name:
+                rewritten_lines.append(raw_line)
+                continue
+            head_tokens[1] = source_name
+            leading = raw_line[: len(raw_line) - len(raw_line.lstrip())]
+            rewritten_lines.append(
+                f"{leading}{' '.join(head_tokens)} -> {after.strip()}".rstrip(),
+            )
+
+        rewritten = "\n".join(rewritten_lines)
+        if trailing_newline:
+            rewritten += "\n"
+        return rewritten
 
     def _stage7_build_verification_domain(self, method_library):
         planner = PANDAPlanner()

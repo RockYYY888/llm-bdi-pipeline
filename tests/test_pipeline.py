@@ -49,6 +49,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTargetTaskBinding,
 	HTNTask,
 )
+from stage3_method_synthesis.transition_native import build_transition_native_prompt_analysis
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner
@@ -757,6 +758,201 @@ def _official_domain_method_library(
 	)
 
 
+def _official_transition_native_method_library(
+	domain_key: str,
+	*,
+	grounding_map: GroundingMap,
+	dfa_result: Dict[str, Any],
+	target_literal_signatures: List[str],
+	query_task_anchors: List[Dict[str, Any]],
+	ordered_literal_signatures: List[str] | None = None,
+) -> HTNMethodLibrary:
+	base_library = _official_domain_method_library(
+		domain_key,
+		target_literal_signatures=target_literal_signatures,
+		query_task_anchors=query_task_anchors,
+	)
+	delegate = RealHTNMethodSynthesizer()
+	transition_specs = _extract_progressing_transitions_compat(
+		delegate,
+		grounding_map,
+		dfa_result,
+		ordered_literal_signatures=ordered_literal_signatures,
+		linearise_ordered_literals=True,
+	)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=base_library.target_literals,
+		query_task_anchors=query_task_anchors,
+		transition_specs=transition_specs,
+	)
+
+	helper_compound_tasks = [
+		HTNTask(
+			name=task.name,
+			parameters=task.parameters,
+			is_primitive=task.is_primitive,
+			source_predicates=task.source_predicates,
+			headline_literal=task.headline_literal,
+			source_name=None,
+		)
+		for task in base_library.compound_tasks
+	]
+	query_root_tasks = [
+		HTNTask(
+			name=str(item["name"]),
+			parameters=tuple(item.get("parameters", ()) or ()),
+			is_primitive=False,
+			source_predicates=(str(item["headline_literal"]["predicate"]),),
+			headline_literal=HTNLiteral(
+				predicate=str(item["headline_literal"]["predicate"]),
+				args=tuple(item["headline_literal"].get("args", ()) or ()),
+				is_positive=bool(item["headline_literal"].get("is_positive", True)),
+				source_symbol=None,
+			),
+			source_name=str(item.get("source_name") or "").strip(),
+		)
+		for item in prompt_analysis.get("query_root_alias_tasks", ())
+	]
+	transition_tasks = [
+		HTNTask(
+			name=str(item["name"]),
+			parameters=tuple(item.get("parameters", ()) or ()),
+			is_primitive=False,
+			source_predicates=(str(item["headline_literal"]["predicate"]),),
+			headline_literal=HTNLiteral(
+				predicate=str(item["headline_literal"]["predicate"]),
+				args=tuple(item["headline_literal"].get("args", ()) or ()),
+				is_positive=bool(item["headline_literal"].get("is_positive", True)),
+				source_symbol=None,
+			),
+			source_name=None,
+		)
+		for item in prompt_analysis.get("transition_tasks", ())
+	]
+
+	literal_to_helper_tasks: Dict[str, List[str]] = {}
+	for binding in base_library.target_task_bindings:
+		literal_to_helper_tasks.setdefault(binding.target_literal, []).append(binding.task_name)
+
+	literal_to_transition_names: Dict[str, List[str]] = {}
+	for item in prompt_analysis.get("transition_tasks", ()):
+		literal_to_transition_names.setdefault(str(item["target_literal"]), []).append(str(item["name"]))
+
+	wrapper_methods: List[HTNMethod] = []
+	for item in prompt_analysis.get("query_root_alias_tasks", ()):
+		task_name = str(item["name"])
+		parameters = tuple(item.get("parameters", ()) or ())
+		headline_literal = HTNLiteral(
+			predicate=str(item["headline_literal"]["predicate"]),
+			args=tuple(item["headline_literal"].get("args", ()) or ()),
+			is_positive=bool(item["headline_literal"].get("is_positive", True)),
+			source_symbol=None,
+		)
+		target_literal = str(item.get("target_literal"))
+		transition_candidates = literal_to_transition_names.get(target_literal, [])
+		if not transition_candidates:
+			raise ValueError(
+				f"Official Stage 3 mask could not find a transition task for target literal '{target_literal}'.",
+			)
+		transition_name = transition_candidates.pop(0)
+		wrapper_methods.append(
+			HTNMethod(
+				method_name=f"m_{task_name}_noop",
+				task_name=task_name,
+				parameters=parameters,
+				task_args=parameters,
+				context=(headline_literal,) if headline_literal else (),
+				subtasks=(),
+				ordering=(),
+				origin="official_stage3_mask_transition_native",
+			),
+		)
+		wrapper_methods.append(
+			HTNMethod(
+				method_name=f"m_{task_name}_constructive",
+				task_name=task_name,
+				parameters=parameters,
+				task_args=parameters,
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name=transition_name,
+						args=parameters,
+						kind="compound",
+						action_name=None,
+					),
+				),
+				ordering=(),
+				origin="official_stage3_mask_transition_native",
+			),
+		)
+
+	for item in prompt_analysis.get("transition_tasks", ()):
+		task_name = str(item["name"])
+		parameters = tuple(item.get("parameters", ()) or ())
+		headline_literal = HTNLiteral(
+			predicate=str(item["headline_literal"]["predicate"]),
+			args=tuple(item["headline_literal"].get("args", ()) or ()),
+			is_positive=bool(item["headline_literal"].get("is_positive", True)),
+			source_symbol=None,
+		)
+		target_literal = str(item.get("target_literal"))
+		helper_candidates = literal_to_helper_tasks.get(target_literal, [])
+		if not helper_candidates:
+			raise ValueError(
+				f"Official Stage 3 mask could not map transition task '{task_name}' to an official helper task "
+				f"for '{target_literal}'.",
+			)
+		helper_task_name = helper_candidates[0]
+		wrapper_methods.append(
+			HTNMethod(
+				method_name=f"m_{task_name}_noop",
+				task_name=task_name,
+				parameters=parameters,
+				task_args=parameters,
+				context=(headline_literal,) if headline_literal else (),
+				subtasks=(),
+				ordering=(),
+				origin="official_stage3_mask_transition_native",
+			),
+		)
+		wrapper_methods.append(
+			HTNMethod(
+				method_name=f"m_{task_name}_constructive",
+				task_name=task_name,
+				parameters=parameters,
+				task_args=parameters,
+				context=(),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name=helper_task_name,
+						args=parameters,
+						kind="compound",
+						action_name=None,
+					),
+				),
+				ordering=(),
+				origin="official_stage3_mask_transition_native",
+			),
+		)
+
+	return HTNMethodLibrary(
+		compound_tasks=tuple([*helper_compound_tasks, *query_root_tasks, *transition_tasks]),
+		primitive_tasks=tuple(base_library.primitive_tasks),
+		methods=tuple([*base_library.methods, *wrapper_methods]),
+		target_literals=base_library.target_literals,
+		target_task_bindings=tuple(
+			HTNTargetTaskBinding(
+				target_literal=str(item["target_literal"]),
+				task_name=str(item["task_name"]),
+			)
+			for item in prompt_analysis.get("target_task_bindings", ())
+		),
+	)
+
+
 def _build_oracle_task_grounded_stage1_spec(
 	pipeline: LTL_BDI_Pipeline,
 	nl_instruction: str,
@@ -868,10 +1064,13 @@ def _run_domain_query_case_with_official_stage3_mask(
 		):
 			target_literal_signatures = list(ordered_literal_signatures or ())
 			anchors = list(query_task_anchors or ())
-			method_library = _official_domain_method_library(
+			method_library = _official_transition_native_method_library(
 				domain_key,
+				grounding_map=grounding_map,
+				dfa_result=dfa_result,
 				target_literal_signatures=target_literal_signatures,
 				query_task_anchors=anchors,
+				ordered_literal_signatures=target_literal_signatures,
 			)
 			return method_library, {
 				"used_llm": False,
@@ -4899,10 +5098,29 @@ def assert_stage7_prefers_guided_hierarchical_plan_text():
 		problem_file=str(problem_path.resolve()),
 	)
 	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage7_verifier_"))
-	method_library = _official_domain_method_library(
-		"blocksworld",
-		target_literal_signatures=["on(b1, b2)"],
-		query_task_anchors=[{"task_name": "do_put_on", "args": ["b1", "b2"]}],
+	method_library = HTNMethodLibrary(
+		compound_tasks=(
+			HTNTask(
+				name="query_root_1_do_put_on",
+				parameters=("ARG1", "ARG2"),
+				is_primitive=False,
+				source_predicates=("on",),
+				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True, None),
+				source_name="do_put_on",
+			),
+			HTNTask(
+				name="dfa_step_q1_q2_on_b1_b2",
+				parameters=("ARG1", "ARG2"),
+				is_primitive=False,
+				source_predicates=("on",),
+				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True, None),
+				source_name=None,
+			),
+		),
+		primitive_tasks=(),
+		methods=(),
+		target_literals=(HTNLiteral("on", ("b1", "b2"), True, None),),
+		target_task_bindings=(HTNTargetTaskBinding("on(b1, b2)", "query_root_1_do_put_on"),),
 	)
 	captured: Dict[str, Any] = {"verify_plan": 0, "verify_plan_text": 0}
 
@@ -4946,7 +5164,13 @@ def assert_stage7_prefers_guided_hierarchical_plan_text():
 			method_library,
 			{
 				"artifacts": {
-					"guided_hierarchical_plan_text": "==>\n0 stack b1 b2\nroot\n",
+					"guided_hierarchical_plan_text": (
+						"==>\n"
+						"0 stack b1 b2\n"
+						"root 2\n"
+						"2 query_root_1_do_put_on b1 b2 -> m_query_root_1_do_put_on_constructive 4\n"
+						"4 dfa_step_q1_q2_on_b1_b2 b1 b2 -> m_dfa_step_q1_q2_on_b1_b2_constructive\n"
+					),
 					"action_path": "/tmp/action_path.txt",
 					"method_trace": "/tmp/method_trace.json",
 				},
@@ -4958,7 +5182,13 @@ def assert_stage7_prefers_guided_hierarchical_plan_text():
 	assert result is not None
 	assert captured["verify_plan_text"] == 1
 	assert captured["verify_plan"] == 0
-	assert captured["plan_text"] == "==>\n0 stack b1 b2\nroot\n"
+	assert captured["plan_text"] == (
+		"==>\n"
+		"0 stack b1 b2\n"
+		"root 2\n"
+		"2 do_put_on b1 b2 -> m_query_root_1_do_put_on_constructive 4\n"
+		"4 dfa_step_q1_q2_on_b1_b2 b1 b2 -> m_dfa_step_q1_q2_on_b1_b2_constructive\n"
+	)
 
 
 def assert_stage6_unordered_ordering_fallback_does_not_write_to_repo_root(monkeypatch):
