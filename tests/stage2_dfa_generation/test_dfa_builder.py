@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
@@ -61,29 +60,16 @@ digraph G {
   1 -> 2 [label="true"];
 }
 """.strip()
-    simplified_dfa = """
-digraph G {
-  node [shape = doublecircle]; 2;
-  node [shape = circle]; 1;
-  init -> 1;
-  1 -> 2 [label="true"];
-}
-""".strip()
-
     builder = DFABuilder()
     builder.converter.convert = lambda _: (original_dfa, {"original_formula": "stub"})
-    builder.simplifier.simplify = lambda dot, grounding: SimpleNamespace(
-        simplified_dot=simplified_dfa,
-        stats={"method": "stub"},
-    )
 
     result = builder.build(spec)
 
     assert result["formula"] == "(F(on(a, b)) & F(on(b, c)))"
-    assert result["original_num_states"] == 2
-    assert result["original_num_transitions"] == 1
     assert result["num_states"] == 2
     assert result["num_transitions"] == 1
+    assert result["construction"] == "generic_ltlf2dfa"
+    assert result["dfa_path"] == "dfa.dot"
     assert "timing_profile" in result
     assert result["timing_profile"]["convert_seconds"] >= 0.0
     assert result["timing_profile"]["total_seconds"] >= 0.0
@@ -114,7 +100,7 @@ def test_ltlf_to_dfa_uses_fast_path_for_independent_eventually_conjunctions():
     assert '3 -> 4 [label="on_a_b"]' in dfa_dot
 
 
-def test_dfa_builder_skips_bdd_simplification_for_independent_eventually_atomic_fast_path():
+def test_dfa_builder_keeps_raw_atomic_fast_path_output():
     spec = LTLSpecification()
     spec.add_formula(_finally_formula("on", ["a", "b"]))
     spec.add_formula(_finally_formula("clear", ["a"]))
@@ -123,19 +109,11 @@ def test_dfa_builder_skips_bdd_simplification_for_independent_eventually_atomic_
     grounding_map.add_atom("clear_a", "clear", ["a"])
     spec.grounding_map = grounding_map
 
-    builder = DFABuilder()
-    builder.simplifier.simplify = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("BDD simplifier should be skipped for the atomic fast path"),
-    )
+    result = DFABuilder().build(spec)
 
-    result = builder.build(spec)
-
-    assert result["original_num_states"] == 4
     assert result["num_states"] == 4
-    assert result["original_num_transitions"] == 5
     assert result["num_transitions"] == 5
-    assert result["simplification_stats"]["method"] == "independent_eventually_atomic_fast_path"
-    assert result["simplification_stats"]["skipped_simplifier"] is True
+    assert result["construction"] == "independent_eventually_atomic_fast_path"
 
 
 def test_ltlf_to_dfa_uses_fast_path_for_thirteen_independent_eventually_goals():
@@ -237,23 +215,20 @@ digraph MONA_DFA {
   1 -> 2 [label="goal_0"];
 }
 """.strip()
-    simplified_dfa = original_dfa
-
     builder = DFABuilder()
-    builder.converter.ltlf_parser = lambda *_args, **_kwargs: SimpleNamespace(to_dfa=lambda: original_dfa)
-    builder.simplifier.simplify = lambda dot, grounding: SimpleNamespace(
-        simplified_dot=simplified_dfa,
-        stats={"method": "stub"},
-    )
+    builder.converter.ltlf_parser = lambda *_args, **_kwargs: type(
+        "StubFormula",
+        (),
+        {"to_dfa": staticmethod(lambda: original_dfa)},
+    )()
 
     result = builder.build(spec)
 
-    assert result["original_num_transitions"] == 1
     assert result["num_transitions"] == 1
-    assert result["simplification_stats"]["method"] == "stub"
+    assert result["construction"] == "generic_ltlf2dfa"
 
 
-def test_dfa_builder_skips_bdd_simplification_for_symbolic_unordered_surrogate():
+def test_dfa_builder_keeps_symbolic_unordered_surrogate_output():
     spec = LTLSpecification()
     grounding_map = GroundingMap()
     signatures = []
@@ -266,19 +241,11 @@ def test_dfa_builder_skips_bdd_simplification_for_symbolic_unordered_surrogate()
     spec.query_task_literal_signatures = signatures
     spec.query_task_sequence_is_ordered = False
 
-    builder = DFABuilder()
-    builder.simplifier.simplify = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("BDD simplifier should be skipped for the symbolic surrogate path"),
-    )
+    result = DFABuilder().build(spec)
 
-    result = builder.build(spec)
-
-    assert result["original_num_states"] == 1
     assert result["num_states"] == 1
-    assert result["original_num_transitions"] == 1
     assert result["num_transitions"] == 1
-    assert result["simplification_stats"]["method"] == "independent_eventually_symbolic_surrogate"
-    assert result["simplification_stats"]["skipped_simplifier"] is True
+    assert result["construction"] == "independent_eventually_symbolic_surrogate"
 
 
 def test_ltlf_to_dfa_uses_fast_path_for_ordered_eventually_sequences():
@@ -336,7 +303,7 @@ def test_ltlf_to_dfa_uses_fast_path_for_ordered_eventually_sequences():
     assert '3 -> 4 [label="holding_a"]' in dfa_dot
 
 
-def test_dfa_builder_skips_bdd_simplification_for_ordered_eventually_atomic_fast_path():
+def test_dfa_builder_keeps_ordered_eventually_atomic_fast_path_output():
     spec = LTLSpecification()
     spec.formulas = [_finally_formula("goal", ["a"])]
     spec.query_task_sequence_is_ordered = True
@@ -346,19 +313,11 @@ def test_dfa_builder_skips_bdd_simplification_for_ordered_eventually_atomic_fast
     grounding_map.add_atom("finish_a", "finish", ["a"])
     spec.grounding_map = grounding_map
 
-    builder = DFABuilder()
-    builder.simplifier.simplify = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        AssertionError("BDD simplifier should be skipped for ordered atomic fast path"),
-    )
+    result = DFABuilder().build(spec)
 
-    result = builder.build(spec)
-
-    assert result["original_num_states"] == 4
     assert result["num_states"] == 4
-    assert result["original_num_transitions"] == 3
     assert result["num_transitions"] == 3
-    assert result["simplification_stats"]["method"] == "ordered_eventually_atomic_fast_path"
-    assert result["simplification_stats"]["skipped_simplifier"] is True
+    assert result["construction"] == "ordered_eventually_atomic_fast_path"
 
 
 def test_dfa_builder_count_transitions_ignores_init_and_handles_multiple_edges_per_line():

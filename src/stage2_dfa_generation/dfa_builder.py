@@ -38,13 +38,11 @@ class DFABuilder:
         Returns:
             Dict with:
                 - formula: Original LTLf formula string
-                - original_dfa_dot: Original DFA in DOT format (before simplification)
                 - dfa_dot: Raw DFA in DOT format
+                - dfa_path: Relative artifact path used by the logger
+                - construction: DFA construction path reported by the converter
                 - num_states: Number of states in the raw DFA
                 - num_transitions: Number of transitions in the raw DFA
-                - original_num_states: Number of states in original DFA
-                - original_num_transitions: Number of transitions in original DFA
-                - simplification_stats: Compatibility metadata describing raw export
         """
         total_start = time.perf_counter()
         timing_profile: Dict[str, float] = {}
@@ -66,39 +64,25 @@ class DFABuilder:
 
         # Step 1: Generate DFA using the convert method (takes ltl_spec object)
         convert_start = time.perf_counter()
-        original_dfa_dot, metadata = self.converter.convert(ltl_spec)
+        dfa_dot, metadata = self.converter.convert(ltl_spec)
         timing_profile["convert_seconds"] = time.perf_counter() - convert_start
 
-        # Parse original DFA to get statistics (BEFORE simplification)
-        original_stats_start = time.perf_counter()
-        original_num_states = int(metadata.get("num_states") or self._count_states(original_dfa_dot))
-        original_num_transitions = int(
-            metadata.get("num_transitions") or self._count_transitions(original_dfa_dot)
+        stats_start = time.perf_counter()
+        num_states = int(metadata.get("num_states") or self._count_states(dfa_dot))
+        num_transitions = int(
+            metadata.get("num_transitions") or self._count_transitions(dfa_dot)
         )
-        timing_profile["original_stats_seconds"] = time.perf_counter() - original_stats_start
-
-        num_states = original_num_states
-        num_transitions = original_num_transitions
+        timing_profile["stats_seconds"] = time.perf_counter() - stats_start
         timing_profile["total_seconds"] = time.perf_counter() - total_start
 
         result = {
             "formula": formula_str,
-            "original_dfa_dot": original_dfa_dot,
-            "dfa_dot": original_dfa_dot,
+            "dfa_dot": dfa_dot,
+            "dfa_path": "dfa.dot",
+            "construction": metadata.get("construction") or "generic_ltlf2dfa",
             "num_states": num_states,
             "num_transitions": num_transitions,
-            "original_num_states": original_num_states,
-            "original_num_transitions": original_num_transitions,
-            "simplification_stats": {
-                "method": metadata.get("construction") or "raw_original_dfa",
-                "num_predicates": len(metadata.get("alphabet", [])),
-                "num_original_states": original_num_states,
-                "num_new_states": original_num_states,
-                "num_original_transitions": original_num_transitions,
-                "num_new_transitions": original_num_transitions,
-                "skipped_simplifier": True,
-                "raw_dfa_only": True,
-            },
+            "num_predicates": len(metadata.get("alphabet", [])),
             "timing_profile": timing_profile,
         }
 
@@ -149,14 +133,14 @@ def test_dfa_builder():
     from stage1_interpretation.grounding_map import GroundingMap
 
     print("="*80)
-    print("DFA BUILDER TEST (with mandatory simplification)")
+    print("DFA BUILDER TEST")
     print("="*80)
 
     # Create test LTL spec: F(on_a_b)
     spec = LTLSpecification()
     spec.objects = ["a", "b"]
 
-    # Create grounding map (required for simplification)
+    # Create grounding map
     gmap = GroundingMap()
     gmap.add_atom("on_a_b", "on", ["a", "b"])
     spec.grounding_map = gmap
@@ -181,33 +165,19 @@ def test_dfa_builder():
 
     print(f"\nTest formula: {f_formula.to_string()}")
 
-    # Build DFA (now includes mandatory simplification)
+    # Build DFA
     builder = DFABuilder()
     result = builder.build(spec)
 
-    print(f"\n✓ DFA Generated and Simplified")
+    print(f"\n✓ DFA Generated")
     print(f"  Formula: {result['formula']}")
-    print(f"\n  Original DFA (before simplification):")
-    print(f"    States: {result['original_num_states']}")
-    print(f"    Transitions: {result['original_num_transitions']}")
-    print(f"\n  Simplified DFA (after simplification):")
+    print(f"\n  DFA:")
     print(f"    States: {result['num_states']}")
     print(f"    Transitions: {result['num_transitions']}")
-    print(f"\nSimplification Stats:")
-    stats = result['simplification_stats']
-    print(f"  Method: {stats['method']}")
-    print(f"  Predicates: {stats['num_predicates']}")
+    print(f"  Construction: {result['construction']}")
+    print(f"  Predicates: {result['num_predicates']}")
 
-    # Only show detailed stats if simplification was actually performed
-    if 'num_original_states' in stats:
-        print(f"  Original States: {stats['num_original_states']}")
-        print(f"  New States: {stats['num_new_states']}")
-        print(f"  Original Transitions: {stats['num_original_transitions']}")
-        print(f"  New Transitions: {stats['num_new_transitions']}")
-
-    print(f"\nOriginal DFA:")
-    print(result['original_dfa_dot'])
-    print(f"\nSimplified DFA:")
+    print(f"\nDFA:")
     print(result['dfa_dot'])
 
     print("\n" + "="*80)

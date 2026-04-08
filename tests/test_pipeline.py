@@ -259,8 +259,7 @@ def _required_artifact_paths(log_dir: Path) -> List[Path]:
 		log_dir / "execution.json",
 		log_dir / "execution.txt",
 		log_dir / "grounding_map.json",
-		log_dir / "dfa_original.dot",
-		log_dir / "dfa_simplified.dot",
+		log_dir / "dfa.dot",
 		log_dir / "agentspeak_generated.asl",
 		log_dir / "htn_method_library.json",
 		log_dir / "panda_transitions.json",
@@ -2853,13 +2852,10 @@ def assert_pipeline_logger_stage2_payload_omits_embedded_dfa_bodies(tmp_path):
 
 	dfa_result = {
 		"formula": "F(at(package-0, city-loc-0))",
-		"original_dfa_dot": 'digraph MONA_DFA { init -> 1; 1 -> 2 [label="at_package_0_city_loc_0"]; }',
 		"dfa_dot": 'digraph MONA_DFA { init -> 1; 1 -> 2 [label="at_package_0_city_loc_0"]; }',
 		"num_states": 2,
 		"num_transitions": 1,
-		"original_num_states": 2,
-		"original_num_transitions": 1,
-		"simplification_stats": {"method": "stub"},
+		"construction": "stub",
 	}
 
 	logger.log_stage2_dfas(None, dfa_result, "Success")
@@ -2868,12 +2864,10 @@ def assert_pipeline_logger_stage2_payload_omits_embedded_dfa_bodies(tmp_path):
 	execution_json = json.loads((logger.current_log_dir / "execution.json").read_text())
 	stage2_result = execution_json["stage2_dfa_result"]
 	assert "dfa_dot" not in stage2_result
-	assert "original_dfa_dot" not in stage2_result
-	assert stage2_result["original_dfa_path"] == "dfa_original.dot"
-	assert stage2_result["simplified_dfa_path"] == "dfa_simplified.dot"
+	assert stage2_result["dfa_path"] == "dfa.dot"
 
 	execution_txt = (logger.current_log_dir / "execution.txt").read_text()
-	assert "Full DFA bodies are stored in dfa_original.dot and dfa_simplified.dot" in execution_txt
+	assert "Full DFA bodies are stored in dfa.dot" in execution_txt
 	assert 'label="at_package_0_city_loc_0"' not in execution_txt
 
 

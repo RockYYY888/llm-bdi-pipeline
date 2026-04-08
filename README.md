@@ -282,8 +282,7 @@ PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
   - `execution.json`
   - `execution.txt`
   - `grounding_map.json`
-  - `dfa_original.dot`
-  - `dfa_simplified.dot`
+  - `dfa.dot`
   - `dfa.json`
   - `agentspeak_generated.asl`
   - `htn_method_library.json`
@@ -310,7 +309,7 @@ Notes:
 - Stage 1 and Stage 3 both read the same `OPENAI_*` configuration.
 - `--domain-file` is required. The pipeline does not use an implicit default domain.
 - For benchmark-backed or Stage 3-sensitive runs, prefer the single-sentence task-anchored query
-  format documented in `docs/nl_instruction_template.md`.
+  format documented in `docs/query_protocol.md`.
 - `--problem-file` is optional and, when provided, Stage 6 seeds runtime facts from the
   official HDDL problem `:init` and Stage 7 verifies the generated hierarchical plan against
   the same benchmark problem.
@@ -368,8 +367,7 @@ A successful Stage 1-7 benchmark-backed run writes:
 - `execution.json`
 - `execution.txt`
 - `grounding_map.json`
-- `dfa_original.dot`
-- `dfa_simplified.dot`
+- `dfa.dot`
 - `dfa.json`
 - `agentspeak_generated.asl`
 - `htn_method_library.json`

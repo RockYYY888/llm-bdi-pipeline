@@ -332,14 +332,9 @@ class LTL_BDI_Pipeline:
             print(f"✓ DFA Generation Complete")
             print(f"  Formula: {dfa_result['formula']}")
             print(f"\n  Raw DFA:")
-            print(f"    States: {dfa_result['original_num_states']}")
-            print(f"    Transitions: {dfa_result['original_num_transitions']}")
-            print(f"    Saved to: {self.output_dir / 'dfa_original.dot'}")
-            if dfa_result.get("dfa_dot") != dfa_result.get("original_dfa_dot"):
-                print(f"\n  Additional DFA export:")
-                print(f"    States: {dfa_result['num_states']}")
-                print(f"    Transitions: {dfa_result['num_transitions']}")
-                print(f"    Saved to: {self.output_dir / 'dfa_simplified.dot'}")
+            print(f"    States: {dfa_result['num_states']}")
+            print(f"    Transitions: {dfa_result['num_transitions']}")
+            print(f"    Saved to: {self.output_dir / 'dfa.dot'}")
 
             # Save complete DFA result to JSON
             output_file = self.output_dir / "dfa.json"
@@ -347,8 +342,7 @@ class LTL_BDI_Pipeline:
             # Remove the actual DOT strings from JSON to keep it readable
             # (DOT files are saved separately)
             persist_start = time.perf_counter()
-            json_data = {k: v for k, v in dfa_result.items()
-                        if k not in ['dfa_dot', 'original_dfa_dot']}
+            json_data = {k: v for k, v in dfa_result.items() if k != 'dfa_dot'}
             output_file.write_text(json.dumps(json_data, indent=2))
             stage2_breakdown = self._timing_breakdown_without_total(
                 dfa_result.get("timing_profile"),
@@ -361,9 +355,7 @@ class LTL_BDI_Pipeline:
                 stage_start,
                 breakdown=stage2_breakdown,
                 metadata={
-                    "construction": (
-                        (dfa_result.get("simplification_stats") or {}).get("method")
-                    ),
+                    "construction": dfa_result.get("construction"),
                     "num_states": dfa_result.get("num_states"),
                     "num_transitions": dfa_result.get("num_transitions"),
                 },

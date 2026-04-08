@@ -38,8 +38,6 @@ class PipelineRecord:
 	stage2_formula: Optional[str] = None
 	stage2_num_states: int = 0
 	stage2_num_transitions: int = 0
-	stage2_original_num_states: int = 0
-	stage2_original_num_transitions: int = 0
 	stage2_error: Optional[str] = None
 
 	stage3_status: str = "pending"
@@ -264,17 +262,10 @@ class PipelineLogger:
 			self.current_record.stage2_formula = dfa_result.get("formula", "N/A")
 			self.current_record.stage2_num_states = dfa_result.get("num_states", 0)
 			self.current_record.stage2_num_transitions = dfa_result.get("num_transitions", 0)
-			self.current_record.stage2_original_num_states = dfa_result.get("original_num_states", 0)
-			self.current_record.stage2_original_num_transitions = dfa_result.get(
-				"original_num_transitions",
-				0,
-			)
 
 			if self.current_log_dir:
-				if "original_dfa_dot" in dfa_result:
-					(self.current_log_dir / "dfa_original.dot").write_text(dfa_result["original_dfa_dot"])
 				if "dfa_dot" in dfa_result:
-					(self.current_log_dir / "dfa_simplified.dot").write_text(dfa_result["dfa_dot"])
+					(self.current_log_dir / "dfa.dot").write_text(dfa_result["dfa_dot"])
 		elif error:
 			self.current_record.stage2_status = "failed"
 			self.current_record.stage2_error = str(error)
@@ -286,12 +277,9 @@ class PipelineLogger:
 		if not isinstance(dfa_result, dict):
 			return dfa_result
 		sanitised = dict(dfa_result)
-		sanitised.pop("original_dfa_dot", None)
 		sanitised.pop("dfa_dot", None)
-		if "original_dfa_path" not in sanitised:
-			sanitised["original_dfa_path"] = "dfa_original.dot"
-		if "simplified_dfa_path" not in sanitised:
-			sanitised["simplified_dfa_path"] = "dfa_simplified.dot"
+		if "dfa_path" not in sanitised:
+			sanitised["dfa_path"] = "dfa.dot"
 		return sanitised
 
 	def log_stage3_method_synthesis(
@@ -727,16 +715,12 @@ class PipelineLogger:
 			handle.write("DFA GENERATION RESULT\n")
 			handle.write("~" * 40 + "\n")
 			handle.write(f"Formula: {record.get('stage2_formula', 'N/A')}\n\n")
-			handle.write("Original DFA (before simplification):\n")
-			handle.write(f"  States: {record.get('stage2_original_num_states', 0)}\n")
-			handle.write(f"  Transitions: {record.get('stage2_original_num_transitions', 0)}\n")
-			handle.write("  File: dfa_original.dot\n\n")
-			handle.write("Simplified DFA (after simplification):\n")
+			handle.write("Raw DFA:\n")
 			handle.write(f"  States: {record.get('stage2_num_states', 0)}\n")
 			handle.write(f"  Transitions: {record.get('stage2_num_transitions', 0)}\n")
-			handle.write("  File: dfa_simplified.dot\n\n")
+			handle.write("  File: dfa.dot\n\n")
 			handle.write(
-				"Full DFA bodies are stored in dfa_original.dot and dfa_simplified.dot; "
+				"Full DFA bodies are stored in dfa.dot; "
 				"execution artifacts keep only metadata to avoid pathological log bloat.\n\n"
 			)
 		elif record["stage2_error"]:
