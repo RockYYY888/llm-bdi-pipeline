@@ -1039,6 +1039,21 @@ class JasonRunner:
 			trace_ready_code,
 			target_literals,
 		)
+		completed_target_ids = [
+			str(target_id).strip()
+			for target_id in guided_completed_target_ids
+			if str(target_id).strip()
+		]
+		completed_literal_signatures = {
+			observation["literal"].to_signature()
+			for observation in target_observations
+			if str(observation.get("target_id", "")).strip() in completed_target_ids
+		}
+		remaining_target_observations = [
+			observation
+			for observation in target_observations
+			if observation["literal"].to_signature() not in completed_literal_signatures
+		]
 		if guided_action_path and guided_continue_with_runtime_goal:
 			observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
 				trace_ready_code,
@@ -1047,12 +1062,13 @@ class JasonRunner:
 			if not ordered_query_sequence:
 				observation_ready_code = self._rewrite_unordered_control_plans(
 					observation_ready_code,
-					target_observations,
+					remaining_target_observations,
 				)
 			return self._build_guided_prefix_runner_asl(
 				observation_ready_code,
 				target_literals=target_literals,
 				target_observations=target_observations,
+				remaining_target_observations=remaining_target_observations,
 				method_library=method_library,
 				completion_mode=completion_mode,
 				ordered_query_sequence=ordered_query_sequence,
@@ -1221,6 +1237,7 @@ class JasonRunner:
 		*,
 		target_literals: Sequence[HTNLiteral],
 		target_observations: Sequence[Dict[str, Any]],
+		remaining_target_observations: Sequence[Dict[str, Any]],
 		method_library: HTNMethodLibrary | None,
 		completion_mode: str,
 		ordered_query_sequence: bool,
@@ -1228,8 +1245,18 @@ class JasonRunner:
 		guided_method_trace: Sequence[Dict[str, Any]],
 		guided_completed_target_ids: Sequence[str],
 	) -> str:
+		completed_target_ids = [
+			str(target_id).strip()
+			for target_id in guided_completed_target_ids
+			if str(target_id).strip()
+		]
+		remaining_observations = [
+			observation
+			for observation in remaining_target_observations
+			if str(observation.get("target_id", "")).strip() not in completed_target_ids
+		]
 		target_context = (
-			self._observed_target_context_expression(target_observations)
+			self._observed_target_context_expression(remaining_observations)
 			or self._target_context_expression(target_literals)
 		)
 		initial_dfa_state = self._extract_initial_dfa_state(agentspeak_code) or "q1"
@@ -1239,11 +1266,6 @@ class JasonRunner:
 			for entry in guided_method_trace
 		]
 		prefix_body.extend(f"!{action_step}" for action_step in guided_action_path)
-		completed_target_ids = [
-			str(target_id).strip()
-			for target_id in guided_completed_target_ids
-			if str(target_id).strip()
-		]
 		for target_id in completed_target_ids:
 			prefix_body.append(f"!mark_target_{target_id}")
 			prefix_body.append(f"!advance_dfa_for_{target_id}")
@@ -1584,6 +1606,7 @@ class JasonRunner:
 			literal.to_signature(): literal
 			for literal in target_literals
 		}
+		target_id_by_signature: Dict[str, str] = {}
 		observations: List[Dict[str, Any]] = []
 		seen_transitions: set[str] = set()
 		for match in re.finditer(
@@ -1596,10 +1619,14 @@ class JasonRunner:
 			if target_literal is None or transition_name in seen_transitions:
 				continue
 			seen_transitions.add(transition_name)
+			target_id = target_id_by_signature.get(label)
+			if target_id is None:
+				target_id = f"t{len(target_id_by_signature) + 1}"
+				target_id_by_signature[label] = target_id
 			observations.append(
 				{
 					"transition_name": transition_name,
-					"target_id": f"t{len(observations) + 1}",
+					"target_id": target_id,
 					"literal": target_literal,
 				},
 			)
@@ -1688,8 +1715,12 @@ class JasonRunner:
 			return []
 
 		lines = ["/* Target Observation Plans */"]
+		seen_targets: set[str] = set()
 		for observation in target_observations:
 			target_id = str(observation["target_id"])
+			if target_id in seen_targets:
+				continue
+			seen_targets.add(target_id)
 			literal = observation["literal"]
 			context = self._literal_to_context_expression(literal)
 			protection_atom = self._target_protection_atom(literal)
@@ -1786,10 +1817,15 @@ class JasonRunner:
 	) -> str:
 		if not target_observations:
 			return ""
-		return " & ".join(
-			f"target_seen({item['target_id']})"
-			for item in target_observations
-		)
+		seen_targets: set[str] = set()
+		ordered_targets: List[str] = []
+		for observation in target_observations:
+			target_id = str(observation["target_id"])
+			if target_id in seen_targets:
+				continue
+			seen_targets.add(target_id)
+			ordered_targets.append(target_id)
+		return " & ".join(f"target_seen({target_id})" for target_id in ordered_targets)
 
 	def _extract_initial_dfa_state(self, agentspeak_code: str) -> Optional[str]:
 		match = re.search(r"^\s*dfa_state\(([^)]+)\)\.\s*$", agentspeak_code, re.MULTILINE)

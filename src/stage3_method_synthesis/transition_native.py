@@ -17,6 +17,9 @@ from typing import Any, Collection, Dict, Iterable, List, Optional, Sequence, Tu
 from stage3_method_synthesis.htn_prompts import (
 	_is_aux_binding_requirement,
 	_extend_mapping_with_action_parameters,
+	_filter_dominated_producer_modes,
+	_render_positive_dynamic_requirements,
+	_render_positive_static_requirements,
 	_render_producer_mode_options_for_predicate,
 	_render_signature_with_mapping,
 	_same_arity_caller_shared_requirements,
@@ -264,9 +267,11 @@ def build_transition_native_system_prompt() -> str:
 		"ordering, orderings, or ordering_edges anywhere in the output.\n"
 		"Do not merge required branches. If a contract lists N constructive branches for a task, "
 		"emit exactly N constructive branch objects for that task.\n"
-		"Each query_root_* task is a pure alias bridge to required dfa_step_* tasks. "
+		"Each query_root_* task is a pure administrative alias bridge to required dfa_step_* tasks. "
 		"Never give query_root_* any helper step or primitive action. "
-		"Each query_root_* constructive branch must contain exactly one dfa_step_* call.\n"
+		"Each query_root_* constructive branch must contain exactly one dfa_step_* call. "
+		"Never inline helper_* calls, primitive actions, or the body of a dfa_step_* branch inside "
+		"query_root_*.\n"
 		"If a transition task must preserve earlier ordered goals, use the branch ordered_subtasks "
 		"exactly as listed in REQUIRED BRANCH CONTRACTS JSON. That ordered list already encodes the "
 		"staged support order: stable preparation, retained-prefix restoration, volatile final support, "
@@ -279,6 +284,8 @@ def build_transition_native_system_prompt() -> str:
 		"omit precondition entirely.\n"
 		"If a branch introduces AUX* symbols, every AUX* must be justified by a genuine AUX witness-binding "
 		"literal or by the exact ordered_subtasks contract that establishes it.\n"
+		"When TASK INVENTORY JSON lists parameter_types for a task, those types are authoritative exact slot types. "
+		"Do not reuse an ARG slot as a different type, even if a predicate supertype would allow it.\n"
 		"Call every compound child with exactly the task-header parameters listed in TASK INVENTORY JSON. "
 		"Branch-local parameters are local existential witnesses for that task's own method branch only; "
 		"never pass a branch-local AUX symbol from a parent call unless it also appears in the callee's "
@@ -324,10 +331,16 @@ def build_transition_native_user_prompt(
 		required_branch_contracts=required_branch_contracts,
 		task_defaults=compiler_defaults.get("task_defaults", {}) or {},
 	)
+	query_root_bridge_lines = _query_root_bridge_contract_lines(
+		prompt_analysis=prompt_analysis,
+	)
 
 	return (
 		"TASK INVENTORY JSON:\n"
 		+ json.dumps(task_inventory_payload, ensure_ascii=False, separators=(",", ":"))
+		+ "\n\n"
+		+ "REQUIRED QUERY_ROOT BRIDGE RULES:\n"
+		+ ("\n".join(query_root_bridge_lines) if query_root_bridge_lines else "- none")
 		+ "\n\n"
 		+ "REQUIRED BRANCH CONTRACTS JSON:\n"
 		+ json.dumps(branch_contracts_payload, ensure_ascii=False, separators=(",", ":"))
@@ -341,6 +354,9 @@ def build_transition_native_user_prompt(
 		+ '- {"name":"query_root_*","constructive":[{"ordered_subtasks":["dfa_step_q1_q2_goal(ARG1)"]}]}\n'
 		+ '- {"name":"dfa_step_*","constructive":[{"ordered_subtasks":["helper_x(ARG1)","primitive_or_helper(ARG1, ARG2)"]}]}\n'
 		+ '- {"name":"helper_clear","constructive":[{"parameters":["ARG1","AUX1"],"precondition":["on(AUX1, ARG1)"],"ordered_subtasks":["helper_clear(AUX1)","helper_handempty","unstack(AUX1, ARG1)"]}]}\n'
+		+ "HARD PROHIBITIONS:\n"
+		+ "- query_root_* must never inline helper_* or primitive actions; only one dfa_step_* call per constructive branch\n"
+		+ "- do not copy a dfa_step_* ordered_subtasks body into query_root_*\n"
 	)
 
 
@@ -372,6 +388,13 @@ def _prompt_task_defaults_payload(
 			"name": task_name,
 			"parameters": list(defaults.get("parameters", ()) or ()),
 		}
+		parameter_types = [
+			str(value).strip()
+			for value in (defaults.get("parameter_types") or ())
+			if str(value).strip()
+		]
+		if parameter_types:
+			task_entry["parameter_types"] = parameter_types
 		source_name = str(defaults.get("source_name", "")).strip()
 		if source_name:
 			task_entry["source_name"] = source_name
@@ -428,6 +451,8 @@ def build_transition_native_ast_compiler_defaults(
 			"noop": headline,
 			"grounded_args": list(item.get("grounded_args") or []),
 		}
+		if item.get("parameter_types"):
+			task_defaults[task_name]["parameter_types"] = list(item.get("parameter_types") or [])
 		bridge_precondition = [
 			str(value).strip()
 			for value in (item.get("bridge_precondition") or ())
@@ -457,6 +482,8 @@ def build_transition_native_ast_compiler_defaults(
 			"noop": noop_contract,
 			"grounded_args": list(item.get("grounded_args") or []),
 		}
+		if item.get("parameter_types"):
+			task_defaults[task_name]["parameter_types"] = list(item.get("parameter_types") or [])
 		call_arities[task_name] = len(parameters)
 	for helper_literal in _recommended_helper_literals(
 		prompt_analysis=prompt_analysis,
@@ -598,12 +625,12 @@ def build_transition_native_required_branch_contracts(
 			)
 		)
 		branches: List[Dict[str, Any]] = []
-		for mode_call, needs in _render_producer_mode_options_for_predicate(
-			headline_literal.predicate,
-			headline_literal.args,
-			action_analysis,
-			limit=3,
-		):
+		for mode_call, needs, static_requirements in _render_producer_mode_contract_options_for_predicate(
+				headline_literal.predicate,
+				headline_literal.args,
+				action_analysis,
+				limit=3,
+			):
 			raw_needs = tuple(
 				str(value).strip()
 				for value in (needs or ())
@@ -648,13 +675,33 @@ def build_transition_native_required_branch_contracts(
 				current_headline_literal=headline_literal,
 				preserve_aux_binding_context=False,
 			)
+			realised_helper_calls = set(preparatory_support_calls) | set(support_calls)
+			same_arity_support_preconditions = _dedupe_invocation_signatures(
+				tuple(
+					signature
+					for requirement_signature in needs
+					for signature in _same_arity_positive_precondition_envelope(
+						requirement_signature,
+						action_analysis=action_analysis,
+					)
+					if (
+						(parsed_requirement := _parse_signature_literal(requirement_signature)) is not None
+						and _helper_call_for_literal(parsed_requirement) in realised_helper_calls
+					)
+				),
+			)
 			retained_prefix_support = _dedupe_invocation_signatures(
 				retained_prefix_support_calls,
 			)
 			branch_precondition = _dedupe_invocation_signatures(
-				residual_context
+				(*same_arity_support_preconditions, *static_requirements, *residual_context)
 				if retained_prefix_support
-				else (*retained_prefix_literals, *residual_context),
+				else (
+					*same_arity_support_preconditions,
+					*static_requirements,
+					*retained_prefix_literals,
+					*residual_context,
+				),
 			)
 			ordered_subtasks = (
 				*preparatory_support_calls,
@@ -680,12 +727,12 @@ def build_transition_native_required_branch_contracts(
 		canonical_literal = canonicalise_helper_literal(helper_literal)
 		task_name = helper_task_name_for_literal(canonical_literal)
 		branches: List[Dict[str, Any]] = []
-		for mode_call, needs in _render_producer_mode_options_for_predicate(
-			canonical_literal.predicate,
-			canonical_literal.args,
-			action_analysis,
-			limit=3,
-		):
+		for mode_call, needs, static_requirements in _render_producer_mode_contract_options_for_predicate(
+				canonical_literal.predicate,
+				canonical_literal.args,
+				action_analysis,
+				limit=3,
+			):
 			needs = tuple(str(value).strip() for value in (needs or ()) if str(value).strip())
 			extra_role_symbols = _branch_extra_role_symbols(
 				mode_call=mode_call,
@@ -702,7 +749,7 @@ def build_transition_native_required_branch_contracts(
 			branches.append(
 				_branch_contract_dict(
 					parameters=(*canonical_literal.args, *extra_role_symbols),
-					precondition=residual_context,
+					precondition=(*static_requirements, *residual_context),
 					ordered_subtasks=(*support_calls, *restabilise_calls, mode_call),
 				)
 			)
@@ -724,6 +771,113 @@ def _helper_call_for_literal(literal: HTNLiteral) -> str:
 	args = ", ".join(str(arg).strip() for arg in literal.args if str(arg).strip())
 	helper_name = helper_task_name_for_literal(literal)
 	return f"{helper_name}({args})" if args else helper_name
+
+
+def _render_producer_mode_contract_options_for_predicate(
+	predicate_name: str,
+	predicate_args: Sequence[str],
+	action_analysis: Dict[str, Any],
+	*,
+	limit: int = 3,
+) -> Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...]:
+	rendered_modes: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+	seen: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
+	target_signature = (
+		predicate_name
+		if not predicate_args
+		else f"{predicate_name}({', '.join(predicate_args)})"
+	)
+	for pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+		predicate_name,
+		[],
+	):
+		effect_args = list(pattern.get("effect_args") or [])
+		if len(effect_args) != len(predicate_args):
+			continue
+		token_mapping = {
+			token: arg
+			for token, arg in zip(effect_args, predicate_args)
+		}
+		rendered_action_args = _extend_mapping_with_action_parameters(
+			token_mapping,
+			pattern.get("action_parameters") or [],
+			action_parameter_types=pattern.get("action_parameter_types") or [],
+		)
+		rendered_dynamic_requirements = tuple(
+			_render_positive_dynamic_requirements(pattern, token_mapping)
+		)
+		if target_signature in rendered_dynamic_requirements:
+			continue
+		rendered_static_requirements = tuple(
+			_render_positive_static_requirements(pattern, token_mapping)
+		)
+		mode = (
+			_task_invocation_signature(pattern["action_name"], rendered_action_args),
+			rendered_dynamic_requirements,
+			rendered_static_requirements,
+		)
+		if mode in seen:
+			continue
+		seen.add(mode)
+		rendered_modes.append(mode)
+	filtered_dynamic_modes = {
+		(mode_call, requirements)
+		for mode_call, requirements in _filter_dominated_producer_modes(
+			[(mode_call, requirements) for mode_call, requirements, _ in rendered_modes]
+		)
+	}
+	filtered_modes = [
+		mode
+		for mode in rendered_modes
+		if (mode[0], mode[1]) in filtered_dynamic_modes
+	]
+	if limit > 0:
+		filtered_modes = filtered_modes[:limit]
+	return tuple(filtered_modes)
+
+
+def _same_arity_positive_precondition_envelope(
+	requirement_signature: str,
+	*,
+	action_analysis: Dict[str, Any],
+) -> Tuple[str, ...]:
+	parsed_requirement = _parse_signature_literal(requirement_signature)
+	if parsed_requirement is None or not parsed_requirement.is_positive:
+		return ()
+	task_parameters = tuple(str(arg).strip() for arg in parsed_requirement.args if str(arg).strip())
+	if not task_parameters:
+		return ()
+	headline_signature = parsed_requirement.to_signature()
+	requirement_sets: List[set[str]] = []
+	for pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
+		parsed_requirement.predicate,
+		[],
+	):
+		effect_args = [
+			str(value).strip()
+			for value in (pattern.get("effect_args") or ())
+			if str(value).strip()
+		]
+		if len(effect_args) != len(task_parameters):
+			continue
+		token_mapping = {
+			token: arg
+			for token, arg in zip(effect_args, task_parameters)
+		}
+		requirements: set[str] = set()
+		for rendered_signature in _render_positive_static_requirements(pattern, token_mapping):
+			rendered_literal = _parse_signature_literal(rendered_signature)
+			if rendered_literal is None or not rendered_literal.is_positive:
+				continue
+			if rendered_literal.to_signature() == headline_signature:
+				continue
+			if rendered_literal.args and not set(rendered_literal.args).issubset(set(task_parameters)):
+				continue
+			requirements.add(rendered_literal.to_signature())
+		requirement_sets.append(requirements)
+	if not requirement_sets:
+		return ()
+	return tuple(sorted(set.intersection(*requirement_sets)))
 
 
 def _transition_payload_symbolic_grounded_pairs(
@@ -1048,11 +1202,18 @@ def _requirement_must_remain_context(
 	*,
 	task_parameter_symbols: Collection[str],
 	extra_role_symbols: Collection[str],
+	current_headline_literal: Optional[HTNLiteral] = None,
 ) -> bool:
 	requirement_args = tuple(str(arg).strip() for arg in requirement.args if str(arg).strip())
 	if not requirement_args:
 		return False
 	if not any(arg in extra_role_symbols for arg in requirement_args):
+		return False
+	if (
+		current_headline_literal is not None
+		and requirement.is_positive
+		and requirement.predicate == current_headline_literal.predicate
+	):
 		return False
 	if _is_aux_binding_requirement(
 		requirement_args,
@@ -1060,7 +1221,7 @@ def _requirement_must_remain_context(
 		extra_role_symbols=extra_role_symbols,
 	):
 		return True
-	return len(requirement_args) > 1
+	return False
 
 
 def _support_plan_for_requirements(
@@ -1105,22 +1266,27 @@ def _support_plan_contract_for_requirements(
 		parsed_requirement = _parse_signature_literal(str(requirement_signature).strip())
 		if parsed_requirement is None or not parsed_requirement.is_positive:
 			continue
+		producer_options = None
+		if action_analysis is not None:
+			producer_options = _render_producer_mode_options_for_predicate(
+				parsed_requirement.predicate,
+				parsed_requirement.args,
+				action_analysis,
+				limit=3,
+			)
 		if preserve_aux_binding_context and _requirement_must_remain_context(
 			parsed_requirement,
 			task_parameter_symbols=task_parameter_symbols,
 			extra_role_symbols=extra_role_symbols,
+			current_headline_literal=current_headline_literal,
 		):
-			rendered_signature = parsed_requirement.to_signature()
-			if rendered_signature not in seen_context_literals:
-				seen_context_literals.add(rendered_signature)
-				residual_context_literals.append(rendered_signature)
-			continue
-		if action_analysis is not None and not _render_producer_mode_options_for_predicate(
-			parsed_requirement.predicate,
-			parsed_requirement.args,
-			action_analysis,
-			limit=3,
-		):
+			if not producer_options:
+				rendered_signature = parsed_requirement.to_signature()
+				if rendered_signature not in seen_context_literals:
+					seen_context_literals.add(rendered_signature)
+					residual_context_literals.append(rendered_signature)
+				continue
+		if action_analysis is not None and not producer_options:
 			rendered_signature = parsed_requirement.to_signature()
 			if rendered_signature not in seen_context_literals:
 				seen_context_literals.add(rendered_signature)

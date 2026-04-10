@@ -31,6 +31,7 @@ from stage3_method_synthesis.transition_native import (
 	build_transition_native_system_prompt,
 	build_transition_native_user_prompt,
 	query_root_alias_task_name,
+	sanitize_identifier,
 )
 from stage3_method_synthesis.htn_prompts import _render_producer_mode_options_for_predicate
 from utils.config import DEFAULT_STAGE3_MODEL
@@ -178,6 +179,10 @@ class HTNMethodSynthesizer:
 				query_task_anchors=normalised_query_task_anchors,
 				transition_specs=transition_specs,
 			),
+		)
+		prompt_analysis = self._annotate_transition_native_parameter_types(
+			prompt_analysis,
+			query_object_inventory=normalised_query_object_inventory,
 		)
 		if prompt_analysis.get("transition_native") and not prompt_analysis.get(
 			"required_branch_contracts",
@@ -1506,7 +1511,7 @@ class HTNMethodSynthesizer:
 				merged_entry = HTNMethodSynthesizer._migrate_ast_branch_field_shorthand(
 					merged_entry,
 				)
-			for fixed_key in ("name", "parameters", "headline", "source_name"):
+			for fixed_key in ("name", "parameters", "parameter_types", "headline", "source_name"):
 				if fixed_key in default_entry:
 					merged_entry[fixed_key] = default_entry[fixed_key]
 			normalised_tasks.append(merged_entry)
@@ -1602,6 +1607,7 @@ class HTNMethodSynthesizer:
 		allowed_task_keys = {
 			"name",
 			"parameters",
+			"parameter_types",
 			"headline",
 			"grounded_args",
 			"source_name",
@@ -3271,13 +3277,15 @@ class HTNMethodSynthesizer:
 						)
 					missing_child_requirements = [
 						signature
-						for signature in self._common_child_constructive_requirements(
+						for signature in self._common_compatible_child_dynamic_requirements(
 							step,
 							child_methods,
 							task_lookup,
 							action_schemas,
 							predicate_arities,
 							dynamic_predicates=dynamic_predicates,
+							available_positive=available_positive,
+							known_negative=known_negative,
 						)
 						if signature not in available_positive
 					]
@@ -3402,6 +3410,106 @@ class HTNMethodSynthesizer:
 		for child_method in child_methods:
 			if not child_method.subtasks:
 				continue
+			grounded_literals = self._materialise_method_literals(
+				self._promoted_method_context(
+					child_method,
+					task_lookup,
+					action_schemas,
+					predicate_arities,
+				),
+				child_method.parameters,
+				step.args,
+			)
+			required_signatures = {
+				literal.to_signature()
+				for literal in grounded_literals
+				if literal.is_positive and literal.predicate in dynamic_predicates
+				and (
+					not literal.args
+					or set(literal.args).issubset(set(step.args))
+				)
+			}
+			if headline_signature:
+				required_signatures.discard(headline_signature)
+			requirement_sets.append(required_signatures)
+
+		if not requirement_sets:
+			return ()
+
+		return tuple(sorted(set.intersection(*requirement_sets)))
+
+	def _common_compatible_child_dynamic_requirements(
+		self,
+		step: HTNMethodStep,
+		child_methods: Sequence[HTNMethod],
+		task_lookup: Dict[str, HTNTask],
+		action_schemas: Dict[str, Any],
+		predicate_arities: Dict[str, int],
+		*,
+		dynamic_predicates: set[str],
+		available_positive: set[str],
+		known_negative: set[str],
+	) -> Tuple[str, ...]:
+		if step.kind != "compound":
+			return ()
+
+		compatible_child_methods = tuple(
+			child_method
+			for child_method in child_methods
+			if self._child_method_is_compatible_with_known_dynamic_facts(
+				step,
+				child_method,
+				available_positive=available_positive,
+				known_negative=known_negative,
+				task_lookup=task_lookup,
+				action_schemas=action_schemas,
+				predicate_arities=predicate_arities,
+				dynamic_predicates=dynamic_predicates,
+			)
+		)
+		if compatible_child_methods:
+			return self._common_child_dynamic_requirements(
+				step,
+				compatible_child_methods,
+				task_lookup,
+				action_schemas,
+				predicate_arities,
+				dynamic_predicates=dynamic_predicates,
+			)
+		return self._common_child_dynamic_requirements(
+			step,
+			child_methods,
+			task_lookup,
+			action_schemas,
+			predicate_arities,
+			dynamic_predicates=dynamic_predicates,
+		)
+
+	def _common_child_dynamic_requirements(
+		self,
+		step: HTNMethodStep,
+		child_methods: Sequence[HTNMethod],
+		task_lookup: Dict[str, HTNTask],
+		action_schemas: Dict[str, Any],
+		predicate_arities: Dict[str, int],
+		*,
+		dynamic_predicates: set[str],
+	) -> Tuple[str, ...]:
+		if step.kind != "compound":
+			return ()
+
+		task_schema = task_lookup.get(step.task_name)
+		headline_signature: Optional[str] = None
+		headline_literal = self._materialise_task_headline_literal(
+			task_schema,
+			bound_args=step.args,
+			predicate_arities=predicate_arities,
+		)
+		if headline_literal is not None:
+			headline_signature = headline_literal.to_signature()
+
+		requirement_sets: List[set[str]] = []
+		for child_method in child_methods:
 			grounded_literals = self._materialise_method_literals(
 				self._promoted_method_context(
 					child_method,
@@ -3820,7 +3928,7 @@ class HTNMethodSynthesizer:
 				if self._is_branch_specific_dynamic_selector(
 					literal,
 					method,
-					constructive_methods_by_task.get(method.task_name, ()),
+					methods_by_task.get(method.task_name, ()),
 				):
 					continue
 				if not _render_producer_mode_options_for_predicate(
@@ -5422,10 +5530,19 @@ class HTNMethodSynthesizer:
 					for value in (payload.get("parameters") or ())
 					if str(value).strip()
 				)
+				parameter_type_overrides = {
+					str(parameter).strip(): str(type_name).strip()
+					for parameter, type_name in (payload.get("parameter_type_overrides") or {}).items()
+					if str(parameter).strip() and str(type_name).strip()
+				}
 				if not task_name or not parameters:
 					continue
 				symbol_types: Dict[str, set[str]] = {
-					parameter: set()
+					parameter: (
+						{parameter_type_overrides[parameter]}
+						if parameter in parameter_type_overrides
+						else set()
+					)
 					for parameter in parameters
 				}
 				headline_literal = self._literal_from_dict(payload.get("headline_literal"))
@@ -5437,6 +5554,8 @@ class HTNMethodSynthesizer:
 						if literal is None:
 							continue
 						self._collect_literal_types(symbol_types, literal, predicate_types)
+				for parameter, type_name in parameter_type_overrides.items():
+					symbol_types[parameter] = {type_name}
 				if not all(
 					len(symbol_types.get(parameter, ())) == 1
 					for parameter in parameters
@@ -5508,7 +5627,63 @@ class HTNMethodSynthesizer:
 
 	@staticmethod
 	def _sanitize_name(name: str) -> str:
-		return name.replace("-", "_")
+		return sanitize_identifier(name)
+
+	@staticmethod
+	def _annotate_transition_native_parameter_types(
+		prompt_analysis: Dict[str, Any],
+		*,
+		query_object_inventory: Sequence[Dict[str, Any]],
+	) -> Dict[str, Any]:
+		if not prompt_analysis.get("transition_native"):
+			return prompt_analysis
+		object_type_lookup: Dict[str, str] = {}
+		for entry in query_object_inventory or ():
+			type_name = str(entry.get("type", "")).strip().upper()
+			if not type_name:
+				continue
+			for object_name in entry.get("objects") or ():
+				token = str(object_name).strip()
+				if token:
+					object_type_lookup[token] = type_name
+		if not object_type_lookup:
+			return prompt_analysis
+
+		annotated = dict(prompt_analysis)
+		for section_name in ("query_root_alias_tasks", "transition_tasks"):
+			updated_payloads: List[Dict[str, Any]] = []
+			for payload in (prompt_analysis.get(section_name, ()) or ()):
+				if not isinstance(payload, dict):
+					updated_payloads.append(payload)
+					continue
+				item = dict(payload)
+				parameters = [
+					str(value).strip()
+					for value in (item.get("parameters") or ())
+					if str(value).strip()
+				]
+				grounded_args = [
+					str(value).strip()
+					for value in (item.get("grounded_args") or ())
+					if str(value).strip()
+				]
+				if not parameters or not grounded_args:
+					updated_payloads.append(item)
+					continue
+				parameter_types: List[str] = []
+				parameter_type_overrides: Dict[str, str] = {}
+				for parameter, grounded_arg in zip(parameters, grounded_args):
+					type_name = object_type_lookup.get(grounded_arg, "")
+					parameter_types.append(type_name)
+					if type_name:
+						parameter_type_overrides[parameter] = type_name
+				if any(parameter_types):
+					item["parameter_types"] = parameter_types
+				if parameter_type_overrides:
+					item["parameter_type_overrides"] = parameter_type_overrides
+				updated_payloads.append(item)
+			annotated[section_name] = updated_payloads
+		return annotated
 
 	def _declared_task_alias_maps(
 		self,

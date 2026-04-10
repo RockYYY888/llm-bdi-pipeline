@@ -3695,6 +3695,119 @@ def assert_stage6_exact_transition_task_network_grounds_bridge_context_arguments
 	assert bridge_metadata[1]["transition_task_args"] == ["b6", "b3", "b5"]
 
 
+def assert_stage6_exact_transition_task_network_falls_back_to_same_arity_query_args():
+	pipeline = LTL_BDI_Pipeline(domain_file=MARSROVER_DOMAIN_FILE)
+	query_task_network = (
+		("query_root_2_get_rock_data", ("waypoint3",)),
+		("query_root_1_get_soil_data", ("waypoint2",)),
+	)
+	literal_signatures = (
+		"communicated_rock_data(waypoint3)",
+		"communicated_soil_data(waypoint2)",
+	)
+	transition_specs = (
+		{
+			"transition_name": "dfa_step_q1_q3_communicated_rock_data_waypoint3",
+			"source_state": "q1",
+			"target_state": "q3",
+			"target_literal": {
+				"predicate": "communicated_rock_data",
+				"args": ["waypoint3"],
+				"is_positive": True,
+			},
+			"initial_state": "q1",
+		},
+		{
+			"transition_name": "dfa_step_q3_q5_communicated_soil_data_waypoint2",
+			"source_state": "q3",
+			"target_state": "q5",
+			"target_literal": {
+				"predicate": "communicated_soil_data",
+				"args": ["waypoint2"],
+				"is_positive": True,
+			},
+			"initial_state": "q1",
+		},
+		{
+			"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
+			"source_state": "q1",
+			"target_state": "q2",
+			"target_literal": {
+				"predicate": "communicated_soil_data",
+				"args": ["waypoint2"],
+				"is_positive": True,
+			},
+			"initial_state": "q1",
+		},
+	)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[
+			HTNLiteral("communicated_soil_data", ("waypoint2",), True, None),
+			HTNLiteral("communicated_rock_data", ("waypoint3",), True, None),
+		],
+		query_task_anchors=[
+			{"task_name": "get_soil_data", "args": ["waypoint2"]},
+			{"task_name": "get_rock_data", "args": ["waypoint3"]},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q3_communicated_rock_data_waypoint3",
+				"literal": HTNLiteral("communicated_rock_data", ("waypoint3",), True, None),
+				"source_state": "q1",
+				"target_state": "q3",
+				"raw_label": "communicated_rock_data_waypoint3",
+				"initial_state": "q1",
+			},
+			{
+				"transition_name": "dfa_step_q3_q5_communicated_soil_data_waypoint2",
+				"literal": HTNLiteral("communicated_soil_data", ("waypoint2",), True, None),
+				"source_state": "q3",
+				"target_state": "q5",
+				"raw_label": "communicated_soil_data_waypoint2",
+				"initial_state": "q1",
+			},
+			{
+				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
+				"literal": HTNLiteral("communicated_soil_data", ("waypoint2",), True, None),
+				"source_state": "q1",
+				"target_state": "q2",
+				"raw_label": "communicated_soil_data_waypoint2",
+				"initial_state": "q1",
+			},
+		],
+	)
+	method_library = SimpleNamespace(
+		task_for_name=lambda task_name: {
+			"dfa_step_q1_q3_communicated_rock_data_waypoint3": HTNTask(
+				"dfa_step_q1_q3_communicated_rock_data_waypoint3",
+				("ARG1",),
+				False,
+				("communicated_rock_data",),
+			),
+			"dfa_step_q3_q5_communicated_soil_data_waypoint2": HTNTask(
+				"dfa_step_q3_q5_communicated_soil_data_waypoint2",
+				("ARG1",),
+				False,
+				("communicated_soil_data",),
+			),
+		}.get(task_name),
+	)
+
+	exact_task_network, bridge_metadata = pipeline._stage6_exact_transition_task_network(
+		query_task_network=query_task_network,
+		literal_signatures=literal_signatures,
+		transition_specs=transition_specs,
+		prompt_analysis=prompt_analysis,
+		method_library=method_library,
+	)
+
+	assert exact_task_network == (
+		("dfa_step_q1_q3_communicated_rock_data_waypoint3", ("waypoint3",)),
+		("dfa_step_q3_q5_communicated_soil_data_waypoint2", ("waypoint2",)),
+	)
+	assert bridge_metadata[1]["transition_task_args"] == ["waypoint2"]
+
+
 def assert_stage6_incremental_guided_execution_reuses_stage4_plan_record_when_task_plan_is_empty():
 	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p02.hddl"
 	if not problem_path.exists():
@@ -4178,6 +4291,23 @@ def assert_stage6_guided_execution_prefers_exact_transition_tasks_when_available
 	assert guided["method_trace"][1]["method_name"].startswith("m_dfa_step_")
 	assert "actual_plan" in guided and isinstance(guided["actual_plan"], str)
 	assert "query_root_" in guided["actual_plan"]
+	exact_transition_task_network, _bridge_metadata = pipeline._stage6_exact_transition_task_network(
+		query_task_network=pipeline._stage6_query_task_network(ltl_spec, method_library),
+		literal_signatures=tuple(ltl_spec.query_task_literal_signatures),
+		transition_specs=transition_specs,
+		prompt_analysis=prompt_analysis,
+		method_library=method_library,
+	)
+	assert exact_transition_task_network
+	transition_target_id_map = pipeline._stage6_transition_target_id_map(
+		transition_specs=transition_specs,
+		target_literals=method_library.target_literals,
+	)
+	expected_target_ids = [
+		transition_target_id_map[str(task_name)]
+		for task_name, _task_args in exact_transition_task_network
+	]
+	assert guided["completed_target_ids"] == expected_target_ids
 
 
 def assert_stage6_exact_transition_guidance_reuses_stage4_plan_records_on_timeout():

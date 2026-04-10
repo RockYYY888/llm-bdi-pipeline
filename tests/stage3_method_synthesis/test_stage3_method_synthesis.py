@@ -2079,6 +2079,75 @@ def test_common_child_constructive_requirements_do_not_alias_unbound_child_local
 	assert "handempty" in requirements
 
 
+def test_common_compatible_child_dynamic_requirements_ignore_internal_branch_split():
+	synthesizer = HTNMethodSynthesizer()
+	domain = _marsrover_domain()
+	action_schemas = synthesizer._action_schema_map(domain)
+	predicate_arities = {
+		predicate.name: len(predicate.parameters)
+		for predicate in domain.predicates
+	}
+	dynamic_predicates = set(
+		synthesizer._analyse_domain_actions(domain)["dynamic_predicates"]
+	)
+	task_lookup = {
+		"helper_empty": HTNTask(
+			"helper_empty",
+			("ARG1",),
+			False,
+			("empty",),
+			headline_literal=HTNLiteral("empty", ("ARG1",), True, None),
+		),
+	}
+	step = HTNMethodStep(
+		step_id="s1",
+		task_name="helper_empty",
+		args=("AUX_STORE1",),
+		kind="compound",
+	)
+	child_methods = [
+		HTNMethod(
+			method_name="m_helper_empty_noop",
+			task_name="helper_empty",
+			parameters=("ARG1",),
+			context=(HTNLiteral("empty", ("ARG1",), True, None),),
+			subtasks=(),
+			ordering=(),
+			origin="llm",
+		),
+		HTNMethod(
+			method_name="m_helper_empty_constructive",
+			task_name="helper_empty",
+			parameters=("ARG1", "AUX_ROVER1"),
+			context=(HTNLiteral("full", ("ARG1",), True, None),),
+			subtasks=(
+				HTNMethodStep(
+					step_id="s1",
+					task_name="drop",
+					args=("AUX_ROVER1", "ARG1"),
+					kind="primitive",
+					action_name="drop",
+				),
+			),
+			ordering=(),
+			origin="llm",
+		),
+	]
+
+	requirements = synthesizer._common_compatible_child_dynamic_requirements(
+		step,
+		child_methods,
+		task_lookup,
+		action_schemas,
+		predicate_arities,
+		dynamic_predicates=dynamic_predicates,
+		available_positive=set(),
+		known_negative=set(),
+	)
+
+	assert requirements == ()
+
+
 def test_constructive_validator_rejects_compound_prep_that_does_not_feed_later_requirements():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -6896,7 +6965,8 @@ def test_transition_native_prompt_includes_canonical_hddl_shaped_step_examples()
 	assert "fixed context" in system_prompt
 	assert "Each constructive branch may contain only: optional parameters, optional precondition, required ordered_subtasks." in system_prompt
 	assert "Do not merge required branches." in system_prompt
-	assert "Each query_root_* task is a pure alias bridge to required dfa_step_* tasks." in system_prompt
+	assert "Each query_root_* task is a pure administrative alias bridge to required dfa_step_* tasks." in system_prompt
+	assert "Never inline helper_* calls, primitive actions, or the body of a dfa_step_* branch inside query_root_*." in system_prompt
 	assert "Do not use task-level ordered_subtasks as a branch shorthand." in system_prompt
 	assert "Never add the query_root headline literal or any other extra dynamic predicate to a query_root constructive precondition/context." in system_prompt
 	assert "genuine AUX witness-binding literal" in system_prompt
@@ -6904,16 +6974,23 @@ def test_transition_native_prompt_includes_canonical_hddl_shaped_step_examples()
 	assert "preserve ARG/AUX argument order" in system_prompt
 	assert "ALLOWED PRIMITIVE ACTIONS JSON:" in user_prompt
 	assert "TASK INVENTORY JSON:" in user_prompt
+	assert "REQUIRED QUERY_ROOT BRIDGE RULES:" in user_prompt
 	assert "REQUIRED BRANCH CONTRACTS JSON:" in user_prompt
 	assert "OUTPUT SHAPE EXAMPLES:" in user_prompt
+	assert "HARD PROHIBITIONS:" in user_prompt
 	assert '- {"name":"query_root_*","constructive":[{"ordered_subtasks":["dfa_step_q1_q2_goal(ARG1)"]}]}' in user_prompt
 	assert '- {"name":"dfa_step_*","constructive":[{"ordered_subtasks":["helper_x(ARG1)","primitive_or_helper(ARG1, ARG2)"]}]}' in user_prompt
 	task_inventory = json.loads(
 		_extract_prompt_section(
 			user_prompt,
 			"TASK INVENTORY JSON:\n",
-			"REQUIRED BRANCH CONTRACTS JSON:\n",
+			"REQUIRED QUERY_ROOT BRIDGE RULES:\n",
 		),
+	)
+	query_root_bridge_rules = _extract_prompt_section(
+		user_prompt,
+		"REQUIRED QUERY_ROOT BRIDGE RULES:\n",
+		"REQUIRED BRANCH CONTRACTS JSON:\n",
 	)
 	branch_contracts = json.loads(
 		_extract_prompt_section(
@@ -6935,6 +7012,8 @@ def test_transition_native_prompt_includes_canonical_hddl_shaped_step_examples()
 		entry.get("name") == "helper_handempty" and entry.get("parameters") == []
 		for entry in task_inventory
 	)
+	assert "query_root_1_do_put_on -> required bridge branches: 1" in query_root_bridge_rules
+	assert 'exact compact task payload suffix: {"ordered_subtasks":["dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)"]}' in query_root_bridge_rules
 	assert branch_contracts["query_root_1_do_put_on"] == [
 		{"ordered_subtasks": ["dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)"]},
 	]
@@ -7385,6 +7464,8 @@ def test_transition_native_required_branch_contracts_hoist_unsupportable_helper_
 	assert "at_soil_sample(ARG1)" in contract["precondition"]
 	assert "available(AUX_ROVER1)" in contract["precondition"]
 	assert "channel_free(AUX_LANDER1)" in contract["precondition"]
+	assert "at_lander(AUX_LANDER1, AUX_WAYPOINT2)" in contract["precondition"]
+	assert "visible(AUX_WAYPOINT1, AUX_WAYPOINT2)" in contract["precondition"]
 
 
 def test_transition_native_required_branch_contracts_keep_helper_hidden_aux_internal():
@@ -7431,7 +7512,222 @@ def test_transition_native_required_branch_contracts_keep_helper_hidden_aux_inte
 	]
 	assert "available(AUX_ROVER1)" in contract["precondition"]
 	assert "channel_free(AUX_LANDER1)" in contract["precondition"]
+	assert "at_lander(AUX_LANDER1, AUX_WAYPOINT2)" in contract["precondition"]
+	assert "visible(AUX_WAYPOINT1, AUX_WAYPOINT2)" in contract["precondition"]
 	assert "calibrated(AUX_CAMERA1, AUX_ROVER1)" not in contract["precondition"]
+
+
+def test_transition_native_helper_at_contract_keeps_recursive_reachability_as_subtask():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	action_analysis = synthesizer._analyse_domain_actions(domain)
+	target_literal = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[target_literal],
+		query_task_anchors=[
+			{
+				"task_name": "get_soil_data",
+				"source_name": "get_soil_data",
+				"args": ["waypoint2"],
+			},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
+				"literal": target_literal,
+				"source_state": "q1",
+				"target_state": "q2",
+				"accepting_states": ["q2"],
+			},
+		],
+	)
+	required_branch_contracts = build_transition_native_required_branch_contracts(
+		prompt_analysis=prompt_analysis,
+		action_analysis=action_analysis,
+	)
+	helper_contract = required_branch_contracts["helper_at"][0]
+
+	assert helper_contract["ordered_subtasks"] == [
+		"helper_at(ARG1, AUX_WAYPOINT1)",
+		"navigate(ARG1, AUX_WAYPOINT1, ARG2)",
+	]
+	assert "at(ARG1, AUX_WAYPOINT1)" not in helper_contract["precondition"]
+	assert "can_traverse(ARG1, AUX_WAYPOINT1, ARG2)" in helper_contract["precondition"]
+	assert "visible(AUX_WAYPOINT1, ARG2)" in helper_contract["precondition"]
+	assert "available(ARG1)" in helper_contract["precondition"]
+
+
+def test_transition_native_helper_have_image_supports_calibration():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	action_analysis = synthesizer._analyse_domain_actions(domain)
+	target_literal = HTNLiteral("communicated_image_data", ("objective1", "high_res"), True, None)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[target_literal],
+		query_task_anchors=[
+			{
+				"task_name": "get_image_data",
+				"source_name": "get_image_data",
+				"args": ["objective1", "high_res"],
+			},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q4_communicated_image_data_objective1_high_res",
+				"literal": target_literal,
+				"source_state": "q1",
+				"target_state": "q4",
+				"accepting_states": ["q4"],
+			},
+		],
+	)
+	required_branch_contracts = build_transition_native_required_branch_contracts(
+		prompt_analysis=prompt_analysis,
+		action_analysis=action_analysis,
+	)
+	helper_contracts = required_branch_contracts["helper_have_image"]
+
+	assert any(
+		"helper_calibrated" in step
+		for contract in helper_contracts
+		for step in contract["ordered_subtasks"]
+	)
+
+
+def test_transition_native_required_branch_contracts_keep_static_selector_preconditions():
+	domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	action_analysis = synthesizer._analyse_domain_actions(domain)
+	target_literals = [
+		HTNLiteral("communicated_soil_data", ("waypoint2",), True, None),
+		HTNLiteral("communicated_rock_data", ("waypoint3",), True, None),
+		HTNLiteral("communicated_image_data", ("objective1", "high_res"), True, None),
+	]
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=target_literals,
+		query_task_anchors=[
+			{
+				"task_name": "get_soil_data",
+				"source_name": "get_soil_data",
+				"args": ["waypoint2"],
+			},
+			{
+				"task_name": "get_rock_data",
+				"source_name": "get_rock_data",
+				"args": ["waypoint3"],
+			},
+			{
+				"task_name": "get_image_data",
+				"source_name": "get_image_data",
+				"args": ["objective1", "high_res"],
+			},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
+				"literal": target_literals[0],
+				"source_state": "q1",
+				"target_state": "q2",
+				"accepting_states": ["q8"],
+			},
+			{
+				"transition_name": "dfa_step_q1_q3_communicated_rock_data_waypoint3",
+				"literal": target_literals[1],
+				"source_state": "q1",
+				"target_state": "q3",
+				"accepting_states": ["q8"],
+			},
+			{
+				"transition_name": "dfa_step_q1_q4_communicated_image_data_objective1_high_res",
+				"literal": target_literals[2],
+				"source_state": "q1",
+				"target_state": "q4",
+				"accepting_states": ["q8"],
+			},
+		],
+	)
+	required_branch_contracts = build_transition_native_required_branch_contracts(
+		prompt_analysis=prompt_analysis,
+		action_analysis=action_analysis,
+	)
+
+	soil_helper_contract = required_branch_contracts["helper_have_soil_analysis"][0]
+	rock_helper_contract = required_branch_contracts["helper_have_rock_analysis"][0]
+	image_helper_contract = required_branch_contracts["helper_have_image"][0]
+	empty_helper_contract = required_branch_contracts["helper_empty"][0]
+
+	assert "equipped_for_soil_analysis(ARG1)" in soil_helper_contract["precondition"]
+	assert "store_of(AUX_STORE1, ARG1)" in soil_helper_contract["precondition"]
+	assert "equipped_for_rock_analysis(ARG1)" in rock_helper_contract["precondition"]
+	assert "store_of(AUX_STORE1, ARG1)" in rock_helper_contract["precondition"]
+	assert "equipped_for_imaging(ARG1)" in image_helper_contract["precondition"]
+	assert "on_board(AUX_CAMERA1, ARG1)" in image_helper_contract["precondition"]
+	assert "supports(AUX_CAMERA1, ARG3)" in image_helper_contract["precondition"]
+	assert "visible_from(ARG2, AUX_WAYPOINT1)" in image_helper_contract["precondition"]
+	assert "store_of(ARG1, AUX_ROVER1)" in empty_helper_contract["precondition"]
+
+
+def test_transition_native_same_arity_envelope_shares_only_static_selectors():
+	blocksworld_domain = _domain()
+	marsrover_domain = _marsrover_domain()
+	synthesizer = HTNMethodSynthesizer()
+	blocksworld_analysis = synthesizer._analyse_domain_actions(blocksworld_domain)
+	marsrover_analysis = synthesizer._analyse_domain_actions(marsrover_domain)
+
+	blocksworld_target = HTNLiteral("on", ("b3", "b5"), True, None)
+	blocksworld_prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[blocksworld_target],
+		query_task_anchors=[
+			{
+				"task_name": "do_put_on",
+				"source_name": "do_put_on",
+				"args": ["b3", "b5"],
+			},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q2_on_b3_b5",
+				"literal": blocksworld_target,
+				"source_state": "q1",
+				"target_state": "q2",
+				"accepting_states": ["q2"],
+			},
+		],
+	)
+	blocksworld_contract = build_transition_native_required_branch_contracts(
+		prompt_analysis=blocksworld_prompt_analysis,
+		action_analysis=blocksworld_analysis,
+	)["dfa_step_q1_q2_on_b3_b5"][0]
+
+	marsrover_target = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
+	marsrover_prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[marsrover_target],
+		query_task_anchors=[
+			{
+				"task_name": "get_soil_data",
+				"source_name": "get_soil_data",
+				"args": ["waypoint2"],
+			},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
+				"literal": marsrover_target,
+				"source_state": "q1",
+				"target_state": "q2",
+				"accepting_states": ["q2"],
+			},
+		],
+	)
+	marsrover_contract = build_transition_native_required_branch_contracts(
+		prompt_analysis=marsrover_prompt_analysis,
+		action_analysis=marsrover_analysis,
+	)["dfa_step_q1_q2_communicated_soil_data_waypoint2"][0]
+
+	assert blocksworld_contract["precondition"] == []
+	assert "equipped_for_soil_analysis(AUX_ROVER1)" in marsrover_contract["precondition"]
+	assert "at(AUX_ROVER1, ARG1)" not in marsrover_contract["precondition"]
+	assert "at_soil_sample(ARG1)" in marsrover_contract["precondition"]
 
 
 def test_render_producer_mode_options_prunes_dominated_modes():
@@ -9269,7 +9565,7 @@ def test_transition_native_prompt_keeps_marsrover_single_query_compact():
 		],
 	)
 
-	assert len(user_prompt) < 12000
+	assert len(user_prompt) < 14000
 
 
 def test_ast_payload_accepts_compact_target_task_binding_invocation_strings():

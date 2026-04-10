@@ -4143,6 +4143,11 @@ class LTL_BDI_Pipeline:
                 )
             )
             if exact_transition_task_network:
+                transition_target_id_map = self._stage6_transition_target_id_map(
+                    transition_specs=self._latest_transition_specs,
+                    target_literals=method_library.target_literals,
+                    plan_records=plan_records,
+                )
                 exact_guided = self._stage6_incremental_exact_transition_guided_execution(
                     planner=planner,
                     runner=runner,
@@ -4156,6 +4161,7 @@ class LTL_BDI_Pipeline:
                     predicate_name_map=predicate_name_map,
                     timeout_seconds=planner_timeout_seconds,
                     completed_target_ids=effective_target_ids,
+                    transition_target_id_map=transition_target_id_map,
                     plan_records=plan_records,
                 )
                 if exact_guided is not None:
@@ -4243,6 +4249,11 @@ class LTL_BDI_Pipeline:
             method_library=method_library,
         )
         if exact_transition_task_network:
+            transition_target_id_map = self._stage6_transition_target_id_map(
+                transition_specs=self._latest_transition_specs,
+                target_literals=method_library.target_literals,
+                plan_records=plan_records,
+            )
             exact_guided = self._stage6_incremental_exact_transition_guided_execution(
                 planner=planner,
                 runner=runner,
@@ -4256,6 +4267,7 @@ class LTL_BDI_Pipeline:
                 predicate_name_map=predicate_name_map,
                 timeout_seconds=planner_timeout_seconds,
                 completed_target_ids=effective_target_ids,
+                transition_target_id_map=transition_target_id_map,
                 plan_records=plan_records,
             )
             if exact_guided is not None:
@@ -5179,6 +5191,12 @@ class LTL_BDI_Pipeline:
                 completed_literal_history=tuple(completed_literal_history),
             )
             if not grounded_transition_args:
+                grounded_transition_args = self._stage6_fallback_exact_transition_task_args_by_arity(
+                    transition_name=transition_name,
+                    query_task_args=query_root_task_args,
+                    method_library=method_library,
+                )
+            if not grounded_transition_args:
                 return (), ()
             exact_task_network.append((transition_name, grounded_transition_args))
             bridge_metadata.append(
@@ -5198,6 +5216,32 @@ class LTL_BDI_Pipeline:
                 return (), ()
 
         return tuple(exact_task_network), tuple(bridge_metadata)
+
+    @staticmethod
+    def _stage6_fallback_exact_transition_task_args_by_arity(
+        *,
+        transition_name: str,
+        query_task_args: Sequence[str],
+        method_library,
+    ) -> Optional[Tuple[str, ...]]:
+        if method_library is None or not hasattr(method_library, "task_for_name"):
+            return None
+        task_schema = method_library.task_for_name(str(transition_name).strip())
+        if task_schema is None:
+            return None
+        task_parameters = tuple(
+            str(value).strip()
+            for value in (getattr(task_schema, "parameters", ()) or ())
+            if str(value).strip()
+        )
+        grounded_query_args = tuple(
+            str(value).strip()
+            for value in (query_task_args or ())
+            if str(value).strip()
+        )
+        if not task_parameters or len(task_parameters) != len(grounded_query_args):
+            return None
+        return grounded_query_args
 
     def _stage6_ground_exact_transition_task_args(
         self,
@@ -5355,6 +5399,64 @@ class LTL_BDI_Pipeline:
                 )
         return str(transition_spec.get("label") or "").strip()
 
+    def _stage6_transition_target_id_map(
+        self,
+        *,
+        transition_specs: Sequence[Dict[str, Any]],
+        target_literals: Sequence[HTNLiteral],
+        plan_records: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Dict[str, str]:
+        if not transition_specs or not target_literals:
+            return {}
+
+        target_signatures = {
+            literal.to_signature()
+            for literal in target_literals
+        }
+        transition_target_ids: Dict[str, str] = {}
+        target_id_by_signature: Dict[str, str] = {}
+
+        def _append_targets_from_records(records: Sequence[Dict[str, Any]]) -> None:
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                transition_name = str(record.get("transition_name") or "").strip()
+                label = str(record.get("label") or "").strip()
+                if not transition_name or not label:
+                    continue
+                if label not in target_signatures:
+                    continue
+                if transition_name in transition_target_ids:
+                    continue
+                target_id = target_id_by_signature.get(label)
+                if target_id is None:
+                    target_id = f"t{len(target_id_by_signature) + 1}"
+                    target_id_by_signature[label] = target_id
+                transition_target_ids[transition_name] = target_id
+
+        if plan_records:
+            _append_targets_from_records(plan_records)
+        if transition_target_ids:
+            return transition_target_ids
+
+        for transition_spec in transition_specs:
+            if not isinstance(transition_spec, dict):
+                continue
+            transition_name = str(transition_spec.get("transition_name") or "").strip()
+            if not transition_name:
+                continue
+            signature = self._stage6_transition_spec_literal_signature(transition_spec)
+            if not signature or signature not in target_signatures:
+                continue
+            if transition_name in transition_target_ids:
+                continue
+            target_id = target_id_by_signature.get(signature)
+            if target_id is None:
+                target_id = f"t{len(target_id_by_signature) + 1}"
+                target_id_by_signature[signature] = target_id
+            transition_target_ids[transition_name] = target_id
+        return transition_target_ids
+
     def _stage6_query_root_bridge_method_trace_entry(
         self,
         *,
@@ -5390,6 +5492,7 @@ class LTL_BDI_Pipeline:
         predicate_name_map,
         timeout_seconds: float,
         completed_target_ids: Sequence[str] = (),
+        transition_target_id_map: Optional[Dict[str, str]] = None,
         plan_records=None,
     ):
         if not transition_task_network or len(transition_task_network) != len(bridge_metadata):
@@ -5407,6 +5510,15 @@ class LTL_BDI_Pipeline:
             for target_id in (completed_target_ids or ())
             if str(target_id).strip()
         )
+        transition_target_ids: List[str] = []
+        if transition_target_id_map:
+            transition_target_ids = [
+                str(transition_target_id_map.get(task_name, "")).strip()
+                for task_name, _ in transition_task_network
+            ]
+            if any(not target_id for target_id in transition_target_ids):
+                transition_target_ids = []
+        effective_target_ids = transition_target_ids or all_target_ids
 
         def _partial_guidance_result() -> Optional[Dict[str, Any]]:
             if not action_path and not method_trace:
@@ -5423,7 +5535,7 @@ class LTL_BDI_Pipeline:
                 "actual_plan": self._stage6_merge_hierarchical_plan_texts(actual_plan_texts),
                 "is_partial": True,
                 "completed_task_count": completed_count,
-                "completed_target_ids": list(all_target_ids[:completed_count]),
+                "completed_target_ids": list(effective_target_ids[:completed_count]),
                 "post_guided_seed_facts": tuple(current_seed_facts),
             }
 
@@ -5587,7 +5699,7 @@ class LTL_BDI_Pipeline:
             "method_trace": method_trace,
             "work_dir": work_dirs[-1] if work_dirs else None,
             "actual_plan": self._stage6_merge_hierarchical_plan_texts(actual_plan_texts),
-            "completed_target_ids": list(completed_target_ids),
+            "completed_target_ids": list(effective_target_ids),
         }
 
     @staticmethod

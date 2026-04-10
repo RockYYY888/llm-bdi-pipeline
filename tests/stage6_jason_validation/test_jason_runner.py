@@ -240,7 +240,138 @@ def test_runner_asl_guided_prefix_continues_with_runtime_goal():
 	assert "!mark_target_t1;" in asl
 	assert "!run_dfa;" in asl
 	assert "!verify_targets;" in asl
-	assert '+!verify_targets : target_seen(t1) <-' in asl
+	assert "+!verify_targets" in asl
+
+
+def test_runner_asl_guided_prefix_filters_completed_targets_from_unordered_control_plan():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q4).",
+				'dfa_edge_label(dfa_step_q1_q2_goal_a, "goal(a)").',
+				'dfa_edge_label(dfa_step_q2_q3_goal_b, "goal(b)").',
+				'dfa_edge_label(dfa_step_q3_q4_goal_c, "goal(c)").',
+				"",
+				"/* DFA Transition Wrappers */",
+				"+!dfa_step_q1_q2_goal_a : not target_seen(t1) & not blocked_target(t1) <-",
+				"\t!task_a.",
+				"",
+				"+!dfa_step_q2_q3_goal_b : not target_seen(t2) & not blocked_target(t2) <-",
+				"\t!task_b.",
+				"",
+				"+!dfa_step_q3_q4_goal_c : not target_seen(t3) & not blocked_target(t3) <-",
+				"\t!task_c.",
+				"",
+				"/* DFA Control Plans */",
+				"+!run_dfa : target_seen(t1) & target_seen(t2) & target_seen(t3) <-",
+				"\ttrue.",
+				"",
+				"/* Primitive Action Plans */",
+				"+!task_a : true <-",
+				"\ttrue.",
+				"+!task_b : true <-",
+				"\ttrue.",
+				"+!task_c : true <-",
+				"\ttrue.",
+				"",
+				"/* HTN Method Plans */",
+			],
+		),
+		[
+			HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("c",), is_positive=True, source_symbol=None),
+		],
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("dfa_step_q1_q2_goal_a", (), False, ("goal",)),
+				HTNTask("dfa_step_q2_q3_goal_b", (), False, ("goal",)),
+				HTNTask("dfa_step_q3_q4_goal_c", (), False, ("goal",)),
+			],
+		),
+		ordered_query_sequence=False,
+		guided_action_path=("task_a",),
+		guided_method_trace=(
+			{"method_name": "m_guided_trace", "task_args": []},
+		),
+		guided_continue_with_runtime_goal=True,
+		guided_completed_target_ids=("t1", "t2"),
+	)
+
+	start = asl.find("/* DFA Control Plans */")
+	assert start != -1
+	control_section = asl[start:]
+	assert "+!run_dfa : target_seen(t1)" not in control_section
+	assert "+!run_dfa : target_seen(t2)" not in control_section
+	assert "not target_seen(t1) & not blocked_target(t1)" not in control_section
+	assert "not target_seen(t2) & not blocked_target(t2)" not in control_section
+	assert "not target_seen(t3) & not blocked_target(t3)" in control_section
+
+
+def test_runner_asl_guided_prefix_filters_completed_literal_variants():
+	runner = JasonRunner()
+	asl = runner._build_runner_asl(
+		"\n".join(
+			[
+				"domain(test).",
+				"dfa_state(q1).",
+				"accepting_state(q4).",
+				'dfa_edge_label(dfa_step_q1_q2_goal_a, "goal(a)").',
+				'dfa_edge_label(dfa_step_q2_q3_goal_a, "goal(a)").',
+				'dfa_edge_label(dfa_step_q3_q4_goal_b, "goal(b)").',
+				"",
+				"/* DFA Transition Wrappers */",
+				"+!dfa_step_q1_q2_goal_a : not target_seen(t1) & not blocked_target(t1) <-",
+				"\t!task_a.",
+				"",
+				"+!dfa_step_q2_q3_goal_a : not target_seen(t2) & not blocked_target(t2) <-",
+				"\t!task_a.",
+				"",
+				"+!dfa_step_q3_q4_goal_b : not target_seen(t3) & not blocked_target(t3) <-",
+				"\t!task_b.",
+				"",
+				"/* DFA Control Plans */",
+				"+!run_dfa : target_seen(t1) & target_seen(t2) & target_seen(t3) <-",
+				"\ttrue.",
+				"",
+				"/* Primitive Action Plans */",
+				"+!task_a : true <-",
+				"\ttrue.",
+				"+!task_b : true <-",
+				"\ttrue.",
+				"",
+				"/* HTN Method Plans */",
+			],
+		),
+		[
+			HTNLiteral(predicate="goal", args=("a",), is_positive=True, source_symbol=None),
+			HTNLiteral(predicate="goal", args=("b",), is_positive=True, source_symbol=None),
+		],
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask("dfa_step_q1_q2_goal_a", (), False, ("goal",)),
+				HTNTask("dfa_step_q2_q3_goal_a", (), False, ("goal",)),
+				HTNTask("dfa_step_q3_q4_goal_b", (), False, ("goal",)),
+			],
+		),
+		ordered_query_sequence=False,
+		guided_action_path=("task_a",),
+		guided_method_trace=(
+			{"method_name": "m_guided_trace", "task_args": []},
+		),
+		guided_continue_with_runtime_goal=True,
+		guided_completed_target_ids=("t1",),
+	)
+
+	start = asl.find("/* DFA Control Plans */")
+	assert start != -1
+	control_section = asl[start:]
+	assert "dfa_step_q1_q2_goal_a" not in control_section
+	assert "dfa_step_q2_q3_goal_a" not in control_section
+	assert "dfa_step_q3_q4_goal_b" in control_section
 
 
 def test_runner_asl_guided_prefix_syncs_dfa_state_for_current_transition_style():
