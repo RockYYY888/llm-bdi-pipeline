@@ -13,6 +13,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -324,7 +325,7 @@ class PANDAPlanner:
 
 	def _resolve_work_dir(self, transition_name: str) -> Path:
 		if self.workspace is None:
-			return Path.cwd() / ".panda_stage3" / transition_name
+			return Path(tempfile.mkdtemp(prefix="panda_stage3_")) / transition_name
 		return self.workspace / "panda" / transition_name
 
 	def _require_toolchain(self) -> None:
@@ -489,7 +490,7 @@ class PANDAPlanner:
 			return tuple(method.parameters)
 		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
 		if not declared_parameters:
-			return tuple(method.parameters)
+			return ()
 		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
 		if len(leading_parameters) == len(declared_parameters):
 			return leading_parameters

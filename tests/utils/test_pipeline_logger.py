@@ -290,3 +290,43 @@ def test_pipeline_logger_persists_structured_timing_profile(tmp_path):
     assert "TIMING PROFILE" in execution_txt
     assert "stage1: 1.235s" in execution_txt
     assert "prompt_build_seconds: 0.111s" in execution_txt
+
+
+def test_pipeline_logger_sanitises_stage6_artifact_path_lists(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path))
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        domain_name="ROVER",
+        problem_name="roverprob1234",
+        output_dir=str(tmp_path),
+    )
+    log_dir = logger.current_log_dir
+    assert log_dir is not None
+
+    chunk_a = log_dir / "chunk_a.plan"
+    chunk_b = log_dir / "chunk_b.plan"
+    chunk_a.write_text("a")
+    chunk_b.write_text("b")
+
+    logger.log_stage6_jason_validation(
+        {
+            "backend": "RunLocalMAS",
+            "status": "failed",
+            "artifacts": {
+                "guided_chunk_plans": [str(chunk_a), str(chunk_b)],
+            },
+        },
+        "Failed",
+        error="timeout",
+        metadata={"backend": "RunLocalMAS"},
+    )
+    logger.end_pipeline(success=False)
+
+    execution = json.loads((log_dir / "execution.json").read_text())
+    assert execution["stage6_status"] == "failed"
+    assert execution["stage6_artifacts"]["artifacts"]["guided_chunk_plans"] == [
+        "chunk_a.plan",
+        "chunk_b.plan",
+    ]

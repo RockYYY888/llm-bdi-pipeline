@@ -2217,6 +2217,11 @@ def _render_producer_mode_options_for_predicate(
 
 	rendered_modes: list[tuple[str, tuple[str, ...]]] = []
 	seen: set[tuple[str, tuple[str, ...]]] = set()
+	target_signature = (
+		predicate_name
+		if not predicate_args
+		else f"{predicate_name}({', '.join(predicate_args)})"
+	)
 	for pattern in action_analysis.get("producer_patterns_by_predicate", {}).get(
 		predicate_name,
 		[],
@@ -2237,6 +2242,8 @@ def _render_producer_mode_options_for_predicate(
 		rendered_requirements = tuple(
 			_render_positive_dynamic_requirements(pattern, token_mapping)
 		)
+		if target_signature in rendered_requirements:
+			continue
 		mode = (
 			_task_invocation_signature(pattern["action_name"], rendered_action_args),
 			rendered_requirements,
@@ -2245,9 +2252,32 @@ def _render_producer_mode_options_for_predicate(
 			continue
 		seen.add(mode)
 		rendered_modes.append(mode)
-		if len(rendered_modes) >= limit:
-			break
-	return tuple(rendered_modes)
+	rendered_modes = _filter_dominated_producer_modes(rendered_modes)
+	return tuple(rendered_modes[:limit])
+
+
+def _filter_dominated_producer_modes(
+	rendered_modes: Sequence[tuple[str, tuple[str, ...]]],
+) -> list[tuple[str, tuple[str, ...]]]:
+	filtered_modes: list[tuple[str, tuple[str, ...]]] = []
+	need_sets = [
+		{
+			str(signature).strip()
+			for signature in needs
+			if str(signature).strip()
+		}
+		for _, needs in rendered_modes
+	]
+	for index, mode in enumerate(rendered_modes):
+		current_need_set = need_sets[index]
+		if any(
+			other_index != index
+			and need_sets[other_index] < current_need_set
+			for other_index in range(len(rendered_modes))
+		):
+			continue
+		filtered_modes.append(mode)
+	return filtered_modes
 
 
 def _constructive_template_line_for_task(

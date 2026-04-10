@@ -48,9 +48,11 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethodStep,
 	HTNTargetTaskBinding,
 	HTNTask,
+	_parse_signature_literal,
 )
 from stage3_method_synthesis.transition_native import build_transition_native_prompt_analysis
 from stage4_panda_planning.panda_planner import PANDAPlanner
+from stage4_panda_planning.panda_schema import PANDAPlanResult
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner
 from utils.config import get_config
@@ -842,6 +844,16 @@ def _official_transition_native_method_library(
 	for item in prompt_analysis.get("query_root_alias_tasks", ()):
 		task_name = str(item["name"])
 		parameters = tuple(item.get("parameters", ()) or ())
+		bridge_parameters = tuple(item.get("bridge_parameters", ()) or ()) or parameters
+		bridge_precondition = tuple(
+			parsed
+			for parsed in (
+				_parse_signature_literal(str(value).strip())
+				for value in (item.get("bridge_precondition") or ())
+				if str(value).strip()
+			)
+			if parsed is not None and parsed.is_positive
+		)
 		headline_literal = HTNLiteral(
 			predicate=str(item["headline_literal"]["predicate"]),
 			args=tuple(item["headline_literal"].get("args", ()) or ()),
@@ -859,30 +871,30 @@ def _official_transition_native_method_library(
 			HTNMethod(
 				method_name=f"m_{task_name}_noop",
 				task_name=task_name,
-				parameters=parameters,
+				parameters=bridge_parameters,
 				task_args=parameters,
-				context=(headline_literal,) if headline_literal else (),
+				context=tuple([*bridge_precondition, headline_literal]) if headline_literal else bridge_precondition,
 				subtasks=(),
 				ordering=(),
 				origin="official_stage3_mask_transition_native",
-			),
-		)
+				),
+			)
 		wrapper_methods.append(
 			HTNMethod(
 				method_name=f"m_{task_name}_constructive",
 				task_name=task_name,
-				parameters=parameters,
+				parameters=bridge_parameters,
 				task_args=parameters,
-				context=(),
+				context=bridge_precondition,
 				subtasks=(
 					HTNMethodStep(
-						step_id="s1",
-						task_name=transition_name,
-						args=parameters,
-						kind="compound",
-						action_name=None,
+							step_id="s1",
+							task_name=transition_name,
+							args=bridge_parameters,
+							kind="compound",
+							action_name=None,
+						),
 					),
-				),
 				ordering=(),
 				origin="official_stage3_mask_transition_native",
 			),
@@ -891,6 +903,15 @@ def _official_transition_native_method_library(
 	for item in prompt_analysis.get("transition_tasks", ()):
 		task_name = str(item["name"])
 		parameters = tuple(item.get("parameters", ()) or ())
+		retained_prefix_literals = tuple(
+			parsed
+			for parsed in (
+				_parse_signature_literal(str(value).strip())
+				for value in (item.get("retained_prefix_literals") or ())
+				if str(value).strip()
+			)
+			if parsed is not None and parsed.is_positive
+		)
 		headline_literal = HTNLiteral(
 			predicate=str(item["headline_literal"]["predicate"]),
 			args=tuple(item["headline_literal"].get("args", ()) or ()),
@@ -905,13 +926,16 @@ def _official_transition_native_method_library(
 				f"for '{target_literal}'.",
 			)
 		helper_task_name = helper_candidates[0]
+		helper_task = base_library.task_for_name(helper_task_name)
+		helper_arity = len(tuple(getattr(helper_task, "parameters", ()) or ()))
+		helper_args = tuple(parameters[:helper_arity])
 		wrapper_methods.append(
 			HTNMethod(
 				method_name=f"m_{task_name}_noop",
 				task_name=task_name,
 				parameters=parameters,
 				task_args=parameters,
-				context=(headline_literal,) if headline_literal else (),
+				context=tuple([*retained_prefix_literals, headline_literal]) if headline_literal else retained_prefix_literals,
 				subtasks=(),
 				ordering=(),
 				origin="official_stage3_mask_transition_native",
@@ -923,12 +947,12 @@ def _official_transition_native_method_library(
 				task_name=task_name,
 				parameters=parameters,
 				task_args=parameters,
-				context=(),
+				context=retained_prefix_literals,
 				subtasks=(
 					HTNMethodStep(
 						step_id="s1",
 						task_name=helper_task_name,
-						args=parameters,
+						args=helper_args,
 						kind="compound",
 						action_name=None,
 					),
@@ -2480,6 +2504,66 @@ def assert_benchmark_query_dataset_instructions_respect_protocol():
 				assert clause in instruction, (query_id, clause)
 
 
+def test_transition_native_raw_dfa_audit_over_all_stored_benchmark_queries():
+	delegate = RealHTNMethodSynthesizer()
+	for domain_key, problem_dir in {
+		"blocksworld": BLOCKSWORLD_PROBLEM_DIR,
+		"marsrover": MARSROVER_PROBLEM_DIR,
+		"satellite": SATELLITE_PROBLEM_DIR,
+		"transport": TRANSPORT_PROBLEM_DIR,
+	}.items():
+		query_cases = _load_problem_query_cases(
+			problem_dir,
+			limit=10_000,
+			pattern=DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS[domain_key],
+		)
+		for query_id, case in query_cases.items():
+			pipeline = LTL_BDI_Pipeline(
+				domain_file=CLI_DOMAIN_FILES[domain_key],
+				problem_file=str(case["problem_file"]),
+			)
+			pipeline.output_dir = Path(tempfile.mkdtemp(prefix="raw_dfa_audit_"))
+			ltl_spec = _build_oracle_task_grounded_stage1_spec(
+				pipeline,
+				case["instruction"],
+			)
+			dfa_result = pipeline._stage2_dfa_generation(ltl_spec)
+			assert dfa_result is not None, (domain_key, query_id)
+			graph = delegate._parse_dfa_graph(str(dfa_result.get("dfa_dot") or ""))
+			selected_edges = delegate._select_relevant_edges(graph)
+			assert selected_edges, (domain_key, query_id)
+			for source_state, target_state, raw_label in selected_edges:
+				label = str(raw_label or "").strip()
+				assert label, (domain_key, query_id, source_state, target_state)
+				if label == "true":
+					assert source_state == target_state, (
+						domain_key,
+						query_id,
+						source_state,
+						target_state,
+						label,
+					)
+					continue
+				assert label != "false", (
+					domain_key,
+					query_id,
+					source_state,
+					target_state,
+					label,
+				)
+				literal = delegate._literal_from_supported_raw_label(
+					label,
+					ltl_spec.grounding_map,
+				)
+				assert literal.is_positive, (
+					domain_key,
+					query_id,
+					source_state,
+					target_state,
+					label,
+				)
+
+
 def assert_query_task_anchor_extraction_uses_declared_tasks_only():
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
 	anchors = pipeline._extract_query_task_anchors(
@@ -3411,6 +3495,81 @@ def assert_stage6_guided_execution_uses_query_task_anchors_not_problem_root_task
 	assert guided["method_trace"] == [{"method_name": "m_do_put_on", "task_args": ["b1", "b2"]}]
 
 
+def assert_stage6_exact_transition_task_network_grounds_bridge_context_arguments():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p02.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	query_task_network = (
+		("query_root_1_do_put_on", ("b3", "b5")),
+		("query_root_2_do_put_on", ("b6", "b3")),
+	)
+	literal_signatures = ("on(b3, b5)", "on(b6, b3)")
+	transition_specs = (
+		{
+			"transition_name": "dfa_step_q1_q2_on_b3_b5",
+			"source_state": "q1",
+			"target_state": "q2",
+			"target_literal": {"predicate": "on", "args": ["b3", "b5"], "is_positive": True},
+			"initial_state": "q1",
+		},
+		{
+			"transition_name": "dfa_step_q2_q3_on_b6_b3",
+			"source_state": "q2",
+			"target_state": "q3",
+			"target_literal": {"predicate": "on", "args": ["b6", "b3"], "is_positive": True},
+			"initial_state": "q1",
+		},
+	)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=[
+			HTNLiteral("on", ("b3", "b5"), True, None),
+			HTNLiteral("on", ("b6", "b3"), True, None),
+		],
+		query_task_anchors=[
+			{"task_name": "do_put_on", "args": ["b3", "b5"]},
+			{"task_name": "do_put_on", "args": ["b6", "b3"]},
+		],
+		transition_specs=[
+			{
+				"transition_name": "dfa_step_q1_q2_on_b3_b5",
+				"literal": HTNLiteral("on", ("b3", "b5"), True, None),
+				"source_state": "q1",
+				"target_state": "q2",
+				"raw_label": "on_b3_b5",
+				"initial_state": "q1",
+			},
+			{
+				"transition_name": "dfa_step_q2_q3_on_b6_b3",
+				"literal": HTNLiteral("on", ("b6", "b3"), True, None),
+				"source_state": "q2",
+				"target_state": "q3",
+				"raw_label": "on_b6_b3",
+				"initial_state": "q1",
+			},
+		],
+	)
+	method_library = SimpleNamespace(task_for_name=lambda _name: object())
+
+	exact_task_network, bridge_metadata = pipeline._stage6_exact_transition_task_network(
+		query_task_network=query_task_network,
+		literal_signatures=literal_signatures,
+		transition_specs=transition_specs,
+		prompt_analysis=prompt_analysis,
+		method_library=method_library,
+	)
+
+	assert exact_task_network == (
+		("dfa_step_q1_q2_on_b3_b5", ("b3", "b5")),
+		("dfa_step_q2_q3_on_b6_b3", ("b6", "b3", "b5")),
+	)
+	assert bridge_metadata[1]["transition_task_args"] == ["b6", "b3", "b5"]
+
+
 def assert_stage6_incremental_guided_execution_reuses_stage4_plan_record_when_task_plan_is_empty():
 	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p02.hddl"
 	if not problem_path.exists():
@@ -3671,6 +3830,7 @@ def assert_stage6_guided_execution_falls_back_to_chunked_query_tasks_before_incr
 				{
 					"task_name": kwargs.get("task_name"),
 					"task_network": task_network,
+					"timeout_seconds": kwargs.get("timeout_seconds"),
 				},
 			)
 			if len(task_network) > 2:
@@ -3703,7 +3863,681 @@ def assert_stage6_guided_execution_falls_back_to_chunked_query_tasks_before_incr
 	assert guided["source"] == "panda_chunked_query_tasks_with_goals"
 	assert len(captured["calls"]) >= 2
 	assert len(captured["calls"][0]["task_network"]) == 3
+	assert captured["calls"][0]["task_name"] == "stage6_guided_schedule"
+	assert captured["calls"][0]["timeout_seconds"] == 60.0
 	assert any(len(call["task_network"]) < 3 for call in captured["calls"][1:])
+
+
+def assert_stage6_guided_execution_prefers_exact_transition_tasks_when_available():
+	problem_path = MARSROVER_PROBLEM_DIR / "pfile01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing marsrover problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=MARSROVER_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage6_exact_transition_test_"))
+	instruction = MARSROVER_QUERY_CASES["query_1"]["instruction"]
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(pipeline, instruction)
+	dfa_result = pipeline._stage2_dfa_generation(ltl_spec)
+	assert dfa_result is not None
+
+	delegate = RealHTNMethodSynthesizer()
+	transition_specs = _extract_progressing_transitions_compat(
+		delegate,
+		ltl_spec.grounding_map,
+		dfa_result,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		linearise_ordered_literals=pipeline._query_task_sequence_is_ordered(ltl_spec),
+	)
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=_official_domain_method_library(
+			"marsrover",
+			target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+			query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+		).target_literals,
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+		transition_specs=transition_specs,
+	)
+	method_library = _official_transition_native_method_library(
+		"marsrover",
+		grounding_map=ltl_spec.grounding_map,
+		dfa_result=dfa_result,
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction)),
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+	)
+	extra_bridge_methods: List[HTNMethod] = []
+	for item in prompt_analysis.get("query_root_alias_tasks", ()):
+		task_name = str(item["name"])
+		parameters = tuple(item.get("parameters", ()) or ())
+		target_literal = str(item.get("target_literal") or "")
+		for transition in prompt_analysis.get("transition_tasks", ()):
+			if str(transition.get("target_literal") or "") != target_literal:
+				continue
+			transition_name = str(transition.get("name") or "")
+			if any(
+				method.task_name == task_name
+				and len(method.subtasks) == 1
+				and method.subtasks[0].task_name == transition_name
+				for method in method_library.methods
+			):
+				continue
+			extra_bridge_methods.append(
+				HTNMethod(
+					method_name=f"m_{task_name}_bridge_{transition_name}",
+					task_name=task_name,
+					parameters=parameters,
+					task_args=parameters,
+					context=(),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name=transition_name,
+							args=parameters,
+							kind="compound",
+							action_name=None,
+						),
+					),
+					ordering=(),
+					origin="test_transition_native_bridge_expansion",
+				),
+			)
+	if extra_bridge_methods:
+		method_library = HTNMethodLibrary(
+			compound_tasks=method_library.compound_tasks,
+			primitive_tasks=method_library.primitive_tasks,
+			methods=tuple([*method_library.methods, *extra_bridge_methods]),
+			target_literals=method_library.target_literals,
+			target_task_bindings=method_library.target_task_bindings,
+		)
+	pipeline._latest_transition_specs = tuple(transition_specs)
+
+	literal_by_transition = {
+		str(item["transition_name"]): str(item["label"])
+		for item in transition_specs
+	}
+	captured: Dict[str, Any] = {"calls": []}
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			task_name = str(kwargs.get("task_name") or "")
+			task_args = tuple(kwargs.get("task_args") or ())
+			target_literal = kwargs.get("target_literal")
+			captured["calls"].append(
+				{
+					"task_name": task_name,
+					"task_args": task_args,
+					"timeout_seconds": kwargs.get("timeout_seconds"),
+					"target_literal": (
+						target_literal.to_signature()
+						if hasattr(target_literal, "to_signature")
+						else None
+					),
+				},
+			)
+			task_head = " ".join([task_name, *task_args]).strip()
+			return SimpleNamespace(
+				steps=[],
+				work_dir=f"dummy-{task_name}",
+				raw_plan="\n".join(
+					[
+						"==>",
+						"root 1",
+						f"1 {task_head} -> m_{task_name}_constructive",
+					],
+				),
+				actual_plan="\n".join(
+					[
+						"==>",
+						"root 1",
+						f"1 {task_head} -> m_{task_name}_constructive",
+					],
+				),
+			)
+
+		def extract_method_trace(self, plan_text):
+			task_name = str(plan_text or "").splitlines()[-1].split()[1]
+			task_args = str(plan_text or "").splitlines()[-1].split()[2:]
+			return [{"method_name": f"m_{task_name}_constructive", "task_args": task_args}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_infer_unordered_target_execution_order",
+		lambda self, **kwargs: {"target_ids": ["t1", "t2", "t3"]},
+	)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {"passed": True, "world_facts": []},
+	)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_runtime_world_to_hddl_facts",
+		lambda self, world_facts, predicate_name_map: (
+			pipeline._render_problem_fact(
+				pipeline._stage6_parse_literal_signature(
+					literal_by_transition[captured["calls"][len(captured["calls"]) - 1]["task_name"]],
+				),
+			),
+		),
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_incremental_exact_transition_tasks"
+	assert captured["calls"]
+	assert all(call["task_name"].startswith("dfa_step_") for call in captured["calls"])
+	assert all(call["timeout_seconds"] == 60.0 for call in captured["calls"])
+	assert all(
+		call["target_literal"] == literal_by_transition[call["task_name"]]
+		for call in captured["calls"]
+	)
+	assert guided["method_trace"][0]["method_name"].startswith("m_query_root_")
+	assert guided["method_trace"][1]["method_name"].startswith("m_dfa_step_")
+	assert "actual_plan" in guided and isinstance(guided["actual_plan"], str)
+	assert "query_root_" in guided["actual_plan"]
+
+
+def assert_stage6_exact_transition_guidance_reuses_stage4_plan_records_on_timeout():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage6_exact_fallback_test_"))
+	instruction = BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"]
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(pipeline, instruction)
+	dfa_result = pipeline._stage2_dfa_generation(ltl_spec)
+	assert dfa_result is not None
+
+	delegate = RealHTNMethodSynthesizer()
+	transition_specs = _extract_progressing_transitions_compat(
+		delegate,
+		ltl_spec.grounding_map,
+		dfa_result,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		linearise_ordered_literals=pipeline._query_task_sequence_is_ordered(ltl_spec),
+	)
+	query_task_anchors = list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction))
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=_official_transition_native_method_library(
+			"blocksworld",
+			grounding_map=ltl_spec.grounding_map,
+			dfa_result=dfa_result,
+			target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+			query_task_anchors=query_task_anchors,
+			ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		).target_literals,
+		query_task_anchors=query_task_anchors,
+		transition_specs=transition_specs,
+	)
+	method_library = _official_transition_native_method_library(
+		"blocksworld",
+		grounding_map=ltl_spec.grounding_map,
+		dfa_result=dfa_result,
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=query_task_anchors,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+	)
+	pipeline._latest_transition_specs = tuple(transition_specs)
+	pipeline._latest_transition_prompt_analysis = prompt_analysis
+
+	literal_by_transition = {
+		str(item["transition_name"]): str(item["label"])
+		for item in transition_specs
+	}
+	first_transition_name = str(transition_specs[0]["transition_name"])
+	first_literal = pipeline._stage6_parse_literal_signature(literal_by_transition[first_transition_name])
+	assert first_literal is not None
+	fallback_plan = SimpleNamespace(
+		steps=[
+			SimpleNamespace(task_name="pick-up", args=("b4",)),
+			SimpleNamespace(task_name="stack", args=("b4", "b2")),
+		],
+		work_dir="fallback-transition",
+		raw_plan="\n".join(
+			[
+				"==>",
+				"root 1",
+				f"1 {first_transition_name} b4 b2 -> m_{first_transition_name}_constructive",
+			],
+		),
+		actual_plan="\n".join(
+			[
+				"==>",
+				"root 1",
+				f"1 {first_transition_name} b4 b2 -> m_{first_transition_name}_constructive",
+			],
+		),
+	)
+	plan_records = [
+		{
+			"transition_name": first_transition_name,
+			"target_literal": first_literal,
+			"plan": fallback_plan,
+		},
+	]
+
+	class TimeoutPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			raise RuntimeError("simulated exact transition timeout")
+
+		def extract_method_trace(self, plan_text):
+			lines = [line.strip() for line in str(plan_text or "").splitlines() if line.strip()]
+			last_line = lines[-1]
+			parts = last_line.split()
+			return [{"method_name": parts[-1], "task_args": parts[2:-2]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", TimeoutPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {"passed": True, "world_facts": [literal_by_transition[first_transition_name]]},
+	)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_runtime_world_to_hddl_facts",
+		lambda self, world_facts, predicate_name_map: tuple(
+			pipeline._render_problem_fact(pipeline._stage6_parse_literal_signature(item))
+			for item in world_facts
+			if pipeline._stage6_parse_literal_signature(item) is not None
+		),
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			plan_records=plan_records,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_incremental_exact_transition_tasks"
+	assert guided["action_path"] == ["pick_up(b4)", "stack(b4, b2)"]
+	assert guided["method_trace"][0]["method_name"].startswith("m_query_root_1_do_put_on")
+	assert guided["method_trace"][1]["method_name"] == f"m_{first_transition_name}_constructive"
+	assert guided.get("is_partial") is True
+	assert guided.get("completed_task_count") == 1
+
+
+def assert_stage6_exact_transition_guidance_prefers_replayable_stage4_plan_records_before_replanning():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage6_exact_replay_first_test_"))
+	instruction = BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"]
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(pipeline, instruction)
+	dfa_result = pipeline._stage2_dfa_generation(ltl_spec)
+	assert dfa_result is not None
+
+	delegate = RealHTNMethodSynthesizer()
+	transition_specs = _extract_progressing_transitions_compat(
+		delegate,
+		ltl_spec.grounding_map,
+		dfa_result,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		linearise_ordered_literals=pipeline._query_task_sequence_is_ordered(ltl_spec),
+	)
+	query_task_anchors = list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction))
+	prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=_official_transition_native_method_library(
+			"blocksworld",
+			grounding_map=ltl_spec.grounding_map,
+			dfa_result=dfa_result,
+			target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+			query_task_anchors=query_task_anchors,
+			ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		).target_literals,
+		query_task_anchors=query_task_anchors,
+		transition_specs=transition_specs,
+	)
+	method_library = _official_transition_native_method_library(
+		"blocksworld",
+		grounding_map=ltl_spec.grounding_map,
+		dfa_result=dfa_result,
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=query_task_anchors,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+	)
+	pipeline._latest_transition_specs = tuple(transition_specs)
+	pipeline._latest_transition_prompt_analysis = prompt_analysis
+
+	task_network = pipeline._stage6_query_task_network(ltl_spec, method_library=method_library)
+	exact_transition_task_network, _bridge_metadata = pipeline._stage6_exact_transition_task_network(
+		query_task_network=task_network,
+		literal_signatures=tuple(ltl_spec.query_task_literal_signatures),
+		transition_specs=pipeline._latest_transition_specs,
+		prompt_analysis=pipeline._latest_transition_prompt_analysis,
+		method_library=method_library,
+	)
+	assert exact_transition_task_network
+
+	literal_by_transition = {
+		str(item["transition_name"]): str(item["label"])
+		for item in transition_specs
+	}
+	plan_records = []
+	for task_name, task_args in exact_transition_task_network:
+		task_head = " ".join([task_name, *task_args]).strip()
+		plan_records.append(
+			{
+				"transition_name": task_name,
+				"target_literal": pipeline._stage6_parse_literal_signature(
+					literal_by_transition[task_name],
+				),
+				"plan": SimpleNamespace(
+					steps=[SimpleNamespace(task_name="pick-up", args=(task_args[0],))],
+					work_dir=f"replayed-{task_name}",
+					raw_plan="\n".join(
+						[
+							"==>",
+							"root 1",
+							f"1 {task_head} -> m_{task_name}_constructive",
+						],
+					),
+					actual_plan="\n".join(
+						[
+							"==>",
+							"root 1",
+							f"1 {task_head} -> m_{task_name}_constructive",
+						],
+					),
+				),
+			},
+		)
+
+	captured = {"planner_calls": 0}
+
+	class NoReplanPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			captured["planner_calls"] += 1
+			raise AssertionError("exact transition replay should have satisfied guidance before replanning")
+
+		def extract_method_trace(self, plan_text):
+			lines = [line.strip() for line in str(plan_text or "").splitlines() if line.strip()]
+			last_line = lines[-1]
+			parts = last_line.split()
+			return [{"method_name": parts[-1], "task_args": parts[2:-2]}]
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", NoReplanPlanner)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_replay_action_path_against_schemas",
+		lambda self, **kwargs: {"passed": True, "world_facts": list(literal_by_transition.values())},
+	)
+	monkeypatch.setattr(
+		JasonRunner,
+		"_runtime_world_to_hddl_facts",
+		lambda self, world_facts, predicate_name_map: tuple(
+			pipeline._render_problem_fact(pipeline._stage6_parse_literal_signature(item))
+			for item in world_facts
+			if pipeline._stage6_parse_literal_signature(item) is not None
+		),
+	)
+	try:
+		guided = pipeline._stage6_planner_guided_execution(
+			ltl_spec,
+			method_library,
+			plan_records=plan_records,
+			action_schemas=pipeline._stage6_action_schemas(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			object_types=dict(pipeline.problem.object_types),
+			seed_facts=tuple(pipeline._render_problem_fact(fact) for fact in pipeline.problem.init_facts),
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert guided is not None
+	assert guided["source"] == "panda_incremental_exact_transition_tasks"
+	assert guided.get("is_partial") is not True
+	assert guided.get("completed_target_ids") == ["t1", "t2", "t3"]
+	assert captured["planner_calls"] == 0
+
+
+def assert_stage6_partial_exact_transition_guidance_resumes_with_query_task_suffix():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p02.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	partial_guided = {
+		"source": "panda_incremental_exact_transition_tasks",
+		"action_path": [
+			"unstack(b3, b6)",
+			"put_down(b3)",
+			"unstack(b6, b5)",
+			"put_down(b6)",
+			"pick_up(b3)",
+			"stack(b3, b5)",
+			"pick_up(b6)",
+			"stack(b6, b3)",
+		],
+		"method_trace": [
+			{"method_name": "m_query_root_1_do_put_on_constructive", "task_args": ["b3", "b5"]},
+			{"method_name": "m_query_root_2_do_put_on_constructive", "task_args": ["b6", "b3"]},
+		],
+		"actual_plan": "\n".join(
+			[
+				"==>",
+				"1 stack b3 b5",
+				"4 stack b6 b3",
+				"root 2 5",
+				"2 query_root_1_do_put_on b3 b5 -> m_query_root_1_do_put_on_constructive 3",
+				"3 dfa_step_q1_q2_on_b3_b5 b3 b5 -> m_dfa_step_q1_q2_on_b3_b5_constructive 1",
+				"5 query_root_2_do_put_on b6 b3 -> m_query_root_2_do_put_on_constructive 6",
+				"6 dfa_step_q2_q3_on_b6_b3 b6 b3 b5 -> m_dfa_step_q2_q3_on_b6_b3_constructive 4",
+			],
+		)
+		+ "\n",
+		"is_partial": True,
+		"completed_task_count": 2,
+		"completed_target_ids": ["t1", "t2"],
+		"post_guided_seed_facts": ("(on b6 b3)", "(on b3 b5)", "(handempty)"),
+	}
+	task_network = (
+		("query_root_1_do_put_on", ("b3", "b5")),
+		("query_root_2_do_put_on", ("b6", "b3")),
+		("query_root_3_do_put_on", ("b1", "b6")),
+		("query_root_4_do_put_on", ("b2", "b1")),
+	)
+	completed_target_ids = ("t1", "t2", "t3", "t4")
+	captured: Dict[str, Any] = {}
+
+	def fake_plan_task_network_only(**kwargs):
+		captured["task_network"] = kwargs["task_network"]
+		captured["seed_facts"] = kwargs["seed_facts"]
+		return (
+			SimpleNamespace(work_dir="suffix-workdir"),
+			["pick_up(b1)", "stack(b1, b6)", "pick_up(b2)", "stack(b2, b1)"],
+			[
+				{"method_name": "m_query_root_3_do_put_on_constructive", "task_args": ["b1", "b6"]},
+				{"method_name": "m_query_root_4_do_put_on_constructive", "task_args": ["b2", "b1"]},
+			],
+			"\n".join(
+				[
+					"==>",
+					"1 stack b1 b6",
+					"4 stack b2 b1",
+					"root 2 5",
+					"2 query_root_3_do_put_on b1 b6 -> m_query_root_3_do_put_on_constructive 3",
+					"3 dfa_step_q3_q4_on_b1_b6 b1 b6 b3 b5 -> m_dfa_step_q3_q4_on_b1_b6_constructive 1",
+					"5 query_root_4_do_put_on b2 b1 -> m_query_root_4_do_put_on_constructive 6",
+					"6 dfa_step_q4_q5_on_b2_b1 b2 b1 b3 b5 b6 -> m_dfa_step_q4_q5_on_b2_b1_constructive 4",
+				],
+			)
+			+ "\n",
+		)
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(
+		pipeline,
+		"_stage6_plan_task_network_only",
+		fake_plan_task_network_only,
+	)
+	try:
+		resumed = pipeline._stage6_resume_partial_guided_execution_with_query_task_suffix(
+			partial_guided_execution=partial_guided,
+			task_network=task_network,
+			completed_target_ids=completed_target_ids,
+			planner=object(),
+			method_library=HTNMethodLibrary(),
+			runtime_objects=tuple(pipeline.problem.objects),
+			typed_objects=tuple(pipeline.problem.object_types.items()),
+			task_network_ordered=True,
+			planner_timeout_seconds=60.0,
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert resumed is not partial_guided
+	assert resumed.get("is_partial") is None
+	assert resumed["source"] == "panda_incremental_exact_transition_tasks+panda_query_task_suffix"
+	assert resumed["completed_target_ids"] == list(completed_target_ids)
+	assert captured["task_network"] == task_network[2:]
+	assert captured["seed_facts"] == partial_guided["post_guided_seed_facts"]
+	assert resumed["action_path"][:8] == partial_guided["action_path"]
+	assert resumed["action_path"][8:] == ["pick_up(b1)", "stack(b1, b6)", "pick_up(b2)", "stack(b2, b1)"]
+	assert [entry["method_name"] for entry in resumed["method_trace"]] == [
+		"m_query_root_1_do_put_on_constructive",
+		"m_query_root_2_do_put_on_constructive",
+		"m_query_root_3_do_put_on_constructive",
+		"m_query_root_4_do_put_on_constructive",
+	]
+	assert resumed["actual_plan"] is not None
+	assert "query_root_1_do_put_on" in resumed["actual_plan"]
+	assert "query_root_4_do_put_on" in resumed["actual_plan"]
+
+
+def assert_stage4_transition_native_planning_uses_full_transition_task_signature():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p02.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage4_transition_args_test_"))
+	instruction = BLOCKSWORLD_QUERY_CASES["query_2"]["instruction"]
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(pipeline, instruction)
+	dfa_result = pipeline._stage2_dfa_generation(ltl_spec)
+	assert dfa_result is not None
+
+	delegate = RealHTNMethodSynthesizer()
+	transition_specs = _extract_progressing_transitions_compat(
+		delegate,
+		ltl_spec.grounding_map,
+		dfa_result,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		linearise_ordered_literals=pipeline._query_task_sequence_is_ordered(ltl_spec),
+	)
+	query_task_anchors = list(pipeline._extract_query_task_anchors(ltl_spec.source_instruction))
+	method_library = _official_transition_native_method_library(
+		"blocksworld",
+		grounding_map=ltl_spec.grounding_map,
+		dfa_result=dfa_result,
+		target_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+		query_task_anchors=query_task_anchors,
+		ordered_literal_signatures=list(ltl_spec.query_task_literal_signatures),
+	)
+	pipeline._latest_transition_specs = tuple(transition_specs)
+	pipeline._latest_transition_prompt_analysis = build_transition_native_prompt_analysis(
+		target_literals=method_library.target_literals,
+		query_task_anchors=query_task_anchors,
+		transition_specs=transition_specs,
+	)
+
+	captured: List[Dict[str, Any]] = []
+
+	class DummyPlanner:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def plan(self, **kwargs):
+			captured.append(
+				{
+					"task_name": kwargs.get("task_name"),
+					"task_args": tuple(kwargs.get("task_args") or ()),
+				},
+			)
+			task_name = str(kwargs.get("task_name") or "")
+			task_args = tuple(str(arg) for arg in (kwargs.get("task_args") or ()))
+			return PANDAPlanResult(
+				task_name=task_name,
+				task_args=task_args,
+				target_literal=kwargs.get("target_literal"),
+				steps=[],
+				raw_plan="\n".join(["==>", "root 1", f"1 {task_name} {' '.join(task_args)} -> noop"]),
+				actual_plan="\n".join(["==>", "root 1", f"1 {task_name} {' '.join(task_args)} -> noop"]),
+				work_dir=f"dummy-{task_name}",
+				timing_profile={},
+			)
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		LTL_BDI_Pipeline,
+		"_task_witness_initial_facts",
+		lambda self, planner, task_name, method_library, task_args, objects, object_pool, object_types: (),
+	)
+	try:
+		plan_records, _stage4_artifacts = pipeline._stage4_panda_planning(
+			ltl_spec,
+			method_library,
+			transition_specs,
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert len(plan_records) == len(transition_specs)
+	assert captured
+	planned_args_by_name = {
+		item["task_name"]: item["task_args"]
+		for item in captured
+	}
+	assert planned_args_by_name["dfa_step_q2_q3_on_b6_b3"] == ("b6", "b3", "b5")
+	assert planned_args_by_name["dfa_step_q3_q4_on_b1_b6"] == ("b1", "b6", "b3", "b5")
 
 
 def assert_stage6_unordered_guided_execution_falls_back_to_chunked_query_tasks():
@@ -3988,7 +4822,7 @@ def assert_stage6_chunked_guided_execution_uses_longer_timeout_for_singleton_uno
 		if len(call["task_network"]) == 1
 	}
 	assert multi_task_timeouts == {5.0}
-	assert singleton_timeouts == {30.0}
+	assert singleton_timeouts == {60.0}
 
 
 def assert_stage6_chunked_guided_execution_retains_reduced_chunk_ceiling_after_failures():

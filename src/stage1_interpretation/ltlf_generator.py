@@ -131,10 +131,11 @@ class NLToLTLfGenerator:
         prefer_compact_output = bool(compact_task_clauses) and (
             self._should_prefer_compact_task_grounded_output(nl_instruction)
         )
-        prefer_skeletal_output = (
-            prefer_compact_output
-            and self._should_use_skeletal_task_grounded_output(compact_task_clauses)
-        )
+        # Keep the main Stage 1 path semantically complete. Query-grounded benchmark
+        # instructions already enumerate the intended task order explicitly, so asking
+        # the model to collapse them to a single skeletal anchor is unsound and can
+        # also trigger provider schema drift on larger queries.
+        prefer_skeletal_output = False
         user_prompt = get_ltl_user_prompt_with_options(
             nl_instruction,
             prefer_compact_task_grounded_output=prefer_compact_output,
@@ -637,20 +638,6 @@ class NLToLTLfGenerator:
         request_variants = [
             {
                 "response_format": {"type": "json_object"},
-                "extra_body": {
-                    "reasoning": {
-                        "effort": "none",
-                        "exclude": True,
-                    },
-                },
-            },
-            {
-                "response_format": {"type": "json_object"},
-                "extra_body": {
-                    "reasoning": {
-                        "exclude": True,
-                    },
-                },
             },
             {
                 "response_format": {"type": "json_object"},
@@ -670,14 +657,6 @@ class NLToLTLfGenerator:
                 if self._is_unsupported_json_response_format_error(exc):
                     last_optional_error = exc
                     request_variants = [{}]
-                    index = 0
-                    continue
-                if self._is_unsupported_reasoning_parameter_error(exc):
-                    last_optional_error = exc
-                    request_variants = [
-                        {"response_format": {"type": "json_object"}},
-                        {},
-                    ]
                     index = 0
                     continue
                 raise
@@ -776,22 +755,6 @@ class NLToLTLfGenerator:
         """
         message = str(exc).lower()
         if "response_format" not in message and "json_object" not in message:
-            return False
-        unsupported_markers = (
-            "unsupported",
-            "not supported",
-            "invalid parameter",
-            "unknown parameter",
-            "unrecognized request argument",
-            "extra inputs are not permitted",
-        )
-        return any(marker in message for marker in unsupported_markers)
-
-    @staticmethod
-    def _is_unsupported_reasoning_parameter_error(exc: Exception) -> bool:
-        """Detect provider errors that reject explicit reasoning controls."""
-        message = str(exc).lower()
-        if "reasoning" not in message:
             return False
         unsupported_markers = (
             "unsupported",

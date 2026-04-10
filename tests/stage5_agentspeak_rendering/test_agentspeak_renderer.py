@@ -1913,6 +1913,57 @@ def test_renderer_stops_recursive_compound_effect_summary_cycles():
 	assert "+!loop_task(" in code
 
 
+def test_renderer_stops_mutual_recursive_compound_effect_summary_cycles():
+	renderer = AgentSpeakRenderer()
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("helper_holding", ("ITEM",), False, ("holding",)),
+			HTNTask("helper_clear", ("ITEM",), False, ("clear",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_helper_holding",
+				task_name="helper_holding",
+				parameters=("ITEM",),
+				task_args=("ITEM",),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="helper_clear",
+						args=("ITEM",),
+						kind="compound",
+					),
+				),
+			),
+			HTNMethod(
+				method_name="m_helper_clear",
+				task_name="helper_clear",
+				parameters=("ITEM",),
+				task_args=("ITEM",),
+				subtasks=(
+					HTNMethodStep(
+						step_id="s1",
+						task_name="helper_holding",
+						args=("ITEM",),
+						kind="compound",
+					),
+				),
+			),
+		],
+	)
+
+	code = renderer.generate(
+		domain=_domain(),
+		objects=("a",),
+		method_library=method_library,
+		plan_records=[],
+	)
+
+	assert "+!helper_holding(" in code
+	assert "+!helper_clear(" in code
+
+
 def test_renderer_hoists_branch_discriminators_from_action_schema():
 	renderer = AgentSpeakRenderer()
 	method_library = HTNMethodLibrary(

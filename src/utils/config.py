@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 DEFAULT_STAGE1_MODEL = "deepseek/deepseek-chat-v3-0324"
+DEFAULT_STAGE3_MODEL = "minimax/minimax-m2"
 DEFAULT_SHARED_MODEL = "deepseek-chat"
 
 
@@ -69,13 +70,12 @@ class Config:
         """
         Get the Stage 3 model identifier.
 
-        Stage 3 needs a model that can return one structured JSON library within
-        the completion budget. Some reasoning-first endpoints reserve the full
-        completion budget for hidden reasoning and never emit final JSON. Allow
-        Stage 3 to use a separate model from Stage 1 while keeping the default
-        backward-compatible.
+        Stage 3 needs a Minimax model that can return one structured JSON
+        library within a bounded wall-clock budget. The smaller M2 variant is a
+        better fit for low-latency one-shot structured generation than the
+        slower reasoning-heavier variants.
         """
-        return os.getenv('OPENAI_STAGE3_MODEL', self.openai_model)
+        return os.getenv('OPENAI_STAGE3_MODEL', DEFAULT_STAGE3_MODEL)
 
     @property
     def openai_timeout(self) -> int:
@@ -87,22 +87,26 @@ class Config:
         """
         Get the Stage 3 request timeout in seconds.
 
-        Stage 3 synthesizes an entire method library in one response, so it needs a
-        looser default wall-clock budget than Stage 1's semantic-parsing request.
+        Stage 3 synthesizes an entire transition-native method library in one
+        Minimax response. The compact AST prompt reduces output size, but the
+        model can still need materially longer wall-clock time than Stage 1 on
+        larger ordered task networks while reasoning remains enabled.
         """
-        return int(os.getenv('OPENAI_STAGE3_TIMEOUT', '180'))
+        return int(os.getenv('OPENAI_STAGE3_TIMEOUT', '600'))
 
     @property
     def openai_stage3_max_tokens(self) -> int:
         """
         Get the Stage 3 response token budget.
 
-        Stage 3 now emits a narrow AST-style JSON library rather than free-form text.
-        Keep the default well below the old 20000-token budget to reduce latency
-        and to stay within common structured-output limits such as DeepSeek's 8K
-        maximum for `deepseek-chat`.
+        Stage 3 emits one complete method library in a single Minimax response.
+        The transition-native redesign keeps the JSON compact, but the one-shot
+        library can still be materially larger than Stage 1's symbolic output,
+        especially when reasoning remains enabled. Keep a larger one-shot budget
+        by default so the model can finish a full library on longer benchmark
+        queries without requiring retries or repairs.
         """
-        return max(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '8000')), 1)
+        return max(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '48000')), 1)
 
     @property
     def openai_stage1_max_tokens(self) -> int:

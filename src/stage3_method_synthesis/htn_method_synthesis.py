@@ -9,9 +9,7 @@ and validate executable AgentSpeak wrappers.
 from __future__ import annotations
 
 import json
-import queue
 import re
-import threading
 import time
 from collections import deque
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -24,13 +22,18 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethodStep,
 	HTNTask,
 	HTNTargetTaskBinding,
+	_parse_invocation_signature,
 )
 from stage3_method_synthesis.transition_native import (
+	build_transition_native_ast_compiler_defaults,
 	build_transition_native_prompt_analysis,
+	build_transition_native_required_branch_contracts,
 	build_transition_native_system_prompt,
 	build_transition_native_user_prompt,
 	query_root_alias_task_name,
 )
+from stage3_method_synthesis.htn_prompts import _render_producer_mode_options_for_predicate
+from utils.config import DEFAULT_STAGE3_MODEL
 from utils.hddl_condition_parser import HDDLConditionParser
 from utils.negation_mode_resolver import NegationResolution, resolve_negation_modes
 
@@ -54,6 +57,21 @@ class HTNSynthesisError(RuntimeError):
 		self.metadata = dict(metadata or {})
 
 
+class LLMStreamingResponseError(RuntimeError):
+	"""Raised when a streaming Stage 3 response is unusable but diagnostically valuable."""
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		partial_text: Optional[str] = None,
+		finish_reason: Optional[str] = None,
+	) -> None:
+		super().__init__(message)
+		self.partial_text = partial_text
+		self.finish_reason = finish_reason
+
+
 class HTNMethodSynthesizer:
 	"""Build an HTN method library for the current DFA targets."""
 
@@ -66,7 +84,7 @@ class HTNMethodSynthesizer:
 		max_tokens: int = 8192,
 	) -> None:
 		self.api_key = api_key
-		self.model = model or "deepseek-chat"
+		self.model = model or DEFAULT_STAGE3_MODEL
 		self.base_url = base_url
 		self.timeout = timeout
 		self.max_tokens = max_tokens
@@ -161,6 +179,19 @@ class HTNMethodSynthesizer:
 				transition_specs=transition_specs,
 			),
 		)
+		if prompt_analysis.get("transition_native") and not prompt_analysis.get(
+			"required_branch_contracts",
+		):
+			prompt_analysis["required_branch_contracts"] = (
+				build_transition_native_required_branch_contracts(
+					prompt_analysis=prompt_analysis,
+					action_analysis=action_analysis,
+				)
+			)
+		ast_compiler_defaults = build_transition_native_ast_compiler_defaults(
+			prompt_analysis=prompt_analysis,
+			action_analysis=action_analysis,
+		)
 
 		metadata: Dict[str, Any] = {
 			"used_llm": False,
@@ -186,6 +217,7 @@ class HTNMethodSynthesizer:
 			"llm_generation_attempts": 0,
 			"pruned_constructive_siblings": 0,
 			"pruned_unreachable_structures": 0,
+			"timing_profile": {},
 		}
 
 		if not self.client:
@@ -198,6 +230,7 @@ class HTNMethodSynthesizer:
 				),
 			)
 
+		prompt_build_start = time.monotonic()
 		prompt = {
 			"system": build_transition_native_system_prompt(),
 			"user": build_transition_native_user_prompt(
@@ -211,7 +244,18 @@ class HTNMethodSynthesizer:
 				query_object_inventory=normalised_query_object_inventory,
 			),
 		}
+		metadata["timing_profile"]["prompt_build_seconds"] = round(
+			time.monotonic() - prompt_build_start,
+			6,
+		)
 		metadata["llm_prompt"] = prompt
+		request_max_tokens = self._estimate_stage3_response_token_budget(
+			prompt_analysis=prompt_analysis,
+			ast_compiler_defaults=ast_compiler_defaults,
+			default_max_tokens=self.max_tokens,
+		)
+		request_max_tokens = self._apply_stage3_provider_token_ceiling(request_max_tokens)
+		metadata["llm_request_max_tokens"] = request_max_tokens
 
 		metadata["llm_generation_attempts"] = 1
 		llm_library, response_text, finish_reason = self._request_complete_llm_library(
@@ -219,6 +263,8 @@ class HTNMethodSynthesizer:
 			domain,
 			metadata,
 			prompt_analysis=prompt_analysis,
+			ast_compiler_defaults=ast_compiler_defaults,
+			max_tokens=request_max_tokens,
 		)
 
 		metadata["llm_response"] = response_text
@@ -239,6 +285,7 @@ class HTNMethodSynthesizer:
 		llm_only_library, pruned_count = self._prune_redundant_constructive_siblings(
 			llm_only_library,
 			domain,
+			prompt_analysis=prompt_analysis,
 		)
 		metadata["pruned_constructive_siblings"] = pruned_count
 		llm_only_library, unreachable_pruned_count = self._prune_unreachable_task_structures(
@@ -246,6 +293,7 @@ class HTNMethodSynthesizer:
 			prompt_analysis=prompt_analysis,
 		)
 		metadata["pruned_unreachable_structures"] = unreachable_pruned_count
+		validation_start = time.monotonic()
 		try:
 			self._validate_library(
 				llm_only_library,
@@ -254,6 +302,7 @@ class HTNMethodSynthesizer:
 				prompt_analysis=prompt_analysis,
 				query_objects=normalised_query_objects,
 				static_predicates=tuple(action_analysis["static_predicates"]),
+				action_analysis=action_analysis,
 			)
 		except Exception as exc:
 			raise self._build_synthesis_error(
@@ -261,6 +310,10 @@ class HTNMethodSynthesizer:
 				"library_validation",
 				f"LLM HTN library failed validation: {exc}",
 			) from exc
+		metadata["timing_profile"]["library_validation_seconds"] = round(
+			time.monotonic() - validation_start,
+			6,
+		)
 
 		metadata["used_llm"] = True
 		metadata["compound_tasks"] = len(llm_only_library.compound_tasks)
@@ -947,6 +1000,8 @@ class HTNMethodSynthesizer:
 		metadata: Dict[str, Any],
 		*,
 		prompt_analysis: Optional[Dict[str, Any]] = None,
+		ast_compiler_defaults: Optional[Dict[str, Any]] = None,
+		max_tokens: Optional[int] = None,
 	) -> Tuple[HTNMethodLibrary, str, Optional[str]]:
 		total_start = time.monotonic()
 		metadata["llm_attempts"] = 1
@@ -954,25 +1009,41 @@ class HTNMethodSynthesizer:
 		try:
 			response_text, finish_reason = self._call_llm(
 				prompt,
-				max_tokens=self.max_tokens,
+				max_tokens=max_tokens or self.max_tokens,
 			)
 		except Exception as exc:
+			llm_roundtrip_seconds = time.monotonic() - attempt_start
 			metadata["llm_attempt_durations_seconds"] = [
-				round(time.monotonic() - attempt_start, 3),
+				round(llm_roundtrip_seconds, 3),
 			]
 			metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
+			metadata["timing_profile"]["llm_roundtrip_seconds"] = round(
+				llm_roundtrip_seconds,
+				6,
+			)
+			partial_response = getattr(exc, "partial_text", None)
+			if partial_response:
+				metadata["llm_response"] = str(partial_response)
+			partial_finish_reason = getattr(exc, "finish_reason", None)
+			if partial_finish_reason is not None:
+				metadata["llm_finish_reason"] = partial_finish_reason
 			raise self._build_synthesis_error(
 				metadata,
 				"llm_call",
 				f"LLM request failed: {exc}",
 			) from exc
 
+		llm_roundtrip_seconds = time.monotonic() - attempt_start
 		metadata["llm_attempt_durations_seconds"] = [
-			round(time.monotonic() - attempt_start, 3),
+			round(llm_roundtrip_seconds, 3),
 		]
 		metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
 		metadata["llm_response"] = response_text
 		metadata["llm_finish_reason"] = finish_reason
+		metadata["timing_profile"]["llm_roundtrip_seconds"] = round(
+			llm_roundtrip_seconds,
+			6,
+		)
 
 		if finish_reason == "length":
 			raise self._build_synthesis_error(
@@ -981,14 +1052,22 @@ class HTNMethodSynthesizer:
 				"LLM response was truncated before completion (finish_reason=length).",
 			)
 
+		parse_start = time.monotonic()
 		try:
-			parsed_library = self._parse_llm_library(response_text)
+			parsed_library = self._parse_llm_library(
+				response_text,
+				ast_compiler_defaults=ast_compiler_defaults,
+			)
 		except Exception as exc:
 			raise self._build_synthesis_error(
 				metadata,
 				"response_parse",
 				f"LLM response could not be parsed as a valid HTN library: {exc}",
 			) from exc
+		metadata["timing_profile"]["ast_parse_seconds"] = round(
+			time.monotonic() - parse_start,
+			6,
+		)
 
 		return self._normalise_llm_library(
 			parsed_library,
@@ -996,57 +1075,71 @@ class HTNMethodSynthesizer:
 			prompt_analysis=prompt_analysis,
 		), response_text, finish_reason
 
+	@staticmethod
+	def _estimate_stage3_response_token_budget(
+		*,
+		prompt_analysis: Optional[Dict[str, Any]],
+		ast_compiler_defaults: Optional[Dict[str, Any]],
+		default_max_tokens: int | None = None,
+	) -> int:
+		max_tokens = int(default_max_tokens or 0)
+		if max_tokens <= 0:
+			max_tokens = 48000
+		analysis = dict(prompt_analysis or {})
+		defaults = dict(ast_compiler_defaults or {})
+		task_count = len(dict(defaults.get("task_defaults") or {}))
+		query_root_count = len(tuple(analysis.get("query_root_alias_tasks", ()) or ()))
+		required_branch_contracts = dict(analysis.get("required_branch_contracts") or {})
+		branch_count = sum(
+			len(tuple(branches or ()))
+			for branches in required_branch_contracts.values()
+		)
+		estimated = (
+			6000
+			+ 220 * task_count
+			+ 140 * branch_count
+			+ 120 * query_root_count
+		)
+		minimum_budget = 20000 if analysis.get("transition_native") else 12000
+		return min(max_tokens, max(minimum_budget, estimated))
+
+	def _apply_stage3_provider_token_ceiling(self, requested_max_tokens: int) -> int:
+		"""
+		Cap Stage 3 completion budgets for providers that misbehave on oversized
+		one-shot JSON requests.
+
+		Minimax returns stable transition-native libraries for the current
+		benchmark prompts, but on the OpenRouter-compatible chat path it can
+		occasionally respond with an empty assistant envelope when the requested
+		completion budget is inflated well beyond the actual JSON need. Keeping a
+		compact ceiling preserves one-shot generation while avoiding provider-side
+		null-content failures on longer ordered queries.
+		"""
+		requested = max(int(requested_max_tokens or 0), 1)
+		model_name = str(self.model or "").strip().lower()
+		if model_name.startswith("minimax/"):
+			return min(requested, 20000)
+		return requested
+
 	def _call_llm(
 		self,
 		prompt: Dict[str, str],
 		*,
 		max_tokens: Optional[int] = None,
 	) -> Tuple[str, Optional[str]]:
-		response = self._call_llm_with_wall_clock_timeout(
-			prompt,
-			max_tokens=max_tokens,
-		)
-		choice = response.choices[0]
-		finish_reason = getattr(choice, "finish_reason", None)
-		content = self._extract_response_text(response)
-		return content, finish_reason
+		response = self._create_chat_completion(prompt, max_tokens=max_tokens)
+		return self._consume_llm_response(response)
 
-	def _call_llm_with_wall_clock_timeout(
+	def _consume_llm_response(
 		self,
-		prompt: Dict[str, str],
-		*,
-		max_tokens: Optional[int] = None,
-	):
-		if self.timeout <= 0:
-			return self._create_chat_completion(prompt, max_tokens=max_tokens)
-
-		result_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue(maxsize=1)
-
-		def _worker() -> None:
-			try:
-				response = self._create_chat_completion(prompt, max_tokens=max_tokens)
-			except Exception as exc:  # pragma: no cover - exercised via queue boundary
-				result_queue.put(("error", exc))
-				return
-			result_queue.put(("ok", response))
-
-		thread = threading.Thread(
-			target=_worker,
-			name="stage3-llm-request",
-			daemon=True,
-		)
-		thread.start()
-
-		try:
-			status, payload = result_queue.get(timeout=float(self.timeout))
-		except queue.Empty as exc:
-			raise TimeoutError(
-				f"Stage 3 LLM wall-clock timeout after {self.timeout:.1f}s.",
-			) from exc
-
-		if status == "error":
-			raise payload  # type: ignore[misc]
-		return payload
+		response: object,
+	) -> Tuple[str, Optional[str]]:
+		if hasattr(response, "choices"):
+			choice = response.choices[0]
+			finish_reason = getattr(choice, "finish_reason", None)
+			content = self._extract_response_text(response)
+			return content, finish_reason
+		return self._consume_streaming_llm_response(response)
 
 	def _create_chat_completion(
 		self,
@@ -1054,7 +1147,7 @@ class HTNMethodSynthesizer:
 		*,
 		max_tokens: Optional[int] = None,
 	):
-		request_kwargs = {
+		request_kwargs: Dict[str, Any] = {
 			"model": self.model,
 			"messages": [
 				{"role": "system", "content": prompt["system"]},
@@ -1063,46 +1156,91 @@ class HTNMethodSynthesizer:
 			"temperature": 0.0,
 			"max_tokens": max_tokens or self.max_tokens,
 			"timeout": self.timeout,
+			"stream": False,
 		}
-		request_variants = (
-			{
-				"extra_body": {
-					"reasoning": {
-						"effort": "none",
-						"exclude": True,
-					},
-				},
-			},
-			{
-				"extra_body": {
-					"reasoning": {
-						"exclude": True,
-					},
-				},
-			},
-			{},
+		extra_body = self._openrouter_provider_routing_body()
+		if extra_body is not None:
+			request_kwargs["extra_body"] = extra_body
+		return self.client.chat.completions.create(
+			**request_kwargs,
 		)
-		last_optional_error: Optional[Exception] = None
-		for variant in request_variants:
-			try:
-				return self.client.chat.completions.create(
-					**request_kwargs,
-					**variant,
-				)
-			except Exception as exc:
-				if not (
-					self._is_unsupported_json_response_format_error(exc)
-					or self._is_unsupported_reasoning_parameter_error(exc)
-				):
-					raise
-				last_optional_error = exc
-		if last_optional_error is not None:
-			raise last_optional_error
-		raise RuntimeError("Stage 3 could not create a chat completion request.")
+
+	def _openrouter_provider_routing_body(self) -> Dict[str, Any] | None:
+		base_url = str(self.base_url or "").strip().lower()
+		if "openrouter.ai" not in base_url:
+			return None
+		model_name = str(self.model or "").strip()
+		if "/" not in model_name:
+			return None
+		provider_name = model_name.split("/", 1)[0].strip().lower()
+		if not provider_name:
+			return None
+		return {
+			"provider": {
+				"only": [provider_name],
+				"allow_fallbacks": False,
+			},
+		}
+
+	def _consume_streaming_llm_response(
+		self,
+		response: object,
+	) -> Tuple[str, Optional[str]]:
+		parts: list[str] = []
+		finish_reason: Optional[str] = None
+		close_stream = getattr(response, "close", None)
+		for chunk in response:
+			choices = getattr(chunk, "choices", None) or ()
+			if not choices:
+				continue
+			choice = choices[0]
+			finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+			delta = getattr(choice, "delta", None)
+			for candidate in (
+				getattr(delta, "content", None) if delta is not None else None,
+				getattr(delta, "parsed", None) if delta is not None else None,
+				getattr(choice, "message", None),
+			):
+				extracted = self._normalise_response_content(candidate)
+				if extracted is not None:
+					parts.append(extracted)
+			current_text = "".join(parts).strip()
+			complete_payload = self._extract_complete_json_payload_text(current_text)
+			if complete_payload is not None:
+				if callable(close_stream):
+					close_stream()
+				return complete_payload, finish_reason or "stop"
+
+		text = "".join(parts).strip()
+		complete_payload = self._extract_complete_json_payload_text(text)
+		if complete_payload is not None:
+			if callable(close_stream):
+				close_stream()
+			return complete_payload, finish_reason or "stop"
+		if text:
+			raise LLMStreamingResponseError(
+				"LLM response did not contain usable textual JSON content. "
+				f"finish_reason={finish_reason!r}",
+				partial_text=text,
+				finish_reason=finish_reason,
+			)
+		raise LLMStreamingResponseError(
+			"LLM response did not contain usable textual JSON content. "
+			f"finish_reason={finish_reason!r}",
+			finish_reason=finish_reason,
+		)
+
+	def _stream_response_has_complete_json(self, text: str) -> bool:
+		return self._extract_complete_json_payload_text(text) is not None
 
 	def _extract_response_text(self, response: object) -> str:
 		choices = getattr(response, "choices", None) or ()
 		if not choices:
+			response_dump = response.model_dump() if hasattr(response, "model_dump") else None
+			if isinstance(response_dump, dict):
+				extracted = self._extract_response_text_from_response_dump(response_dump)
+				if extracted is not None:
+					return extracted
 			raise RuntimeError("LLM response did not include any choices.")
 
 		message = getattr(choices[0], "message", None)
@@ -1128,47 +1266,17 @@ class HTNMethodSynthesizer:
 			if refusal_text:
 				raise RuntimeError(f"LLM refused Stage 3 response: {refusal_text}")
 
+		response_dump = response.model_dump() if hasattr(response, "model_dump") else None
+		if isinstance(response_dump, dict):
+			extracted = self._extract_response_text_from_response_dump(response_dump)
+			if extracted is not None:
+				return extracted
+
 		finish_reason = getattr(choices[0], "finish_reason", None)
 		raise RuntimeError(
 			"LLM response did not contain usable textual JSON content. "
 			f"finish_reason={finish_reason!r}",
 		)
-
-	@staticmethod
-	def _is_unsupported_json_response_format_error(exc: Exception) -> bool:
-		message = str(exc).lower()
-		if "response_format" not in message and "json_object" not in message:
-			return False
-		unsupported_markers = (
-			"unsupported",
-			"not supported",
-			"invalid parameter",
-			"unknown parameter",
-			"unrecognized request argument",
-			"extra inputs are not permitted",
-		)
-		return any(marker in message for marker in unsupported_markers)
-
-	@staticmethod
-	def _is_unsupported_reasoning_parameter_error(exc: Exception) -> bool:
-		message = str(exc).lower()
-		if not any(
-			token in message
-			for token in ("reasoning", "effort", "exclude", "enabled", "disabled")
-		):
-			return False
-		unsupported_markers = (
-			"unsupported",
-			"not supported",
-			"invalid parameter",
-			"unknown parameter",
-			"unrecognized request argument",
-			"extra inputs are not permitted",
-			"cannot be disabled",
-			"reasoning is mandatory",
-			"mandatory",
-		)
-		return any(marker in message for marker in unsupported_markers)
 
 	@staticmethod
 	def _normalise_response_content(content: object) -> str | None:
@@ -1206,35 +1314,629 @@ class HTNMethodSynthesizer:
 		stringified = str(content).strip()
 		return stringified or None
 
-	def _parse_llm_library(self, response_text: str) -> HTNMethodLibrary:
+	@classmethod
+	def _extract_response_text_from_response_dump(cls, response_dump: Dict[str, Any]) -> str | None:
+		choices = response_dump.get("choices")
+		if isinstance(choices, list) and choices:
+			first_choice = choices[0]
+			if isinstance(first_choice, dict):
+				message = first_choice.get("message")
+				if isinstance(message, dict):
+					for key in ("content", "parsed", "output_text", "text"):
+						extracted = cls._normalise_response_content(message.get(key))
+						if extracted is not None:
+							return extracted
+					if any(key in message for key in ("target_task_bindings", "tasks", "compound_tasks", "methods")):
+						extracted = cls._normalise_response_content(message)
+						if extracted is not None:
+							return extracted
+				for key in ("content", "parsed", "output_text", "text"):
+					extracted = cls._normalise_response_content(first_choice.get(key))
+					if extracted is not None:
+						return extracted
+		for key in ("output_text", "text", "content", "parsed"):
+			extracted = cls._normalise_response_content(response_dump.get(key))
+			if extracted is not None:
+				return extracted
+		return None
+
+	@classmethod
+	def _extract_complete_json_payload_text(cls, text: str) -> str | None:
+		stripped = str(text or "").strip()
+		if not stripped:
+			return None
+
+		def _decode_from(start_index: int) -> str | None:
+			candidate = stripped[start_index:]
+			if cls._appears_truncated_json(candidate):
+				return None
+			try:
+				parsed, end_index = json.JSONDecoder().raw_decode(candidate)
+			except json.JSONDecodeError:
+				return None
+			if not isinstance(parsed, (dict, list)):
+				return None
+			payload = candidate[:end_index].strip()
+			return payload or None
+
+		first_nonspace = stripped[0]
+		if first_nonspace in "{[":
+			payload = _decode_from(0)
+			if payload is not None:
+				return payload
+
+		object_index = stripped.find("{")
+		if object_index != -1:
+			payload = _decode_from(object_index)
+			return payload
+
+		array_index = stripped.find("[")
+		if array_index != -1:
+			payload = _decode_from(array_index)
+			return payload
+		return None
+
+	def _parse_llm_library(
+		self,
+		response_text: str,
+		*,
+		ast_compiler_defaults: Optional[Dict[str, Any]] = None,
+	) -> HTNMethodLibrary:
 		clean_text = self._strip_code_fences(response_text)
+		salvaged_tail_payload = self._salvage_missing_object_closer_at_tail(clean_text)
 		if self._appears_truncated_json(clean_text):
-			raise ValueError(
-				"LLM response appears truncated before the JSON object closed. "
-				"The HTN library was cut off mid-response.",
-			)
-		try:
-			payload = json.loads(clean_text)
-		except json.JSONDecodeError as original_error:
-			raw_decoded = self._decode_leading_json_object(clean_text)
-			if raw_decoded is not None:
-				payload = raw_decoded
+			if salvaged_tail_payload is not None:
+				payload = salvaged_tail_payload
 			else:
-				candidate = self._extract_json_object_candidate(clean_text)
-				if candidate is None:
-					raise ValueError(
-						f"HTN synthesis response could not be parsed as JSON: {original_error}"
-					) from original_error
-				try:
-					payload = json.loads(candidate)
-				except json.JSONDecodeError as candidate_error:
-					raise ValueError(
-						"HTN synthesis response could not be parsed as JSON: "
-						f"{candidate_error}"
-					) from original_error
+				raise ValueError(
+					"LLM response appears truncated before the JSON object closed. "
+					"The HTN library was cut off mid-response.",
+				)
+		else:
+			try:
+				payload = json.loads(clean_text)
+			except json.JSONDecodeError as original_error:
+				salvaged_payload = self._salvage_ast_payload(clean_text)
+				if salvaged_payload is not None:
+					payload = salvaged_payload
+				else:
+					missing_object_closer_payload = self._salvage_missing_object_closer(
+						clean_text,
+						original_error,
+					)
+					if missing_object_closer_payload is not None:
+						payload = missing_object_closer_payload
+					else:
+						raw_decoded = self._decode_leading_json_object(clean_text)
+						if raw_decoded is not None:
+							payload = raw_decoded
+						else:
+							candidate = self._extract_json_object_candidate(clean_text)
+							if candidate is None:
+								raise ValueError(
+									f"HTN synthesis response could not be parsed as JSON: {original_error}"
+								) from original_error
+							try:
+								payload = json.loads(candidate)
+							except json.JSONDecodeError as candidate_error:
+								raise ValueError(
+									"HTN synthesis response could not be parsed as JSON: "
+									f"{candidate_error}"
+								) from original_error
+		if isinstance(payload, list):
+			if len(payload) == 1 and isinstance(payload[0], dict):
+				payload = payload[0]
+			else:
+				raise ValueError("HTN synthesis response must be a JSON object")
 		if not isinstance(payload, dict):
 			raise ValueError("HTN synthesis response must be a JSON object")
+		if ast_compiler_defaults:
+			payload = self._apply_ast_compiler_defaults(
+				payload,
+				ast_compiler_defaults=ast_compiler_defaults,
+			)
+			self._validate_transition_native_ast_payload_shape(
+				payload,
+				ast_compiler_defaults=ast_compiler_defaults,
+			)
 		return HTNMethodLibrary.from_dict(payload)
+
+	@staticmethod
+	def _apply_ast_compiler_defaults(
+		payload: Dict[str, Any],
+		*,
+		ast_compiler_defaults: Dict[str, Any],
+	) -> Dict[str, Any]:
+		if "tasks" not in payload or "compound_tasks" in payload or "methods" in payload:
+			return payload
+		tasks_payload = payload.get("tasks", [])
+		if not isinstance(tasks_payload, list):
+			return payload
+		task_defaults = dict(ast_compiler_defaults.get("task_defaults") or {})
+		default_target_task_bindings = list(
+			ast_compiler_defaults.get("target_task_bindings") or (),
+		)
+		normalised_payload = dict(payload)
+		if default_target_task_bindings:
+			normalised_payload["target_task_bindings"] = default_target_task_bindings
+		elif normalised_payload.get("target_task_bindings") in (None, []):
+			normalised_payload["target_task_bindings"] = default_target_task_bindings
+		if ast_compiler_defaults.get("primitive_aliases"):
+			normalised_payload["primitive_aliases"] = list(
+				ast_compiler_defaults.get("primitive_aliases") or (),
+			)
+		if ast_compiler_defaults.get("call_arities"):
+			normalised_payload["call_arities"] = dict(
+				ast_compiler_defaults.get("call_arities") or {},
+			)
+		strict_hddl_ast = bool(ast_compiler_defaults.get("strict_hddl_ast"))
+		normalised_tasks: List[Any] = []
+		for task_entry in tasks_payload:
+			if not isinstance(task_entry, dict):
+				normalised_tasks.append(task_entry)
+				continue
+			task_name = str(task_entry.get("name", "")).strip()
+			default_entry = task_defaults.get(task_name)
+			if not default_entry:
+				normalised_tasks.append(task_entry)
+				continue
+			raw_task_parameters = [
+				str(value).strip()
+				for value in (task_entry.get("parameters") or ())
+				if str(value).strip()
+			]
+			merged_entry = dict(default_entry)
+			if strict_hddl_ast:
+				merged_entry.update(task_entry)
+				merged_entry = HTNMethodSynthesizer._normalise_query_root_bridge_layout(
+					merged_entry,
+					raw_task_parameters=tuple(raw_task_parameters),
+					default_task_parameters=tuple(default_entry.get("parameters") or ()),
+				)
+			else:
+				task_entry = HTNMethodSynthesizer._migrate_ast_ordered_subtasks_branch_array_shorthand(
+					task_entry,
+				)
+				merged_entry.update(task_entry)
+				merged_entry = HTNMethodSynthesizer._migrate_ast_branch_parameter_shorthand(
+					merged_entry,
+					raw_task_parameters=raw_task_parameters,
+					default_task_parameters=tuple(default_entry.get("parameters") or ()),
+				)
+				merged_entry = HTNMethodSynthesizer._migrate_ast_branch_field_shorthand(
+					merged_entry,
+				)
+			for fixed_key in ("name", "parameters", "headline", "source_name"):
+				if fixed_key in default_entry:
+					merged_entry[fixed_key] = default_entry[fixed_key]
+			normalised_tasks.append(merged_entry)
+		normalised_payload["tasks"] = normalised_tasks
+		return normalised_payload
+
+	@staticmethod
+	def _normalise_query_root_bridge_layout(
+		task_entry: Dict[str, Any],
+		*,
+		raw_task_parameters: Tuple[str, ...],
+		default_task_parameters: Tuple[str, ...],
+	) -> Dict[str, Any]:
+		task_name = str(task_entry.get("name", "")).strip()
+		if not task_name.startswith("query_root_"):
+			return task_entry
+		constructive = task_entry.get("constructive")
+		if not isinstance(constructive, list) or len(constructive) != 1:
+			return task_entry
+		branch = constructive[0]
+		if not isinstance(branch, dict):
+			return task_entry
+
+		normalised_entry = dict(task_entry)
+		normalised_branch = dict(branch)
+		if (
+			raw_task_parameters
+			and len(raw_task_parameters) > len(default_task_parameters)
+			and not normalised_branch.get("parameters")
+		):
+			normalised_branch["parameters"] = list(raw_task_parameters)
+
+		task_precondition = [
+			str(value).strip()
+			for value in (normalised_entry.get("precondition") or ())
+			if str(value).strip()
+		]
+		branch_precondition = [
+			str(value).strip()
+			for value in (normalised_branch.get("precondition") or ())
+			if str(value).strip()
+		]
+		if task_precondition and not branch_precondition:
+			normalised_branch["precondition"] = task_precondition
+			normalised_entry.pop("precondition", None)
+
+		normalised_entry["constructive"] = [normalised_branch]
+		return normalised_entry
+
+	@staticmethod
+	def _validate_transition_native_ast_payload_shape(
+		payload: Dict[str, Any],
+		*,
+		ast_compiler_defaults: Dict[str, Any],
+	) -> None:
+		if not ast_compiler_defaults.get("strict_hddl_ast"):
+			return
+		tasks_payload = payload.get("tasks", [])
+		if not isinstance(tasks_payload, list):
+			raise ValueError("Stage 3 transition-native AST must use a tasks list.")
+		allowed_top_level_keys = {
+			"target_task_bindings",
+			"tasks",
+			"primitive_aliases",
+			"call_arities",
+		}
+		unexpected_top_level_keys = sorted(
+			key
+			for key in payload
+			if key not in allowed_top_level_keys
+		)
+		if unexpected_top_level_keys:
+			raise ValueError(
+				"Stage 3 transition-native AST contains unsupported top-level keys: "
+				f"{unexpected_top_level_keys}.",
+			)
+		obsolete_task_level_keys = {
+			"task_args",
+			"context",
+			"ordered_subtasks",
+			"ordering",
+			"orderings",
+			"ordering_edges",
+			"subtasks",
+			"steps",
+			"support_before",
+			"producer",
+			"produce",
+			"followup",
+			"followups",
+			"label",
+		}
+		allowed_task_keys = {
+			"name",
+			"parameters",
+			"headline",
+			"grounded_args",
+			"source_name",
+			"precondition",
+			"noop",
+			"constructive",
+		}
+		allowed_branch_keys = {
+			"parameters",
+			"precondition",
+			"ordered_subtasks",
+		}
+		for task_entry in tasks_payload:
+			if not isinstance(task_entry, dict):
+				raise ValueError("Each Stage 3 task entry must be a JSON object.")
+			task_name = str(task_entry.get("name", "")).strip() or "<unnamed>"
+			obsolete_present = sorted(
+				key for key in obsolete_task_level_keys if key in task_entry
+			)
+			if obsolete_present:
+				raise ValueError(
+					f"Transition-native task '{task_name}' uses obsolete task-level "
+					f"shorthand keys {obsolete_present}. Use constructive branches with "
+					"ordered_subtasks only.",
+				)
+			unexpected_task_keys = sorted(
+				key for key in task_entry if key not in allowed_task_keys
+			)
+			if unexpected_task_keys:
+				raise ValueError(
+					f"Transition-native task '{task_name}' contains unsupported keys "
+					f"{unexpected_task_keys}.",
+				)
+			constructive = task_entry.get("constructive")
+			if not isinstance(constructive, list) or not constructive:
+				raise ValueError(
+					f"Transition-native task '{task_name}' must define a non-empty "
+					"constructive branch list.",
+				)
+			for branch in constructive:
+				if not isinstance(branch, dict):
+					raise ValueError(
+						f"Transition-native task '{task_name}' must use object "
+						"constructive branches.",
+					)
+				unexpected_branch_keys = sorted(
+					key for key in branch if key not in allowed_branch_keys
+				)
+				if unexpected_branch_keys:
+					raise ValueError(
+						f"Transition-native task '{task_name}' contains unsupported "
+						f"branch keys {unexpected_branch_keys}. Use only parameters, "
+						"precondition, and ordered_subtasks.",
+					)
+				ordered_subtasks = branch.get("ordered_subtasks")
+				if not isinstance(ordered_subtasks, list) or not ordered_subtasks:
+					raise ValueError(
+						f"Transition-native task '{task_name}' must use ordered_subtasks "
+						"in every constructive branch.",
+					)
+
+	@staticmethod
+	def _migrate_ast_ordered_subtasks_branch_array_shorthand(
+		task_entry: Dict[str, Any],
+	) -> Dict[str, Any]:
+		if task_entry.get("constructive") not in (None, [], {}):
+			return task_entry
+		raw_ordered_subtasks = task_entry.get("ordered_subtasks")
+		if not isinstance(raw_ordered_subtasks, (list, tuple)) or not raw_ordered_subtasks:
+			return task_entry
+		if not all(isinstance(item, dict) for item in raw_ordered_subtasks):
+			return task_entry
+		branch_keys = {
+			"label",
+			"parameters",
+			"task_args",
+			"precondition",
+			"context",
+			"ordered_subtasks",
+			"ordering",
+			"orderings",
+			"ordering_edges",
+			"subtasks",
+			"steps",
+			"support_before",
+			"producer",
+			"produce",
+			"followup",
+			"followups",
+		}
+		if not all(any(key in item for key in branch_keys) for item in raw_ordered_subtasks):
+			return task_entry
+		migrated_entry = dict(task_entry)
+		migrated_entry["constructive"] = list(raw_ordered_subtasks)
+		migrated_entry.pop("ordered_subtasks", None)
+		return migrated_entry
+
+	@staticmethod
+	def _migrate_ast_branch_parameter_shorthand(
+		task_entry: Dict[str, Any],
+		*,
+		raw_task_parameters: Sequence[str],
+		default_task_parameters: Sequence[str],
+	) -> Dict[str, Any]:
+		"""
+		Preserve branch-local AUX witness parameters before fixed task defaults apply.
+
+		Transition-native contracts intentionally keep task headers equal to the
+		canonical headline arity. Some providers still place extra branch witness
+		parameters on the task object instead of on the constructive branch. When
+		that happens, migrate the longer parameter list onto any constructive
+		branch that omitted an explicit parameters field.
+		"""
+		normalised_raw_parameters = tuple(
+			str(value).strip()
+			for value in raw_task_parameters
+			if str(value).strip()
+		)
+		normalised_default_parameters = tuple(
+			str(value).strip()
+			for value in default_task_parameters
+			if str(value).strip()
+		)
+		if (
+			not normalised_raw_parameters
+			or normalised_raw_parameters == normalised_default_parameters
+		):
+			return task_entry
+
+		migrated_entry = dict(task_entry)
+		constructive_payload = task_entry.get("constructive")
+		if constructive_payload not in (None, [], {}):
+			migrated_entry["constructive"] = (
+				HTNMethodSynthesizer._inject_missing_ast_branch_parameters(
+					constructive_payload,
+					branch_parameters=normalised_raw_parameters,
+				)
+			)
+			return migrated_entry
+
+		branch_payload = HTNMethodSynthesizer._extract_ast_task_level_branch_shorthand(
+			task_entry,
+		)
+		if branch_payload is None:
+			return migrated_entry
+
+		migrated_branch = dict(branch_payload)
+		migrated_branch.setdefault("parameters", list(normalised_raw_parameters))
+		migrated_entry["constructive"] = [migrated_branch]
+		for key in (
+			"label",
+			"task_args",
+			"precondition",
+			"context",
+			"ordered_subtasks",
+			"ordering",
+			"orderings",
+			"ordering_edges",
+			"subtasks",
+			"steps",
+			"support_before",
+			"producer",
+			"produce",
+			"followup",
+			"followups",
+		):
+			migrated_entry.pop(key, None)
+		return migrated_entry
+
+	@staticmethod
+	def _migrate_ast_branch_field_shorthand(
+		task_entry: Dict[str, Any],
+	) -> Dict[str, Any]:
+		"""
+		Promote task-level branch fields onto constructive branches when present.
+
+		Some providers keep branch-scoped metadata such as precondition or
+		support_before on the task object even when they already emit a
+		constructive branch array. That shape is semantically unambiguous for a
+		single task definition, so normalise it before validation rather than
+		rejecting a mechanically recoverable AST variant.
+		"""
+		constructive_payload = task_entry.get("constructive")
+		if constructive_payload in (None, [], {}):
+			return task_entry
+
+		inherited_fields = {
+			key: task_entry[key]
+			for key in (
+				"label",
+				"task_args",
+				"precondition",
+				"context",
+				"ordered_subtasks",
+				"ordering",
+				"orderings",
+				"ordering_edges",
+				"subtasks",
+				"steps",
+				"support_before",
+				"producer",
+				"produce",
+				"followup",
+				"followups",
+			)
+			if key in task_entry
+		}
+		if not inherited_fields:
+			return task_entry
+
+		migrated_entry = dict(task_entry)
+		migrated_entry["constructive"] = (
+			HTNMethodSynthesizer._inject_missing_ast_branch_fields(
+				constructive_payload,
+				inherited_fields=inherited_fields,
+			)
+		)
+		for key in inherited_fields:
+			migrated_entry.pop(key, None)
+		return migrated_entry
+
+	@staticmethod
+	def _inject_missing_ast_branch_parameters(
+		constructive_payload: Any,
+		*,
+		branch_parameters: Sequence[str],
+	) -> Any:
+		if isinstance(constructive_payload, list):
+			return [
+				HTNMethodSynthesizer._inject_missing_ast_branch_parameters(
+					item,
+					branch_parameters=branch_parameters,
+				)
+				for item in constructive_payload
+			]
+		if isinstance(constructive_payload, tuple):
+			return tuple(
+				HTNMethodSynthesizer._inject_missing_ast_branch_parameters(
+					item,
+					branch_parameters=branch_parameters,
+				)
+				for item in constructive_payload
+			)
+		if not isinstance(constructive_payload, dict):
+			return constructive_payload
+
+		for wrapper_key in ("branch", "branches"):
+			if wrapper_key in constructive_payload:
+				migrated_wrapper = dict(constructive_payload)
+				migrated_wrapper[wrapper_key] = (
+					HTNMethodSynthesizer._inject_missing_ast_branch_parameters(
+						constructive_payload.get(wrapper_key),
+						branch_parameters=branch_parameters,
+					)
+				)
+				return migrated_wrapper
+
+		if "parameters" in constructive_payload:
+			return constructive_payload
+
+		migrated_branch = dict(constructive_payload)
+		migrated_branch["parameters"] = list(branch_parameters)
+		return migrated_branch
+
+	@staticmethod
+	def _inject_missing_ast_branch_fields(
+		constructive_payload: Any,
+		*,
+		inherited_fields: Dict[str, Any],
+	) -> Any:
+		if isinstance(constructive_payload, list):
+			return [
+				HTNMethodSynthesizer._inject_missing_ast_branch_fields(
+					item,
+					inherited_fields=inherited_fields,
+				)
+				for item in constructive_payload
+			]
+		if isinstance(constructive_payload, tuple):
+			return tuple(
+				HTNMethodSynthesizer._inject_missing_ast_branch_fields(
+					item,
+					inherited_fields=inherited_fields,
+				)
+				for item in constructive_payload
+			)
+		if not isinstance(constructive_payload, dict):
+			return constructive_payload
+
+		for wrapper_key in ("branch", "branches"):
+			if wrapper_key in constructive_payload:
+				migrated_wrapper = dict(constructive_payload)
+				migrated_wrapper[wrapper_key] = (
+					HTNMethodSynthesizer._inject_missing_ast_branch_fields(
+						constructive_payload.get(wrapper_key),
+						inherited_fields=inherited_fields,
+					)
+				)
+				return migrated_wrapper
+
+		migrated_branch = dict(constructive_payload)
+		for key, value in inherited_fields.items():
+			migrated_branch.setdefault(key, value)
+		return migrated_branch
+
+	@staticmethod
+	def _extract_ast_task_level_branch_shorthand(
+		task_entry: Dict[str, Any],
+	) -> Dict[str, Any] | None:
+		branch_keys = (
+			"label",
+			"task_args",
+			"precondition",
+			"context",
+			"ordered_subtasks",
+			"ordering",
+			"orderings",
+			"ordering_edges",
+			"subtasks",
+			"steps",
+			"support_before",
+			"producer",
+			"produce",
+			"followup",
+			"followups",
+		)
+		if task_entry.get("constructive") not in (None, [], {}):
+			return None
+		if not any(key in task_entry for key in branch_keys):
+			return None
+		return {
+			key: task_entry[key]
+			for key in branch_keys
+			if key in task_entry
+		}
 
 	@staticmethod
 	def _appears_truncated_json(text: str) -> bool:
@@ -1249,6 +1951,27 @@ class HTNMethodSynthesizer:
 		return False
 
 	@staticmethod
+	def _salvage_missing_object_closer_at_tail(
+		result_text: str,
+	) -> dict | list | None:
+		if result_text.count("[") != result_text.count("]"):
+			return None
+		if result_text.count("{") != result_text.count("}") + 1:
+			return None
+		candidate_indexes = [
+			index
+			for index, character in enumerate(result_text)
+			if character == "]"
+		]
+		for insert_index in reversed(candidate_indexes):
+			candidate = result_text[:insert_index] + "}" + result_text[insert_index:]
+			try:
+				return json.loads(candidate)
+			except json.JSONDecodeError:
+				continue
+		return None
+
+	@staticmethod
 	def _extract_json_object_candidate(result_text: str) -> str | None:
 		start_index = result_text.find("{")
 		end_index = result_text.rfind("}")
@@ -1256,6 +1979,26 @@ class HTNMethodSynthesizer:
 			return None
 		candidate = result_text[start_index:end_index + 1].strip()
 		return candidate or None
+
+	@staticmethod
+	def _salvage_missing_object_closer(
+		result_text: str,
+		error: json.JSONDecodeError,
+	) -> dict | list | None:
+		position = int(getattr(error, "pos", -1))
+		if position < 0 or position >= len(result_text):
+			return None
+		if result_text[position] != "]":
+			return None
+		if result_text.count("[") != result_text.count("]"):
+			return None
+		if result_text.count("{") != result_text.count("}") + 1:
+			return None
+		candidate = result_text[:position] + "}" + result_text[position:]
+		try:
+			return json.loads(candidate)
+		except json.JSONDecodeError:
+			return None
 
 	@staticmethod
 	def _decode_leading_json_object(result_text: str) -> dict | None:
@@ -1268,6 +2011,128 @@ class HTNMethodSynthesizer:
 		except json.JSONDecodeError:
 			return None
 		return parsed if isinstance(parsed, dict) else None
+
+	@classmethod
+	def _salvage_ast_payload(cls, result_text: str) -> dict | None:
+		target_task_bindings_array = cls._extract_balanced_array_for_key(
+			result_text,
+			"target_task_bindings",
+		)
+		if target_task_bindings_array is None:
+			return None
+		try:
+			target_task_bindings = json.loads(target_task_bindings_array)
+		except json.JSONDecodeError:
+			return None
+		if not isinstance(target_task_bindings, list):
+			return None
+
+		task_object_texts = cls._extract_named_task_object_fragments(result_text)
+		if not task_object_texts:
+			return None
+
+		tasks: List[Dict[str, Any]] = []
+		for task_text in task_object_texts:
+			try:
+				task_payload = json.loads(task_text)
+			except json.JSONDecodeError:
+				continue
+			if not isinstance(task_payload, dict):
+				continue
+			if not str(task_payload.get("name", "")).strip():
+				continue
+			tasks.append(task_payload)
+
+		if not tasks:
+			return None
+		return {
+			"target_task_bindings": target_task_bindings,
+			"tasks": tasks,
+		}
+
+	@classmethod
+	def _extract_balanced_array_for_key(
+		cls,
+		result_text: str,
+		key: str,
+	) -> str | None:
+		match = re.search(rf'"{re.escape(key)}"\s*:', result_text)
+		if match is None:
+			return None
+		index = match.end()
+		while index < len(result_text) and result_text[index].isspace():
+			index += 1
+		if index >= len(result_text) or result_text[index] != "[":
+			return None
+		end_index = cls._find_matching_delimiter(
+			result_text,
+			start_index=index,
+			open_char="[",
+			close_char="]",
+		)
+		if end_index is None:
+			return None
+		return result_text[index:end_index + 1]
+
+	@classmethod
+	def _extract_named_task_object_fragments(
+		cls,
+		result_text: str,
+	) -> List[str]:
+		tasks_match = re.search(r'"tasks"\s*:', result_text)
+		if tasks_match is None:
+			return []
+		search_index = tasks_match.end()
+		fragments: List[str] = []
+		while True:
+			match = re.search(r'\{\s*"name"\s*:', result_text[search_index:])
+			if match is None:
+				break
+			start_index = search_index + match.start()
+			end_index = cls._find_matching_delimiter(
+				result_text,
+				start_index=start_index,
+				open_char="{",
+				close_char="}",
+			)
+			if end_index is None:
+				break
+			fragments.append(result_text[start_index:end_index + 1])
+			search_index = end_index + 1
+		return fragments
+
+	@staticmethod
+	def _find_matching_delimiter(
+		result_text: str,
+		*,
+		start_index: int,
+		open_char: str,
+		close_char: str,
+	) -> int | None:
+		depth = 0
+		in_string = False
+		escape_next = False
+		for index in range(start_index, len(result_text)):
+			character = result_text[index]
+			if in_string:
+				if escape_next:
+					escape_next = False
+				elif character == "\\":
+					escape_next = True
+				elif character == '"':
+					in_string = False
+				continue
+			if character == '"':
+				in_string = True
+				continue
+			if character == open_char:
+				depth += 1
+				continue
+			if character == close_char:
+				depth -= 1
+				if depth == 0:
+					return index
+		return None
 
 	@staticmethod
 	def _method_step_semantic_signature(step: HTNMethodStep) -> Tuple[Any, ...]:
@@ -1807,6 +2672,7 @@ class HTNMethodSynthesizer:
 		prompt_analysis: Optional[Dict[str, Any]] = None,
 		query_objects: Sequence[str] = (),
 		static_predicates: Sequence[str] = (),
+		action_analysis: Optional[Dict[str, Any]] = None,
 	) -> None:
 		compound_task_names = [task.name for task in library.compound_tasks]
 		if len(compound_task_names) != len(set(compound_task_names)):
@@ -1848,6 +2714,7 @@ class HTNMethodSynthesizer:
 			for effect in getattr(action_schema, "effects", ())
 			if effect.predicate != "="
 		}
+		normalised_action_analysis = action_analysis or self._analyse_domain_actions(domain)
 		predicate_types = {
 			predicate.name: tuple(
 				self._parameter_type(parameter)
@@ -1855,6 +2722,12 @@ class HTNMethodSynthesizer:
 			)
 			for predicate in getattr(domain, "predicates", [])
 		}
+		task_types.update(
+			self._compiler_generated_task_type_map(
+				prompt_analysis=prompt_analysis,
+				predicate_types=predicate_types,
+			),
+		)
 
 		method_counts: Dict[str, int] = {}
 		for method in library.methods:
@@ -1867,6 +2740,11 @@ class HTNMethodSynthesizer:
 		required_transition_tasks = tuple(
 			(prompt_analysis or {}).get("transition_tasks", ()) or ()
 		)
+		required_transition_task_names = {
+			str(item.get("name", "")).strip()
+			for item in required_transition_tasks
+			if str(item.get("name", "")).strip()
+		}
 
 		if primitive_names - {task.name for task in library.primitive_tasks}:
 			raise ValueError("HTN library is missing primitive action tasks")
@@ -1892,17 +2770,31 @@ class HTNMethodSynthesizer:
 						f"Task '{task.name}' headline literal references unknown predicate "
 						f"'{headline_predicate}'. Known predicates: {sorted(predicate_arities)}",
 					)
-				if len(task.headline_literal.args) != len(task.parameters):
-					raise ValueError(
-						f"Task '{task.name}' headline literal '{task.headline_literal.to_signature()}' "
-						f"uses {len(task.headline_literal.args)} args, but the task declares "
-						f"{len(task.parameters)} parameters.",
-					)
-				if set(task.headline_literal.args) != set(task.parameters):
-					raise ValueError(
-						f"Task '{task.name}' headline literal '{task.headline_literal.to_signature()}' "
-						"must be a permutation of the task parameters.",
-					)
+				if task.name in required_transition_task_names:
+					headline_args = tuple(task.headline_literal.args)
+					if len(headline_args) > len(task.parameters):
+						raise ValueError(
+							f"Task '{task.name}' headline literal '{task.headline_literal.to_signature()}' "
+							f"uses {len(headline_args)} args, but the task declares "
+							f"{len(task.parameters)} parameters.",
+						)
+					if tuple(task.parameters[: len(headline_args)]) != headline_args:
+						raise ValueError(
+							f"Transition-native task '{task.name}' must place headline arguments "
+							f"{headline_args} first in task parameters {task.parameters}.",
+						)
+				else:
+					if len(task.headline_literal.args) != len(task.parameters):
+						raise ValueError(
+							f"Task '{task.name}' headline literal '{task.headline_literal.to_signature()}' "
+							f"uses {len(task.headline_literal.args)} args, but the task declares "
+							f"{len(task.parameters)} parameters.",
+						)
+					if set(task.headline_literal.args) != set(task.parameters):
+						raise ValueError(
+							f"Task '{task.name}' headline literal '{task.headline_literal.to_signature()}' "
+							"must be a permutation of the task parameters.",
+						)
 				if task.source_predicates and headline_predicate not in task.source_predicates:
 					raise ValueError(
 						f"Task '{task.name}' headline literal '{task.headline_literal.to_signature()}' "
@@ -1912,6 +2804,14 @@ class HTNMethodSynthesizer:
 				continue
 			predicate_name = task.source_predicates[0]
 			predicate_arity = predicate_arities[predicate_name]
+			if task.name in required_transition_task_names:
+				if predicate_arity != len(tuple(task.headline_literal.args) if task.headline_literal else ()):
+					raise ValueError(
+						f"Transition-native task '{task.name}' source predicate '{predicate_name}' "
+						f"must match headline arity {len(tuple(task.headline_literal.args) if task.headline_literal else ())}, "
+						f"but predicate has {predicate_arity}.",
+					)
+				continue
 			if predicate_arity != len(task.parameters):
 				raise ValueError(
 					f"Task '{task.name}' source predicate '{predicate_name}' arity mismatch: "
@@ -1926,7 +2826,12 @@ class HTNMethodSynthesizer:
 				binding_lookup={},
 				required_query_root_tasks=required_query_root_tasks,
 				required_transition_tasks=required_transition_tasks,
+				required_branch_contracts=(prompt_analysis or {}).get(
+					"required_branch_contracts",
+					{},
+				),
 				dynamic_predicates=dynamic_predicates,
+				action_analysis=normalised_action_analysis,
 			)
 		else:
 			required_contract_task_names = {
@@ -2214,6 +3119,12 @@ class HTNMethodSynthesizer:
 							f"references unknown action task '{step.task_name}'. "
 							f"Allowed primitive task names: {sorted(primitive_names)}.{hint}",
 						)
+					if step.task_name == "nop":
+						raise ValueError(
+							f"Method '{method.method_name}' uses nop in a constructive branch. "
+							"already-satisfied cases belong only in noop methods; constructive "
+							"branches must use real supporting or producing steps.",
+						)
 
 				if step.kind == "compound" and step.task_name not in compound_names:
 					raise ValueError(
@@ -2276,6 +3187,7 @@ class HTNMethodSynthesizer:
 			task_lookup,
 			action_schemas,
 			predicate_arities,
+			prompt_analysis=prompt_analysis,
 		)
 		self._validate_dynamic_precondition_support(
 			library,
@@ -2708,9 +3620,14 @@ class HTNMethodSynthesizer:
 		binding_lookup: Dict[str, str],
 		required_query_root_tasks: Sequence[Dict[str, Any]],
 		required_transition_tasks: Sequence[Dict[str, Any]],
+		required_branch_contracts: Dict[str, List[Dict[str, Any]]],
 		dynamic_predicates: set[str],
+		action_analysis: Dict[str, Any],
 	) -> None:
 		del binding_lookup
+		methods_by_task: Dict[str, List[HTNMethod]] = {}
+		for method in library.methods:
+			methods_by_task.setdefault(method.task_name, []).append(method)
 		required_root_by_name = {
 			str(item.get("name", "")).strip(): item
 			for item in required_query_root_tasks
@@ -2721,6 +3638,30 @@ class HTNMethodSynthesizer:
 			for item in required_transition_tasks
 			if str(item.get("name", "")).strip()
 		}
+		compiler_owned_preconditions_by_task = {
+			task_name: {
+				str(signature).strip()
+				for signature in (payload.get("bridge_precondition") or ())
+				if str(signature).strip()
+			}
+			for task_name, payload in required_root_by_name.items()
+		}
+		compiler_owned_preconditions_by_task.update({
+			task_name: {
+				str(signature).strip()
+				for signature in (payload.get("retained_prefix_literals") or ())
+				if str(signature).strip()
+			}
+			for task_name, payload in required_transition_by_name.items()
+		})
+		transition_names_by_target_literal: Dict[str, set[str]] = {}
+		for payload in required_transition_tasks:
+			target_literal = str(payload.get("target_literal", "")).strip()
+			transition_name = str(payload.get("name", "")).strip()
+			if target_literal and transition_name:
+				transition_names_by_target_literal.setdefault(target_literal, set()).add(
+					transition_name,
+				)
 		required_names = set(required_root_by_name) | set(required_transition_by_name)
 		missing_required_tasks = sorted(required_names - compound_names)
 		if missing_required_tasks:
@@ -2755,6 +3696,50 @@ class HTNMethodSynthesizer:
 					f"Query-root alias task '{name}' must follow deterministic naming "
 					f"'{expected_name}'.",
 				)
+			expected_transition_names = transition_names_by_target_literal.get(
+				str(payload.get("target_literal", "")).strip(),
+				set(),
+			)
+			expected_bridge_parameters = tuple(
+				str(value).strip()
+				for value in (payload.get("bridge_parameters") or payload.get("parameters") or ())
+				if str(value).strip()
+			)
+			constructive_methods = [
+				method
+				for method in methods_by_task.get(name, ())
+				if method.subtasks
+			]
+			if not constructive_methods:
+				raise ValueError(
+					f"Query-root alias task '{name}' must include a constructive bridge "
+					"method to a required transition task.",
+				)
+			for method in constructive_methods:
+				ordered_steps = self._ordered_method_steps(method)
+				if len(ordered_steps) != 1:
+					raise ValueError(
+						f"Query-root alias task '{name}' must bridge to exactly one "
+						"required transition task per constructive method.",
+					)
+				step = ordered_steps[0]
+				if step.kind != "compound":
+					raise ValueError(
+						f"Query-root alias task '{name}' must bridge through a compound "
+						"transition task, not a primitive step '{step.task_name}'.",
+					)
+				if expected_transition_names and step.task_name not in expected_transition_names:
+					raise ValueError(
+						f"Query-root alias task '{name}' must bridge to one of the required "
+						f"transition tasks {sorted(expected_transition_names)}, not "
+						f"'{step.task_name}'.",
+					)
+				if tuple(step.args) != expected_bridge_parameters:
+					raise ValueError(
+						f"Query-root alias task '{name}' must pass through its own "
+						f"bridge parameters {list(expected_bridge_parameters)} to transition task "
+						f"'{step.task_name}', not {list(step.args)}.",
+					)
 
 		for name, payload in required_transition_by_name.items():
 			task = task_lookup[name]
@@ -2795,6 +3780,314 @@ class HTNMethodSynthesizer:
 					f"'{headline_literal.predicate}'. Helpers may only headline dynamic predicates.",
 				)
 
+		constructive_methods_by_task: Dict[str, List[HTNMethod]] = {}
+		for method in library.methods:
+			if method.subtasks:
+				constructive_methods_by_task.setdefault(method.task_name, []).append(method)
+
+		for method in library.methods:
+			if not method.subtasks:
+				continue
+			task_schema = task_lookup.get(method.task_name)
+			declared_task_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+			declared_task_arity = len(declared_task_parameters)
+			if method.task_args:
+				task_bound_symbols = set(method.task_args[:declared_task_arity])
+			else:
+				task_bound_symbols = set(method.parameters[:declared_task_arity])
+			auxiliary_parameters = {
+				parameter
+				for parameter in method.parameters
+				if parameter not in task_bound_symbols
+			}
+			unsupported_dynamic_context = []
+			for literal in method.context:
+				if not literal.is_positive or literal.predicate not in dynamic_predicates:
+					continue
+				literal_symbols = {
+					str(arg).strip()
+					for arg in literal.args
+					if str(arg).strip()
+				}
+				literal_signature = literal.to_signature()
+				if literal_signature in compiler_owned_preconditions_by_task.get(
+					method.task_name,
+					set(),
+				):
+					continue
+				if auxiliary_parameters and literal_symbols & auxiliary_parameters:
+					continue
+				if self._is_branch_specific_dynamic_selector(
+					literal,
+					method,
+					constructive_methods_by_task.get(method.task_name, ()),
+				):
+					continue
+				if not _render_producer_mode_options_for_predicate(
+					literal.predicate,
+					literal.args,
+					action_analysis,
+					limit=3,
+				):
+					continue
+				unsupported_dynamic_context.append(literal.to_signature())
+			if unsupported_dynamic_context:
+				raise ValueError(
+					f"Constructive method '{method.method_name}' leaves positive dynamic "
+					f"requirements {unsupported_dynamic_context} in precondition/context "
+					"without binding an AUX witness parameter. Transition-native "
+					"constructive branches must support such dynamic needs via earlier "
+					"subtasks instead.",
+				)
+
+		for task_name, contracts in sorted(required_branch_contracts.items()):
+			constructive_methods = tuple(
+				method
+				for method in methods_by_task.get(task_name, ())
+				if method.subtasks
+			)
+			if not contracts:
+				continue
+			if not constructive_methods:
+				raise ValueError(
+					f"Task '{task_name}' omitted all required constructive branches. "
+					f"Expected at least {len(contracts)} branch contract(s).",
+				)
+			for contract in contracts:
+				if any(
+					self._transition_native_method_matches_branch_contract(
+						method,
+						contract,
+						task_lookup=task_lookup,
+					)
+					for method in constructive_methods
+				):
+					continue
+				raise ValueError(
+					f"Task '{task_name}' is missing a required constructive branch: "
+					f"{self._describe_transition_native_branch_contract(contract)}.",
+				)
+
+	@staticmethod
+	def _describe_transition_native_branch_contract(contract: Dict[str, Any]) -> str:
+		precondition = [
+			str(value).strip()
+			for value in (contract.get("precondition") or ())
+			if str(value).strip()
+		]
+		ordered_subtasks = [
+			str(value).strip()
+			for value in (contract.get("ordered_subtasks") or ())
+			if str(value).strip()
+		]
+		support_before = [
+			str(value).strip()
+			for value in (contract.get("support_before") or ())
+			if str(value).strip()
+		]
+		producer = str(contract.get("producer", "")).strip()
+		followup = [
+			str(value).strip()
+			for value in (contract.get("followup") or ())
+			if str(value).strip()
+		]
+		parts = [
+			f"parameters={list(contract.get('parameters') or ())}",
+			f"precondition={precondition or ['none']}",
+		]
+		if ordered_subtasks:
+			parts.append(f"ordered_subtasks={ordered_subtasks}")
+		else:
+			parts.extend(
+				[
+					f"support_before={support_before or ['none']}",
+					f"producer={producer}",
+				]
+			)
+			if followup:
+				parts.append(f"followup={followup}")
+		return " | ".join(parts)
+
+	def _transition_native_method_matches_branch_contract(
+		self,
+		method: HTNMethod,
+		contract: Dict[str, Any],
+		*,
+		task_lookup: Dict[str, HTNTask],
+	) -> bool:
+		expected_parameters = tuple(
+			str(value).strip()
+			for value in (contract.get("parameters") or ())
+			if str(value).strip()
+		)
+		if tuple(method.parameters) != expected_parameters:
+			return False
+
+		expected_context = {
+			str(value).strip()
+			for value in (contract.get("precondition") or ())
+			if str(value).strip()
+		}
+		actual_context = {
+			literal.to_signature()
+			for literal in method.context
+			if literal.is_positive
+		}
+		ordered_steps = self._ordered_method_steps(method)
+		ordered_subtask_calls = [
+			str(value).strip()
+			for value in (contract.get("ordered_subtasks") or ())
+			if str(value).strip()
+		]
+		if ordered_subtask_calls:
+			if len(ordered_steps) != len(ordered_subtask_calls):
+				return False
+			for step, expected_call in zip(ordered_steps, ordered_subtask_calls):
+				if not self._transition_native_step_matches_invocation_signature(
+					step,
+					expected_call,
+				):
+					return False
+			producer_index = len(ordered_subtask_calls) - 1
+			prefix_supported_signatures: set[str] = set()
+			for step in ordered_steps[:producer_index]:
+				prefix_supported_signatures.update(
+					self._transition_native_step_supported_signatures(
+						step,
+						task_lookup=task_lookup,
+					),
+				)
+			unresolved_context = expected_context - actual_context
+			return unresolved_context <= prefix_supported_signatures
+
+		required_support_calls = [
+			str(value).strip()
+			for value in (contract.get("support_before") or ())
+			if str(value).strip()
+		]
+		producer_call = str(contract.get("producer", "")).strip()
+		followup_calls = [
+			str(value).strip()
+			for value in (contract.get("followup") or ())
+			if str(value).strip()
+		]
+		if not producer_call:
+			return False
+
+		search_index = 0
+		for expected_call in required_support_calls:
+			matched_index = self._find_matching_transition_native_step_index(
+				ordered_steps,
+				expected_call,
+				start_index=search_index,
+			)
+			if matched_index is None:
+				return False
+			search_index = matched_index + 1
+
+		producer_index = self._find_matching_transition_native_step_index(
+			ordered_steps,
+			producer_call,
+			start_index=search_index,
+		)
+		if producer_index is None:
+			return False
+		search_index = producer_index + 1
+
+		for expected_call in followup_calls:
+			matched_index = self._find_matching_transition_native_step_index(
+				ordered_steps,
+				expected_call,
+				start_index=search_index,
+			)
+			if matched_index is None:
+				return False
+			search_index = matched_index + 1
+
+		prefix_supported_signatures: set[str] = set()
+		for step in ordered_steps[:producer_index]:
+			prefix_supported_signatures.update(
+				self._transition_native_step_supported_signatures(
+					step,
+					task_lookup=task_lookup,
+				),
+			)
+		unresolved_context = expected_context - actual_context
+		return unresolved_context <= prefix_supported_signatures
+
+	def _find_matching_transition_native_step_index(
+		self,
+		ordered_steps: Sequence[HTNMethodStep],
+		invocation_signature: str,
+		*,
+		start_index: int,
+	) -> int | None:
+		for index in range(max(start_index, 0), len(ordered_steps)):
+			if self._transition_native_step_matches_invocation_signature(
+				ordered_steps[index],
+				invocation_signature,
+			):
+				return index
+		return None
+
+	@staticmethod
+	def _transition_native_step_matches_invocation_signature(
+		step: HTNMethodStep,
+		invocation_signature: str,
+	) -> bool:
+		parsed_invocation = _parse_invocation_signature(invocation_signature)
+		if parsed_invocation is None:
+			return False
+		expected_name = str(parsed_invocation.get("call", "")).strip()
+		expected_args = tuple(
+			str(value).strip()
+			for value in (parsed_invocation.get("args") or ())
+			if str(value).strip()
+		)
+		return step.task_name == expected_name and tuple(step.args) == expected_args
+
+	def _transition_native_step_supported_signatures(
+		self,
+		step: HTNMethodStep,
+		*,
+		task_lookup: Dict[str, HTNTask],
+	) -> set[str]:
+		supported_signatures: set[str] = set()
+		if step.kind == "compound":
+			task_schema = task_lookup.get(step.task_name)
+			headline_literal = self._materialise_task_headline_literal(
+				task_schema,
+				bound_args=step.args,
+			)
+			if headline_literal is not None and headline_literal.is_positive:
+				supported_signatures.add(headline_literal.to_signature())
+		elif step.kind == "primitive":
+			for effect in step.effects:
+				if effect.is_positive:
+					supported_signatures.add(effect.to_signature())
+		return supported_signatures
+
+	def _is_branch_specific_dynamic_selector(
+		self,
+		literal: HTNLiteral,
+		method: HTNMethod,
+		sibling_constructive_methods: Sequence[HTNMethod],
+	) -> bool:
+		if len(tuple(sibling_constructive_methods)) <= 1:
+			return False
+		literal_signature = literal.to_signature()
+		for sibling in sibling_constructive_methods:
+			if sibling.method_name == method.method_name:
+				continue
+			sibling_context_signatures = {
+				context_literal.to_signature()
+				for context_literal in sibling.context
+				if context_literal.is_positive
+			}
+			if literal_signature not in sibling_context_signatures:
+				return True
+		return False
+
 	def _validate_transition_native_target_bindings(
 		self,
 		library: HTNMethodLibrary,
@@ -2826,7 +4119,7 @@ class HTNMethodSynthesizer:
 			args=tuple(str(arg).strip() for arg in (payload.get("args") or ()) if str(arg).strip()),
 			is_positive=bool(payload.get("is_positive", True)),
 			source_symbol=payload.get("source_symbol"),
-			negation_mode=payload.get("negation_mode"),
+			negation_mode=str(payload.get("negation_mode", "naf") or "naf"),
 		)
 
 	def _validate_query_object_leakage(
@@ -2922,6 +4215,8 @@ class HTNMethodSynthesizer:
 		self,
 		library: HTNMethodLibrary,
 		domain: Any,
+		*,
+		prompt_analysis: Optional[Dict[str, Any]] = None,
 	) -> Tuple[HTNMethodLibrary, int]:
 		task_lookup = {task.name: task for task in library.compound_tasks}
 		action_schemas = self._action_schema_map(domain)
@@ -2933,6 +4228,9 @@ class HTNMethodSynthesizer:
 		methods_by_task: Dict[str, List[HTNMethod]] = {}
 		for method in library.methods:
 			methods_by_task.setdefault(method.task_name, []).append(method)
+		required_branch_contracts = dict(
+			(prompt_analysis or {}).get("required_branch_contracts") or {},
+		)
 
 		allowed_method_names: set[str] = set()
 		for task_name, methods in methods_by_task.items():
@@ -2983,11 +4281,29 @@ class HTNMethodSynthesizer:
 			seen_signatures: set[Tuple[str, ...]] = set()
 			kept_empty_signature = False
 
+			required_contract_matched_names = {
+				method.method_name
+				for method in constructive_methods
+				if any(
+					self._transition_native_method_matches_branch_contract(
+						method,
+						contract,
+						task_lookup=task_lookup,
+					)
+					for contract in required_branch_contracts.get(task_name, ())
+				)
+			}
+			if required_contract_matched_names:
+				allowed_method_names.update(required_contract_matched_names)
+
 			if not has_distinguishing_context:
-				allowed_method_names.add(constructive_methods[0].method_name)
+				if not required_contract_matched_names:
+					allowed_method_names.add(constructive_methods[0].method_name)
 				continue
 
 			for method in constructive_methods:
+				if method.method_name in required_contract_matched_names:
+					continue
 				signature = context_signatures[method.method_name]
 				if method.method_name in supportive_constructive_names:
 					if any(
@@ -3046,7 +4362,23 @@ class HTNMethodSynthesizer:
 			for payload in (prompt_analysis or {}).get(section_name, [])
 			if str(payload.get("task_name", "")).strip()
 		}
-		seed_task_names = root_task_names | required_contract_task_names
+		required_transition_native_task_names = {
+			str(payload.get("name", "")).strip()
+			for section_name in ("query_root_alias_tasks", "transition_tasks")
+			for payload in (prompt_analysis or {}).get(section_name, [])
+			if str(payload.get("name", "")).strip()
+		}
+		required_branch_task_names = {
+			str(task_name).strip()
+			for task_name in ((prompt_analysis or {}).get("required_branch_contracts") or {})
+			if str(task_name).strip()
+		}
+		seed_task_names = (
+			root_task_names
+			| required_contract_task_names
+			| required_transition_native_task_names
+			| required_branch_task_names
+		)
 		if not seed_task_names:
 			return library, 0
 
@@ -3333,6 +4665,19 @@ class HTNMethodSynthesizer:
 			for literal in method.context
 			if literal.is_positive and literal.predicate in dynamic_predicates
 		}
+		task_preserved_dynamic_signatures = {
+			literal.to_signature()
+			for candidate_method in methods_by_task.get(task.name, ())
+			if not candidate_method.subtasks
+			for literal in candidate_method.context
+			if literal.is_positive
+			and literal.predicate in dynamic_predicates
+			and not self._literal_matches_expected_signature(
+				literal,
+				expected_literal,
+				method_bindings,
+			)
+		}
 		established_by_steps: set[str] = set()
 		headline_producer_index: Optional[int] = None
 		ordered_steps = self._ordered_method_steps(method)
@@ -3486,7 +4831,13 @@ class HTNMethodSynthesizer:
 					dynamic_predicates=dynamic_predicates,
 				)
 				unresolved_later_requirements = later_requirements - available_positive
-				if unresolved_later_requirements:
+				unresolved_preservation_requirements = (
+					task_preserved_dynamic_signatures - available_positive
+				)
+				relevant_unresolved_requirements = (
+					unresolved_later_requirements | unresolved_preservation_requirements
+				)
+				if relevant_unresolved_requirements:
 					possible_effects = {
 						literal.to_signature()
 						for literal in self._possible_positive_step_effect_literals(
@@ -3498,18 +4849,20 @@ class HTNMethodSynthesizer:
 							dynamic_predicates=dynamic_predicates,
 						)
 					}
-					if not possible_effects & unresolved_later_requirements:
+					if not possible_effects & relevant_unresolved_requirements:
 						raise ValueError(
 							f"Method '{method.method_name}' inserts compound step "
 							f"'{step.step_id}' ({step.task_name}) before the headline "
 							f"producer, but that step does not supply any unresolved later "
-							f"dynamic requirement in this branch. Later unresolved "
-							f"requirements are {sorted(unresolved_later_requirements)}; "
+							"dynamic requirement or required preserved dynamic literal in this "
+							f"branch. Later unresolved requirements are "
+							f"{sorted(unresolved_later_requirements)}; preserved dynamic "
+							f"obligations are {sorted(unresolved_preservation_requirements)}; "
 							f"possible effects of '{step.task_name}' here are "
 							f"{sorted(possible_effects)}.",
 						)
 
-				for literal in self._possible_positive_step_effect_literals(
+				for literal in self._compound_step_carryover_positive_literals(
 					step,
 					methods_by_task,
 					task_lookup,
@@ -3647,6 +5000,55 @@ class HTNMethodSynthesizer:
 				),
 			)
 		return requirement_signatures
+
+	def _compound_step_carryover_positive_literals(
+		self,
+		step: HTNMethodStep,
+		methods_by_task: Dict[str, List[HTNMethod]],
+		task_lookup: Dict[str, HTNTask],
+		action_schemas: Dict[str, Any],
+		predicate_arities: Dict[str, int],
+		*,
+		dynamic_predicates: set[str],
+	) -> Tuple[HTNLiteral, ...]:
+		positive_literals: list[HTNLiteral] = [
+			literal
+			for literal in self._step_effect_literals(
+				step,
+				task_lookup,
+				action_schemas,
+				predicate_arities,
+			)
+			if literal.is_positive and literal.predicate in dynamic_predicates
+		]
+		if step.kind != "compound":
+			return tuple(positive_literals)
+
+		task_schema = task_lookup.get(step.task_name)
+		if task_schema is None:
+			return tuple(positive_literals)
+
+		seen_signatures = {
+			literal.to_signature()
+			for literal in positive_literals
+		}
+		for method in methods_by_task.get(step.task_name, ()):
+			if method.subtasks:
+				continue
+			task_args = self._default_method_task_args(method, task_schema)
+			for literal in self._materialise_method_literals(
+				method.context,
+				task_args,
+				step.args,
+			):
+				if not literal.is_positive or literal.predicate not in dynamic_predicates:
+					continue
+				signature = literal.to_signature()
+				if signature in seen_signatures:
+					continue
+				seen_signatures.add(signature)
+				positive_literals.append(literal)
+		return tuple(positive_literals)
 
 	def _possible_positive_step_effect_literals(
 		self,
@@ -4003,6 +5405,50 @@ class HTNMethodSynthesizer:
 			task_types[self._sanitize_name(task.name)] = type_signature
 		return task_types
 
+	def _compiler_generated_task_type_map(
+		self,
+		*,
+		prompt_analysis: Optional[Dict[str, Any]],
+		predicate_types: Dict[str, Tuple[str, ...]],
+	) -> Dict[str, Tuple[str, ...]]:
+		generated_task_types: Dict[str, Tuple[str, ...]] = {}
+		for section_name in ("query_root_alias_tasks", "transition_tasks"):
+			for payload in (prompt_analysis or {}).get(section_name, ()) or ():
+				if not isinstance(payload, dict):
+					continue
+				task_name = str(payload.get("name", "")).strip()
+				parameters = tuple(
+					str(value).strip()
+					for value in (payload.get("parameters") or ())
+					if str(value).strip()
+				)
+				if not task_name or not parameters:
+					continue
+				symbol_types: Dict[str, set[str]] = {
+					parameter: set()
+					for parameter in parameters
+				}
+				headline_literal = self._literal_from_dict(payload.get("headline_literal"))
+				if headline_literal is not None:
+					self._collect_literal_types(symbol_types, headline_literal, predicate_types)
+				for collection_name in ("retained_prefix_literals", "bridge_precondition"):
+					for signature in payload.get(collection_name) or ():
+						literal = self._literal_from_signature_text(str(signature).strip())
+						if literal is None:
+							continue
+						self._collect_literal_types(symbol_types, literal, predicate_types)
+				if not all(
+					len(symbol_types.get(parameter, ())) == 1
+					for parameter in parameters
+				):
+					continue
+				type_signature = tuple(
+					next(iter(symbol_types[parameter]))
+					for parameter in parameters
+				)
+				generated_task_types[task_name] = type_signature
+		return generated_task_types
+
 	def _resolve_action_schema(self, step: HTNMethodStep, action_schemas: Dict[str, Any]) -> Any:
 		if step.action_name and step.action_name in action_schemas:
 			return action_schemas[step.action_name]
@@ -4194,6 +5640,7 @@ class HTNMethodSynthesizer:
 		self._validate_auxiliary_parameters_are_constrained_before_use(
 			method,
 			task_schema,
+			task_lookup,
 			ordered_steps,
 		)
 		bound_variables = self._extend_bound_variables_from_literals(
@@ -4234,6 +5681,7 @@ class HTNMethodSynthesizer:
 		self,
 		method: HTNMethod,
 		task_schema: Optional[HTNTask],
+		task_lookup: Dict[str, HTNTask],
 		ordered_steps: Sequence[HTNMethodStep],
 	) -> None:
 		if method.origin == "domain" or task_schema is None:
@@ -4261,6 +5709,9 @@ class HTNMethodSynthesizer:
 				if variable in constrained_variables:
 					continue
 				if variable not in step.args:
+					continue
+				if step.kind == "compound" and step.task_name in task_lookup:
+					constrained_variables.add(variable)
 					continue
 				raise ValueError(
 					f"Method '{method.method_name}' uses auxiliary parameter '{variable}' in "
@@ -4450,6 +5901,8 @@ class HTNMethodSynthesizer:
 		task_lookup: Dict[str, HTNTask],
 		action_schemas: Dict[str, Any],
 		predicate_arities: Dict[str, int],
+		*,
+		prompt_analysis: Optional[Dict[str, Any]] = None,
 	) -> None:
 		methods_by_task: Dict[str, List[HTNMethod]] = {}
 		for method in library.methods:
@@ -4458,6 +5911,13 @@ class HTNMethodSynthesizer:
 		for task_name, methods in methods_by_task.items():
 			constructive_methods = [method for method in methods if method.subtasks]
 			if len(constructive_methods) <= 1:
+				continue
+			if self._is_transition_native_query_root_bridge_task(
+				task_name,
+				constructive_methods,
+				task_lookup=task_lookup,
+				prompt_analysis=prompt_analysis,
+			):
 				continue
 
 			seen_signatures: Dict[Tuple[str, ...], str] = {}
@@ -4490,6 +5950,30 @@ class HTNMethodSynthesizer:
 					)
 				seen_signatures[signature] = method.method_name
 
+	def _is_transition_native_query_root_bridge_task(
+		self,
+		task_name: str,
+		constructive_methods: Sequence[HTNMethod],
+		*,
+		task_lookup: Dict[str, HTNTask],
+		prompt_analysis: Optional[Dict[str, Any]],
+	) -> bool:
+		if not (prompt_analysis or {}).get("transition_native"):
+			return False
+		task_schema = task_lookup.get(task_name)
+		if task_schema is None or not getattr(task_schema, "source_name", ""):
+			return False
+		if not str(task_name).startswith("query_root_"):
+			return False
+		for method in constructive_methods:
+			ordered_steps = self._ordered_method_steps(method)
+			if len(ordered_steps) != 1:
+				return False
+			step = ordered_steps[0]
+			if step.kind != "compound" or not str(step.task_name).startswith("dfa_step_"):
+				return False
+		return True
+
 	@staticmethod
 	def _default_method_task_args(
 		method: HTNMethod,
@@ -4501,7 +5985,7 @@ class HTNMethodSynthesizer:
 			return tuple(method.parameters)
 		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
 		if not declared_parameters:
-			return tuple(method.parameters)
+			return ()
 		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
 		if len(leading_parameters) == len(declared_parameters):
 			return leading_parameters

@@ -150,6 +150,31 @@ class PipelineLogger:
 					pass
 		return candidate.name or str(candidate)
 
+	def _relative_artifact_reference(self, value: Any) -> Any:
+		if value is None:
+			return None
+		if isinstance(value, (str, Path)):
+			return self._relative_artifact_path(value)
+		if isinstance(value, (list, tuple)):
+			items = [
+				self._relative_artifact_reference(item)
+				for item in value
+			]
+			items = [item for item in items if item is not None]
+			return items or None
+		if isinstance(value, dict):
+			items = {
+				str(key): self._relative_artifact_reference(item)
+				for key, item in value.items()
+			}
+			items = {
+				key: item
+				for key, item in items.items()
+				if item is not None
+			}
+			return items or None
+		return None
+
 	@staticmethod
 	def _normalise_timing_breakdown(breakdown: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 		if not breakdown:
@@ -481,9 +506,9 @@ class PipelineLogger:
 			"consistency_checks": artifacts.get("consistency_checks"),
 		}
 		artifact_paths = {
-			key: self._relative_artifact_path(value)
+			key: self._relative_artifact_reference(value)
 			for key, value in dict(artifacts.get("artifacts") or {}).items()
-			if self._relative_artifact_path(value)
+			if self._relative_artifact_reference(value) is not None
 		}
 		if artifact_paths:
 			sanitised["artifacts"] = artifact_paths

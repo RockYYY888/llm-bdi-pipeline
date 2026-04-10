@@ -21,7 +21,7 @@ from stage1_interpretation.ltlf_generator import NLToLTLfGenerator
 from stage1_interpretation.ltlf_formula import LTLFormula, LogicalOperator, TemporalOperator
 from stage2_dfa_generation.dfa_builder import DFABuilder
 from stage3_method_synthesis.htn_method_synthesis import HTNMethodSynthesizer
-from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary
+from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary, _parse_signature_literal
 from stage3_method_synthesis.transition_native import query_root_alias_task_name
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
@@ -84,6 +84,8 @@ class LTL_BDI_Pipeline:
         self.task_type_map = self._task_type_map()
         self._validate_problem_domain_compatibility()
         self._query_task_action_analysis_cache: Optional[Dict[str, Any]] = None
+        self._latest_transition_specs: Tuple[Dict[str, Any], ...] = ()
+        self._latest_transition_prompt_analysis: Dict[str, Any] = {}
 
         # Output directory (set during execution - will use logger's directory)
         self.output_dir = None
@@ -453,6 +455,10 @@ class LTL_BDI_Pipeline:
                 ordered_literal_signatures=ordered_literal_signatures,
                 linearise_ordered_literals=self._query_task_sequence_is_ordered(ltl_spec),
             )
+            self._latest_transition_specs = tuple(transition_specs or ())
+            self._latest_transition_prompt_analysis = dict(
+                synthesis_meta.get("derived_analysis", {}) or {},
+            )
             transition_extract_seconds = time.perf_counter() - transition_extract_start
             summary["dfa_progress_transitions"] = len(transition_specs)
             self._record_stage_timing(
@@ -500,6 +506,8 @@ class LTL_BDI_Pipeline:
             }
 
         except Exception as e:
+            self._latest_transition_specs = ()
+            self._latest_transition_prompt_analysis = {}
             self._record_stage_timing("stage3", stage_start)
             self.logger.log_stage3_method_synthesis(
                 None,
@@ -1285,6 +1293,25 @@ class LTL_BDI_Pipeline:
         try:
             plan_records = []
             transition_artifacts = []
+            exact_transition_task_args_by_name: Dict[str, Tuple[str, ...]] = {}
+            query_task_network = self._stage6_query_task_network(
+                ltl_spec,
+                method_library=method_library,
+            )
+            if query_task_network:
+                exact_transition_task_network, _ = self._stage6_exact_transition_task_network(
+                    query_task_network=query_task_network,
+                    literal_signatures=tuple(
+                        getattr(ltl_spec, "query_task_literal_signatures", ()) or ()
+                    ),
+                    transition_specs=self._latest_transition_specs or transition_specs,
+                    prompt_analysis=self._latest_transition_prompt_analysis,
+                    method_library=method_library,
+                )
+                exact_transition_task_args_by_name = {
+                    str(task_name): tuple(str(arg) for arg in (task_args or ()))
+                    for task_name, task_args in exact_transition_task_network
+                }
             stage4_breakdown: Dict[str, float] = {
                 "seed_scope_seconds": 0.0,
                 "witness_initial_facts_seconds": 0.0,
@@ -1299,11 +1326,15 @@ class LTL_BDI_Pipeline:
                         "Stage 3 output is missing the required transition task "
                         f"'{transition_name}' for '{literal.to_signature()}'."
                     )
+                transition_task_args = exact_transition_task_args_by_name.get(
+                    task_name,
+                    tuple(str(arg) for arg in literal.args),
+                )
                 seed_scope_start = time.perf_counter()
                 witness_objects, witness_object_types = self._seed_validation_scope(
                     task_name,
                     method_library,
-                    tuple(literal.args),
+                    transition_task_args,
                     ltl_spec.objects,
                 )
                 stage4_breakdown["seed_scope_seconds"] += time.perf_counter() - seed_scope_start
@@ -1312,7 +1343,7 @@ class LTL_BDI_Pipeline:
                     planner,
                     task_name,
                     method_library,
-                    tuple(literal.args),
+                    transition_task_args,
                     ltl_spec.objects,
                     object_pool=witness_objects,
                     object_types=witness_object_types,
@@ -1332,7 +1363,7 @@ class LTL_BDI_Pipeline:
                     target_literal=literal,
                     task_name=task_name,
                     transition_name=transition_name,
-                    task_args=tuple(literal.args),
+                    task_args=transition_task_args,
                     typed_objects=self._typed_object_entries(
                         witness_objects,
                         witness_object_types,
@@ -1783,20 +1814,142 @@ class LTL_BDI_Pipeline:
             return ()
 
         task_schema = method_library.task_for_name(task_name)
-        if task_schema is None or len(task_schema.source_predicates) != 1:
+        if task_schema is None:
             return ()
-
-        predicate_name = task_schema.source_predicates[0]
+        predicate_name = ""
+        if len(getattr(task_schema, "source_predicates", ()) or ()) == 1:
+            predicate_name = str(task_schema.source_predicates[0]).strip()
+        elif getattr(task_schema, "headline_literal", None) is not None:
+            predicate_name = str(task_schema.headline_literal.predicate).strip()
+        if not predicate_name:
+            return ()
         predicate_signature = self.predicate_type_map.get(predicate_name, ())
         if not predicate_signature:
             return ()
         if len(predicate_signature) != len(task_schema.parameters):
+            inferred_signature = self._infer_transition_native_task_type_signature(
+                task_name,
+                task_schema,
+                predicate_signature,
+                method_library=method_library,
+            )
+            if inferred_signature:
+                return inferred_signature
             raise TypeResolutionError(
                 f"Task '{task_name}' source predicate '{predicate_name}' arity mismatch: "
                 f"task has {len(task_schema.parameters)} args, predicate has "
                 f"{len(predicate_signature)}.",
             )
         return predicate_signature
+
+    def _infer_transition_native_task_type_signature(
+        self,
+        task_name: str,
+        task_schema,
+        predicate_signature: Sequence[str],
+        *,
+        method_library,
+    ) -> Tuple[str, ...]:
+        parameters = tuple(str(value).strip() for value in (task_schema.parameters or ()) if str(value).strip())
+        if not parameters:
+            return ()
+        candidates: Dict[str, Set[str]] = defaultdict(set)
+
+        headline_literal = getattr(task_schema, "headline_literal", None)
+        if (
+            headline_literal is not None
+            and not getattr(headline_literal, "is_equality", False)
+            and len(getattr(headline_literal, "args", ()) or ()) == len(predicate_signature)
+        ):
+            for arg_name, type_name in zip(headline_literal.args, predicate_signature):
+                symbol = str(arg_name).strip()
+                if symbol in parameters and str(type_name).strip():
+                    candidates[symbol].add(str(type_name).strip())
+
+        self._collect_transition_native_prompt_type_candidates(
+            task_name=task_name,
+            parameters=parameters,
+            candidates=candidates,
+        )
+
+        for method in method_library.methods_for_task(task_name):
+            for literal in tuple(getattr(method, "context", ()) or ()):
+                if getattr(literal, "is_equality", False):
+                    continue
+                literal_signature = self.predicate_type_map.get(str(literal.predicate), ())
+                if not literal_signature or len(literal_signature) != len(literal.args):
+                    continue
+                for arg_name, type_name in zip(literal.args, literal_signature):
+                    symbol = str(arg_name).strip()
+                    if symbol in parameters and str(type_name).strip():
+                        candidates[symbol].add(str(type_name).strip())
+
+        resolved_signature: List[str] = []
+        for parameter in parameters:
+            resolved_signature.append(
+                self._resolve_symbol_type(
+                    symbol=parameter,
+                    candidate_types=candidates.get(parameter, set()),
+                    scope=f"Task '{task_name}' typing",
+                ),
+            )
+        return tuple(resolved_signature)
+
+    def _transition_native_prompt_payload_for_task(
+        self,
+        task_name: str,
+    ) -> Dict[str, Any]:
+        prompt_analysis = self._latest_transition_prompt_analysis or {}
+        for section_name in ("query_root_alias_tasks", "transition_tasks"):
+            for payload in tuple(prompt_analysis.get(section_name) or ()):
+                if str(payload.get("name", "")).strip() == str(task_name).strip():
+                    return dict(payload)
+        return {}
+
+    def _collect_transition_native_prompt_type_candidates(
+        self,
+        *,
+        task_name: str,
+        parameters: Sequence[str],
+        candidates: Dict[str, Set[str]],
+    ) -> None:
+        payload = self._transition_native_prompt_payload_for_task(task_name)
+        if not payload:
+            return
+
+        literal_items: List[HTNLiteral] = []
+        headline_payload = payload.get("headline_literal")
+        if isinstance(headline_payload, dict):
+            literal = HTNLiteral(
+                predicate=str(headline_payload.get("predicate", "")).strip(),
+                args=tuple(
+                    str(value).strip()
+                    for value in (headline_payload.get("args") or ())
+                    if str(value).strip()
+                ),
+                is_positive=bool(headline_payload.get("is_positive", True)),
+                source_symbol=headline_payload.get("source_symbol"),
+                negation_mode=str(headline_payload.get("negation_mode", "naf")).strip() or "naf",
+            )
+            if literal is not None and not literal.is_equality:
+                literal_items.append(literal)
+
+        for signature in (
+            *(payload.get("bridge_precondition") or ()),
+            *(payload.get("retained_prefix_literals") or ()),
+        ):
+            literal = _parse_signature_literal(str(signature).strip())
+            if literal is not None and literal.is_positive and not literal.is_equality:
+                literal_items.append(literal)
+
+        for literal in literal_items:
+            literal_signature = self.predicate_type_map.get(str(literal.predicate), ())
+            if not literal_signature or len(literal_signature) != len(literal.args):
+                continue
+            for arg_name, type_name in zip(literal.args, literal_signature):
+                symbol = str(arg_name).strip()
+                if symbol in parameters and str(type_name).strip():
+                    candidates[symbol].add(str(type_name).strip())
 
     def _collect_argument_signature_constraints(
         self,
@@ -3548,6 +3701,31 @@ class LTL_BDI_Pipeline:
         return queued.pop(0)
 
     @staticmethod
+    def _stage6_plan_record_queues_by_transition_name(
+        plan_records,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        queues: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for record in tuple(plan_records or ()):
+            transition_name = str(record.get("transition_name") or "").strip()
+            if not transition_name:
+                continue
+            queues[transition_name].append(record)
+        return dict(queues)
+
+    @staticmethod
+    def _stage6_pop_plan_record_for_transition_name(
+        plan_record_queues: Dict[str, List[Dict[str, Any]]],
+        transition_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        name = str(transition_name or "").strip()
+        if not name:
+            return None
+        queued = plan_record_queues.get(name)
+        if not queued:
+            return None
+        return queued.pop(0)
+
+    @staticmethod
     def _stage6_project_effect_args(
         task_args: Sequence[str],
         task_types: Sequence[str],
@@ -3890,10 +4068,16 @@ class LTL_BDI_Pipeline:
         runner = JasonRunner(stage6_dir=Path(__file__).parent / "stage6_jason_validation")
         typed_objects = self._typed_object_entries(runtime_objects, object_types)
         ordered = self._query_task_sequence_is_ordered(ltl_spec)
-        planner_timeout_seconds = 30.0
+        planner_timeout_seconds = 60.0
         unordered_timeout_seconds = min(planner_timeout_seconds, 5.0)
         unordered_full_probe_limit = 4
         unordered_ordered_probe_limit = 16
+        effective_literal_signatures = tuple(
+            str(signature).strip()
+            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
+            if str(signature).strip()
+        )
+        effective_target_ids = tuple(f"t{index}" for index, _ in enumerate(task_network, start=1))
         predicate_name_map = runner._runtime_predicate_name_map(
             action_schemas=action_schemas,
             predicate_names=[
@@ -3937,6 +4121,8 @@ class LTL_BDI_Pipeline:
                 ),
                 preferred_target_ids=tuple(ordering.get("target_ids") or ()),
             )
+            effective_literal_signatures = tuple(unordered_literal_signatures or ())
+            effective_target_ids = tuple(unordered_task_ids or ())
             goal_facts = self._stage6_query_goal_facts(
                 type(
                     "Stage6UnorderedReorderedSpec",
@@ -3947,6 +4133,47 @@ class LTL_BDI_Pipeline:
                 method_library,
                 action_schemas,
             )
+            exact_transition_task_network, bridge_metadata = (
+                self._stage6_exact_transition_task_network(
+                    query_task_network=task_network,
+                    literal_signatures=effective_literal_signatures,
+                    transition_specs=self._latest_transition_specs,
+                    prompt_analysis=self._latest_transition_prompt_analysis,
+                    method_library=method_library,
+                )
+            )
+            if exact_transition_task_network:
+                exact_guided = self._stage6_incremental_exact_transition_guided_execution(
+                    planner=planner,
+                    runner=runner,
+                    method_library=method_library,
+                    transition_task_network=exact_transition_task_network,
+                    bridge_metadata=bridge_metadata,
+                    runtime_objects=runtime_objects,
+                    typed_objects=typed_objects,
+                    seed_facts=tuple(seed_facts),
+                    action_schemas=action_schemas,
+                    predicate_name_map=predicate_name_map,
+                    timeout_seconds=planner_timeout_seconds,
+                    completed_target_ids=effective_target_ids,
+                    plan_records=plan_records,
+                )
+                if exact_guided is not None:
+                    if exact_guided.get("is_partial"):
+                        exact_guided = (
+                            self._stage6_resume_partial_guided_execution_with_query_task_suffix(
+                                partial_guided_execution=exact_guided,
+                                task_network=task_network,
+                                completed_target_ids=effective_target_ids,
+                                planner=planner,
+                                method_library=method_library,
+                                runtime_objects=runtime_objects,
+                                typed_objects=typed_objects,
+                                task_network_ordered=True,
+                                planner_timeout_seconds=planner_timeout_seconds,
+                            )
+                        )
+                    return exact_guided
             if len(task_network) <= unordered_ordered_probe_limit:
                 unordered_ordered_probe_timeout_seconds = (
                     20.0 if len(task_network) <= 11 else 60.0
@@ -4007,6 +4234,46 @@ class LTL_BDI_Pipeline:
                                 "actual_plan": actual_plan_text,
                                 "completed_target_ids": list(unordered_task_ids or ()),
                             }
+
+        exact_transition_task_network, bridge_metadata = self._stage6_exact_transition_task_network(
+            query_task_network=task_network,
+            literal_signatures=effective_literal_signatures,
+            transition_specs=self._latest_transition_specs,
+            prompt_analysis=self._latest_transition_prompt_analysis,
+            method_library=method_library,
+        )
+        if exact_transition_task_network:
+            exact_guided = self._stage6_incremental_exact_transition_guided_execution(
+                planner=planner,
+                runner=runner,
+                method_library=method_library,
+                transition_task_network=exact_transition_task_network,
+                bridge_metadata=bridge_metadata,
+                runtime_objects=runtime_objects,
+                typed_objects=typed_objects,
+                seed_facts=tuple(seed_facts),
+                action_schemas=action_schemas,
+                predicate_name_map=predicate_name_map,
+                timeout_seconds=planner_timeout_seconds,
+                completed_target_ids=effective_target_ids,
+                plan_records=plan_records,
+            )
+            if exact_guided is not None:
+                if exact_guided.get("is_partial"):
+                    exact_guided = (
+                        self._stage6_resume_partial_guided_execution_with_query_task_suffix(
+                            partial_guided_execution=exact_guided,
+                            task_network=task_network,
+                            completed_target_ids=effective_target_ids,
+                            planner=planner,
+                            method_library=method_library,
+                            runtime_objects=runtime_objects,
+                            typed_objects=typed_objects,
+                            task_network_ordered=ordered,
+                            planner_timeout_seconds=planner_timeout_seconds,
+                        )
+                    )
+                return exact_guided
 
         if ordered and goal_facts:
             try:
@@ -4839,6 +5106,657 @@ class LTL_BDI_Pipeline:
             tuple(by_id[target_id][1] for target_id in ordered_ids),
             tuple(ordered_ids),
         )
+
+    def _stage6_exact_transition_task_network(
+        self,
+        *,
+        query_task_network: Sequence[Tuple[str, Sequence[str]]],
+        literal_signatures: Sequence[str],
+        transition_specs: Sequence[Dict[str, Any]],
+        prompt_analysis: Optional[Dict[str, Any]],
+        method_library,
+    ) -> Tuple[Tuple[Tuple[str, Tuple[str, ...]], ...], Tuple[Dict[str, Any], ...]]:
+        if not query_task_network or not literal_signatures or not transition_specs:
+            return (), ()
+        if len(query_task_network) != len(literal_signatures):
+            return (), ()
+
+        specs_by_source_and_literal: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        initial_state = ""
+        for raw_spec in transition_specs:
+            if not isinstance(raw_spec, dict):
+                continue
+            source_state = str(raw_spec.get("source_state") or "").strip()
+            target_state = str(raw_spec.get("target_state") or "").strip()
+            transition_name = str(raw_spec.get("transition_name") or "").strip()
+            target_literal = self._stage6_transition_spec_literal_signature(raw_spec)
+            if (
+                not source_state
+                or not target_state
+                or not transition_name
+                or not target_literal
+            ):
+                continue
+            if not initial_state:
+                initial_state = str(raw_spec.get("initial_state") or "").strip()
+            specs_by_source_and_literal[(source_state, target_literal)].append(raw_spec)
+
+        if not initial_state:
+            return (), ()
+
+        current_state = initial_state
+        exact_task_network: List[Tuple[str, Tuple[str, ...]]] = []
+        bridge_metadata: List[Dict[str, Any]] = []
+        completed_literal_history: List[str] = []
+        query_root_payloads = [
+            item
+            for item in (prompt_analysis or {}).get("query_root_alias_tasks", ()) or ()
+            if isinstance(item, dict)
+        ]
+        for (query_task_name, query_task_args), literal_signature in zip(
+            query_task_network,
+            literal_signatures,
+        ):
+            signature = str(literal_signature or "").strip()
+            if not signature:
+                return (), ()
+            matching_specs = specs_by_source_and_literal.get((current_state, signature), [])
+            if len(matching_specs) != 1:
+                return (), ()
+            transition_spec = matching_specs[0]
+            transition_name = str(transition_spec.get("transition_name") or "").strip()
+            if not transition_name or method_library.task_for_name(transition_name) is None:
+                return (), ()
+            query_root_task_args = tuple(str(arg).strip() for arg in (query_task_args or ()))
+            if any(not arg for arg in query_root_task_args):
+                return (), ()
+            grounded_transition_args = self._stage6_ground_exact_transition_task_args(
+                query_task_name=str(query_task_name).strip(),
+                query_task_args=query_root_task_args,
+                literal_signature=signature,
+                transition_name=transition_name,
+                query_root_payloads=query_root_payloads,
+                completed_literal_history=tuple(completed_literal_history),
+            )
+            if not grounded_transition_args:
+                return (), ()
+            exact_task_network.append((transition_name, grounded_transition_args))
+            bridge_metadata.append(
+                {
+                    "query_root_task_name": str(query_task_name).strip(),
+                    "query_root_task_args": list(query_root_task_args),
+                    "transition_task_args": list(grounded_transition_args),
+                    "transition_name": transition_name,
+                    "target_literal": signature,
+                    "source_state": current_state,
+                    "target_state": str(transition_spec.get("target_state") or "").strip(),
+                },
+            )
+            completed_literal_history.append(signature)
+            current_state = str(transition_spec.get("target_state") or "").strip()
+            if not current_state:
+                return (), ()
+
+        return tuple(exact_task_network), tuple(bridge_metadata)
+
+    def _stage6_ground_exact_transition_task_args(
+        self,
+        *,
+        query_task_name: str,
+        query_task_args: Sequence[str],
+        literal_signature: str,
+        transition_name: str,
+        query_root_payloads: Sequence[Dict[str, Any]],
+        completed_literal_history: Sequence[str],
+    ) -> Optional[Tuple[str, ...]]:
+        query_root_payload = None
+        for payload in query_root_payloads:
+            if (
+                str(payload.get("name", "")).strip() == query_task_name
+                and str(payload.get("target_literal", "")).strip() == literal_signature
+            ):
+                query_root_payload = payload
+                break
+        if query_root_payload is None:
+            return tuple(str(arg).strip() for arg in query_task_args if str(arg).strip())
+
+        bridge_parameters = tuple(
+            str(value).strip()
+            for value in (
+                query_root_payload.get("bridge_parameters")
+                or query_root_payload.get("parameters")
+                or ()
+            )
+            if str(value).strip()
+        )
+        if not bridge_parameters:
+            return tuple(str(arg).strip() for arg in query_task_args if str(arg).strip())
+
+        root_parameters = tuple(
+            str(value).strip()
+            for value in (query_root_payload.get("parameters") or ())
+            if str(value).strip()
+        )
+        symbol_bindings: Dict[str, str] = {
+            parameter: str(argument).strip()
+            for parameter, argument in zip(root_parameters, query_task_args)
+            if str(parameter).strip() and str(argument).strip()
+        }
+        symbolic_requirements = tuple(
+            parsed
+            for parsed in (
+                _parse_signature_literal(str(value).strip())
+                for value in (query_root_payload.get("bridge_precondition") or ())
+                if str(value).strip()
+            )
+            if parsed is not None and parsed.is_positive
+        )
+        concrete_history = tuple(
+            parsed
+            for parsed in (
+                _parse_signature_literal(str(value).strip())
+                for value in completed_literal_history
+                if str(value).strip()
+            )
+            if parsed is not None and parsed.is_positive
+        )
+        resolved_bindings = self._stage6_resolve_symbolic_literal_bindings(
+            symbolic_requirements=symbolic_requirements,
+            concrete_history=concrete_history,
+            seed_bindings=symbol_bindings,
+        )
+        if resolved_bindings is None:
+            return None
+        grounded_args = tuple(
+            str(resolved_bindings.get(parameter, "")).strip()
+            for parameter in bridge_parameters
+        )
+        if any(not value for value in grounded_args):
+            return None
+        return grounded_args
+
+    def _stage6_resolve_symbolic_literal_bindings(
+        self,
+        *,
+        symbolic_requirements: Sequence[HTNLiteral],
+        concrete_history: Sequence[HTNLiteral],
+        seed_bindings: Dict[str, str],
+    ) -> Optional[Dict[str, str]]:
+        if not symbolic_requirements:
+            return dict(seed_bindings)
+
+        def match_requirement(
+            requirement: HTNLiteral,
+            candidate: HTNLiteral,
+            current_bindings: Dict[str, str],
+        ) -> Optional[Dict[str, str]]:
+            if (
+                requirement.predicate != candidate.predicate
+                or requirement.is_positive != candidate.is_positive
+                or len(requirement.args) != len(candidate.args)
+            ):
+                return None
+            next_bindings = dict(current_bindings)
+            for symbolic_arg, concrete_arg in zip(requirement.args, candidate.args):
+                symbol = str(symbolic_arg).strip()
+                value = str(concrete_arg).strip()
+                if not symbol or not value:
+                    return None
+                bound_value = next_bindings.get(symbol)
+                if bound_value is None:
+                    next_bindings[symbol] = value
+                elif bound_value != value:
+                    return None
+            return next_bindings
+
+        def backtrack(
+            requirement_index: int,
+            current_bindings: Dict[str, str],
+            used_candidates: Set[int],
+        ) -> Optional[Dict[str, str]]:
+            if requirement_index >= len(symbolic_requirements):
+                return current_bindings
+            requirement = symbolic_requirements[requirement_index]
+            for candidate_index, candidate in enumerate(concrete_history):
+                if candidate_index in used_candidates:
+                    continue
+                matched_bindings = match_requirement(
+                    requirement,
+                    candidate,
+                    current_bindings,
+                )
+                if matched_bindings is None:
+                    continue
+                resolved = backtrack(
+                    requirement_index + 1,
+                    matched_bindings,
+                    used_candidates | {candidate_index},
+                )
+                if resolved is not None:
+                    return resolved
+            return None
+
+        return backtrack(0, dict(seed_bindings), set())
+
+    def _stage6_transition_spec_literal_signature(self, transition_spec: Dict[str, Any]) -> str:
+        target_literal = transition_spec.get("target_literal")
+        if isinstance(target_literal, dict):
+            predicate = str(target_literal.get("predicate") or "").strip()
+            if predicate:
+                args = [
+                    str(arg).strip()
+                    for arg in (target_literal.get("args") or ())
+                    if str(arg).strip()
+                ]
+                return (
+                    f"{predicate}({', '.join(args)})"
+                    if args
+                    else predicate
+                )
+        return str(transition_spec.get("label") or "").strip()
+
+    def _stage6_query_root_bridge_method_trace_entry(
+        self,
+        *,
+        query_root_task_name: str,
+        query_root_task_args: Sequence[str],
+        transition_name: str,
+        method_library,
+    ) -> Optional[Dict[str, Any]]:
+        for method in method_library.methods_for_task(query_root_task_name):
+            if len(method.subtasks) != 1:
+                continue
+            step = method.subtasks[0]
+            if step.kind != "compound" or step.task_name != transition_name:
+                continue
+            return {
+                "method_name": method.method_name,
+                "task_args": [str(arg).strip() for arg in (query_root_task_args or ())],
+            }
+        return None
+
+    def _stage6_incremental_exact_transition_guided_execution(
+        self,
+        *,
+        planner,
+        runner,
+        method_library,
+        transition_task_network: Sequence[Tuple[str, Sequence[str]]],
+        bridge_metadata: Sequence[Dict[str, Any]],
+        runtime_objects,
+        typed_objects,
+        seed_facts,
+        action_schemas,
+        predicate_name_map,
+        timeout_seconds: float,
+        completed_target_ids: Sequence[str] = (),
+        plan_records=None,
+    ):
+        if not transition_task_network or len(transition_task_network) != len(bridge_metadata):
+            return None
+
+        current_seed_facts = tuple(seed_facts)
+        action_path: List[str] = []
+        method_trace: List[Dict[str, Any]] = []
+        actual_plan_texts: List[str] = []
+        work_dirs: List[str] = []
+        plan_record_queues = self._stage6_plan_record_queues_by_transition_name(plan_records)
+        completed_count = 0
+        all_target_ids = list(
+            str(target_id).strip()
+            for target_id in (completed_target_ids or ())
+            if str(target_id).strip()
+        )
+
+        def _partial_guidance_result() -> Optional[Dict[str, Any]]:
+            if not action_path and not method_trace:
+                return None
+            return {
+                "source": "panda_incremental_exact_transition_tasks",
+                "task_network": [
+                    {"task_name": task_name, "args": list(task_args)}
+                    for task_name, task_args in transition_task_network
+                ],
+                "action_path": list(action_path),
+                "method_trace": list(method_trace),
+                "work_dir": work_dirs[-1] if work_dirs else None,
+                "actual_plan": self._stage6_merge_hierarchical_plan_texts(actual_plan_texts),
+                "is_partial": True,
+                "completed_task_count": completed_count,
+                "completed_target_ids": list(all_target_ids[:completed_count]),
+                "post_guided_seed_facts": tuple(current_seed_facts),
+            }
+
+        for index, ((task_name, task_args), bridge) in enumerate(
+            zip(transition_task_network, bridge_metadata),
+            start=1,
+        ):
+            headline_literal = self._stage6_parse_literal_signature(
+                str(bridge.get("target_literal") or ""),
+            )
+            bridge_entry = self._stage6_query_root_bridge_method_trace_entry(
+                query_root_task_name=str(bridge.get("query_root_task_name") or ""),
+                query_root_task_args=tuple(bridge.get("query_root_task_args") or ()),
+                transition_name=task_name,
+                method_library=method_library,
+            )
+            if bridge_entry is None:
+                return None
+            preferred_plan_record = self._stage6_pop_plan_record_for_transition_name(
+                plan_record_queues,
+                task_name,
+            )
+
+            def _accept_fallback_plan_record(
+                fallback_record: Optional[Dict[str, Any]],
+            ) -> bool:
+                nonlocal current_seed_facts
+                if fallback_record is None:
+                    return False
+                fallback_plan = fallback_record.get("plan")
+                if fallback_plan is None:
+                    return False
+                fallback_action_path = [
+                    JasonRunner._runtime_call(step.task_name, step.args)
+                    for step in getattr(fallback_plan, "steps", ()) or ()
+                ]
+                fallback_replay = runner._replay_action_path_against_schemas(
+                    action_path=fallback_action_path,
+                    action_schemas=action_schemas,
+                    seed_facts=current_seed_facts,
+                )
+                if fallback_replay.get("passed") is not True:
+                    return False
+                fallback_seed_facts = tuple(
+                    runner._runtime_world_to_hddl_facts(
+                        fallback_replay.get("world_facts") or (),
+                        predicate_name_map=predicate_name_map,
+                    ),
+                )
+                if (
+                    headline_literal is not None
+                    and self._stage6_literal_holds_in_seed_facts(
+                        headline_literal,
+                        fallback_seed_facts,
+                    )
+                    is not True
+                ):
+                    return False
+                wrapped_actual_plan = self._stage6_wrap_exact_transition_hierarchical_plan(
+                    fallback_plan.actual_plan or fallback_plan.raw_plan,
+                    bridge_method_name=str(bridge_entry.get("method_name") or "").strip(),
+                    query_root_task_name=str(bridge.get("query_root_task_name") or "").strip(),
+                    query_root_task_args=tuple(bridge.get("query_root_task_args") or ()),
+                )
+                method_trace.append(bridge_entry)
+                method_trace.extend(
+                    planner.extract_method_trace(
+                        fallback_plan.actual_plan or fallback_plan.raw_plan,
+                    ),
+                )
+                action_path.extend(fallback_action_path)
+                if wrapped_actual_plan:
+                    actual_plan_texts.append(wrapped_actual_plan)
+                current_seed_facts = fallback_seed_facts
+                if getattr(fallback_plan, "work_dir", None):
+                    work_dirs.append(str(fallback_plan.work_dir))
+                return True
+
+            if _accept_fallback_plan_record(preferred_plan_record):
+                completed_count += 1
+                continue
+
+            try:
+                guided_plan = planner.plan(
+                    domain=self.domain,
+                    method_library=method_library,
+                    objects=tuple(runtime_objects),
+                    target_literal=headline_literal,
+                    task_name=task_name,
+                    transition_name=f"stage6_guided_transition_t{index}",
+                    typed_objects=typed_objects,
+                    task_args=tuple(task_args or ()),
+                    allow_empty_plan=True,
+                    initial_facts=current_seed_facts,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception:
+                return _partial_guidance_result()
+
+            task_action_path = [
+                JasonRunner._runtime_call(step.task_name, step.args)
+                for step in guided_plan.steps
+            ]
+            task_method_trace = planner.extract_method_trace(
+                guided_plan.actual_plan or guided_plan.raw_plan,
+            )
+            replay = runner._replay_action_path_against_schemas(
+                action_path=task_action_path,
+                action_schemas=action_schemas,
+                seed_facts=current_seed_facts,
+            )
+
+            next_seed_facts = current_seed_facts
+            headline_satisfied = self._stage6_literal_holds_in_seed_facts(
+                headline_literal,
+                current_seed_facts,
+            )
+            if replay.get("passed") is True:
+                next_seed_facts = tuple(
+                    runner._runtime_world_to_hddl_facts(
+                        replay.get("world_facts") or (),
+                        predicate_name_map=predicate_name_map,
+                    ),
+                )
+                headline_satisfied = self._stage6_literal_holds_in_seed_facts(
+                    headline_literal,
+                    next_seed_facts,
+                )
+            elif task_action_path:
+                return _partial_guidance_result()
+
+            if headline_literal is not None and headline_satisfied is not True:
+                return _partial_guidance_result()
+
+            wrapped_actual_plan = self._stage6_wrap_exact_transition_hierarchical_plan(
+                guided_plan.actual_plan or guided_plan.raw_plan,
+                bridge_method_name=str(bridge_entry.get("method_name") or "").strip(),
+                query_root_task_name=str(bridge.get("query_root_task_name") or "").strip(),
+                query_root_task_args=tuple(bridge.get("query_root_task_args") or ()),
+            )
+            method_trace.append(bridge_entry)
+            method_trace.extend(task_method_trace)
+            action_path.extend(task_action_path)
+            if wrapped_actual_plan:
+                actual_plan_texts.append(wrapped_actual_plan)
+            current_seed_facts = tuple(next_seed_facts or ())
+            if guided_plan.work_dir:
+                work_dirs.append(str(guided_plan.work_dir))
+            completed_count += 1
+
+        if not method_trace:
+            return None
+
+        return {
+            "source": "panda_incremental_exact_transition_tasks",
+            "task_network": [
+                {"task_name": task_name, "args": list(task_args)}
+                for task_name, task_args in transition_task_network
+            ],
+            "action_path": action_path,
+            "method_trace": method_trace,
+            "work_dir": work_dirs[-1] if work_dirs else None,
+            "actual_plan": self._stage6_merge_hierarchical_plan_texts(actual_plan_texts),
+            "completed_target_ids": list(completed_target_ids),
+        }
+
+    @staticmethod
+    def _stage6_wrap_exact_transition_hierarchical_plan(
+        plan_text: str,
+        *,
+        bridge_method_name: str,
+        query_root_task_name: str,
+        query_root_task_args: Sequence[str],
+    ) -> str | None:
+        if not str(plan_text or "").strip():
+            return None
+        if not bridge_method_name or not query_root_task_name:
+            return None
+
+        raw_lines = [
+            line.strip()
+            for line in str(plan_text).splitlines()
+            if line.strip()
+        ]
+        if not raw_lines:
+            return None
+
+        root_line_index: int | None = None
+        root_ids: List[int] = []
+        max_node_id = 0
+        for index, line in enumerate(raw_lines):
+            if line == "==>":
+                continue
+            if line.startswith("root "):
+                root_line_index = index
+                try:
+                    root_ids = [int(token) for token in line.split()[1:]]
+                except ValueError:
+                    return None
+                continue
+            if line == "root":
+                root_line_index = index
+                root_ids = []
+                continue
+            head_token = line.split()[0]
+            if head_token.isdigit():
+                max_node_id = max(max_node_id, int(head_token))
+
+        if root_line_index is None or not root_ids:
+            return None
+
+        bridge_node_id = max_node_id + 1
+        bridge_head_tokens = [
+            str(bridge_node_id),
+            query_root_task_name,
+            *[str(arg).strip() for arg in query_root_task_args if str(arg).strip()],
+        ]
+        bridge_child_text = " ".join(str(root_id) for root_id in root_ids)
+        bridge_line = (
+            f"{' '.join(bridge_head_tokens)} -> {bridge_method_name} {bridge_child_text}"
+        ).rstrip()
+
+        rewritten_lines: List[str] = []
+        for index, line in enumerate(raw_lines):
+            if line == "==>":
+                rewritten_lines.append(line)
+                continue
+            if index == root_line_index:
+                rewritten_lines.append(f"root {bridge_node_id}")
+                continue
+            rewritten_lines.append(line)
+        rewritten_lines.append(bridge_line)
+        return "\n".join(rewritten_lines) + "\n"
+
+    def _stage6_resume_partial_guided_execution_with_query_task_suffix(
+        self,
+        *,
+        partial_guided_execution: Dict[str, Any],
+        task_network: Sequence[Tuple[str, Sequence[str]]],
+        completed_target_ids: Sequence[str],
+        planner,
+        method_library,
+        runtime_objects,
+        typed_objects,
+        task_network_ordered: bool,
+        planner_timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        if not partial_guided_execution or not partial_guided_execution.get("is_partial"):
+            return partial_guided_execution
+
+        completed_count = int(partial_guided_execution.get("completed_task_count") or 0)
+        if completed_count <= 0:
+            return partial_guided_execution
+
+        normalized_task_network = [
+            (
+                str(task_name).strip(),
+                tuple(str(arg).strip() for arg in (task_args or ()) if str(arg).strip()),
+            )
+            for task_name, task_args in (task_network or ())
+            if str(task_name).strip()
+        ]
+        if completed_count >= len(normalized_task_network):
+            completed_result = dict(partial_guided_execution)
+            completed_result.pop("is_partial", None)
+            completed_result["completed_target_ids"] = list(completed_target_ids or ())
+            return completed_result
+
+        resumed_seed_facts = tuple(
+            str(fact).strip()
+            for fact in (partial_guided_execution.get("post_guided_seed_facts") or ())
+            if str(fact).strip()
+        )
+        if not resumed_seed_facts:
+            return partial_guided_execution
+
+        remaining_task_network = tuple(normalized_task_network[completed_count:])
+        if not remaining_task_network:
+            completed_result = dict(partial_guided_execution)
+            completed_result.pop("is_partial", None)
+            completed_result["completed_target_ids"] = list(completed_target_ids or ())
+            return completed_result
+
+        try:
+            (
+                suffix_plan,
+                suffix_action_path,
+                suffix_method_trace,
+                suffix_actual_plan,
+            ) = self._stage6_plan_task_network_only(
+                planner=planner,
+                method_library=method_library,
+                runtime_objects=runtime_objects,
+                typed_objects=typed_objects,
+                seed_facts=resumed_seed_facts,
+                task_network=remaining_task_network,
+                task_network_ordered=task_network_ordered,
+                task_name="stage6_guided_suffix_schedule",
+                transition_name="stage6_guided_suffix_schedule",
+                timeout_seconds=planner_timeout_seconds,
+            )
+        except Exception:
+            return partial_guided_execution
+
+        if not suffix_action_path and not suffix_method_trace and not str(suffix_actual_plan or "").strip():
+            return partial_guided_execution
+
+        merged_actual_plan = self._stage6_merge_hierarchical_plan_texts(
+            [
+                partial_guided_execution.get("actual_plan"),
+                suffix_actual_plan,
+            ],
+        )
+
+        return {
+            "source": (
+                f"{str(partial_guided_execution.get('source') or '').strip()}+"
+                "panda_query_task_suffix"
+            ).strip("+"),
+            "task_network": [
+                {"task_name": task_name, "args": list(task_args)}
+                for task_name, task_args in normalized_task_network
+            ],
+            "action_path": list(partial_guided_execution.get("action_path") or ()) + list(suffix_action_path),
+            "method_trace": list(partial_guided_execution.get("method_trace") or ()) + list(suffix_method_trace),
+            "work_dir": getattr(suffix_plan, "work_dir", None) or partial_guided_execution.get("work_dir"),
+            "actual_plan": (
+                merged_actual_plan
+                or suffix_actual_plan
+                or partial_guided_execution.get("actual_plan")
+            ),
+            "completed_target_ids": list(completed_target_ids or ()),
+        }
 
     def _stage6_plan_task_network_only(
         self,

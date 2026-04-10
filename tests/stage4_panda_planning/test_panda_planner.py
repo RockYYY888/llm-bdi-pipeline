@@ -490,6 +490,50 @@ def test_panda_domain_export_uses_leading_method_parameters_when_task_args_omitt
 
 	assert ":task (clear_top ?target)" in domain_hddl
 
+
+def test_panda_domain_export_keeps_zero_arity_task_heads_argument_free():
+	planner = PANDAPlanner()
+	domain_hddl = planner._build_domain_hddl(
+		domain=_domain(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(
+					"helper_handempty",
+					(),
+					False,
+					("handempty",),
+					headline_literal=HTNLiteral("handempty", (), True, None),
+				),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m_helper_handempty_constructive",
+					task_name="helper_handempty",
+					parameters=("AUX_BLOCK1",),
+					context=(),
+					subtasks=(
+						HTNMethodStep(
+							"s1",
+							"put_down",
+							("AUX_BLOCK1",),
+							"primitive",
+							action_name="put-down",
+						),
+					),
+					ordering=(),
+					origin="llm",
+				),
+			],
+			target_literals=[],
+			target_task_bindings=[],
+		),
+		domain_name="blocksworld_zero_arity_helper",
+	)
+
+	assert ":task (helper_handempty)" in domain_hddl
+	assert ":task (helper_handempty ?aux_block1)" not in domain_hddl
+
 def test_panda_plan_parser_extracts_primitive_steps():
 	planner = PANDAPlanner()
 	plan_text = "0: (pick-up a)\n1: (stack a b)\n"

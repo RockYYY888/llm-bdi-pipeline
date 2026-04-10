@@ -1877,24 +1877,13 @@ class AgentSpeakRenderer:
                 seen_signatures.add(self._literal_signature(literal))
                 collected.append(literal)
 
+        # Seed the cache before descending into child methods so mutual-recursion
+        # cycles fall back to the task's own headline effect instead of recursing
+        # indefinitely through A -> B -> A support summaries.
+        effect_cache[task_name] = tuple(collected)
+
         if task_name in stack:
-            for method in methods_by_task.get(task_name, ()):
-                if self._method_is_recursive(method):
-                    continue
-                for literal in self._method_effect_templates(
-                    method,
-                    task_lookup,
-                    methods_by_task,
-                    task_render_specs,
-                    effect_cache,
-                    stack + (task_name,),
-                ):
-                    signature = self._literal_signature(literal)
-                    if signature in seen_signatures:
-                        continue
-                    seen_signatures.add(signature)
-                    collected.append(literal)
-            return tuple(collected)
+            return effect_cache[task_name]
 
         for method in methods_by_task.get(task_name, ()):
             for literal in self._method_effect_templates(

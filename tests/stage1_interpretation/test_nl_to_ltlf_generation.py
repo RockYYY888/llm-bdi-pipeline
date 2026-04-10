@@ -265,7 +265,7 @@ def test_generate_requests_provider_enforced_json_when_supported():
     assert spec.formulas[0].to_string() == "F(on(b1, b2))"
     first_call = generator.client.completions.calls[0]
     assert first_call["response_format"] == {"type": "json_object"}
-    assert first_call["extra_body"]["reasoning"]["exclude"] is True
+    assert "extra_body" not in first_call
     assert first_call["max_tokens"] == 4321
 
 
@@ -288,29 +288,6 @@ def test_generate_falls_back_when_provider_rejects_response_format():
     assert len(generator.client.completions.calls) == 2
     assert generator.client.completions.calls[0]["response_format"] == {"type": "json_object"}
     assert "response_format" not in generator.client.completions.calls[1]
-
-
-def test_generate_falls_back_when_provider_rejects_reasoning_controls():
-    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
-    generator.client = _RecordingClient(
-        [
-            RuntimeError("Unsupported parameter: reasoning"),
-            _stage1_json_response(
-                '{"objects":["b1","b2"],'
-                '"ltl_formulas":[{"type":"temporal","operator":"F","formula":{"on":["b1","b2"]}}],'
-                '"atoms":[{"symbol":"on_b1_b2","predicate":"on","args":["b1","b2"]}]}',
-            ),
-        ],
-    )
-
-    spec, _, _ = generator.generate("Goal: eventually b1 is on b2.")
-
-    assert spec.formulas[0].to_string() == "F(on(b1, b2))"
-    assert len(generator.client.completions.calls) == 2
-    assert generator.client.completions.calls[0]["extra_body"]["reasoning"]["exclude"] is True
-    assert "extra_body" not in generator.client.completions.calls[1]
-    assert generator.client.completions.calls[1]["response_format"] == {"type": "json_object"}
-
 
 def test_generator_prefers_compact_task_grounded_output_for_explicit_task_queries():
     generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
@@ -338,6 +315,23 @@ def test_generator_uses_skeletal_mode_for_very_long_task_lists():
     assert not generator._should_use_skeletal_task_grounded_output(
         tuple(f"do_clear(b{index})" for index in range(5)),
     )
+
+
+def test_generator_main_path_keeps_long_task_lists_in_compact_mode():
+    generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
+    generator.client = _RecordingClient([
+        _stage1_json_response('{"objects":[],"ltl_formulas":[],"atoms":[]}'),
+    ])
+
+    generator.generate(
+        "Using blocks b3, b5, b6, b1, b2, b4, and b7, complete the tasks "
+        "do_put_on(b3, b5), then do_put_on(b6, b3), then do_put_on(b1, b6), "
+        "then do_put_on(b2, b1), then do_put_on(b4, b2), then do_put_on(b7, b4).",
+    )
+
+    user_prompt = generator.client.completions.calls[0]["messages"][1]["content"]
+    assert "Compact task-query rule:" in user_prompt
+    assert "Skeletal task-query rule:" not in user_prompt
 
 
 def test_generator_extracts_task_invocation_clauses_from_instruction():
