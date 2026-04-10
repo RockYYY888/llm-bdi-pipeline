@@ -631,6 +631,14 @@ def build_transition_native_required_branch_contracts(
 				)
 				if parsed_literal is not None and parsed_literal.is_positive
 			)
+			preparatory_support_calls = _dedupe_invocation_signatures(
+				_prepare_support_calls_for_preserved_prefix(
+					requirement_signatures=needs,
+					task_parameter_symbols=base_task_parameters,
+					preserved_literals=preserved_prefix_literals,
+					action_analysis=action_analysis,
+				),
+			)
 			support_calls, residual_context, restabilise_calls = _support_plan_contract_for_requirements(
 				needs,
 				task_parameter_symbols=base_task_parameters,
@@ -649,6 +657,7 @@ def build_transition_native_required_branch_contracts(
 				else (*retained_prefix_literals, *residual_context),
 			)
 			ordered_subtasks = (
+				*preparatory_support_calls,
 				*support_calls,
 				*retained_prefix_support,
 				*restabilise_calls,
@@ -853,6 +862,121 @@ def _filter_requirements_already_available(
 			continue
 		filtered_signatures.append(parsed_requirement.to_signature())
 	return tuple(signature for signature in filtered_signatures if signature)
+
+
+def _prepare_support_calls_for_preserved_prefix(
+	*,
+	requirement_signatures: Sequence[str],
+	task_parameter_symbols: Collection[str],
+	preserved_literals: Sequence[HTNLiteral],
+	action_analysis: Optional[Dict[str, Any]],
+) -> tuple[str, ...]:
+	if action_analysis is None or not preserved_literals:
+		return ()
+
+	preparatory_calls: list[str] = []
+	seen_calls: set[str] = set()
+	for requirement_signature in requirement_signatures:
+		requirement_literal = _parse_signature_literal(str(requirement_signature).strip())
+		if requirement_literal is None or not requirement_literal.is_positive:
+			continue
+		if not any(
+			_support_requirement_disturbance_score(
+				support_literal=requirement_literal,
+				preserved_literal=preserved_literal,
+				action_analysis=action_analysis,
+			) > 0
+			or _support_requirement_disturbance_score(
+				support_literal=preserved_literal,
+				preserved_literal=requirement_literal,
+				action_analysis=action_analysis,
+			) > 0
+			for preserved_literal in preserved_literals
+		):
+			continue
+		for helper_call in _preparatory_mode_support_calls_for_requirement(
+			requirement_literal=requirement_literal,
+			task_parameter_symbols=task_parameter_symbols,
+			preserved_literals=preserved_literals,
+			action_analysis=action_analysis,
+		):
+			if helper_call in seen_calls:
+				continue
+			seen_calls.add(helper_call)
+			preparatory_calls.append(helper_call)
+	return tuple(preparatory_calls)
+
+
+def _preparatory_mode_support_calls_for_requirement(
+	*,
+	requirement_literal: HTNLiteral,
+	task_parameter_symbols: Collection[str],
+	preserved_literals: Sequence[HTNLiteral],
+	action_analysis: Dict[str, Any],
+) -> tuple[str, ...]:
+	best_calls: tuple[str, ...] = ()
+	preserved_symbols = {
+		str(arg).strip()
+		for literal in preserved_literals
+		for arg in literal.args
+		if str(arg).strip()
+	}
+	for mode_call, mode_needs in _render_producer_mode_options_for_predicate(
+		requirement_literal.predicate,
+		requirement_literal.args,
+		action_analysis,
+		limit=3,
+	):
+		parsed_mode_call = _parse_signature_literal(str(mode_call).strip())
+		if parsed_mode_call is None or not parsed_mode_call.is_positive:
+			continue
+		mode_symbols = tuple(str(arg).strip() for arg in parsed_mode_call.args if str(arg).strip())
+		if any(
+			symbol.startswith("AUX_") and symbol not in task_parameter_symbols
+			for symbol in mode_symbols
+		):
+			continue
+		candidate_calls: list[str] = []
+		seen_calls: set[str] = set()
+		for need_signature in mode_needs:
+			need_literal = _parse_signature_literal(str(need_signature).strip())
+			if need_literal is None or not need_literal.is_positive:
+				continue
+			if need_literal.to_signature() == requirement_literal.to_signature():
+				continue
+			need_symbols = tuple(str(arg).strip() for arg in need_literal.args if str(arg).strip())
+			if any(
+				symbol.startswith("AUX_") and symbol not in task_parameter_symbols
+				for symbol in need_symbols
+			):
+				continue
+			if _requirement_must_remain_context(
+				need_literal,
+				task_parameter_symbols=task_parameter_symbols,
+				extra_role_symbols=(),
+			):
+				continue
+			if not need_symbols:
+				continue
+			if preserved_symbols & set(need_symbols):
+				continue
+			if not _render_producer_mode_options_for_predicate(
+				need_literal.predicate,
+				need_literal.args,
+				action_analysis,
+				limit=3,
+			):
+				continue
+			helper_call = _helper_call_for_literal(need_literal)
+			if helper_call in seen_calls:
+				continue
+			seen_calls.add(helper_call)
+			candidate_calls.append(helper_call)
+		if candidate_calls and (
+			not best_calls or len(candidate_calls) < len(best_calls)
+		):
+			best_calls = tuple(candidate_calls)
+	return best_calls
 
 
 def _render_ast_branch_object(

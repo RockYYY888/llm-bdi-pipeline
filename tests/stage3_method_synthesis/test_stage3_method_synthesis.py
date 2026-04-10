@@ -7214,6 +7214,8 @@ def test_transition_native_required_branch_contracts_restore_ordered_prefix_lite
 	assert any(
 		contract.get("precondition") == []
 		and contract.get("ordered_subtasks") == [
+			"helper_clear(ARG1)",
+			"helper_ontable(ARG1)",
 			"dfa_step_q1_q2_on_b3_b5(ARG2, AUX_CTX1)",
 			"helper_clear(ARG2)",
 			"helper_holding(ARG1)",
@@ -7273,6 +7275,8 @@ def test_transition_native_required_branch_contracts_carry_multi_step_prefix_con
 	assert any(
 		contract.get("precondition") == []
 		and contract.get("ordered_subtasks") == [
+			"helper_clear(ARG1)",
+			"helper_ontable(ARG1)",
 			"dfa_step_q2_q3_on_b1_b4(ARG2, AUX_CTX1, AUX_CTX2)",
 			"helper_clear(ARG2)",
 			"helper_holding(ARG1)",
@@ -8590,6 +8594,8 @@ def test_transition_native_query_root_bridge_uses_compiled_bridge_parameters():
 							"constructive": [
 								{
 									"ordered_subtasks": [
+										"helper_clear(ARG1)",
+										"helper_ontable(ARG1)",
 										"dfa_step_q1_q2_on_b3_b5(ARG2, AUX_CTX1)",
 										"helper_clear(ARG2)",
 										"helper_holding(ARG1)",
@@ -8814,6 +8820,8 @@ def test_transition_native_validator_allows_compiler_owned_retained_prefix_conte
 							"constructive": [
 								{
 									"ordered_subtasks": [
+										"helper_clear(ARG1)",
+										"helper_ontable(ARG1)",
 										"dfa_step_q1_q2_on_b3_b5(ARG2, AUX_CTX1)",
 										"helper_clear(ARG2)",
 										"helper_holding(ARG1)",
@@ -9189,6 +9197,8 @@ def test_transition_native_prompt_groups_repeated_transition_contracts_by_headli
 	assert branch_contracts["dfa_step_q2_q3_on_b1_b4"] == [
 		{
 			"ordered_subtasks": [
+				"helper_clear(ARG1)",
+				"helper_ontable(ARG1)",
 				"dfa_step_q1_q2_on_b4_b2(ARG2, AUX_CTX1)",
 				"helper_clear(ARG2)",
 				"helper_holding(ARG1)",

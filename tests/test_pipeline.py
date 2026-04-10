@@ -48,9 +48,14 @@ from stage3_method_synthesis.htn_schema import (
 	HTNMethodStep,
 	HTNTargetTaskBinding,
 	HTNTask,
+	_parse_invocation_signature,
 	_parse_signature_literal,
 )
-from stage3_method_synthesis.transition_native import build_transition_native_prompt_analysis
+from stage3_method_synthesis.transition_native import (
+	build_transition_native_ast_compiler_defaults,
+	build_transition_native_prompt_analysis,
+	build_transition_native_required_branch_contracts,
+)
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage4_panda_planning.panda_schema import PANDAPlanResult
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
@@ -787,6 +792,18 @@ def _official_transition_native_method_library(
 		query_task_anchors=query_task_anchors,
 		transition_specs=transition_specs,
 	)
+	action_analysis = delegate._analyse_domain_actions(
+		HDDLParser.parse_domain(OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]["domain_file"]),
+	)
+	required_branch_contracts = build_transition_native_required_branch_contracts(
+		prompt_analysis=prompt_analysis,
+		action_analysis=action_analysis,
+	)
+	compiler_defaults = build_transition_native_ast_compiler_defaults(
+		prompt_analysis=prompt_analysis,
+		action_analysis=action_analysis,
+	)
+	task_defaults = dict(compiler_defaults.get("task_defaults") or {})
 
 	helper_compound_tasks = [
 		HTNTask(
@@ -831,29 +848,115 @@ def _official_transition_native_method_library(
 		)
 		for item in prompt_analysis.get("transition_tasks", ())
 	]
-
-	literal_to_helper_tasks: Dict[str, List[str]] = {}
-	for binding in base_library.target_task_bindings:
-		literal_to_helper_tasks.setdefault(binding.target_literal, []).append(binding.task_name)
+	generated_task_names = {
+		task.name
+		for task in [*query_root_tasks, *transition_tasks]
+	}
+	helper_tasks = []
+	for task_name, task_default in sorted(task_defaults.items()):
+		if task_name in generated_task_names:
+			continue
+		headline_literal = _literal_from_signature_text(str(task_default.get("headline", "")).strip())
+		if headline_literal is None:
+			continue
+		helper_tasks.append(
+			HTNTask(
+				name=task_name,
+				parameters=tuple(task_default.get("parameters", ()) or ()),
+				is_primitive=False,
+				source_predicates=(headline_literal.predicate,),
+				headline_literal=headline_literal,
+				source_name=None,
+			),
+		)
 
 	literal_to_transition_names: Dict[str, List[str]] = {}
 	for item in prompt_analysis.get("transition_tasks", ()):
 		literal_to_transition_names.setdefault(str(item["target_literal"]), []).append(str(item["name"]))
 
+	primitive_action_names = {
+		str(task.name).strip()
+		for task in base_library.primitive_tasks
+		if str(task.name).strip()
+	}
+	primitive_runtime_to_raw: Dict[str, str] = {}
+	for pattern_mapping in (
+		action_analysis.get("producer_patterns_by_predicate", {}),
+		action_analysis.get("consumer_patterns_by_predicate", {}),
+	):
+		for patterns in pattern_mapping.values():
+			for pattern in patterns or ():
+				runtime_name = str(pattern.get("action_name", "")).strip()
+				raw_name = str(pattern.get("source_action_name", "")).strip()
+				if runtime_name and raw_name:
+					primitive_runtime_to_raw.setdefault(runtime_name, raw_name)
+
+	def _compile_contract_steps(
+		ordered_subtasks: List[str] | tuple[str, ...],
+	) -> tuple[tuple[HTNMethodStep, ...], tuple[tuple[str, str], ...]]:
+		steps: List[HTNMethodStep] = []
+		ordering: List[tuple[str, str]] = []
+		for step_index, invocation in enumerate(ordered_subtasks, start=1):
+			parsed_invocation = _parse_invocation_signature(invocation)
+			if parsed_invocation is None:
+				raise ValueError(
+					f"Official Stage 3 mask could not parse contract step '{invocation}'.",
+				)
+			task_name = str(parsed_invocation.get("call", "")).strip()
+			args = tuple(str(value).strip() for value in (parsed_invocation.get("args") or ()))
+			step_id = f"s{step_index}"
+			is_primitive = task_name in primitive_action_names
+			steps.append(
+				HTNMethodStep(
+					step_id=step_id,
+					task_name=task_name,
+					args=args,
+					kind="primitive" if is_primitive else "compound",
+					action_name=(
+						primitive_runtime_to_raw.get(task_name, task_name.replace("_", "-"))
+						if is_primitive
+						else None
+					),
+				),
+			)
+			if step_index > 1:
+				ordering.append((f"s{step_index - 1}", step_id))
+		return tuple(steps), tuple(ordering)
+
+	def _parse_contract_precondition(
+		precondition_signatures: List[str] | tuple[str, ...],
+	) -> tuple[HTNLiteral, ...]:
+		return tuple(
+			parsed_literal
+			for parsed_literal in (
+				_parse_signature_literal(str(value).strip())
+				for value in precondition_signatures
+				if str(value).strip()
+			)
+			if parsed_literal is not None
+		)
+
+	def _parse_task_noop_context(task_name: str) -> tuple[HTNLiteral, ...]:
+		task_default = task_defaults.get(task_name) or {}
+		raw_noop = task_default.get("noop")
+		if isinstance(raw_noop, str):
+			raw_signatures = [raw_noop]
+		else:
+			raw_signatures = list(raw_noop or ())
+		return tuple(
+			parsed_literal
+			for parsed_literal in (
+				_parse_signature_literal(str(value).strip())
+				for value in raw_signatures
+				if str(value).strip()
+			)
+			if parsed_literal is not None and parsed_literal.is_positive
+		)
+
 	wrapper_methods: List[HTNMethod] = []
 	for item in prompt_analysis.get("query_root_alias_tasks", ()):
 		task_name = str(item["name"])
 		parameters = tuple(item.get("parameters", ()) or ())
-		bridge_parameters = tuple(item.get("bridge_parameters", ()) or ()) or parameters
-		bridge_precondition = tuple(
-			parsed
-			for parsed in (
-				_parse_signature_literal(str(value).strip())
-				for value in (item.get("bridge_precondition") or ())
-				if str(value).strip()
-			)
-			if parsed is not None and parsed.is_positive
-		)
 		headline_literal = HTNLiteral(
 			predicate=str(item["headline_literal"]["predicate"]),
 			args=tuple(item["headline_literal"].get("args", ()) or ()),
@@ -866,104 +969,114 @@ def _official_transition_native_method_library(
 			raise ValueError(
 				f"Official Stage 3 mask could not find a transition task for target literal '{target_literal}'.",
 			)
-		transition_name = transition_candidates.pop(0)
 		wrapper_methods.append(
 			HTNMethod(
 				method_name=f"m_{task_name}_noop",
 				task_name=task_name,
-				parameters=bridge_parameters,
+				parameters=parameters,
 				task_args=parameters,
-				context=tuple([*bridge_precondition, headline_literal]) if headline_literal else bridge_precondition,
+				context=(headline_literal,) if headline_literal else (),
 				subtasks=(),
-				ordering=(),
-				origin="official_stage3_mask_transition_native",
-				),
-			)
-		wrapper_methods.append(
-			HTNMethod(
-				method_name=f"m_{task_name}_constructive",
-				task_name=task_name,
-				parameters=bridge_parameters,
-				task_args=parameters,
-				context=bridge_precondition,
-				subtasks=(
-					HTNMethodStep(
-							step_id="s1",
-							task_name=transition_name,
-							args=bridge_parameters,
-							kind="compound",
-							action_name=None,
-						),
-					),
 				ordering=(),
 				origin="official_stage3_mask_transition_native",
 			),
 		)
+		for contract_index, contract in enumerate(required_branch_contracts.get(task_name, ()), start=1):
+			branch_parameters = tuple(contract.get("parameters", ()) or ()) or parameters
+			branch_precondition = _parse_contract_precondition(
+				tuple(contract.get("precondition", ()) or ()),
+			)
+			branch_steps, branch_ordering = _compile_contract_steps(
+				tuple(contract.get("ordered_subtasks", ()) or ()),
+			)
+			wrapper_methods.append(
+				HTNMethod(
+					method_name=f"m_{task_name}_constructive_{contract_index}",
+					task_name=task_name,
+					parameters=branch_parameters,
+					task_args=parameters,
+					context=branch_precondition,
+					subtasks=branch_steps,
+					ordering=branch_ordering,
+					origin="official_stage3_mask_transition_native",
+				),
+			)
 
 	for item in prompt_analysis.get("transition_tasks", ()):
 		task_name = str(item["name"])
 		parameters = tuple(item.get("parameters", ()) or ())
-		retained_prefix_literals = tuple(
-			parsed
-			for parsed in (
-				_parse_signature_literal(str(value).strip())
-				for value in (item.get("retained_prefix_literals") or ())
-				if str(value).strip()
-			)
-			if parsed is not None and parsed.is_positive
-		)
-		headline_literal = HTNLiteral(
-			predicate=str(item["headline_literal"]["predicate"]),
-			args=tuple(item["headline_literal"].get("args", ()) or ()),
-			is_positive=bool(item["headline_literal"].get("is_positive", True)),
-			source_symbol=None,
-		)
-		target_literal = str(item.get("target_literal"))
-		helper_candidates = literal_to_helper_tasks.get(target_literal, [])
-		if not helper_candidates:
-			raise ValueError(
-				f"Official Stage 3 mask could not map transition task '{task_name}' to an official helper task "
-				f"for '{target_literal}'.",
-			)
-		helper_task_name = helper_candidates[0]
-		helper_task = base_library.task_for_name(helper_task_name)
-		helper_arity = len(tuple(getattr(helper_task, "parameters", ()) or ()))
-		helper_args = tuple(parameters[:helper_arity])
 		wrapper_methods.append(
 			HTNMethod(
 				method_name=f"m_{task_name}_noop",
 				task_name=task_name,
 				parameters=parameters,
 				task_args=parameters,
-				context=tuple([*retained_prefix_literals, headline_literal]) if headline_literal else retained_prefix_literals,
+				context=_parse_task_noop_context(task_name),
 				subtasks=(),
 				ordering=(),
 				origin="official_stage3_mask_transition_native",
 			),
 		)
+		for contract_index, contract in enumerate(required_branch_contracts.get(task_name, ()), start=1):
+			branch_parameters = tuple(contract.get("parameters", ()) or ()) or parameters
+			branch_precondition = _parse_contract_precondition(
+				tuple(contract.get("precondition", ()) or ()),
+			)
+			branch_steps, branch_ordering = _compile_contract_steps(
+				tuple(contract.get("ordered_subtasks", ()) or ()),
+			)
+			wrapper_methods.append(
+				HTNMethod(
+					method_name=f"m_{task_name}_constructive_{contract_index}",
+					task_name=task_name,
+					parameters=branch_parameters,
+					task_args=parameters,
+					context=branch_precondition,
+					subtasks=branch_steps,
+					ordering=branch_ordering,
+					origin="official_stage3_mask_transition_native",
+				),
+			)
+
+	helper_task_name_set = {task.name for task in helper_tasks}
+	for task_name in sorted(helper_task_name_set):
+		task_default = task_defaults.get(task_name) or {}
+		parameters = tuple(task_default.get("parameters", ()) or ())
 		wrapper_methods.append(
 			HTNMethod(
-				method_name=f"m_{task_name}_constructive",
+				method_name=f"m_{task_name}_noop",
 				task_name=task_name,
 				parameters=parameters,
 				task_args=parameters,
-				context=retained_prefix_literals,
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name=helper_task_name,
-						args=helper_args,
-						kind="compound",
-						action_name=None,
-					),
-				),
+				context=_parse_task_noop_context(task_name),
+				subtasks=(),
 				ordering=(),
 				origin="official_stage3_mask_transition_native",
 			),
 		)
+		for contract_index, contract in enumerate(required_branch_contracts.get(task_name, ()), start=1):
+			branch_parameters = tuple(contract.get("parameters", ()) or ()) or parameters
+			branch_precondition = _parse_contract_precondition(
+				tuple(contract.get("precondition", ()) or ()),
+			)
+			branch_steps, branch_ordering = _compile_contract_steps(
+				tuple(contract.get("ordered_subtasks", ()) or ()),
+			)
+			wrapper_methods.append(
+				HTNMethod(
+					method_name=f"m_{task_name}_constructive_{contract_index}",
+					task_name=task_name,
+					parameters=branch_parameters,
+					task_args=parameters,
+					context=branch_precondition,
+					subtasks=branch_steps,
+					ordering=branch_ordering,
+					origin="official_stage3_mask_transition_native",
+				),
+			)
 
 	return HTNMethodLibrary(
-		compound_tasks=tuple([*helper_compound_tasks, *query_root_tasks, *transition_tasks]),
+		compound_tasks=tuple([*helper_compound_tasks, *query_root_tasks, *transition_tasks, *helper_tasks]),
 		primitive_tasks=tuple(base_library.primitive_tasks),
 		methods=tuple([*base_library.methods, *wrapper_methods]),
 		target_literals=base_library.target_literals,
@@ -1088,6 +1201,13 @@ def _run_domain_query_case_with_official_stage3_mask(
 		):
 			target_literal_signatures = list(ordered_literal_signatures or ())
 			anchors = list(query_task_anchors or ())
+			transition_specs = _extract_progressing_transitions_compat(
+				self._delegate,
+				grounding_map,
+				dfa_result,
+				ordered_literal_signatures=target_literal_signatures,
+				linearise_ordered_literals=linearise_ordered_literals,
+			)
 			method_library = _official_transition_native_method_library(
 				domain_key,
 				grounding_map=grounding_map,
@@ -1095,6 +1215,11 @@ def _run_domain_query_case_with_official_stage3_mask(
 				target_literal_signatures=target_literal_signatures,
 				query_task_anchors=anchors,
 				ordered_literal_signatures=target_literal_signatures,
+			)
+			prompt_analysis = build_transition_native_prompt_analysis(
+				target_literals=method_library.target_literals,
+				query_task_anchors=anchors,
+				transition_specs=transition_specs,
 			)
 			return method_library, {
 				"used_llm": False,
@@ -1106,7 +1231,7 @@ def _run_domain_query_case_with_official_stage3_mask(
 				"query_objects": list(query_objects or ()),
 				"negation_resolution": {"predicates": [], "mode_by_predicate": {}},
 				"action_analysis": {},
-				"derived_analysis": dict(derived_analysis or {}),
+				"derived_analysis": prompt_analysis,
 				"compound_tasks": len(method_library.compound_tasks),
 				"primitive_tasks": len(method_library.primitive_tasks),
 				"methods": len(method_library.methods),
