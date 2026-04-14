@@ -31,10 +31,9 @@ if _parent_dir not in sys.path:
 from utils.setup_mona_path import setup_mona
 setup_mona()
 
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any, Tuple
 from ltlf2dfa.parser.ltlf import LTLfParser
 from utils.symbol_normalizer import SymbolNormalizer
-from stage1_interpretation.ltlf_formula import LogicalOperator, TemporalOperator
 
 
 class PredicateToProposition:
@@ -108,8 +107,6 @@ class LTLfToDFA:
     Pipeline: Predicate LTLf → Propositional LTLf → DFA (DOT format)
     """
 
-    MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_TRANSITIONS = 250_000
-
     def __init__(self):
         self.ltlf_parser = LTLfParser()
         self.encoder = PredicateToProposition()
@@ -143,64 +140,6 @@ class LTLfToDFA:
         # Convert to propositional encoding
         propositional_formula = self.encoder.convert_formula(original_formula)
 
-        ordered_atoms = self._extract_ordered_eventually_atoms(ltl_spec)
-        if ordered_atoms:
-            propositional_atoms = [
-                self.encoder.encode_predicate(atom)
-                for atom in ordered_atoms
-            ]
-            dfa_dot = self._build_ordered_eventually_atomic_dfa(propositional_atoms)
-            unique_atoms: List[str] = []
-            for atom in propositional_atoms:
-                if atom not in unique_atoms:
-                    unique_atoms.append(atom)
-            metadata = {
-                "original_formula": original_formula,
-                "propositional_formula": propositional_formula,
-                "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                "num_states": len(propositional_atoms) + 1,
-                "alphabet": list(unique_atoms),
-                "construction": "ordered_eventually_atomic_fast_path",
-            }
-            return dfa_dot, metadata
-
-        eventual_atoms = self._extract_independent_eventually_atoms(ltl_spec)
-        if eventual_atoms:
-            propositional_atoms = [
-                self.encoder.encode_predicate(atom)
-                for atom in eventual_atoms
-            ]
-            unique_atoms: List[str] = []
-            for atom in propositional_atoms:
-                if atom not in unique_atoms:
-                    unique_atoms.append(atom)
-            if self._can_materialize_exact_independent_eventually_dfa(unique_atoms):
-                dfa_dot = self._build_independent_eventually_atomic_dfa(propositional_atoms)
-                metadata = {
-                    "original_formula": original_formula,
-                    "propositional_formula": propositional_formula,
-                    "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                    "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                    "num_states": 1 << len(unique_atoms),
-                    "alphabet": list(unique_atoms),
-                    "construction": "independent_eventually_atomic_fast_path",
-                }
-                return dfa_dot, metadata
-            if self._can_use_symbolic_unordered_independent_eventually_surrogate(ltl_spec):
-                dfa_dot = self._build_symbolic_unordered_independent_eventually_surrogate_dfa()
-                metadata = {
-                    "original_formula": original_formula,
-                    "propositional_formula": propositional_formula,
-                    "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                    "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                    "num_states": 1,
-                    "num_transitions": 1,
-                    "alphabet": list(unique_atoms),
-                    "construction": "independent_eventually_symbolic_surrogate",
-                }
-                return dfa_dot, metadata
-
         # Parse and convert to DFA
         try:
             formula_obj = self.ltlf_parser(propositional_formula)
@@ -225,205 +164,6 @@ class LTLfToDFA:
         }
 
         return dfa_dot, metadata
-
-    def _can_materialize_exact_independent_eventually_dfa(self, unique_atoms: List[str]) -> bool:
-        if not unique_atoms:
-            return False
-        estimated_transitions = self._independent_eventually_transition_count(len(unique_atoms))
-        return estimated_transitions <= self.MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_TRANSITIONS
-
-    @staticmethod
-    def _can_use_symbolic_unordered_independent_eventually_surrogate(ltl_spec: Any) -> bool:
-        if bool(getattr(ltl_spec, "query_task_sequence_is_ordered", False)):
-            return False
-        query_signatures = [
-            str(signature).strip()
-            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
-            if str(signature).strip()
-        ]
-        return bool(query_signatures)
-
-    @staticmethod
-    def _independent_eventually_transition_count(atom_count: int) -> int:
-        if atom_count <= 0:
-            return 0
-        return atom_count * (1 << (atom_count - 1)) + 1
-
-    def _extract_independent_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
-        formulas = list(getattr(ltl_spec, "formulas", ()) or ())
-        if not formulas:
-            return None
-
-        atoms: List[str] = []
-        for formula in formulas:
-            if not self._collect_independent_eventually_atoms(formula, atoms):
-                return None
-        return atoms or None
-
-    def _collect_independent_eventually_atoms(self, formula: Any, atoms: List[str]) -> bool:
-        logical_op = getattr(formula, "logical_op", None)
-        operator = getattr(formula, "operator", None)
-        predicate = getattr(formula, "predicate", None)
-        sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
-
-        if logical_op == LogicalOperator.AND and predicate is None and operator is None:
-            return all(
-                self._collect_independent_eventually_atoms(child, atoms)
-                for child in sub_formulas
-            )
-
-        if operator != TemporalOperator.FINALLY or len(sub_formulas) != 1:
-            return False
-
-        atom = sub_formulas[0]
-        if getattr(atom, "operator", None) is not None:
-            return False
-        if getattr(atom, "logical_op", None) is not None:
-            return False
-        if getattr(atom, "predicate", None) is None:
-            return False
-
-        atoms.append(atom.to_string())
-        return True
-
-    def _extract_ordered_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
-        explicit_ordering = bool(getattr(ltl_spec, "query_task_sequence_is_ordered", False))
-        explicit_signatures = [
-            str(signature).strip()
-            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
-            if str(signature).strip()
-        ]
-        if explicit_ordering and explicit_signatures:
-            return explicit_signatures
-
-        formulas = list(getattr(ltl_spec, "formulas", ()) or ())
-        if len(formulas) != 1:
-            return None
-        return self._collect_ordered_eventually_atoms(formulas[0])
-
-    def _collect_ordered_eventually_atoms(self, formula: Any) -> Optional[List[str]]:
-        operator = getattr(formula, "operator", None)
-        sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
-        if operator != TemporalOperator.FINALLY or len(sub_formulas) != 1:
-            return None
-
-        child = sub_formulas[0]
-        if self._is_atomic_predicate_formula(child):
-            return [child.to_string()]
-
-        if getattr(child, "logical_op", None) != LogicalOperator.AND or len(child.sub_formulas) != 2:
-            return None
-
-        first, remainder = child.sub_formulas
-        if not self._is_atomic_predicate_formula(first):
-            return None
-
-        suffix = self._collect_ordered_eventually_atoms(remainder)
-        if not suffix:
-            return None
-        return [first.to_string(), *suffix]
-
-    @staticmethod
-    def _is_atomic_predicate_formula(formula: Any) -> bool:
-        return (
-            getattr(formula, "operator", None) is None
-            and getattr(formula, "logical_op", None) is None
-            and getattr(formula, "predicate", None) is not None
-        )
-
-    def _build_independent_eventually_atomic_dfa(self, propositional_atoms: List[str]) -> str:
-        unique_atoms: List[str] = []
-        for atom in propositional_atoms:
-            if atom not in unique_atoms:
-                unique_atoms.append(atom)
-
-        transitions: List[Tuple[str, str, str]] = []
-        full_mask = (1 << len(unique_atoms)) - 1
-
-        def state_name(mask: int) -> str:
-            return str(mask + 1)
-
-        for mask in range(full_mask + 1):
-            from_state = state_name(mask)
-            if mask == full_mask:
-                transitions.append((from_state, from_state, "true"))
-                continue
-
-            for atom_index, atom_name in enumerate(unique_atoms):
-                if mask & (1 << atom_index):
-                    continue
-                next_mask = mask | (1 << atom_index)
-                transitions.append(
-                    (
-                        from_state,
-                        state_name(next_mask),
-                        atom_name,
-                    ),
-                )
-
-        accepting_states = {state_name(full_mask)}
-        other_states = {
-            state_name(mask)
-            for mask in range(full_mask + 1)
-            if mask != full_mask
-        }
-
-        lines = [
-            "digraph MONA_DFA {",
-            " rankdir = LR;",
-            " center = true;",
-            " size = \"7.5,10.5\";",
-            " edge [fontname = Courier];",
-            " node [height = .5, width = .5];",
-            f" node [shape = doublecircle]; {' '.join(sorted(accepting_states))};",
-            f" node [shape = circle]; {' '.join(sorted(other_states, key=int))};",
-            " init [shape = plaintext, label = \"\"];",
-            " init -> 1;",
-        ]
-        for from_state, to_state, label in transitions:
-            lines.append(f" {from_state} -> {to_state} [label=\"{label}\"];")
-        lines.append("}")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _build_symbolic_unordered_independent_eventually_surrogate_dfa() -> str:
-        return "\n".join(
-            [
-                "digraph MONA_DFA {",
-                " rankdir = LR;",
-                " center = true;",
-                " size = \"7.5,10.5\";",
-                " edge [fontname = Courier];",
-                " node [height = .5, width = .5];",
-                " node [shape = doublecircle]; 1;",
-                " init [shape = plaintext, label = \"\"];",
-                " init -> 1;",
-                " 1 -> 1 [label=\"true\"];",
-                "}",
-            ],
-        )
-
-    def _build_ordered_eventually_atomic_dfa(self, propositional_atoms: List[str]) -> str:
-        accepting_state = str(len(propositional_atoms) + 1)
-        other_states = [str(index) for index in range(1, len(propositional_atoms) + 1)]
-
-        lines = [
-            "digraph MONA_DFA {",
-            " rankdir = LR;",
-            " center = true;",
-            " size = \"7.5,10.5\";",
-            " edge [fontname = Courier];",
-            " node [height = .5, width = .5];",
-            f" node [shape = doublecircle]; {accepting_state};",
-        ]
-        if other_states:
-            lines.append(f" node [shape = circle]; {' '.join(other_states)};")
-        lines.append(" init [shape = plaintext, label = \"\"];")
-        lines.append(" init -> 1;")
-        for index, atom_name in enumerate(propositional_atoms, start=1):
-            lines.append(f" {index} -> {index + 1} [label=\"{atom_name}\"];")
-        lines.append("}")
-        return "\n".join(lines)
 
     def _count_dfa_states(self, dfa_dot: str) -> int:
         """Count number of states in DFA from DOT representation"""
