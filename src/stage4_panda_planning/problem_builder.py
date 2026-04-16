@@ -38,10 +38,12 @@ class PANDAProblemBuilder:
 		task_args: Sequence[str],
 		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
 		task_network_ordered: bool = True,
+		ordering_edges: Optional[Sequence[Tuple[str, str]]] = None,
 		initial_facts: Optional[Sequence[str]] = None,
 		goal_facts: Optional[Sequence[str]] = None,
 	) -> str:
 		task_network_entries = tuple(task_network or ())
+		ordering_constraints = tuple(ordering_edges or ())
 		object_list = self._select_objects(
 			objects,
 			task_args,
@@ -65,8 +67,15 @@ class PANDAProblemBuilder:
 				f"(t{index} ({network_task}{self._render_problem_args(network_args)}))"
 				for index, (network_task, network_args) in enumerate(task_network_entries, start=1)
 			]
-			subtask_keyword = ":ordered-subtasks" if task_network_ordered else ":subtasks"
-			lines.append(f"    {subtask_keyword} (and {' '.join(task_lines)})")
+			if ordering_constraints:
+				lines.append(f"    :subtasks (and {' '.join(task_lines)})")
+				lines.append("    :ordering (and")
+				for before, after in ordering_constraints:
+					lines.append(f"      (< {before} {after})")
+				lines.append("    )")
+			else:
+				subtask_keyword = ":ordered-subtasks" if task_network_ordered else ":subtasks"
+				lines.append(f"    {subtask_keyword} (and {' '.join(task_lines)})")
 		else:
 			lines.append(
 				f"    :ordered-subtasks (and (t1 ({task_name}{self._render_problem_args(task_args)})))"

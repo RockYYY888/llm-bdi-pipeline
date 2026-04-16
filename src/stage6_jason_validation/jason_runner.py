@@ -22,7 +22,6 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from stage3_method_synthesis.htn_schema import HTNLiteral, HTNMethodLibrary
 from stage3_method_synthesis.task_naming import query_root_alias_task_name
-from stage4_panda_planning import panda_planner as panda_planner_module
 from stage6_jason_validation.environment_adapter import (
 	EnvironmentAdapterResult,
 	Stage6EnvironmentAdapter,
@@ -194,8 +193,6 @@ class JasonRunner:
 		if (
 			not ordered_query_sequence
 			and completion_mode == "target_literals"
-			and method_library is not None
-			and planning_domain is not None
 			and ordering_target_literals
 		):
 			ordering_start = time.perf_counter()
@@ -210,7 +207,7 @@ class JasonRunner:
 				output_path=output_path,
 				target_id_offset=target_id_offset,
 				plan_records=runtime_plan_records,
-				prefer_query_order=not guided_continue_with_runtime_goal,
+				prefer_query_order=True,
 			)
 			unordered_target_order_ids = list(ordering.get("target_ids") or [])
 			unordered_target_order_signatures = list(ordering.get("target_signatures") or [])
@@ -496,6 +493,20 @@ class JasonRunner:
 		plan_records: Optional[Sequence[Dict[str, Any]]] = None,
 		prefer_query_order: bool = False,
 	) -> Dict[str, List[str]]:
+		del method_library, action_schemas, seed_facts, runtime_objects
+		del object_types, planning_domain, output_path, plan_records, prefer_query_order
+		default_target_ids = [
+			f"t{target_id_offset + index}"
+			for index, _ in enumerate(target_literals, start=1)
+		]
+		default_signatures = [literal.to_signature() for literal in target_literals]
+		return {
+			"target_ids": list(default_target_ids),
+			"target_signatures": list(default_signatures),
+			"guided_method_trace": [],
+			"guided_action_path": [],
+		}
+
 		max_runtime_ordering_targets = 24
 		exact_runtime_probe_suffix_limit = 6
 		query_order_protection_horizon = 9

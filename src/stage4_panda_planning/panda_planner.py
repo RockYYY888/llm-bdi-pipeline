@@ -76,6 +76,7 @@ class PANDAPlanner:
 		task_args: Optional[Sequence[str]] = None,
 		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
 		task_network_ordered: bool = True,
+		ordering_edges: Optional[Sequence[Tuple[str, str]]] = None,
 		allow_empty_plan: bool = False,
 		initial_facts: Optional[Sequence[str]] = None,
 		goal_facts: Optional[Sequence[str]] = None,
@@ -112,6 +113,7 @@ class PANDAPlanner:
 			task_args=task_args_tuple,
 			task_network=task_network_entries,
 			task_network_ordered=task_network_ordered,
+			ordering_edges=ordering_edges,
 			initial_facts=initial_facts,
 			goal_facts=goal_facts,
 		)

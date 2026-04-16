@@ -29,7 +29,14 @@ if _src_dir not in sys.path:
 
 import ltl_bdi_pipeline as pipeline_module
 from ltl_bdi_pipeline import LTL_BDI_Pipeline, TypeResolutionError
-from pipeline_artifacts import DomainBuildArtifact, persist_domain_build_artifact
+from pipeline_artifacts import (
+	DomainBuildArtifact,
+	PlanningRequestContext,
+	QueryExecutionContext,
+	TemporallyExtendedGoal,
+	TemporallyExtendedGoalNode,
+	persist_domain_build_artifact,
+)
 from stage1_interpretation.grounding_map import GroundingMap
 from stage1_interpretation.ltlf_formula import (
 	LTLFormula,
@@ -56,6 +63,7 @@ from stage3_method_synthesis.htn_prompts import (
 	build_prompt_analysis_payload,
 )
 from stage4_panda_planning.panda_planner import PANDAPlanner
+from stage4_panda_planning.problem_builder import PANDAProblemBuilder
 from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage6_jason_validation.jason_runner import JasonRunner
@@ -139,7 +147,8 @@ FULL_BENCHMARK_QUERY_LIMIT = 10_000
 TESTS_GENERATED_DIR = Path(__file__).parent / "generated"
 TESTS_GENERATED_LOGS_DIR = TESTS_GENERATED_DIR / "logs"
 TESTS_GENERATED_DOMAIN_BUILDS_DIR = TESTS_GENERATED_DIR / "domain_builds"
-_OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE: Dict[str, Path] = {}
+_OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE: Dict[str, Dict[str, Any]] = {}
+_LIVE_DOMAIN_ARTIFACT_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def _benchmark_query_id_sort_key(query_id: str) -> tuple[int, str]:
@@ -230,6 +239,24 @@ def _pytest_selected_marsrover_query_ids() -> List[str]:
 		default_query=None,
 	)
 
+
+def _pytest_selected_satellite_query_ids() -> List[str]:
+	return _pytest_selected_case_ids(
+		SATELLITE_QUERY_CASES,
+		query_env="PIPELINE_TEST_SATELLITE_QUERY",
+		all_env="PIPELINE_TEST_SATELLITE_ALL",
+		default_query=None,
+	)
+
+
+def _pytest_selected_transport_query_ids() -> List[str]:
+	return _pytest_selected_case_ids(
+		TRANSPORT_QUERY_CASES,
+		query_env="PIPELINE_TEST_TRANSPORT_QUERY",
+		all_env="PIPELINE_TEST_TRANSPORT_ALL",
+		default_query=None,
+	)
+
 def _resolve_cli_selection(argv: List[str]) -> tuple[str, Dict[str, Dict[str, Any]], str]:
 	if len(argv) > 3:
 		raise ValueError(
@@ -260,31 +287,36 @@ def _ensure_live_dependencies() -> None:
 		pytest.skip("Live pipeline tests require a valid OPENAI_API_KEY")
 	if not PANDAPlanner().toolchain_available():
 		pytest.skip("Live pipeline tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
-	if not JasonRunner().toolchain_available():
-		pytest.skip("Live pipeline tests require Stage 6 Java 17-23 and Jason runtime toolchain")
 	if not IPC_PLAN_VERIFIER.tool_available():
 		pytest.skip("Live pipeline tests require the official pandaPIparser verifier on PATH")
 
-def _required_artifact_paths(log_dir: Path) -> List[Path]:
+
+def _ensure_domain_build_dependencies(*, require_live_stage3: bool) -> None:
+	if require_live_stage3:
+		config = get_config()
+		if not config.validate():
+			pytest.skip("Live domain-build tests require a valid OPENAI_API_KEY")
+	if not PANDAPlanner().toolchain_available():
+		pytest.skip("Domain-build tests require pandaPIparser, pandaPIgrounder, and pandaPIengine")
+
+def _required_query_execution_artifact_paths(log_dir: Path) -> List[Path]:
 	return [
 		log_dir / "execution.json",
 		log_dir / "execution.txt",
-		log_dir / "grounding_map.json",
-		log_dir / "dfa.dot",
-		log_dir / "stage5_agentspeak.asl",
-		log_dir / "agentspeak_generated.asl",
-		log_dir / "htn_method_library.json",
-		log_dir / "panda_transitions.json",
-		log_dir / "dfa.json",
-		log_dir / "jason_runner.mas2j",
-		log_dir / "jason_stdout.txt",
-		log_dir / "jason_stderr.txt",
-		log_dir / "jason_validation.json",
-		log_dir / "action_path.txt",
-		log_dir / "method_trace.json",
+		log_dir / "stage5_action_path.txt",
+		log_dir / "stage5_method_trace.json",
 		log_dir / "ipc_official_plan.txt",
 		log_dir / "ipc_official_verifier.txt",
 		log_dir / "ipc_official_verification.json",
+	]
+
+
+def _required_domain_build_artifact_paths(log_dir: Path) -> List[Path]:
+	return [
+		log_dir / "execution.json",
+		log_dir / "execution.txt",
+		log_dir / "htn_method_library.json",
+		log_dir / "panda_transitions.json",
 	]
 
 def _resolve_log_artifact_path(log_dir: Path, relative_path: Any) -> Path | None:
@@ -318,13 +350,29 @@ def _load_stage3_method_library(execution: Dict[str, Any], log_dir: Path) -> Dic
 			return loaded
 	return stage3_payload
 
-def _load_stage5_agentspeak_code(execution: Dict[str, Any], log_dir: Path) -> str:
-	stage5_payload = execution.get("stage5_agentspeak")
-	if not isinstance(stage5_payload, str) or not stage5_payload:
-		return ""
-	if "\n" in stage5_payload or "/* " in stage5_payload:
-		return stage5_payload
-	return _read_text_artifact(log_dir, stage5_payload)
+def _load_stage5_planner_artifacts(execution: Dict[str, Any], log_dir: Path) -> Dict[str, Any]:
+	stage5_payload = execution.get("stage5_artifacts")
+	if not isinstance(stage5_payload, dict):
+		return {}
+	loaded = dict(stage5_payload)
+	artifact_paths = dict(loaded.get("artifacts") or {})
+	actual_plan_path = artifact_paths.get("actual_plan")
+	if actual_plan_path:
+		loaded["actual_plan_text"] = _read_text_artifact(log_dir, actual_plan_path)
+	action_path_path = artifact_paths.get("action_path")
+	if action_path_path:
+		action_path_text = _read_text_artifact(log_dir, action_path_path)
+		loaded["action_path"] = [
+			line.strip()
+			for line in action_path_text.splitlines()
+			if line.strip()
+		]
+	method_trace_path = artifact_paths.get("method_trace")
+	if method_trace_path:
+		method_trace = _read_json_artifact(log_dir, method_trace_path)
+		if isinstance(method_trace, list):
+			loaded["method_trace"] = method_trace
+	return loaded
 
 def _load_stage6_artifacts(execution: Dict[str, Any], log_dir: Path) -> Dict[str, Any]:
 	stage6_payload = execution.get("stage6_artifacts")
@@ -942,30 +990,53 @@ def assert_execute_query_with_library_uses_cached_domain_artifact(monkeypatch, t
 		artifact=artifact,
 	)
 
-	def oracle_stage1_parse_nl(nl_instruction: str):
-		return _build_oracle_task_grounded_stage1_spec(pipeline, nl_instruction)
+	def fake_stage1_goal_grounding(nl_instruction: str, loaded_library):
+		assert loaded_library.target_literals == []
+		assert loaded_library.target_task_bindings == []
+		teg = TemporallyExtendedGoal(
+			query_text=nl_instruction,
+			nodes=(
+				TemporallyExtendedGoalNode(
+					node_id="t1",
+					task_name="do_put_on",
+					args=("b4", "b2"),
+					argument_types=("block", "block"),
+				),
+			),
+			typed_objects={"b4": "block", "b2": "block"},
+		)
+		return PlanningRequestContext(
+			query_text=nl_instruction,
+			temporally_extended_goal=teg,
+			problem_objects=("b4", "b2"),
+			typed_objects={"b4": "block", "b2": "block"},
+			task_network=(("do_put_on", ("b4", "b2")),),
+			task_network_ordered=True,
+			ordering_edges=(),
+		)
 
-	monkeypatch.setattr(pipeline, "_stage1_parse_nl", oracle_stage1_parse_nl)
-	monkeypatch.setattr(
-		pipeline,
-		"_stage2_dfa_generation",
-		lambda ltl_spec: {"states": ["q0"], "transitions": [], "accepting_states": ["q0"]},
-	)
+	monkeypatch.setattr(pipeline, "_stage1_goal_grounding", fake_stage1_goal_grounding)
 
-	def fake_stage5(ltl_spec, dfa_result, runtime_method_library, plan_records, *, query_context=None):
-		assert query_context is not None
-		assert runtime_method_library.target_literals
-		assert runtime_method_library.target_task_bindings
-		assert method_library.target_literals == []
-		assert method_library.target_task_bindings == []
-		return "+!run_dfa <- true.", {"transition_count": 0}
+	def fake_stage5(loaded_library, planning_request):
+		assert loaded_library.target_literals == []
+		assert loaded_library.target_task_bindings == []
+		assert planning_request.task_network == (("do_put_on", ("b4", "b2")),)
+		return {
+			"summary": {"status": "success"},
+			"artifacts": {
+				"backend": "pandaPI",
+				"status": "success",
+				"task_network": [{"task_name": "do_put_on", "args": ["b4", "b2"]}],
+				"task_network_ordered": True,
+				"ordering_edges": [],
+				"step_count": 1,
+				"guided_hierarchical_plan_text": "==>\n0 stack b4 b2\n",
+				"action_path": ["stack(b4, b2)"],
+				"method_trace": [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}],
+			},
+		}
 
-	monkeypatch.setattr(pipeline, "_stage5_agentspeak_rendering", fake_stage5)
-	monkeypatch.setattr(
-		pipeline,
-		"_stage6_jason_validation",
-		lambda *args, **kwargs: {"summary": {"status": "success"}, "artifacts": {}},
-	)
+	monkeypatch.setattr(pipeline, "_stage5_hierarchical_planning", fake_stage5)
 	monkeypatch.setattr(
 		pipeline,
 		"_stage7_official_verification",
@@ -978,13 +1049,73 @@ def assert_execute_query_with_library_uses_cached_domain_artifact(monkeypatch, t
 	)
 
 	assert result["success"] is True
-	assert result["query_execution_context"]["target_literals"]
+	assert result["planning_request_context"]["task_network"] == [
+		{"task_name": "do_put_on", "args": ["b4", "b2"]},
+	]
+
+
+def assert_stage1_goal_grounding_builds_temporally_extended_goal_with_precedence_edges():
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	method_library = _official_domain_method_library("blocksworld")
+	planning_request = pipeline._stage1_goal_grounding(
+		BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+		method_library,
+	)
+
+	assert planning_request is not None
+	assert [node.node_id for node in planning_request.temporally_extended_goal.nodes] == [
+		"t1",
+		"t2",
+		"t3",
+	]
+	assert planning_request.ordering_edges == (("t1", "t2"), ("t2", "t3"))
+	assert planning_request.task_network == (
+		("do_put_on", ("b4", "b2")),
+		("do_put_on", ("b1", "b4")),
+		("do_put_on", ("b3", "b1")),
+	)
+
+
+def assert_problem_builder_renders_ordering_constraints_for_temporally_extended_goal():
+	builder = PANDAProblemBuilder()
+	domain = HDDLParser.parse_domain(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	problem_hddl = builder.build_problem_hddl(
+		domain=domain,
+		domain_name=domain.name,
+		objects=("b1", "b2", "b3", "b4"),
+		typed_objects=(
+			("b1", "block"),
+			("b2", "block"),
+			("b3", "block"),
+			("b4", "block"),
+		),
+		task_name="do_put_on",
+		task_args=("b1", "b2"),
+		task_network=(
+			("do_put_on", ("b1", "b2")),
+			("do_put_on", ("b3", "b4")),
+		),
+		task_network_ordered=False,
+		ordering_edges=(("t1", "t2"),),
+		initial_facts=(),
+	)
+
+	assert ":subtasks (and (t1 (do_put_on b1 b2)) (t2 (do_put_on b3 b4)))" in problem_hddl
+	assert ":ordering (and" in problem_hddl
+	assert "(< t1 t2)" in problem_hddl
 
 
 def _official_stage3_mask_synthesizer_class(domain_key: str):
 	class OfficialStage3MaskSynthesizer:
 		def __init__(self, *args, **kwargs):
-			self._delegate = RealHTNMethodSynthesizer()
+			pass
 
 		def synthesize_domain_complete(
 			self,
@@ -1019,64 +1150,82 @@ def _official_stage3_mask_synthesizer_class(domain_key: str):
 				"llm_generation_attempts": 0,
 			}
 
-		def synthesize(
-			self,
-			domain,
-			*,
-			query_text=None,
-			query_task_anchors=None,
-			semantic_objects=None,
-			query_object_inventory=None,
-			query_objects=None,
-			derived_analysis=None,
-			negation_hints=None,
-			ordered_literal_signatures=None,
-		):
-			target_literal_signatures = list(ordered_literal_signatures or ())
-			anchors = list(query_task_anchors or ())
-			method_library = _official_domain_method_library(
-				domain_key,
-				target_literal_signatures=target_literal_signatures,
-				query_task_anchors=anchors,
-			)
-			if not target_literal_signatures:
-				target_literal_signatures = [
-					literal.to_signature()
-					for literal in method_library.target_literals
-				]
-			prompt_analysis = build_prompt_analysis_payload(
-				domain,
-				target_literals=target_literal_signatures,
-				query_task_anchors=anchors,
-			)
-			return method_library, {
-				"used_llm": False,
-				"model": None,
-				"target_literals": target_literal_signatures,
-				"query_task_anchors": anchors,
-				"semantic_objects": list(semantic_objects or ()),
-				"query_object_inventory": list(query_object_inventory or ()),
-				"query_objects": list(query_objects or ()),
-				"negation_resolution": {"predicates": [], "mode_by_predicate": {}},
-				"action_analysis": {},
-				"derived_analysis": prompt_analysis,
-				"compound_tasks": len(method_library.compound_tasks),
-				"primitive_tasks": len(method_library.primitive_tasks),
-				"methods": len(method_library.methods),
-				"failure_stage": None,
-				"failure_reason": None,
-				"failure_class": None,
-				"llm_prompt": None,
-				"llm_response": None,
-				"llm_finish_reason": None,
-				"llm_attempts": 0,
-				"llm_generation_attempts": 0,
-			}
-
 	return OfficialStage3MaskSynthesizer
 
 
-def _build_official_stage3_mask_domain_artifact(domain_key: str, monkeypatch) -> Path:
+def _domain_build_report_from_result(
+	result: Dict[str, Any],
+) -> Dict[str, Any]:
+	artifact_root = Path(result["artifact_paths"]["method_library"]).parent
+	log_path = Path(result["log_path"])
+	log_dir = log_path.parent
+	return {
+		"artifact_root": artifact_root,
+		"log_dir": log_dir,
+		"execution": json.loads((log_dir / "execution.json").read_text()),
+		"method_library": json.loads((artifact_root / "method_library.json").read_text()),
+		"stage3_summary": json.loads((artifact_root / "stage3_metadata.json").read_text()),
+		"stage4_summary": json.loads((artifact_root / "stage4_domain_gate.json").read_text()),
+		"result": result,
+	}
+
+
+def _domain_build_bug_messages(
+	report: Dict[str, Any],
+	*,
+	expect_used_llm: bool,
+) -> List[str]:
+	execution = report["execution"]
+	method_library = report["method_library"]
+	stage3_summary = report["stage3_summary"]
+	stage4_summary = report["stage4_summary"]
+	log_dir = report["log_dir"]
+	bug_messages: List[str] = []
+
+	if not report["result"]["success"]:
+		bug_messages.append("domain build returned success=False")
+	if execution.get("stage3_status") != "success":
+		bug_messages.append("domain build stage3_status is not success")
+	if execution.get("stage4_status") != "success":
+		bug_messages.append("domain build stage4_status is not success")
+	for stage_key in (
+		"stage1_status",
+		"stage2_status",
+		"stage5_status",
+		"stage6_status",
+		"stage7_status",
+	):
+		if execution.get(stage_key) not in (None, "", "pending"):
+			bug_messages.append(f"domain build {stage_key} should remain pending")
+	if stage3_summary.get("used_llm") is not expect_used_llm:
+		bug_messages.append(
+			f"domain build Stage 3 used_llm expected {expect_used_llm}, "
+			f"got {stage3_summary.get('used_llm')}",
+		)
+	if not stage3_summary.get("declared_compound_tasks"):
+		bug_messages.append("domain build Stage 3 metadata is missing declared compound tasks")
+	if not stage3_summary.get("domain_task_contracts"):
+		bug_messages.append("domain build Stage 3 metadata is missing domain task contracts")
+	if method_library.get("target_literals") not in (None, []):
+		bug_messages.append("domain build method library should not persist target_literals")
+	if method_library.get("target_task_bindings") not in (None, []):
+		bug_messages.append("domain build method library should not persist target_task_bindings")
+	if stage4_summary.get("gate_type") != "domain_complete":
+		bug_messages.append("domain build Stage 4 gate is not domain_complete")
+	if stage4_summary.get("query_specific_runtime_records") != 0:
+		bug_messages.append("domain build Stage 4 recorded query-specific runtime records")
+	if "unordered_runtime_plan_records" in stage4_summary:
+		bug_messages.append("domain build Stage 4 still exposes unordered runtime plan records")
+	if "query_validations" in stage4_summary:
+		bug_messages.append("domain build Stage 4 still exposes query validation artifacts")
+	for path in _required_domain_build_artifact_paths(log_dir):
+		if not path.exists():
+			bug_messages.append(f"missing domain-build artifact: {path.name}")
+
+	return bug_messages
+
+
+def _build_official_stage3_mask_domain_artifact(domain_key: str, monkeypatch) -> Dict[str, Any]:
 	cached = _OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE.get(domain_key)
 	if cached is not None:
 		return cached
@@ -1093,22 +1242,44 @@ def _build_official_stage3_mask_domain_artifact(domain_key: str, monkeypatch) ->
 		output_root=str(TESTS_GENERATED_DOMAIN_BUILDS_DIR / "official_stage3_mask" / domain_key),
 	)
 	assert result["success"] is True
-	artifact_root = Path(result["artifact_paths"]["method_library"]).parent
-	_OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE[domain_key] = artifact_root
-	return artifact_root
+	report = _domain_build_report_from_result(result)
+	_OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE[domain_key] = report
+	return report
 
-def _run_domain_query_case_with_official_stage3_mask(
+
+def _build_live_domain_artifact(domain_key: str) -> Dict[str, Any]:
+	cached = _LIVE_DOMAIN_ARTIFACT_CACHE.get(domain_key)
+	if cached is not None:
+		return cached
+
+	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
+	pipeline = LTL_BDI_Pipeline(domain_file=domain_config["domain_file"])
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
+	result = pipeline.build_domain_library(
+		output_root=str(TESTS_GENERATED_DOMAIN_BUILDS_DIR / "live_stage3" / domain_key),
+	)
+	assert result["success"] is True
+	report = _domain_build_report_from_result(result)
+	_LIVE_DOMAIN_ARTIFACT_CACHE[domain_key] = report
+	return report
+
+def _run_domain_query_case_against_cached_domain_build(
 	domain_key: str,
 	query_id: str,
-	monkeypatch,
+	artifact_report: Dict[str, Any],
 	*,
+	expect_domain_build_used_llm: bool,
 	query_cases: Dict[str, Dict[str, Any]] | None = None,
 	mask_stage1: bool = False,
+	monkeypatch=None,
 ) -> Dict[str, Any]:
 	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
 	case_map = query_cases or domain_config["query_cases"]
 	case = case_map[query_id]
-	artifact_root = _build_official_stage3_mask_domain_artifact(domain_key, monkeypatch)
+	artifact_root = Path(artifact_report["artifact_root"])
+	stage3_summary = dict(artifact_report["stage3_summary"])
+	stage4_summary = dict(artifact_report["stage4_summary"])
+	domain_method_library = dict(artifact_report["method_library"])
 
 	pipeline = LTL_BDI_Pipeline(
 		domain_file=domain_config["domain_file"],
@@ -1116,70 +1287,159 @@ def _run_domain_query_case_with_official_stage3_mask(
 	)
 	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
 	if mask_stage1:
-		def oracle_stage1_parse_nl(nl_instruction: str):
-			print("\n[STAGE 1] Natural Language -> LTLf Specification")
-			print("-"*80)
-			try:
-				ltl_spec = _build_oracle_task_grounded_stage1_spec(pipeline, nl_instruction)
-				pipeline.logger.log_stage1_success(
-					ltl_spec.to_dict(),
-					used_llm=False,
-				)
-				print(
-					f"✓ Oracle task-grounded Stage 1 mask: "
-					f"{[formula.to_string() for formula in ltl_spec.formulas]}",
-				)
-				print(f"  Objects: {ltl_spec.objects}")
-				return ltl_spec
-			except Exception as exc:
-				pipeline.logger.log_stage1_error(str(exc))
-				print(f"✗ Stage 1 Failed: {exc}")
-				return None
+		if monkeypatch is None:
+			raise ValueError("mask_stage1 requires monkeypatch so Stage 1 can be overridden")
+		real_goal_grounding = pipeline._stage1_goal_grounding
 
-		monkeypatch.setattr(pipeline, "_stage1_parse_nl", oracle_stage1_parse_nl)
+		def oracle_stage1_goal_grounding(nl_instruction: str, loaded_library):
+			return real_goal_grounding(nl_instruction, loaded_library)
+
+		monkeypatch.setattr(pipeline, "_stage1_goal_grounding", oracle_stage1_goal_grounding)
 	result = pipeline.execute_query_with_library(
 		case["instruction"],
 		library_artifact=artifact_root,
-		mode="dfa_agentspeak",
+		mode="htn_planner",
 	)
 	log_dir = pipeline.logger.current_log_dir
 	if log_dir is None:
 		raise RuntimeError(f"{domain_key}:{query_id} did not produce a log directory")
 	execution = json.loads((log_dir / "execution.json").read_text())
-	stage6_artifacts = _load_stage6_artifacts(execution, log_dir)
+	execution_txt = (log_dir / "execution.txt").read_text()
+	stage5_artifacts = _load_stage5_planner_artifacts(execution, log_dir)
 	stage7_artifacts = _load_stage7_artifacts(execution, log_dir)
-	stage3_summary = json.loads((artifact_root / "stage3_metadata.json").read_text())
-	stage4_summary = json.loads((artifact_root / "stage4_domain_gate.json").read_text())
+	planning_request_payload = result.get("planning_request_context") or {}
+	planning_request = (
+		PlanningRequestContext.from_dict(planning_request_payload)
+		if isinstance(planning_request_payload, dict)
+		else None
+	)
 
 	bug_messages: List[str] = []
+	domain_action_names = set(HDDLParser.parse_domain(domain_config["domain_file"]).get_action_names())
+	expected_identity = _expected_execution_identity(
+		domain_config["domain_file"],
+		case.get("problem_file"),
+	)
 	if not result["success"]:
-		bug_messages.append("pipeline returned success=False")
+		bug_messages.append("query execution returned success=False")
+	if execution.get("natural_language") != case["instruction"]:
+		bug_messages.append("execution.json natural_language does not match selected query")
+	if execution.get("run_origin") != "tests":
+		bug_messages.append("execution.json run_origin is not tests")
 	failed_stages: List[str] = []
-	for stage_key in (
-		"stage1_status",
-		"stage2_status",
-		"stage5_status",
-		"stage6_status",
-		"stage7_status",
-	):
+	for stage_key in ("stage1_status", "stage5_status", "stage7_status"):
 		if execution.get(stage_key) != "success":
 			failed_stages.append(stage_key)
 	if failed_stages:
 		bug_messages.extend(f"{stage_key} is not success" for stage_key in failed_stages)
+	if execution.get("stage2_status") not in (None, "", "pending"):
+		bug_messages.append("query execution log should not record active Stage 2 status")
 	if execution.get("stage3_status") not in (None, "", "pending"):
 		bug_messages.append("query execution log should not record Stage 3 status")
 	if execution.get("stage4_status") not in (None, "", "pending"):
 		bug_messages.append("query execution log should not record Stage 4 status")
-	if stage3_summary.get("used_llm") is not False:
-		bug_messages.append("official Stage 3 mask should not mark used_llm=True")
+	if execution.get("stage6_status") not in (None, "", "pending"):
+		bug_messages.append("query execution log should not record active Stage 6 status")
+	for key, expected_value in expected_identity.items():
+		if execution.get(key) != expected_value:
+			bug_messages.append(
+				f"execution.json {key} mismatch: expected {expected_value}, got {execution.get(key)}",
+			)
+	log_dir_name = log_dir.name
+	if expected_identity.get("domain_name") and expected_identity.get("problem_name"):
+		expected_suffix = f"_{expected_identity['domain_name']}_{expected_identity['problem_name']}"
+		if not log_dir_name.endswith(expected_suffix):
+			bug_messages.append(
+				f"log directory name does not end with {expected_suffix}: {log_dir_name}",
+			)
+	if stage3_summary.get("used_llm") is not expect_domain_build_used_llm:
+		bug_messages.append(
+			f"cached domain build used_llm expected {expect_domain_build_used_llm}, "
+			f"got {stage3_summary.get('used_llm')}",
+		)
 	if not stage3_summary.get("domain_task_contracts"):
 		bug_messages.append("cached domain Stage 3 metadata is missing domain task contracts")
 	if stage4_summary.get("gate_type") != "domain_complete":
 		bug_messages.append("cached Stage 4 gate is not domain_complete")
 	if not stage4_summary.get("validated_task_count"):
 		bug_messages.append("cached Stage 4 gate validated zero tasks")
-	if execution.get("stage6_status") == "success" and stage6_artifacts.get("status") != "success":
-		bug_messages.append("Stage 6 status payload is not success")
+	if domain_method_library.get("target_literals") not in (None, []):
+		bug_messages.append("cached domain build method library should not persist target_literals")
+	if domain_method_library.get("target_task_bindings") not in (None, []):
+		bug_messages.append("cached domain build method library should not persist target_task_bindings")
+	if result.get("method_library", {}).get("target_task_bindings") not in (None, []):
+		bug_messages.append("query execution result leaked query bindings back into cached domain library")
+	if planning_request is None:
+		bug_messages.append("query execution result is missing planning_request_context")
+	else:
+		if not planning_request.temporally_extended_goal.nodes:
+			bug_messages.append("planning_request_context is missing Temporally Extended Goal nodes")
+		if not planning_request.task_network:
+			bug_messages.append("planning_request_context is missing planner task network")
+		if case["instruction"].lower().find(" then ") != -1 and not planning_request.ordering_edges:
+			bug_messages.append("ordered query did not produce precedence edges")
+	if "STAGE 1: Natural Language → Goal Grounding" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 1 goal grounding section")
+	if "STAGE 5: Hierarchical Task Network Solve" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 5 section")
+	if "STAGE 7: Official IPC HTN Plan Verification" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 7 section")
+	if "Legacy Temporal Compilation" in execution_txt:
+		bug_messages.append("execution.txt still exposes legacy Stage 2 copy")
+	if "Legacy Runtime Validation" in execution_txt:
+		bug_messages.append("execution.txt still exposes legacy Stage 6 copy")
+	if stage5_artifacts.get("status") != "success":
+		bug_messages.append("Stage 5 planner artifact status is not success")
+	if stage5_artifacts.get("backend") not in ("", None, "pandaPI"):
+		bug_messages.append("Stage 5 backend is not pandaPI")
+	if not stage5_artifacts.get("actual_plan_text"):
+		bug_messages.append("Stage 5 is missing the converted hierarchical plan text")
+	action_path = stage5_artifacts.get("action_path") or []
+	if not isinstance(action_path, list):
+		bug_messages.append("Stage 5 action_path is not a list")
+	minimum_action_count = case.get("minimum_action_count")
+	if (
+		execution.get("stage5_status") == "success"
+		and isinstance(minimum_action_count, int)
+		and len(action_path) < minimum_action_count
+	):
+		bug_messages.append(
+			f"Stage 5 action_path shorter than expected minimum {minimum_action_count}: {action_path}",
+		)
+	expected_action_path = case.get("expected_action_path")
+	if (
+		execution.get("stage5_status") == "success"
+		and expected_action_path is not None
+		and action_path != expected_action_path
+	):
+		bug_messages.append(
+			f"Stage 5 action_path mismatch: expected {expected_action_path}, got {action_path}",
+		)
+	for action_step in action_path if execution.get("stage5_status") == "success" else []:
+		match = re.match(r"^([^\s(]+)(?:\((.*)\))?$", action_step)
+		if match is None:
+			bug_messages.append(f"Stage 5 action_path step has invalid format: {action_step}")
+			continue
+		action_name = str(match.group(1) or "").strip()
+		if action_name == "nop":
+			continue
+		if action_name not in domain_action_names:
+			bug_messages.append(f"Stage 5 action_path step is not a domain action: {action_step}")
+	action_path_file = log_dir / "stage5_action_path.txt"
+	if action_path_file.exists():
+		file_actions = [line.strip() for line in action_path_file.read_text().splitlines() if line.strip()]
+		if file_actions != action_path:
+			bug_messages.append("Stage 5 action_path artifact does not match execution.json action_path")
+	method_trace = stage5_artifacts.get("method_trace") or []
+	if not isinstance(method_trace, list):
+		bug_messages.append("Stage 5 method_trace is not a list")
+	method_trace_file = log_dir / "stage5_method_trace.json"
+	if method_trace_file.exists():
+		file_trace = json.loads(method_trace_file.read_text())
+		if file_trace != method_trace:
+			bug_messages.append("Stage 5 method_trace artifact does not match execution.json method_trace")
+	if execution.get("stage7_status") == "success" and stage7_artifacts.get("tool_available") is not True:
+		bug_messages.append("official IPC verifier is not available on PATH")
 	if execution.get("stage7_status") == "success" and stage7_artifacts.get("plan_kind") != "hierarchical":
 		bug_messages.append("official IPC verifier did not validate a hierarchical plan")
 	if (
@@ -1187,6 +1447,20 @@ def _run_domain_query_case_with_official_stage3_mask(
 		and stage7_artifacts.get("verification_result") is not True
 	):
 		bug_messages.append("official IPC HTN verifier did not accept the generated plan")
+	if execution.get("stage7_status") == "success" and stage7_artifacts.get("primitive_plan_executable") is not True:
+		bug_messages.append("official IPC verifier did not mark the primitive plan as executable")
+	if execution.get("stage7_status") == "success" and stage7_artifacts.get("reached_goal_state") is not True:
+		bug_messages.append("official IPC verifier did not report goal-state achievement")
+	required_paths = _required_query_execution_artifact_paths(log_dir)
+	if execution.get("stage7_status") != "success":
+		required_paths = [
+			path
+			for path in required_paths
+			if path.name not in {"ipc_official_plan.txt", "ipc_official_verifier.txt", "ipc_official_verification.json"}
+		]
+	for path in required_paths:
+		if not path.exists():
+			bug_messages.append(f"missing query-execution artifact: {path.name}")
 
 	return {
 		"query_id": query_id,
@@ -1196,9 +1470,47 @@ def _run_domain_query_case_with_official_stage3_mask(
 		"execution": execution,
 		"domain_build_stage3": stage3_summary,
 		"domain_build_stage4": stage4_summary,
+		"domain_build_artifact_root": artifact_root,
+		"planning_request_context": planning_request_payload,
+		"planner_artifacts": stage5_artifacts or None,
+		"official_verifier": stage7_artifacts or None,
 		"bug_messages": bug_messages,
 		"has_bug": bool(bug_messages),
 	}
+
+
+def _run_domain_query_case_with_official_stage3_mask(
+	domain_key: str,
+	query_id: str,
+	monkeypatch,
+	*,
+	query_cases: Dict[str, Dict[str, Any]] | None = None,
+	mask_stage1: bool = False,
+) -> Dict[str, Any]:
+	return _run_domain_query_case_against_cached_domain_build(
+		domain_key,
+		query_id,
+		_build_official_stage3_mask_domain_artifact(domain_key, monkeypatch),
+		query_cases=query_cases,
+		mask_stage1=mask_stage1,
+		monkeypatch=monkeypatch,
+		expect_domain_build_used_llm=False,
+	)
+
+
+def _run_domain_query_case_with_live_stage3(
+	domain_key: str,
+	query_id: str,
+	*,
+	query_cases: Dict[str, Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+	return _run_domain_query_case_against_cached_domain_build(
+		domain_key,
+		query_id,
+		_build_live_domain_artifact(domain_key),
+		query_cases=query_cases,
+		expect_domain_build_used_llm=True,
+	)
 
 def _run_query_case_with_official_stage3_mask(query_id: str, monkeypatch) -> Dict[str, Any]:
 	return _run_domain_query_case_with_official_stage3_mask("blocksworld", query_id, monkeypatch)
@@ -4501,201 +4813,16 @@ def _run_query_case(
 	query_cases: Dict[str, Dict[str, Any]],
 	domain_file: str,
 ) -> Dict[str, Any]:
-	if query_id not in query_cases:
-		raise KeyError(
-			f"Unknown query id '{query_id}'. Available query ids: {sorted(query_cases, key=_benchmark_query_id_sort_key)}",
-		)
-
-	case = query_cases[query_id]
-	domain_action_names = set(HDDLParser.parse_domain(domain_file).get_action_names())
-	pipeline = LTL_BDI_Pipeline(
-		domain_file=domain_file,
-		problem_file=case.get("problem_file"),
+	domain_key = next(
+		key
+		for key, configured_domain_file in CLI_DOMAIN_FILES.items()
+		if configured_domain_file == domain_file
 	)
-	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
-
-	result = pipeline.execute(case["instruction"], mode="dfa_agentspeak")
-	log_dir = pipeline.logger.current_log_dir
-	if log_dir is None:
-		raise RuntimeError(f"{query_id} did not produce a log directory")
-
-	execution_json_path = log_dir / "execution.json"
-	execution_txt_path = log_dir / "execution.txt"
-	execution = json.loads(execution_json_path.read_text())
-	execution_txt = execution_txt_path.read_text()
-	expected_identity = _expected_execution_identity(
-		domain_file,
-		case.get("problem_file"),
+	return _run_domain_query_case_with_live_stage3(
+		domain_key,
+		query_id,
+		query_cases=query_cases,
 	)
-
-	bug_messages: List[str] = []
-
-	if not result["success"]:
-		bug_messages.append("pipeline returned success=False")
-
-	if (log_dir / "generated_code.asl").exists():
-		bug_messages.append("unexpected deprecated generated_code.asl artifact exists")
-
-	if execution["natural_language"] != case["instruction"]:
-		bug_messages.append("execution.json natural_language does not match selected query")
-	if execution.get("run_origin") != "tests":
-		bug_messages.append("execution.json run_origin is not tests")
-
-	for stage_key in (
-		"stage1_status",
-		"stage2_status",
-		"stage3_status",
-		"stage4_status",
-		"stage5_status",
-		"stage6_status",
-		"stage7_status",
-	):
-		if execution.get(stage_key) != "success":
-			bug_messages.append(f"{stage_key} is not success")
-
-	for key, expected_value in expected_identity.items():
-		if execution.get(key) != expected_value:
-			bug_messages.append(
-				f"execution.json {key} mismatch: expected {expected_value}, "
-				f"got {execution.get(key)}",
-			)
-	log_dir_name = log_dir.name
-	if expected_identity.get("domain_name") and expected_identity.get("problem_name"):
-		expected_suffix = (
-			f"_{expected_identity['domain_name']}_{expected_identity['problem_name']}"
-		)
-		if not log_dir_name.endswith(expected_suffix):
-			bug_messages.append(
-				f"log directory name does not end with {expected_suffix}: {log_dir_name}",
-			)
-
-	stage3_metadata = execution.get("stage3_metadata", {}) or {}
-	if execution.get("stage3_used_llm") is not True:
-		bug_messages.append("Stage 3 did not record live LLM synthesis")
-
-	if execution.get("stage4_backend") != "pandaPI":
-		bug_messages.append("Stage 4 backend is not pandaPI")
-
-	stage3_library = _load_stage3_method_library(execution, log_dir)
-	target_bindings = stage3_library.get("target_task_bindings") or []
-	if not target_bindings:
-		bug_messages.append("Stage 3 produced no target_task_bindings")
-	bug_messages.extend(_binding_semantic_messages(stage3_library))
-
-	stage5_code = _load_stage5_agentspeak_code(execution, log_dir)
-	if "/* HTN Method Plans */" not in stage5_code:
-		bug_messages.append("Stage 5 code is missing rendered HTN method plans")
-	if "dfa_edge_label(" not in stage5_code:
-		bug_messages.append("Stage 5 code is missing dfa_edge_label metadata")
-	if "dfa_state(" not in stage5_code:
-		bug_messages.append("Stage 5 code is missing dfa_state state-tracking facts or guards")
-	if "+!dfa_step_" not in stage5_code:
-		bug_messages.append("Stage 5 code is missing state-aware dfa_step wrappers")
-	if "/* PANDA Goal Plans */" in stage5_code:
-		bug_messages.append("deprecated PANDA-only task plan section still present in Stage 5 code")
-	if "target_label(" in stage5_code:
-		bug_messages.append("deprecated target_label facts still present in Stage 5 code")
-	if "+!transition_" in stage5_code:
-		bug_messages.append("deprecated transition_i wrappers still present in Stage 5 code")
-	bug_messages.extend(_method_free_variable_messages(stage5_code))
-
-	for binding in target_bindings:
-		task_name = binding["task_name"]
-		if task_name.startswith(BANNED_TASK_PREFIXES):
-			bug_messages.append(f"deprecated task prefix still present: {task_name}")
-		if (
-			f"+!{task_name}(" not in stage5_code
-			and f"+!{task_name} :" not in stage5_code
-		):
-			bug_messages.append(f"bound task '{task_name}' is missing from Stage 5 code")
-
-	if "STAGE 3: DFA → HTN Method Synthesis" not in execution_txt:
-		bug_messages.append("execution.txt is missing Stage 3 section")
-	if "STAGE 4: HTN Method Library → PANDA Planning" not in execution_txt:
-		bug_messages.append("execution.txt is missing Stage 4 section")
-	if "STAGE 5: HTN Methods + DFA Wrappers → AgentSpeak Rendering" not in execution_txt:
-		bug_messages.append("execution.txt is missing Stage 5 section")
-	if "STAGE 6: AgentSpeak → Jason Runtime Validation" not in execution_txt:
-		bug_messages.append("execution.txt is missing Stage 6 section")
-	if "STAGE 7: Official IPC HTN Plan Verification" not in execution_txt:
-		bug_messages.append("execution.txt is missing Stage 7 section")
-
-	stage6_artifacts = _load_stage6_artifacts(execution, log_dir)
-	if stage6_artifacts.get("status") != "success":
-		bug_messages.append("Stage 6 status payload is not success")
-	if stage6_artifacts.get("backend") != "RunLocalMAS":
-		bug_messages.append("Stage 6 backend is not RunLocalMAS")
-	if stage6_artifacts.get("timed_out"):
-		bug_messages.append("Stage 6 run timed out")
-	stage6_stdout = stage6_artifacts.get("stdout") or ""
-	if "execute success" not in stage6_stdout:
-		bug_messages.append("Stage 6 stdout missing success marker")
-	if "execute failed" in stage6_stdout:
-		bug_messages.append("Stage 6 stdout contains failure marker")
-	action_path = stage6_artifacts.get("action_path") or []
-	if not isinstance(action_path, list):
-		bug_messages.append("Stage 6 action_path is not a list")
-	minimum_action_count = case.get("minimum_action_count")
-	if isinstance(minimum_action_count, int) and len(action_path) < minimum_action_count:
-		bug_messages.append(
-			f"Stage 6 action_path shorter than expected minimum {minimum_action_count}: {action_path}",
-		)
-	expected_action_path = case.get("expected_action_path")
-	if expected_action_path is not None and action_path != expected_action_path:
-		bug_messages.append(
-			f"Stage 6 action_path mismatch: expected {expected_action_path}, got {action_path}",
-		)
-	for action_step in action_path:
-		match = re.match(r"^([^\s(]+)\(", action_step)
-		if match is None:
-			bug_messages.append(f"Stage 6 action_path step has invalid format: {action_step}")
-			continue
-		if match.group(1) not in domain_action_names:
-			bug_messages.append(
-				f"Stage 6 action_path step is not a domain action: {action_step}",
-			)
-	action_path_file = log_dir / "action_path.txt"
-	if action_path_file.exists():
-		file_actions = [line.strip() for line in action_path_file.read_text().splitlines() if line.strip()]
-		if file_actions != action_path:
-			bug_messages.append("Stage 6 action_path.txt does not match execution.json action_path")
-	method_trace = stage6_artifacts.get("method_trace") or []
-	if not isinstance(method_trace, list):
-		bug_messages.append("Stage 6 method_trace is not a list")
-	method_trace_file = log_dir / "method_trace.json"
-	if method_trace_file.exists():
-		file_trace = json.loads(method_trace_file.read_text())
-		if file_trace != method_trace:
-			bug_messages.append("Stage 6 method_trace.json does not match execution.json method_trace")
-	if (log_dir / "jason_runner_agent.asl").exists():
-		bug_messages.append("deprecated runtime-only jason_runner_agent.asl artifact still present")
-
-	stage7_artifacts = _load_stage7_artifacts(execution, log_dir)
-	if stage7_artifacts.get("tool_available") is not True:
-		bug_messages.append("official IPC verifier is not available on PATH")
-	if stage7_artifacts.get("plan_kind") != "hierarchical":
-		bug_messages.append("official IPC verifier did not validate a hierarchical plan")
-	if stage7_artifacts.get("verification_result") is not True:
-		bug_messages.append("official IPC HTN verifier did not accept the generated plan")
-	if stage7_artifacts.get("primitive_plan_executable") is not True:
-		bug_messages.append("official IPC verifier did not mark the primitive plan as executable")
-	if stage7_artifacts.get("reached_goal_state") is not True:
-		bug_messages.append("official IPC verifier did not report goal-state achievement")
-
-	for path in _required_artifact_paths(log_dir):
-		if not path.exists():
-			bug_messages.append(f"missing log artifact: {path.name}")
-
-	return {
-		"query_id": query_id,
-		"case": case,
-		"result": result,
-		"log_dir": log_dir,
-		"execution": execution,
-		"official_verifier": stage7_artifacts or None,
-		"bug_messages": bug_messages,
-		"has_bug": bool(bug_messages),
-	}
 
 def assert_method_validation_initial_facts_are_branch_specific(tmp_path):
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
@@ -5085,6 +5212,20 @@ def test_blocksworld_pipeline_query_case(query_id: str):
 	)
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 
+@pytest.mark.parametrize("domain_key", sorted(OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS))
+def test_domain_build_with_official_stage3_mask(domain_key: str, monkeypatch):
+	_ensure_domain_build_dependencies(require_live_stage3=False)
+	report = _build_official_stage3_mask_domain_artifact(domain_key, monkeypatch)
+	bug_messages = _domain_build_bug_messages(report, expect_used_llm=False)
+	assert bug_messages == [], "\n".join(bug_messages)
+
+@pytest.mark.parametrize("domain_key", sorted(OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS))
+def test_domain_build_with_live_stage3(domain_key: str):
+	_ensure_domain_build_dependencies(require_live_stage3=True)
+	report = _build_live_domain_artifact(domain_key)
+	bug_messages = _domain_build_bug_messages(report, expect_used_llm=True)
+	assert bug_messages == [], "\n".join(bug_messages)
+
 @pytest.mark.parametrize("query_id", sorted(BLOCKSWORLD_QUERY_CASES, key=_benchmark_query_id_sort_key))
 def test_blocksworld_pipeline_query_case_with_official_stage3_mask(query_id: str, monkeypatch):
 	_ensure_live_dependencies()
@@ -5119,27 +5260,44 @@ def test_marsrover_pipeline_query_case(query_id: str):
 	)
 	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
 
+@pytest.mark.parametrize("query_id", _pytest_selected_satellite_query_ids())
+def test_satellite_pipeline_query_case(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_query_case(
+		query_id,
+		query_cases=SATELLITE_QUERY_CASES,
+		domain_file=SATELLITE_DOMAIN_FILE,
+	)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+@pytest.mark.parametrize("query_id", _pytest_selected_transport_query_ids())
+def test_transport_pipeline_query_case(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_query_case(
+		query_id,
+		query_cases=TRANSPORT_QUERY_CASES,
+		domain_file=TRANSPORT_DOMAIN_FILE,
+	)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
 def _print_cli_report(report: Dict[str, Any]) -> None:
 	query_id = report["query_id"]
 	case = report["case"]
-	execution = report["execution"] or {}
-	log_dir = Path(report["log_dir"]) if report.get("log_dir") else None
-	stage3_metadata = execution.get("stage3_metadata") or {}
-	stage3_library = (
-		_load_stage3_method_library(execution, log_dir)
-		if log_dir is not None
-		else (execution.get("stage3_method_library") or {})
-	)
+	planning_request = report.get("planning_request_context") or {}
+	domain_build_stage3 = report.get("domain_build_stage3") or {}
 
 	print(f"{query_id}: {case['description']}")
 	print(f"Instruction: {case['instruction']}")
 	print(f"Log Dir: {report['log_dir']}")
 	print(f"Success: {report['result']['success']}")
-	print(f"Stage 3 Target Literals: {stage3_metadata.get('target_literals', [])}")
+	print(f"Domain Build Used LLM: {domain_build_stage3.get('used_llm')}")
 	print(
-		f"Stage 3 Target Task Bindings: "
-		f"{stage3_library.get('target_task_bindings', [])}",
+		f"Domain Build Compound Tasks: "
+		f"{domain_build_stage3.get('compound_tasks', 'N/A')}",
 	)
+	teg = planning_request.get("temporally_extended_goal") or {}
+	print(f"Grounded Query Nodes: {teg.get('nodes', [])}")
+	print(f"Ordering Edges: {planning_request.get('ordering_edges', [])}")
 	official_verifier = report.get("official_verifier") or {}
 	if official_verifier:
 		print(
@@ -5163,10 +5321,8 @@ def test_print_cli_report_handles_missing_stage3_metadata(capsys):
 			},
 			"log_dir": "/tmp/fake-log",
 			"result": {"success": False},
-			"execution": {
-				"stage3_metadata": None,
-				"stage3_method_library": None,
-			},
+			"domain_build_stage3": None,
+			"planning_request_context": None,
 			"official_verifier": None,
 			"has_bug": True,
 			"bug_messages": ["pipeline returned success=False"],
@@ -5174,8 +5330,9 @@ def test_print_cli_report_handles_missing_stage3_metadata(capsys):
 	)
 
 	rendered = capsys.readouterr().out
-	assert "Stage 3 Target Literals: []" in rendered
-	assert "Stage 3 Target Task Bindings: []" in rendered
+	assert "Domain Build Used LLM: None" in rendered
+	assert "Grounded Query Nodes: []" in rendered
+	assert "Ordering Edges: []" in rendered
 
 def main(argv: List[str]) -> int:
 	config = get_config()

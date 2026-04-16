@@ -1,5 +1,5 @@
 """
-Pipeline logger for the LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak pipeline.
+Pipeline logger for the domain-complete Hierarchical Task Network planning pipeline.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ class PipelineRecord:
 	timestamp: str
 	natural_language: str
 	success: bool
-	mode: str = "dfa_agentspeak"
+	mode: str = "htn_planner"
 	run_origin: str = "src"
-	logs_root: str = "logs"
+	logs_root: str = "artifacts/runs"
 	domain_name: Optional[str] = None
 	problem_name: Optional[str] = None
 
@@ -58,6 +58,7 @@ class PipelineRecord:
 
 	stage5_status: str = "pending"
 	stage5_agentspeak: Optional[str] = None
+	stage5_artifacts: Optional[Dict[str, Any]] = None
 	stage5_error: Optional[str] = None
 	stage5_code_size_chars: int = 0
 	stage5_metadata: Optional[Dict[str, Any]] = None
@@ -95,7 +96,7 @@ class PipelineLogger:
 	def start_pipeline(
 		self,
 		natural_language: str,
-		mode: str = "dfa_agentspeak",
+		mode: str = "htn_planner",
 		domain_file: str = "",
 		problem_file: str | None = None,
 		domain_name: str | None = None,
@@ -397,8 +398,6 @@ class PipelineLogger:
 		compound_tasks = method_library.get("compound_tasks", [])
 		primitive_tasks = method_library.get("primitive_tasks", [])
 		methods = method_library.get("methods", [])
-		target_literals = method_library.get("target_literals", [])
-		target_task_bindings = method_library.get("target_task_bindings", [])
 
 		method_counts_by_task: Dict[str, int] = {}
 		for method in methods:
@@ -409,12 +408,6 @@ class PipelineLogger:
 
 		summary.update(
 			{
-				"target_literals": [
-					self._literal_signature(item)
-					for item in target_literals
-				],
-				"target_task_bindings": target_task_bindings,
-				"target_task_binding_count": len(target_task_bindings),
 				"compound_tasks": len(compound_tasks),
 				"compound_task_names": [task.get("name") for task in compound_tasks if task.get("name")],
 				"primitive_tasks": len(primitive_tasks),
@@ -486,12 +479,56 @@ class PipelineLogger:
 		if status == "Success" and agentspeak_code is not None:
 			self.current_record.stage5_status = "success"
 			self.current_record.stage5_agentspeak = "stage5_agentspeak.asl"
+			self.current_record.stage5_artifacts = None
 			self.current_record.stage5_code_size_chars = len(agentspeak_code)
 		elif error:
 			self.current_record.stage5_status = "failed"
 			self.current_record.stage5_error = str(error)
 
 		self._save_current_state()
+
+	def log_stage5_hierarchical_planning(
+		self,
+		artifacts: Optional[Dict[str, Any]],
+		status: str,
+		*,
+		error: str | None = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		if not self.current_record:
+			return
+
+		self.current_record.stage5_metadata = metadata
+		self.current_record.stage5_agentspeak = None
+		if status == "Success" and artifacts is not None:
+			self.current_record.stage5_status = "success"
+			self.current_record.stage5_artifacts = self._sanitise_stage5_artifacts(artifacts)
+		elif error:
+			self.current_record.stage5_status = "failed"
+			self.current_record.stage5_error = str(error)
+			self.current_record.stage5_artifacts = self._sanitise_stage5_artifacts(artifacts)
+
+		self._save_current_state()
+
+	def _sanitise_stage5_artifacts(self, artifacts: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+		if not isinstance(artifacts, dict):
+			return artifacts
+		sanitised = {
+			"backend": artifacts.get("backend"),
+			"status": artifacts.get("status"),
+			"task_network": artifacts.get("task_network"),
+			"task_network_ordered": artifacts.get("task_network_ordered"),
+			"ordering_edges": artifacts.get("ordering_edges"),
+			"step_count": artifacts.get("step_count"),
+		}
+		artifact_paths = {
+			key: self._relative_artifact_reference(value)
+			for key, value in dict(artifacts.get("artifacts") or {}).items()
+			if self._relative_artifact_reference(value) is not None
+		}
+		if artifact_paths:
+			sanitised["artifacts"] = artifact_paths
+		return sanitised
 
 	def log_stage6_jason_validation(
 		self,
@@ -641,7 +678,7 @@ class PipelineLogger:
 	def _save_readable_format(self, filepath: Path, record: Dict[str, Any]) -> None:
 		with filepath.open("w") as handle:
 			handle.write("=" * 80 + "\n")
-			handle.write("LTL PIPELINE EXECUTION RECORD\n")
+			handle.write("HTN PIPELINE EXECUTION RECORD\n")
 			handle.write("=" * 80 + "\n\n")
 
 			handle.write(f"Timestamp: {record['timestamp']}\n")
@@ -685,15 +722,7 @@ class PipelineLogger:
 		handle.write("-" * 80 + "\n")
 		handle.write("TIMING PROFILE\n")
 		handle.write("-" * 80 + "\n")
-		for stage_name in (
-			"stage1",
-			"stage2",
-			"stage3",
-			"stage4",
-			"stage5",
-			"stage6",
-			"stage7",
-		):
+		for stage_name in ("stage1", "stage2", "stage3", "stage4", "stage5", "stage6", "stage7"):
 			stage_timing = timing_profile.get(stage_name)
 			if not isinstance(stage_timing, dict):
 				continue
@@ -719,15 +748,17 @@ class PipelineLogger:
 			handle.write(f"  - {key}: {value:.3f} seconds\n")
 
 	def _write_stage1(self, handle: Any, record: Dict[str, Any]) -> None:
+		if record["stage1_status"] == "pending" and not record["stage1_ltlf_spec"] and not record["stage1_error"]:
+			return
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 1: Natural Language → LTL Specification\n")
+		handle.write("STAGE 1: Natural Language → Goal Grounding\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage1_status'].upper()}\n")
 		self._write_stage_timing(handle, record, "stage1")
 		if record["stage1_used_llm"]:
-			handle.write(f"Parser: LLM ({record['stage1_model']})\n")
+			handle.write(f"Grounder: LLM ({record['stage1_model']})\n")
 		else:
-			handle.write("Parser: Not configured\n")
+			handle.write("Grounder: deterministic task grounding\n")
 
 		if record["stage1_used_llm"] and record["stage1_llm_prompt"]:
 			handle.write("\n" + "~" * 40 + "\n")
@@ -749,23 +780,43 @@ class PipelineLogger:
 
 		if record["stage1_status"] == "success" and record["stage1_ltlf_spec"]:
 			handle.write("\n" + "~" * 40 + "\n")
-			handle.write("PARSED OUTPUT (Stage 1)\n")
+			handle.write("GOAL GROUNDING OUTPUT (Stage 1)\n")
 			handle.write("~" * 40 + "\n")
-			ltlf = record["stage1_ltlf_spec"]
-			handle.write(f"Objects: {ltlf.get('objects', [])}\n")
-			handle.write(
-				"\nLTLf Formulas (goal semantics only; Stage 4 later instantiates planning state):\n"
-			)
-			for index, formula_str in enumerate(ltlf.get("formulas_string", []), start=1):
-				handle.write(f"  {index}. {formula_str}\n")
+			payload = record["stage1_ltlf_spec"]
+			if "temporally_extended_goal" in payload:
+				teg = dict(payload.get("temporally_extended_goal") or {})
+				nodes = list(teg.get("nodes") or ())
+				edges = list(teg.get("precedence_edges") or ())
+				handle.write(f"Grounded tasks: {len(nodes)}\n")
+				handle.write(f"Precedence edges: {len(edges)}\n")
+				for node in nodes:
+					handle.write(
+						f"  - {node.get('node_id')}: {node.get('task_name')}({', '.join(node.get('args') or [])})\n"
+					)
+				if edges:
+					handle.write("Ordering:\n")
+					for edge in edges:
+						handle.write(f"  - {edge.get('before')} -> {edge.get('after')}\n")
+				diagnostics = list(payload.get("diagnostics") or ())
+				if diagnostics:
+					handle.write("Diagnostics:\n")
+					for item in diagnostics:
+						handle.write(f"  - {item}\n")
+			else:
+				handle.write(f"Objects: {payload.get('objects', [])}\n")
+				handle.write("\nLegacy formulas:\n")
+				for index, formula_str in enumerate(payload.get("formulas_string", []), start=1):
+					handle.write(f"  {index}. {formula_str}\n")
 		elif record["stage1_error"]:
 			handle.write(f"\nError: {record['stage1_error']}\n")
 
 		handle.write("\n")
 
 	def _write_stage2(self, handle: Any, record: Dict[str, Any]) -> None:
+		if record["stage2_status"] == "pending" and not record["stage2_dfa_result"] and not record["stage2_error"]:
+			return
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 2: LTL Specification → DFA Generation\n")
+		handle.write("STAGE 2: Legacy Temporal Compilation\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage2_status'].upper()}\n")
 		self._write_stage_timing(handle, record, "stage2")
@@ -801,8 +852,10 @@ class PipelineLogger:
 			handle.write("\n")
 
 	def _write_stage3(self, handle: Any, record: Dict[str, Any]) -> None:
+		if record["stage3_status"] == "pending" and not record["stage3_metadata"] and not record["stage3_error"]:
+			return
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 3: DFA → HTN Method Synthesis\n")
+		handle.write("STAGE 3: Domain-Complete HTN Method Synthesis\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage3_status'].upper()}\n")
 		self._write_stage_timing(handle, record, "stage3")
@@ -858,8 +911,10 @@ class PipelineLogger:
 		handle.write("\n")
 
 	def _write_stage4(self, handle: Any, record: Dict[str, Any]) -> None:
+		if record["stage4_status"] == "pending" and not record["stage4_metadata"] and not record["stage4_error"]:
+			return
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 4: HTN Method Library → PANDA Planning\n")
+		handle.write("STAGE 4: Domain Gate\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage4_status'].upper()}\n")
 		self._write_stage_timing(handle, record, "stage4")
@@ -889,22 +944,39 @@ class PipelineLogger:
 		handle.write("\n")
 
 	def _write_stage5(self, handle: Any, record: Dict[str, Any]) -> None:
+		if (
+			record["stage5_status"] == "pending"
+			and not record["stage5_agentspeak"]
+			and not record["stage5_artifacts"]
+			and not record["stage5_error"]
+		):
+			return
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 5: HTN Methods + DFA Wrappers → AgentSpeak Rendering\n")
+		handle.write("STAGE 5: Hierarchical Task Network Solve\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage5_status'].upper()}\n")
 		self._write_stage_timing(handle, record, "stage5")
 
 		if record["stage5_metadata"]:
 			handle.write("\n" + "~" * 40 + "\n")
-			title = "AGENTSPEAK RENDERING SUMMARY" if record["stage5_status"] == "success" else "AGENTSPEAK RENDERING DIAGNOSTICS"
+			title = (
+				"HIERARCHICAL TASK NETWORK SOLVE SUMMARY"
+				if record["stage5_status"] == "success"
+				else "HIERARCHICAL TASK NETWORK SOLVE DIAGNOSTICS"
+			)
 			handle.write(f"{title}\n")
 			handle.write("~" * 40 + "\n")
 			for key, value in record["stage5_metadata"].items():
 				handle.write(f"{key}: {value}\n")
 			handle.write("\n")
 
-		if record["stage5_status"] == "success" and record["stage5_agentspeak"]:
+		if record["stage5_status"] == "success" and record["stage5_artifacts"] is not None:
+			handle.write("\n" + "~" * 40 + "\n")
+			handle.write("PLANNER ARTIFACTS (Stage 5)\n")
+			handle.write("~" * 40 + "\n")
+			handle.write(json.dumps(record["stage5_artifacts"], indent=2))
+			handle.write("\n")
+		elif record["stage5_status"] == "success" and record["stage5_agentspeak"]:
 			handle.write("\n" + "~" * 40 + "\n")
 			handle.write("GENERATED AGENTSPEAK CODE (Stage 5)\n")
 			handle.write("~" * 40 + "\n")
@@ -915,8 +987,10 @@ class PipelineLogger:
 		handle.write("\n")
 
 	def _write_stage6(self, handle: Any, record: Dict[str, Any]) -> None:
+		if record["stage6_status"] == "pending" and not record["stage6_artifacts"] and not record["stage6_error"]:
+			return
 		handle.write("-" * 80 + "\n")
-		handle.write("STAGE 6: AgentSpeak → Jason Runtime Validation\n")
+		handle.write("STAGE 6: Legacy Runtime Validation\n")
 		handle.write("-" * 80 + "\n")
 		handle.write(f"Status: {record['stage6_status'].upper()}\n")
 		self._write_stage_timing(handle, record, "stage6")

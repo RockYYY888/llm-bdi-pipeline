@@ -1,5 +1,5 @@
 """
-Main entry point for the LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak -> Jason pipeline.
+Main entry point for the domain-complete Hierarchical Task Network planning pipeline.
 """
 
 import sys
@@ -19,7 +19,7 @@ def main():
 	"""Main entry point"""
 	# Parse command line arguments
 	parser = argparse.ArgumentParser(
-		description='LTL-BDI Pipeline - domain build and query execution entrypoints',
+		description='Domain-complete HTN pipeline - domain build and query execution entrypoints',
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog='''
 Examples:
@@ -28,10 +28,9 @@ Examples:
   python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --library-artifact ./artifacts/domain_builds/blocks
 
 Note:
-  Only 'dfa_agentspeak' mode is supported.
+  The primary mode is 'htn_planner'.
   Domain file is mandatory and must be provided with --domain-file.
-  The compatibility wrapper still runs the full pipeline, but the refactored
-  public flow separates domain build from query execution.
+  The public flow separates domain build from query execution.
 		''',
 	)
 	parser.add_argument(
@@ -50,9 +49,9 @@ Note:
 	)
 	parser.add_argument(
 		'--mode',
-		choices=['dfa_agentspeak'],
-		default='dfa_agentspeak',
-		help='Execution mode (default: dfa_agentspeak)',
+		choices=['htn_planner', 'dfa_agentspeak'],
+		default='htn_planner',
+		help='Execution mode (default: htn_planner)',
 	)
 	parser.add_argument(
 		'--build-domain-library',

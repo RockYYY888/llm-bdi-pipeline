@@ -1,5 +1,5 @@
 """
-LTL-BDI pipeline: NL -> LTLf -> DFA -> HTN synthesis -> PANDA -> AgentSpeak.
+Domain-complete Hierarchical Task Network pipeline with Temporally Extended Goal support.
 """
 
 import copy
@@ -38,7 +38,10 @@ from stage5_agentspeak_rendering.dfa_runtime import build_agentspeak_transition_
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
 from pipeline_artifacts import (
     DomainBuildArtifact,
+    PlanningRequestContext,
     QueryExecutionContext,
+    TemporallyExtendedGoal,
+    TemporallyExtendedGoalNode,
     load_domain_build_artifact,
     persist_domain_build_artifact,
     query_bound_method_library,
@@ -52,14 +55,15 @@ class TypeResolutionError(RuntimeError):
 
 class LTL_BDI_Pipeline:
     """
-    LTL-BDI pipeline implementing compile, execute, and official verification.
+    Domain-complete Hierarchical Task Network pipeline with offline library build.
 
-    Stage 1: Natural Language -> LTLf Specification
-    Stage 2: LTLf -> DFA Conversion (ltlf2dfa)
-    Stage 3: DFA -> HTN Method Synthesis
-    Stage 4: HTN Method Library -> PANDA Planning
-    Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering
-    Stage 6: AgentSpeak -> Jason Runtime Validation
+    Offline:
+    Stage 3: Domain-Complete HTN Method Synthesis
+    Stage 4: Domain Gate
+
+    Online:
+    Stage 1: Natural Language Goal Grounding
+    Stage 5: Hierarchical Task Network Solve
     Stage 7: Official IPC HTN Plan Verification
     """
 
@@ -136,21 +140,20 @@ class LTL_BDI_Pipeline:
             if key != "total_seconds" and value is not None
         }
 
-    def execute(self, nl_instruction: str, mode: str = "dfa_agentspeak") -> Dict[str, Any]:
+    def execute(self, nl_instruction: str, mode: str = "htn_planner") -> Dict[str, Any]:
         """
         Execute the compatibility wrapper over the refactored two-pipeline flow.
 
         Args:
             nl_instruction: Natural language instruction
-            mode: Execution mode (only "dfa_agentspeak" is supported)
+            mode: Execution mode (default: "htn_planner")
 
         Returns:
             Stage-by-stage execution results and saved artifact metadata
         """
-        if mode != "dfa_agentspeak":
+        if mode not in {"htn_planner", "dfa_agentspeak"}:
             raise ValueError(
-                f"Unknown mode '{mode}'. Only 'dfa_agentspeak' is supported. "
-                "The pipeline currently supports the PANDA-backed AgentSpeak path only."
+                f"Unknown mode '{mode}'. Supported modes: 'htn_planner'."
             )
 
         # Start logger (creates timestamped directory in logs/)
@@ -171,10 +174,10 @@ class LTL_BDI_Pipeline:
             self.logger._save_current_state()
 
         print("="*80)
-        print(f"LTL-BDI PIPELINE - {mode.upper()} MODE")
+        print("DOMAIN-COMPLETE HTN PIPELINE")
         print("="*80)
         print(f"\n\"{nl_instruction}\"")
-        print(f"Mode: {mode}")
+        print("Mode: htn_planner")
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)
 
@@ -295,13 +298,13 @@ class LTL_BDI_Pipeline:
         nl_query: str,
         *,
         library_artifact,
-        mode: str = "dfa_agentspeak",
+        mode: str = "htn_planner",
     ) -> Dict[str, Any]:
         """Execute one query against a cached domain-complete library artifact."""
 
-        if mode != "dfa_agentspeak":
+        if mode not in {"htn_planner", "dfa_agentspeak"}:
             raise ValueError(
-                f"Unknown mode '{mode}'. Only 'dfa_agentspeak' is supported.",
+                f"Unknown mode '{mode}'. Supported modes: 'htn_planner'.",
             )
 
         self.logger.start_pipeline(
@@ -358,79 +361,488 @@ class LTL_BDI_Pipeline:
         nl_instruction: str,
         artifact: DomainBuildArtifact,
     ) -> Dict[str, Any]:
-        """Run Stage 1, Stage 2, Stage 5, Stage 6, and Stage 7 with a prebuilt library."""
-
-        ltl_spec = self._stage1_parse_nl(nl_instruction)
-        if not ltl_spec:
-            return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
-
-        dfa_result = self._stage2_dfa_generation(ltl_spec)
-        if not dfa_result:
-            return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
+        """Run the new query-time path with a prebuilt domain-complete method library."""
 
         domain_library = artifact.method_library
-        query_context = self._build_query_execution_context(
-            ltl_spec,
+        planning_request = self._stage1_goal_grounding(
+            nl_instruction,
             domain_library,
         )
-        runtime_method_library = query_bound_method_library(
-            domain_library,
-            target_literals=query_context.target_literals,
-            target_task_bindings=query_context.target_task_bindings,
-        )
+        if planning_request is None:
+            return {
+                "success": False,
+                "stage": "Stage 1",
+                "error": "Goal grounding failed",
+                "method_library": domain_library.to_dict(),
+            }
 
-        asl_code, stage5_metadata = self._stage5_agentspeak_rendering(
-            ltl_spec,
-            dfa_result,
-            runtime_method_library,
-            (),
-            query_context=query_context,
+        stage5_data = self._stage5_hierarchical_planning(
+            domain_library,
+            planning_request,
         )
-        if not asl_code:
+        if stage5_data is None:
             return {
                 "success": False,
                 "stage": "Stage 5",
-                "error": "AgentSpeak rendering failed",
-            }
-
-        stage6_data = self._stage6_jason_validation(
-            ltl_spec,
-            runtime_method_library,
-            (),
-            None,
-            asl_code,
-            query_context=query_context,
-        )
-        if stage6_data is None:
-            return {
-                "success": False,
-                "stage": "Stage 6",
-                "error": "Jason runtime validation failed",
+                "error": "Hierarchical Task Network planning failed",
+                "method_library": domain_library.to_dict(),
+                "planning_request_context": planning_request.to_dict(),
             }
 
         stage7_data = self._stage7_official_verification(
-            ltl_spec,
-            runtime_method_library,
-            stage6_data,
+            None,
+            domain_library,
+            stage5_data,
         )
         if stage7_data is None:
             return {
                 "success": False,
                 "stage": "Stage 7",
                 "error": "Official IPC verification failed",
+                "method_library": domain_library.to_dict(),
+                "planning_request_context": planning_request.to_dict(),
+                "stage5": stage5_data,
             }
 
         return {
             "success": True,
-            "ltl_spec": ltl_spec,
             "method_library": domain_library.to_dict(),
-            "query_execution_context": query_context.to_dict(),
+            "temporally_extended_goal": planning_request.temporally_extended_goal.to_dict(),
+            "planning_request_context": planning_request.to_dict(),
             "plans": [],
-            "agentspeak_code": asl_code,
-            "stage5": stage5_metadata,
-            "stage6": stage6_data,
+            "stage5": stage5_data,
             "stage7": stage7_data,
         }
+
+    def _stage1_goal_grounding(
+        self,
+        nl_instruction: str,
+        method_library,
+    ) -> Optional[PlanningRequestContext]:
+        """Stage 1: natural-language grounding into a Temporally Extended Goal."""
+        print("\n[STAGE 1] Natural Language -> Goal Grounding")
+        print("-"*80)
+        stage_start = time.perf_counter()
+
+        try:
+            query_text = str(nl_instruction or "").strip()
+            if not query_text:
+                raise ValueError("Natural-language query is empty.")
+
+            query_object_inventory = self._extract_query_object_inventory(query_text)
+            query_task_anchors = self._extract_query_task_anchors(query_text)
+            if not query_task_anchors:
+                raise ValueError(
+                    "No declared domain task invocations were found in the natural-language query.",
+                )
+
+            query_task_name_map = self._method_library_source_task_name_map(method_library)
+            merged_object_types = self._goal_grounding_object_types(query_object_inventory)
+            grounding_inventory = (
+                query_object_inventory
+                if query_object_inventory
+                else self._problem_object_inventory()
+            )
+            variable_assignments: Dict[str, str] = {}
+            diagnostics: List[str] = []
+            teg_nodes: List[TemporallyExtendedGoalNode] = []
+
+            for index, anchor in enumerate(query_task_anchors, start=1):
+                source_task_name = str(anchor.get("task_name") or "").strip()
+                resolved_task_name = query_task_name_map.get(source_task_name, source_task_name)
+                raw_args = tuple(
+                    str(arg).strip()
+                    for arg in (anchor.get("args") or ())
+                    if str(arg).strip()
+                )
+                grounded_args = self._ground_query_task_arguments(
+                    task_name=resolved_task_name,
+                    task_args=raw_args,
+                    query_object_inventory=grounding_inventory,
+                    variable_assignments=variable_assignments,
+                )
+                unresolved_args = [
+                    arg
+                    for arg in grounded_args
+                    if self._is_query_variable_symbol(arg)
+                ]
+                if unresolved_args:
+                    raise ValueError(
+                        "Goal grounding could not resolve query variables for "
+                        f"{resolved_task_name}{grounded_args}: {unresolved_args}",
+                    )
+                argument_types = self._task_type_signature(resolved_task_name, method_library)
+                self._validate_grounded_task_arguments(
+                    task_name=resolved_task_name,
+                    grounded_args=grounded_args,
+                    argument_types=argument_types,
+                    object_types=merged_object_types,
+                )
+                teg_nodes.append(
+                    TemporallyExtendedGoalNode(
+                        node_id=f"t{index}",
+                        task_name=resolved_task_name,
+                        args=grounded_args,
+                        argument_types=tuple(argument_types),
+                    ),
+                )
+
+            precedence_edges = self._goal_grounding_precedence_edges(
+                query_text=query_text,
+                teg_nodes=tuple(teg_nodes),
+            )
+            temporally_extended_goal = TemporallyExtendedGoal(
+                query_text=query_text,
+                nodes=tuple(teg_nodes),
+                precedence_edges=precedence_edges,
+                query_object_inventory=tuple(query_object_inventory),
+                typed_objects=dict(merged_object_types),
+                diagnostics=tuple(diagnostics),
+            )
+            planning_request = self._build_planning_request_context(temporally_extended_goal)
+
+            self.logger.log_stage1_success(
+                {
+                    "query_text": planning_request.query_text,
+                    "temporally_extended_goal": temporally_extended_goal.to_dict(),
+                    "task_network": [
+                        {
+                            "task_name": task_name,
+                            "args": list(task_args),
+                        }
+                        for task_name, task_args in planning_request.task_network
+                    ],
+                    "task_network_ordered": planning_request.task_network_ordered,
+                    "ordering_edges": [
+                        {"before": before, "after": after}
+                        for before, after in planning_request.ordering_edges
+                    ],
+                    "problem_objects": list(planning_request.problem_objects),
+                    "typed_objects": dict(planning_request.typed_objects),
+                    "diagnostics": list(planning_request.diagnostics),
+                },
+                used_llm=False,
+                model=None,
+                llm_prompt=None,
+                llm_response=None,
+            )
+            self._record_stage_timing(
+                "stage1",
+                stage_start,
+                breakdown={
+                    "goal_grounding_seconds": time.perf_counter() - stage_start,
+                },
+                metadata={
+                    "grounded_task_count": len(teg_nodes),
+                    "precedence_edge_count": len(precedence_edges),
+                },
+            )
+            print(f"✓ Grounded tasks: {len(teg_nodes)}")
+            print(f"  Ordered edges: {len(precedence_edges)}")
+            return planning_request
+        except Exception as exc:
+            self.logger.log_stage1_error(str(exc))
+            self._record_stage_timing("stage1", stage_start)
+            print(f"✗ Stage 1 Failed: {exc}")
+            return None
+
+    def _problem_object_inventory(self) -> Tuple[Dict[str, Any], ...]:
+        if self.problem is None:
+            return ()
+        grouped: Dict[str, List[str]] = defaultdict(list)
+        for object_name, type_name in dict(getattr(self.problem, "object_types", {}) or {}).items():
+            grouped[str(type_name).strip() or "object"].append(str(object_name).strip())
+        return tuple(
+            {
+                "type": type_name,
+                "label": self._plural_query_type_label(type_name),
+                "objects": sorted(
+                    object_name
+                    for object_name in objects
+                    if object_name
+                ),
+            }
+            for type_name, objects in sorted(grouped.items())
+        )
+
+    def _goal_grounding_object_types(
+        self,
+        query_object_inventory: Sequence[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        query_object_types = self._query_inventory_object_type_map(query_object_inventory)
+        if self.problem is None:
+            return dict(query_object_types)
+
+        problem_object_types = {
+            str(name).strip(): str(type_name).strip()
+            for name, type_name in dict(getattr(self.problem, "object_types", {}) or {}).items()
+            if str(name).strip() and str(type_name).strip()
+        }
+        for object_name, query_type in query_object_types.items():
+            problem_type = problem_object_types.get(object_name)
+            if problem_type is None:
+                raise TypeResolutionError(
+                    f"Goal grounding references object '{object_name}' that is not declared in "
+                    f"problem '{self.problem.name}'.",
+                )
+            if not (
+                query_type == problem_type
+                or self._is_subtype(problem_type, query_type)
+                or self._is_subtype(query_type, problem_type)
+            ):
+                raise TypeResolutionError(
+                    f"Goal grounding assigned incompatible types '{query_type}' and "
+                    f"'{problem_type}' to object '{object_name}'.",
+                )
+        return problem_object_types
+
+    def _validate_grounded_task_arguments(
+        self,
+        *,
+        task_name: str,
+        grounded_args: Sequence[str],
+        argument_types: Sequence[str],
+        object_types: Dict[str, str],
+    ) -> None:
+        if argument_types and len(grounded_args) != len(argument_types):
+            raise TypeResolutionError(
+                f"Grounded task '{task_name}' arity mismatch: "
+                f"{len(grounded_args)} args vs {len(argument_types)} signature entries.",
+            )
+        for index, arg in enumerate(grounded_args):
+            object_name = str(arg).strip()
+            if not object_name:
+                raise TypeResolutionError(
+                    f"Grounded task '{task_name}' contains an empty argument.",
+                )
+            if self.problem is not None and object_name not in set(self.problem.objects or ()):
+                raise TypeResolutionError(
+                    f"Grounded task '{task_name}' references object '{object_name}' that is "
+                    f"absent from problem '{self.problem.name}'.",
+                )
+            if index >= len(argument_types):
+                continue
+            actual_type = object_types.get(object_name)
+            expected_type = str(argument_types[index] or "").strip()
+            if not actual_type or not expected_type:
+                continue
+            if actual_type == expected_type or self._is_subtype(actual_type, expected_type):
+                continue
+            raise TypeResolutionError(
+                f"Grounded task '{task_name}' argument '{object_name}' has type '{actual_type}', "
+                f"expected '{expected_type}'.",
+            )
+
+    def _goal_grounding_precedence_edges(
+        self,
+        *,
+        query_text: str,
+        teg_nodes: Sequence[TemporallyExtendedGoalNode],
+    ) -> Tuple[Tuple[str, str], ...]:
+        if len(teg_nodes) <= 1:
+            return ()
+        if not self._query_requests_ordered_task_sequence(query_text):
+            return ()
+        return tuple(
+            (teg_nodes[index].node_id, teg_nodes[index + 1].node_id)
+            for index in range(len(teg_nodes) - 1)
+        )
+
+    def _build_planning_request_context(
+        self,
+        temporally_extended_goal: TemporallyExtendedGoal,
+    ) -> PlanningRequestContext:
+        task_network = tuple(
+            (node.task_name, tuple(node.args))
+            for node in temporally_extended_goal.nodes
+        )
+        problem_objects = tuple(
+            str(obj).strip()
+            for obj in (self.problem.objects if self.problem is not None else ())
+            if str(obj).strip()
+        )
+        if not problem_objects:
+            problem_objects = tuple(
+                object_name
+                for entry in temporally_extended_goal.query_object_inventory
+                for object_name in entry.get("objects", ())
+                if str(object_name).strip()
+            )
+        task_network_ordered = (
+            len(task_network) <= 1
+            and not temporally_extended_goal.precedence_edges
+        )
+        return PlanningRequestContext(
+            query_text=temporally_extended_goal.query_text,
+            temporally_extended_goal=temporally_extended_goal,
+            problem_objects=problem_objects,
+            typed_objects=dict(temporally_extended_goal.typed_objects),
+            task_network=task_network,
+            task_network_ordered=task_network_ordered,
+            ordering_edges=tuple(temporally_extended_goal.precedence_edges),
+            diagnostics=tuple(temporally_extended_goal.diagnostics),
+        )
+
+    def _stage5_hierarchical_planning(
+        self,
+        method_library,
+        planning_request: PlanningRequestContext,
+    ) -> Optional[Dict[str, Any]]:
+        """Stage 5: solve the grounded Temporally Extended Goal with PANDA."""
+        print("\n[STAGE 5] Hierarchical Task Network Solve")
+        print("-"*80)
+        stage_start = time.perf_counter()
+        planner = PANDAPlanner(workspace=str(self.output_dir))
+
+        try:
+            if not planning_request.task_network:
+                raise ValueError("Planning request contains no grounded task network.")
+
+            if not planner.toolchain_available():
+                raise ValueError(
+                    "PANDA planning toolchain is unavailable on PATH.",
+                )
+
+            problem_objects = tuple(planning_request.problem_objects)
+            if not problem_objects:
+                raise ValueError("Planning request contains no problem objects.")
+            typed_objects = self._typed_object_entries(
+                problem_objects,
+                planning_request.typed_objects,
+            )
+            initial_facts = (
+                tuple(self._render_problem_fact(fact) for fact in (self.problem.init_facts or ()))
+                if self.problem is not None
+                else ()
+            )
+
+            primary_task_name, primary_task_args = planning_request.task_network[0]
+            plan = planner.plan(
+                domain=self.domain,
+                method_library=method_library,
+                objects=problem_objects,
+                target_literal=None,
+                task_name=str(primary_task_name),
+                transition_name="teg_request",
+                typed_objects=typed_objects,
+                task_args=tuple(primary_task_args),
+                task_network=planning_request.task_network,
+                task_network_ordered=planning_request.task_network_ordered,
+                ordering_edges=planning_request.ordering_edges,
+                allow_empty_plan=False,
+                initial_facts=initial_facts,
+            )
+
+            action_path = [
+                (
+                    f"{step.action_name}({', '.join(step.args)})"
+                    if step.args
+                    else str(step.action_name)
+                )
+                for step in plan.steps
+            ]
+            method_trace = planner.extract_method_trace(plan.actual_plan)
+            action_path_file = self.output_dir / "stage5_action_path.txt"
+            action_path_file.write_text(
+                "".join(f"{step}\n" for step in action_path),
+            )
+            method_trace_file = self.output_dir / "stage5_method_trace.json"
+            method_trace_file.write_text(json.dumps(method_trace, indent=2))
+
+            work_dir = Path(str(plan.work_dir)).resolve() if plan.work_dir else None
+            artifacts = {
+                "backend": "pandaPI",
+                "status": "success",
+                "task_network": [
+                    {
+                        "task_name": task_name,
+                        "args": list(task_args),
+                    }
+                    for task_name, task_args in planning_request.task_network
+                ],
+                "task_network_ordered": planning_request.task_network_ordered,
+                "ordering_edges": [
+                    {"before": before, "after": after}
+                    for before, after in planning_request.ordering_edges
+                ],
+                "step_count": len(plan.steps),
+                "action_path": action_path,
+                "method_trace": method_trace,
+                "guided_hierarchical_plan_text": plan.actual_plan,
+                "guided_hierarchical_plan_source": "panda_plan",
+                "timing_profile": dict(plan.timing_profile),
+                "artifacts": {
+                    "domain_hddl": str(work_dir / "domain.hddl") if work_dir else None,
+                    "problem_hddl": str(work_dir / "problem.hddl") if work_dir else None,
+                    "parsed_problem": str(work_dir / "problem.psas") if work_dir else None,
+                    "grounded_problem": str(work_dir / "problem.psas.grounded") if work_dir else None,
+                    "raw_plan": str(work_dir / "plan.original") if work_dir else None,
+                    "actual_plan": str(work_dir / "plan.actual") if work_dir else None,
+                    "action_path": str(action_path_file),
+                    "method_trace": str(method_trace_file),
+                },
+            }
+            summary = {
+                "backend": "pandaPI",
+                "status": "success",
+                "task_count": len(planning_request.task_network),
+                "precedence_edge_count": len(planning_request.ordering_edges),
+                "step_count": len(plan.steps),
+            }
+            self.logger.log_stage5_hierarchical_planning(
+                artifacts,
+                "Success",
+                metadata=summary,
+            )
+            self._record_stage_timing(
+                "stage5",
+                stage_start,
+                breakdown={
+                    key: value
+                    for key, value in dict(plan.timing_profile or {}).items()
+                    if key != "total_seconds"
+                },
+                metadata={
+                    "task_count": len(planning_request.task_network),
+                    "step_count": len(plan.steps),
+                },
+            )
+            print(f"✓ Planner returned {len(plan.steps)} primitive steps")
+            print(f"  Task network size: {len(planning_request.task_network)}")
+            return {
+                "summary": summary,
+                "artifacts": artifacts,
+            }
+        except Exception as exc:
+            failure_artifacts = {
+                "backend": "pandaPI",
+                "status": "failed",
+                "task_network": [
+                    {
+                        "task_name": task_name,
+                        "args": list(task_args),
+                    }
+                    for task_name, task_args in planning_request.task_network
+                ],
+                "task_network_ordered": planning_request.task_network_ordered,
+                "ordering_edges": [
+                    {"before": before, "after": after}
+                    for before, after in planning_request.ordering_edges
+                ],
+                "step_count": 0,
+            }
+            self.logger.log_stage5_hierarchical_planning(
+                failure_artifacts,
+                "Failed",
+                error=str(exc),
+                metadata={
+                    "backend": "pandaPI",
+                    "status": "failed",
+                },
+            )
+            self._record_stage_timing("stage5", stage_start)
+            print(f"✗ Stage 5 Failed: {exc}")
+            return None
 
     def _stage1_parse_nl(self, nl_instruction: str):
         """Stage 1: Natural Language -> LTLf Specification"""
@@ -4667,8 +5079,6 @@ class LTL_BDI_Pipeline:
                 output_dir=self.output_dir,
                 completion_mode="target_literals",
                 ordered_query_sequence=ordered_query_sequence,
-                planning_domain=self.domain,
-                runtime_plan_records=(),
             )
             validation_seconds = time.perf_counter() - validation_start
             summary = {

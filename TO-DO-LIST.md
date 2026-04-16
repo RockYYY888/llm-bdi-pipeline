@@ -3,15 +3,25 @@
 ## Current Focus
 
 - Finish the domain-complete refactor so each domain builds one cached Stage 3/Stage 4 artifact
-  and benchmark queries only run Stage 1/2/5/6/7 against that artifact.
-- Keep `Stage2 = LTLf -> equivalent DFA`, `Stage3 = domain-only method library`, and keep all
-  query grounding and target binding in the query-side execution context.
-- Keep Stage 6 free of query-side Panda helper records; any remaining runtime guidance must come
-  from Stage 5 lowering or Jason-executable structure.
-- Convert the benchmark acceptance harness from the compatibility wrapper to explicit
-  `4 domain builds + 115 query executions`, with separate reporting for domain builds and query runs.
+  and benchmark queries run the new `Stage1 -> Temporally Extended Goal -> Stage5 planner ->
+  Stage7 verifier` path against that artifact.
+- Replace the mainline `QueryExecutionContext` path with `TemporallyExtendedGoal` and
+  `PlanningRequestContext`, while keeping Stage 3 and Stage 4 completely domain-only.
+- Make the default benchmark and command-line entrypoints use the planner-backed query path rather
+  than `Deterministic Finite Automaton / AgentSpeak / Jason`.
+- Convert the benchmark acceptance harness to explicit `4 domain builds + 115 query executions`,
+  with separate reporting for domain builds, grounding, planner solving, and official verification.
 - Keep generated outputs isolated under `artifacts/` and `tests/generated/` so source, tests, and
   runtime artifacts stay clearly separated.
+
+## Active Refactor Notes
+
+- `plan.md` is now the authoritative architecture note for the
+  Domain-Complete Hierarchical Task Network refactor with Temporally Extended Goal support.
+- `Temporally Extended Goal` means a query-time task graph with grounded task nodes and precedence
+  edges, not a return to `Linear Temporal Logic on finite traces`.
+- `Belief-Desire-Intention / Jason` is no longer the benchmark-time solver; if retained, it is a
+  downstream export target only.
 
 ## Recent Completed Milestones
 
