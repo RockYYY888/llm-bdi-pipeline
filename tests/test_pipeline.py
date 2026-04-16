@@ -136,6 +136,10 @@ def _literal_signature(predicate: str, args: List[str], is_positive: bool = True
 	return atom if is_positive else f"!{atom}"
 
 FULL_BENCHMARK_QUERY_LIMIT = 10_000
+TESTS_GENERATED_DIR = Path(__file__).parent / "generated"
+TESTS_GENERATED_LOGS_DIR = TESTS_GENERATED_DIR / "logs"
+TESTS_GENERATED_DOMAIN_BUILDS_DIR = TESTS_GENERATED_DIR / "domain_builds"
+_OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE: Dict[str, Path] = {}
 
 
 def _benchmark_query_id_sort_key(query_id: str) -> tuple[int, str]:
@@ -877,8 +881,7 @@ def assert_stage4_domain_gate_omits_query_runtime_records(monkeypatch):
 
 def assert_build_domain_library_persists_stable_artifacts(monkeypatch, tmp_path):
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
-	test_logs_dir = Path(__file__).parent / "logs"
-	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
 	method_library = _official_domain_method_library("blocksworld")
 	method_library.target_literals = []
 	method_library.target_task_bindings = []
@@ -923,8 +926,7 @@ def assert_build_domain_library_persists_stable_artifacts(monkeypatch, tmp_path)
 
 def assert_execute_query_with_library_uses_cached_domain_artifact(monkeypatch, tmp_path):
 	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
-	test_logs_dir = Path(__file__).parent / "logs"
-	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
 	method_library = _official_domain_method_library("blocksworld")
 	method_library.target_literals = []
 	method_library.target_task_bindings = []
@@ -978,18 +980,8 @@ def assert_execute_query_with_library_uses_cached_domain_artifact(monkeypatch, t
 	assert result["success"] is True
 	assert result["query_execution_context"]["target_literals"]
 
-def _run_domain_query_case_with_official_stage3_mask(
-	domain_key: str,
-	query_id: str,
-	monkeypatch,
-	*,
-	query_cases: Dict[str, Dict[str, Any]] | None = None,
-	mask_stage1: bool = False,
-) -> Dict[str, Any]:
-	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
-	case_map = query_cases or domain_config["query_cases"]
-	case = case_map[query_id]
 
+def _official_stage3_mask_synthesizer_class(domain_key: str):
 	class OfficialStage3MaskSynthesizer:
 		def __init__(self, *args, **kwargs):
 			self._delegate = RealHTNMethodSynthesizer()
@@ -1081,14 +1073,48 @@ def _run_domain_query_case_with_official_stage3_mask(
 				"llm_generation_attempts": 0,
 			}
 
-	monkeypatch.setattr(pipeline_module, "HTNMethodSynthesizer", OfficialStage3MaskSynthesizer)
+	return OfficialStage3MaskSynthesizer
+
+
+def _build_official_stage3_mask_domain_artifact(domain_key: str, monkeypatch) -> Path:
+	cached = _OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE.get(domain_key)
+	if cached is not None:
+		return cached
+
+	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
+	monkeypatch.setattr(
+		pipeline_module,
+		"HTNMethodSynthesizer",
+		_official_stage3_mask_synthesizer_class(domain_key),
+	)
+	pipeline = LTL_BDI_Pipeline(domain_file=domain_config["domain_file"])
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
+	result = pipeline.build_domain_library(
+		output_root=str(TESTS_GENERATED_DOMAIN_BUILDS_DIR / "official_stage3_mask" / domain_key),
+	)
+	assert result["success"] is True
+	artifact_root = Path(result["artifact_paths"]["method_library"]).parent
+	_OFFICIAL_STAGE3_MASK_DOMAIN_ARTIFACT_CACHE[domain_key] = artifact_root
+	return artifact_root
+
+def _run_domain_query_case_with_official_stage3_mask(
+	domain_key: str,
+	query_id: str,
+	monkeypatch,
+	*,
+	query_cases: Dict[str, Dict[str, Any]] | None = None,
+	mask_stage1: bool = False,
+) -> Dict[str, Any]:
+	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
+	case_map = query_cases or domain_config["query_cases"]
+	case = case_map[query_id]
+	artifact_root = _build_official_stage3_mask_domain_artifact(domain_key, monkeypatch)
 
 	pipeline = LTL_BDI_Pipeline(
 		domain_file=domain_config["domain_file"],
 		problem_file=case.get("problem_file"),
 	)
-	test_logs_dir = Path(__file__).parent / "logs"
-	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
 	if mask_stage1:
 		def oracle_stage1_parse_nl(nl_instruction: str):
 			print("\n[STAGE 1] Natural Language -> LTLf Specification")
@@ -1111,13 +1137,19 @@ def _run_domain_query_case_with_official_stage3_mask(
 				return None
 
 		monkeypatch.setattr(pipeline, "_stage1_parse_nl", oracle_stage1_parse_nl)
-	result = pipeline.execute(case["instruction"], mode="dfa_agentspeak")
+	result = pipeline.execute_query_with_library(
+		case["instruction"],
+		library_artifact=artifact_root,
+		mode="dfa_agentspeak",
+	)
 	log_dir = pipeline.logger.current_log_dir
 	if log_dir is None:
 		raise RuntimeError(f"{domain_key}:{query_id} did not produce a log directory")
 	execution = json.loads((log_dir / "execution.json").read_text())
 	stage6_artifacts = _load_stage6_artifacts(execution, log_dir)
 	stage7_artifacts = _load_stage7_artifacts(execution, log_dir)
+	stage3_summary = json.loads((artifact_root / "stage3_metadata.json").read_text())
+	stage4_summary = json.loads((artifact_root / "stage4_domain_gate.json").read_text())
 
 	bug_messages: List[str] = []
 	if not result["success"]:
@@ -1126,8 +1158,6 @@ def _run_domain_query_case_with_official_stage3_mask(
 	for stage_key in (
 		"stage1_status",
 		"stage2_status",
-		"stage3_status",
-		"stage4_status",
 		"stage5_status",
 		"stage6_status",
 		"stage7_status",
@@ -1136,6 +1166,18 @@ def _run_domain_query_case_with_official_stage3_mask(
 			failed_stages.append(stage_key)
 	if failed_stages:
 		bug_messages.extend(f"{stage_key} is not success" for stage_key in failed_stages)
+	if execution.get("stage3_status") not in (None, "", "pending"):
+		bug_messages.append("query execution log should not record Stage 3 status")
+	if execution.get("stage4_status") not in (None, "", "pending"):
+		bug_messages.append("query execution log should not record Stage 4 status")
+	if stage3_summary.get("used_llm") is not False:
+		bug_messages.append("official Stage 3 mask should not mark used_llm=True")
+	if not stage3_summary.get("domain_task_contracts"):
+		bug_messages.append("cached domain Stage 3 metadata is missing domain task contracts")
+	if stage4_summary.get("gate_type") != "domain_complete":
+		bug_messages.append("cached Stage 4 gate is not domain_complete")
+	if not stage4_summary.get("validated_task_count"):
+		bug_messages.append("cached Stage 4 gate validated zero tasks")
 	if execution.get("stage6_status") == "success" and stage6_artifacts.get("status") != "success":
 		bug_messages.append("Stage 6 status payload is not success")
 	if execution.get("stage7_status") == "success" and stage7_artifacts.get("plan_kind") != "hierarchical":
@@ -1152,6 +1194,8 @@ def _run_domain_query_case_with_official_stage3_mask(
 		"result": result,
 		"log_dir": log_dir,
 		"execution": execution,
+		"domain_build_stage3": stage3_summary,
+		"domain_build_stage4": stage4_summary,
 		"bug_messages": bug_messages,
 		"has_bug": bool(bug_messages),
 	}
@@ -4468,8 +4512,7 @@ def _run_query_case(
 		domain_file=domain_file,
 		problem_file=case.get("problem_file"),
 	)
-	test_logs_dir = Path(__file__).parent / "logs"
-	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
 
 	result = pipeline.execute(case["instruction"], mode="dfa_agentspeak")
 	log_dir = pipeline.logger.current_log_dir

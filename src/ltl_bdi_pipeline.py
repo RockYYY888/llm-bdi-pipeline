@@ -82,7 +82,7 @@ class LTL_BDI_Pipeline:
         # This ensures logs go to same location regardless of where tests are run from
         project_root = Path(__file__).parent.parent  # src/ -> project root
         self.project_root = project_root
-        self.logger = PipelineLogger(logs_dir=str(project_root / "logs"))
+        self.logger = PipelineLogger(logs_dir=str(project_root / "artifacts" / "runs"))
 
         if not domain_file:
             raise ValueError(
@@ -161,7 +161,7 @@ class LTL_BDI_Pipeline:
             problem_file=self.problem_file,
             domain_name=self.domain.name,
             problem_name=self.problem.name if self.problem is not None else None,
-            output_dir="logs",
+            output_dir="artifacts/runs",
         )
 
         # Use logger's directory for all output files
@@ -244,7 +244,7 @@ class LTL_BDI_Pipeline:
             problem_file=None,
             domain_name=self.domain.name,
             problem_name=None,
-            output_dir="logs",
+            output_dir="artifacts/runs",
         )
         self.output_dir = self.logger.current_log_dir
         if self.logger.current_record is not None and self.output_dir is not None:
@@ -311,7 +311,7 @@ class LTL_BDI_Pipeline:
             problem_file=self.problem_file,
             domain_name=self.domain.name,
             problem_name=self.problem.name if self.problem is not None else None,
-            output_dir="logs",
+            output_dir="artifacts/runs",
         )
         self.output_dir = self.logger.current_log_dir
         if self.logger.current_record is not None and self.output_dir is not None:

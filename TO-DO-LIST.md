@@ -2,17 +2,23 @@
 
 ## Current Focus
 
-- Keep the default Stage 1-7 path green with Jason runtime execution plus official IPC verification.
-- Keep negation semantics unified to all-NAF (`not`) across Stage 3/5/6.
-- Keep HDDL parsing on the sound subset only (`and/or/not/imply`; fail-fast on unsupported constructs).
-- Keep the benchmark boundary clean: compile from `domain + user query`, use `problem` only for
-  Stage 6 runtime init and Stage 7 official verification.
-- Expand live coverage beyond blocksworld, starting with the official Mars Rover `pfile01`-`pfile03`
-  problems.
-- Keep an explicit, code-faithful assumptions boundary document in sync with README.
+- Finish the domain-complete refactor so each domain builds one cached Stage 3/Stage 4 artifact
+  and benchmark queries only run Stage 1/2/5/6/7 against that artifact.
+- Keep `Stage2 = LTLf -> equivalent DFA`, `Stage3 = domain-only method library`, and keep all
+  query grounding and target binding in the query-side execution context.
+- Keep Stage 6 free of query-side Panda helper records; any remaining runtime guidance must come
+  from Stage 5 lowering or Jason-executable structure.
+- Convert the benchmark acceptance harness from the compatibility wrapper to explicit
+  `4 domain builds + 115 query executions`, with separate reporting for domain builds and query runs.
+- Keep generated outputs isolated under `artifacts/` and `tests/generated/` so source, tests, and
+  runtime artifacts stay clearly separated.
 
 ## Recent Completed Milestones
 
+- [x] Milestone 26: Split the pipeline into explicit domain-build and query-execution public
+  entrypoints, add persisted domain-build artifacts plus query execution context, move official
+  Stage 3 mask runs onto `build once + execute with cached library`, and separate generated test
+  outputs into `tests/generated`
 - [x] Milestone 25: Align Stage 6 guided-prefix target tracking with literal-based transition IDs,
   render observation plans for completed targets, and relax transition-native support gating so
   auxiliary-role requirements (for example calibration) are supported; masked marsrover `query_1`
