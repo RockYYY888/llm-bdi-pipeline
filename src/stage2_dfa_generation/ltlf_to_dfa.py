@@ -31,10 +31,15 @@ if _parent_dir not in sys.path:
 from utils.setup_mona_path import setup_mona
 setup_mona()
 
-from typing import Dict, List, Any, Tuple, Optional
+import re
+import subprocess
+from collections import defaultdict
+from tempfile import TemporaryDirectory
+from typing import Dict, List, Any, Tuple
 from ltlf2dfa.parser.ltlf import LTLfParser
+from ltlf2dfa.ltlf2dfa import UNSAT_DOT
+from ltlf2dfa.base import MonaProgram
 from utils.symbol_normalizer import SymbolNormalizer
-from stage1_interpretation.ltlf_formula import LogicalOperator, TemporalOperator
 
 
 class PredicateToProposition:
@@ -108,7 +113,7 @@ class LTLfToDFA:
     Pipeline: Predicate LTLf → Propositional LTLf → DFA (DOT format)
     """
 
-    MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_TRANSITIONS = 250_000
+    MONA_TIMEOUT_SECONDS = 300
 
     def __init__(self):
         self.ltlf_parser = LTLfParser()
@@ -143,68 +148,10 @@ class LTLfToDFA:
         # Convert to propositional encoding
         propositional_formula = self.encoder.convert_formula(original_formula)
 
-        ordered_atoms = self._extract_ordered_eventually_atoms(ltl_spec)
-        if ordered_atoms:
-            propositional_atoms = [
-                self.encoder.encode_predicate(atom)
-                for atom in ordered_atoms
-            ]
-            dfa_dot = self._build_ordered_eventually_atomic_dfa(propositional_atoms)
-            unique_atoms: List[str] = []
-            for atom in propositional_atoms:
-                if atom not in unique_atoms:
-                    unique_atoms.append(atom)
-            metadata = {
-                "original_formula": original_formula,
-                "propositional_formula": propositional_formula,
-                "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                "num_states": len(propositional_atoms) + 1,
-                "alphabet": list(unique_atoms),
-                "construction": "ordered_eventually_atomic_fast_path",
-            }
-            return dfa_dot, metadata
-
-        eventual_atoms = self._extract_independent_eventually_atoms(ltl_spec)
-        if eventual_atoms:
-            propositional_atoms = [
-                self.encoder.encode_predicate(atom)
-                for atom in eventual_atoms
-            ]
-            unique_atoms: List[str] = []
-            for atom in propositional_atoms:
-                if atom not in unique_atoms:
-                    unique_atoms.append(atom)
-            if self._can_materialize_exact_independent_eventually_dfa(unique_atoms):
-                dfa_dot = self._build_independent_eventually_atomic_dfa(propositional_atoms)
-                metadata = {
-                    "original_formula": original_formula,
-                    "propositional_formula": propositional_formula,
-                    "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                    "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                    "num_states": 1 << len(unique_atoms),
-                    "alphabet": list(unique_atoms),
-                    "construction": "independent_eventually_atomic_fast_path",
-                }
-                return dfa_dot, metadata
-            if self._can_use_symbolic_unordered_independent_eventually_surrogate(ltl_spec):
-                dfa_dot = self._build_symbolic_unordered_independent_eventually_surrogate_dfa()
-                metadata = {
-                    "original_formula": original_formula,
-                    "propositional_formula": propositional_formula,
-                    "predicate_to_prop_mapping": self.encoder.get_mapping(),
-                    "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-                    "num_states": 1,
-                    "num_transitions": 1,
-                    "alphabet": list(unique_atoms),
-                    "construction": "independent_eventually_symbolic_surrogate",
-                }
-                return dfa_dot, metadata
-
         # Parse and convert to DFA
         try:
             formula_obj = self.ltlf_parser(propositional_formula)
-            dfa_dot = formula_obj.to_dfa()
+            dfa_dot, parse_metadata = self._convert_formula_object_to_dot(formula_obj)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to convert LTLf to DFA.\n"
@@ -219,220 +166,264 @@ class LTLfToDFA:
             "propositional_formula": propositional_formula,
             "predicate_to_prop_mapping": self.encoder.get_mapping(),
             "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-            "num_states": self._count_dfa_states(dfa_dot),
-            "num_transitions": self._count_dfa_transitions(dfa_dot),
+            "num_states": int(
+                parse_metadata.get("num_states") or self._count_dfa_states(dfa_dot)
+            ),
+            "num_transitions": int(
+                parse_metadata.get("num_transitions")
+                or self._count_dfa_transitions(dfa_dot)
+            ),
             "alphabet": self._extract_alphabet(dfa_dot),
         }
 
         return dfa_dot, metadata
 
-    def _can_materialize_exact_independent_eventually_dfa(self, unique_atoms: List[str]) -> bool:
-        if not unique_atoms:
-            return False
-        estimated_transitions = self._independent_eventually_transition_count(len(unique_atoms))
-        return estimated_transitions <= self.MAX_EXACT_INDEPENDENT_EVENTUALLY_FAST_PATH_TRANSITIONS
+    def _convert_formula_object_to_dot(self, formula_obj: Any) -> Tuple[str, Dict[str, Any]]:
+        """Convert an ltlf2dfa formula object to DOT without relying on sympy-heavy guard simplification."""
+        if not hasattr(formula_obj, "to_mona") or not hasattr(formula_obj, "find_labels"):
+            # Test doubles in the suite still expose the older zero-argument shape.
+            return formula_obj.to_dfa(), {}
+        mona_output = self._invoke_mona_directly(formula_obj)
 
-    @staticmethod
-    def _can_use_symbolic_unordered_independent_eventually_surrogate(ltl_spec: Any) -> bool:
-        if bool(getattr(ltl_spec, "query_task_sequence_is_ordered", False)):
-            return False
-        query_signatures = [
-            str(signature).strip()
-            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
-            if str(signature).strip()
-        ]
-        return bool(query_signatures)
+        if mona_output is False:
+            raise RuntimeError("MONA timed out while converting LTLf to DFA.")
 
-    @staticmethod
-    def _independent_eventually_transition_count(atom_count: int) -> int:
-        if atom_count <= 0:
-            return 0
-        return atom_count * (1 << (atom_count - 1)) + 1
+        rendered_output = str(mona_output or "").strip()
+        if not rendered_output:
+            raise RuntimeError("MONA returned empty output while converting LTLf to DFA.")
+        if rendered_output.lstrip().startswith("digraph"):
+            return rendered_output, {}
+        if "Formula is unsatisfiable" in rendered_output:
+            return UNSAT_DOT, {
+                "num_states": 1,
+                "num_transitions": 1,
+            }
 
-    def _extract_independent_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
-        formulas = list(getattr(ltl_spec, "formulas", ()) or ())
-        if not formulas:
-            return None
-
-        atoms: List[str] = []
-        for formula in formulas:
-            if not self._collect_independent_eventually_atoms(formula, atoms):
-                return None
-        return atoms or None
-
-    def _collect_independent_eventually_atoms(self, formula: Any, atoms: List[str]) -> bool:
-        logical_op = getattr(formula, "logical_op", None)
-        operator = getattr(formula, "operator", None)
-        predicate = getattr(formula, "predicate", None)
-        sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
-
-        if logical_op == LogicalOperator.AND and predicate is None and operator is None:
-            return all(
-                self._collect_independent_eventually_atoms(child, atoms)
-                for child in sub_formulas
-            )
-
-        if operator != TemporalOperator.FINALLY or len(sub_formulas) != 1:
-            return False
-
-        atom = sub_formulas[0]
-        if getattr(atom, "operator", None) is not None:
-            return False
-        if getattr(atom, "logical_op", None) is not None:
-            return False
-        if getattr(atom, "predicate", None) is None:
-            return False
-
-        atoms.append(atom.to_string())
-        return True
-
-    def _extract_ordered_eventually_atoms(self, ltl_spec: Any) -> Optional[List[str]]:
-        explicit_ordering = bool(getattr(ltl_spec, "query_task_sequence_is_ordered", False))
-        explicit_signatures = [
-            str(signature).strip()
-            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
-            if str(signature).strip()
-        ]
-        if explicit_ordering and explicit_signatures:
-            return explicit_signatures
-
-        formulas = list(getattr(ltl_spec, "formulas", ()) or ())
-        if len(formulas) != 1:
-            return None
-        return self._collect_ordered_eventually_atoms(formulas[0])
-
-    def _collect_ordered_eventually_atoms(self, formula: Any) -> Optional[List[str]]:
-        operator = getattr(formula, "operator", None)
-        sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
-        if operator != TemporalOperator.FINALLY or len(sub_formulas) != 1:
-            return None
-
-        child = sub_formulas[0]
-        if self._is_atomic_predicate_formula(child):
-            return [child.to_string()]
-
-        if getattr(child, "logical_op", None) != LogicalOperator.AND or len(child.sub_formulas) != 2:
-            return None
-
-        first, remainder = child.sub_formulas
-        if not self._is_atomic_predicate_formula(first):
-            return None
-
-        suffix = self._collect_ordered_eventually_atoms(remainder)
-        if not suffix:
-            return None
-        return [first.to_string(), *suffix]
-
-    @staticmethod
-    def _is_atomic_predicate_formula(formula: Any) -> bool:
-        return (
-            getattr(formula, "operator", None) is None
-            and getattr(formula, "logical_op", None) is None
-            and getattr(formula, "predicate", None) is not None
-        )
-
-    def _build_independent_eventually_atomic_dfa(self, propositional_atoms: List[str]) -> str:
-        unique_atoms: List[str] = []
-        for atom in propositional_atoms:
-            if atom not in unique_atoms:
-                unique_atoms.append(atom)
-
-        transitions: List[Tuple[str, str, str]] = []
-        full_mask = (1 << len(unique_atoms)) - 1
-
-        def state_name(mask: int) -> str:
-            return str(mask + 1)
-
-        for mask in range(full_mask + 1):
-            from_state = state_name(mask)
-            if mask == full_mask:
-                transitions.append((from_state, from_state, "true"))
-                continue
-
-            for atom_index, atom_name in enumerate(unique_atoms):
-                if mask & (1 << atom_index):
-                    continue
-                next_mask = mask | (1 << atom_index)
-                transitions.append(
-                    (
-                        from_state,
-                        state_name(next_mask),
-                        atom_name,
-                    ),
-                )
-
-        accepting_states = {state_name(full_mask)}
-        other_states = {
-            state_name(mask)
-            for mask in range(full_mask + 1)
-            if mask != full_mask
+        graph = self._parse_mona_output(rendered_output)
+        return self._render_mona_graph_as_dot(graph), {
+            "num_states": graph["num_states"],
+            "num_transitions": graph["num_transitions"],
         }
 
-        lines = [
-            "digraph MONA_DFA {",
-            " rankdir = LR;",
-            " center = true;",
-            " size = \"7.5,10.5\";",
-            " edge [fontname = Courier];",
-            " node [height = .5, width = .5];",
-            f" node [shape = doublecircle]; {' '.join(sorted(accepting_states))};",
-            f" node [shape = circle]; {' '.join(sorted(other_states, key=int))};",
-            " init [shape = plaintext, label = \"\"];",
-            " init -> 1;",
-        ]
-        for from_state, to_state, label in transitions:
-            lines.append(f" {from_state} -> {to_state} [label=\"{label}\"];")
-        lines.append("}")
-        return "\n".join(lines)
+    def _invoke_mona_directly(self, formula_obj: Any) -> str | bool:
+        """Invoke MONA directly so we can strip oversized debug comments and tune timeout safely."""
+        mona_program = self._render_mona_program(formula_obj)
+
+        with TemporaryDirectory(prefix="ltlf2dfa_mona_") as temp_dir:
+            program_path = Path(temp_dir) / "automa.mona"
+            stdout_path = Path(temp_dir) / "stdout.txt"
+            program_path.write_text(mona_program, encoding="utf-8")
+
+            with stdout_path.open("w", encoding="utf-8") as stdout_handle:
+                try:
+                    completed = subprocess.run(
+                        ["mona", "-q", "-u", "-w", str(program_path)],
+                        stdout=stdout_handle,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=self.MONA_TIMEOUT_SECONDS,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    return False
+
+            stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
+            stderr = str(completed.stderr or "").strip()
+            if completed.returncode != 0:
+                error_parts = [
+                    f"MONA exited with code {completed.returncode}.",
+                    f"stdout_size={stdout_size} bytes.",
+                ]
+                if stderr:
+                    error_parts.append(f"stderr={stderr[:500]}")
+                raise RuntimeError(" ".join(error_parts))
+            if not stdout_size and stderr:
+                raise RuntimeError(stderr[:500])
+            return stdout_path.read_text(encoding="utf-8").strip()
+
 
     @staticmethod
-    def _build_symbolic_unordered_independent_eventually_surrogate_dfa() -> str:
-        return "\n".join(
-            [
-                "digraph MONA_DFA {",
-                " rankdir = LR;",
-                " center = true;",
-                " size = \"7.5,10.5\";",
-                " edge [fontname = Courier];",
-                " node [height = .5, width = .5];",
-                " node [shape = doublecircle]; 1;",
-                " init [shape = plaintext, label = \"\"];",
-                " init -> 1;",
-                " 1 -> 1 [label=\"true\"];",
-                "}",
-            ],
+    def _render_mona_program(formula_obj: Any) -> str:
+        """Render a MONA program without embedding the full source formula as a leading comment."""
+        program = MonaProgram(formula_obj).mona_program()
+        lines = program.splitlines()
+        if lines and lines[0].startswith("#"):
+            return "\n".join(lines[1:]) + "\n"
+        return program
+
+    def _parse_mona_output(self, mona_output: str) -> Dict[str, Any]:
+        """Parse raw MONA output into a grouped graph representation."""
+        free_variables = self._extract_mona_free_variables(mona_output)
+        accepting_states = self._extract_mona_accepting_states(mona_output)
+        grouped_guards: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+        init_targets: List[str] = []
+        states: set[str] = set()
+
+        for line in mona_output.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("State "):
+                continue
+
+            match = re.match(r"State\s+(\d+):\s*([01X]+)\s*->\s*state\s+(\d+)\s*$", stripped)
+            if not match:
+                continue
+
+            source_state, guard_bits, target_state = match.groups()
+            if source_state == "0":
+                init_targets.append(target_state)
+                continue
+
+            grouped_guards[(source_state, target_state)].append(guard_bits)
+            states.add(source_state)
+            states.add(target_state)
+
+        init_state = init_targets[0] if init_targets else (min(states) if states else "1")
+        states.add(init_state)
+        states.update(accepting_states)
+
+        return {
+            "free_variables": free_variables,
+            "accepting_states": tuple(sorted(accepting_states, key=self._numeric_state_sort_key)),
+            "init_state": init_state,
+            "grouped_guards": {
+                key: tuple(guards)
+                for key, guards in grouped_guards.items()
+            },
+            "num_states": len(states),
+            "num_transitions": len(grouped_guards),
+        }
+
+    @staticmethod
+    def _extract_mona_free_variables(mona_output: str) -> Tuple[str, ...]:
+        match = re.search(
+            r"DFA for formula with free variables:\s*(.*?)\s*\n",
+            mona_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ()
+        raw_tokens = [
+            token.strip().lower()
+            for token in match.group(1).split()
+            if token.strip()
+        ]
+        if len(raw_tokens) == 1 and raw_tokens[0] == "state":
+            return ()
+        return tuple(raw_tokens)
+
+    @staticmethod
+    def _extract_mona_accepting_states(mona_output: str) -> Tuple[str, ...]:
+        match = re.search(
+            r"Accepting states:\s*(.*?)\s*\n",
+            mona_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ()
+        return tuple(
+            token.strip()
+            for token in match.group(1).split()
+            if token.strip()
         )
 
-    def _build_ordered_eventually_atomic_dfa(self, propositional_atoms: List[str]) -> str:
-        accepting_state = str(len(propositional_atoms) + 1)
-        other_states = [str(index) for index in range(1, len(propositional_atoms) + 1)]
-
+    def _render_mona_graph_as_dot(self, graph: Dict[str, Any]) -> str:
+        """Render a grouped MONA graph into a compact DOT projection."""
         lines = [
             "digraph MONA_DFA {",
-            " rankdir = LR;",
+            ' rankdir = LR;',
             " center = true;",
-            " size = \"7.5,10.5\";",
+            ' size = "7.5,10.5";',
             " edge [fontname = Courier];",
             " node [height = .5, width = .5];",
-            f" node [shape = doublecircle]; {accepting_state};",
         ]
-        if other_states:
-            lines.append(f" node [shape = circle]; {' '.join(other_states)};")
-        lines.append(" init [shape = plaintext, label = \"\"];")
-        lines.append(" init -> 1;")
-        for index, atom_name in enumerate(propositional_atoms, start=1):
-            lines.append(f" {index} -> {index + 1} [label=\"{atom_name}\"];")
+
+        accepting_states = tuple(graph.get("accepting_states", ()))
+        if accepting_states:
+            lines.append(
+                f" node [shape = doublecircle]; {'; '.join(accepting_states)};",
+            )
+        else:
+            lines.append(" node [shape = doublecircle];")
+
+        init_state = str(graph.get("init_state") or "1")
+        lines.append(f" node [shape = circle]; {init_state};")
+        lines.append(' init [shape = plaintext, label = ""];')
+        lines.append(f" init -> {init_state};")
+
+        free_variables = tuple(graph.get("free_variables", ()))
+        grouped_guards = graph.get("grouped_guards", {})
+        for (source_state, target_state), guards in sorted(
+            grouped_guards.items(),
+            key=lambda item: (
+                self._numeric_state_sort_key(item[0][0]),
+                self._numeric_state_sort_key(item[0][1]),
+            ),
+        ):
+            label = self._render_guard_group_label(tuple(guards), free_variables)
+            lines.append(f' {source_state} -> {target_state} [label="{label}"];')
+
         lines.append("}")
         return "\n".join(lines)
+
+    def _render_guard_group_label(
+        self,
+        guards: Tuple[str, ...],
+        free_variables: Tuple[str, ...],
+    ) -> str:
+        """Render a guard group compactly; large disjunctions stay opaque but parseable."""
+        unique_guards = tuple(dict.fromkeys(str(guard).strip() for guard in guards if str(guard).strip()))
+        if not unique_guards:
+            return "false"
+        if all(re.fullmatch(r"[01X]+", guard) is None for guard in unique_guards):
+            return " | ".join(unique_guards)
+        if len(unique_guards) == 1:
+            return self._render_guard_cube(unique_guards[0], free_variables)
+        if len(unique_guards) <= 8:
+            rendered_cubes = [
+                self._render_guard_cube(guard, free_variables)
+                for guard in unique_guards
+            ]
+            return " | ".join(
+                rendered if rendered == "true" else f"({rendered})"
+                for rendered in rendered_cubes
+            )
+        return f"guard_group_{len(unique_guards)}"
+
+    @staticmethod
+    def _render_guard_cube(guard: str, free_variables: Tuple[str, ...]) -> str:
+        literals: List[str] = []
+        for index, value in enumerate(str(guard).strip()):
+            if value == "X":
+                continue
+            if index >= len(free_variables):
+                continue
+            symbol = free_variables[index]
+            literals.append(symbol if value == "1" else f"~{symbol}")
+        return " & ".join(literals) if literals else "true"
+
+    @staticmethod
+    def _numeric_state_sort_key(state: str) -> Tuple[int, str]:
+        token = str(state).strip()
+        return (int(token), token) if token.isdigit() else (10**9, token)
 
     def _count_dfa_states(self, dfa_dot: str) -> int:
         """Count number of states in DFA from DOT representation"""
-        # Simple heuristic: count lines with state transitions
-        lines = dfa_dot.strip().split('\n')
-        # Count lines that contain "->" which indicate transitions
-        transition_lines = [line for line in lines if '->' in line and 'init' not in line]
-        # Rough estimate - not exact but good enough for metadata
-        return max(10, len(transition_lines) // 2)  # Placeholder logic
+        states = set()
+        for line in dfa_dot.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            grouped_match = re.search(r'node\s+\[.*?\];\s*([^;]+);', stripped)
+            if grouped_match:
+                tokens = re.findall(r"[A-Za-z0-9_]+", grouped_match.group(1))
+                states.update(token for token in tokens if token != "init")
+                continue
+            single_match = re.search(r"([A-Za-z0-9_]+)\s*\[\s*shape\s*=\s*", stripped)
+            if single_match:
+                token = single_match.group(1)
+                if token != "init":
+                    states.add(token)
+        return len(states)
 
     def _count_dfa_transitions(self, dfa_dot: str) -> int:
         """Count DFA transitions cheaply for large generic ltlf2dfa outputs."""

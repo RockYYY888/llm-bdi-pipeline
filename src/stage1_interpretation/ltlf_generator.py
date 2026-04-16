@@ -131,11 +131,9 @@ class NLToLTLfGenerator:
         prefer_compact_output = bool(compact_task_clauses) and (
             self._should_prefer_compact_task_grounded_output(nl_instruction)
         )
-        # Keep the main Stage 1 path semantically complete. Query-grounded benchmark
-        # instructions already enumerate the intended task order explicitly, so asking
-        # the model to collapse them to a single skeletal anchor is unsound and can
-        # also trigger provider schema drift on larger queries.
-        prefer_skeletal_output = False
+        prefer_skeletal_output = bool(prefer_compact_output) and (
+            self._should_use_skeletal_task_grounded_output(compact_task_clauses)
+        )
         user_prompt = get_ltl_user_prompt_with_options(
             nl_instruction,
             prefer_compact_task_grounded_output=prefer_compact_output,

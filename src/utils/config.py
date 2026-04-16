@@ -58,24 +58,24 @@ class Config:
         """
         Get the Stage 1 model identifier.
 
-        Stage 1 must not inherit the shared model selection used by other stages.
-        Keep it pinned to the DeepSeek chat model family by default so benchmark
-        runs remain stable even when Stage 3 experiments temporarily switch the
-        shared model to another provider.
+        Stage 1 is part of the benchmark contract, not a per-shell tuning knob.
+        Keep it pinned to the DeepSeek chat model unconditionally so live query
+        evaluation cannot silently drift to a different provider or reasoning
+        variant via shell or dotenv overrides.
         """
-        return os.getenv('OPENAI_STAGE1_MODEL', DEFAULT_STAGE1_MODEL)
+        return DEFAULT_STAGE1_MODEL
 
     @property
     def openai_stage3_model(self) -> str:
         """
         Get the Stage 3 model identifier.
 
-        Stage 3 needs a Minimax model that can return one structured JSON
-        library within a bounded wall-clock budget. The smaller M2 variant is a
-        better fit for low-latency one-shot structured generation than the
-        slower reasoning-heavier variants.
+        Stage 3 is likewise benchmark-pinned. The transition-native one-shot
+        synthesis path is evaluated specifically on Minimax M2 with reasoning
+        enabled, so configuration overrides must not swap in another provider,
+        larger reasoning-heavy variant, or unrelated chat model.
         """
-        return os.getenv('OPENAI_STAGE3_MODEL', DEFAULT_STAGE3_MODEL)
+        return DEFAULT_STAGE3_MODEL
 
     @property
     def openai_timeout(self) -> int:
@@ -107,6 +107,17 @@ class Config:
         queries without requiring retries or repairs.
         """
         return max(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '48000')), 1)
+
+    @property
+    def stage6_jason_timeout(self) -> int:
+        """
+        Get the Stage 6 Jason runtime timeout in seconds.
+
+        Large benchmark queries can require thousands of primitive actions in the
+        BDI runtime. Keep this separate from LLM timeouts so runtime validation
+        can scale without changing Stage 1 or Stage 3 synthesis behavior.
+        """
+        return max(int(os.getenv('STAGE6_JASON_TIMEOUT', '600')), 1)
 
     @property
     def openai_stage1_max_tokens(self) -> int:

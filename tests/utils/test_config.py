@@ -21,6 +21,7 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     monkeypatch.setenv("OPENAI_TIMEOUT", "120")
     monkeypatch.setenv("OPENAI_STAGE3_TIMEOUT", "240")
     monkeypatch.setenv("OPENAI_STAGE3_MAX_TOKENS", "4096")
+    monkeypatch.setenv("STAGE6_JASON_TIMEOUT", "900")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 
     config = Config()
@@ -32,6 +33,7 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     assert config.openai_timeout == 120
     assert config.openai_stage3_timeout == 240
     assert config.openai_stage3_max_tokens == 4096
+    assert config.stage6_jason_timeout == 900
     assert config.openai_base_url == "https://api.deepseek.com"
 
 
@@ -51,6 +53,15 @@ def test_stage3_timeout_defaults_to_longer_one_shot_budget(monkeypatch):
     config = Config()
 
     assert config.openai_stage3_timeout == 600
+
+
+def test_stage6_jason_timeout_defaults_to_large_runtime_budget(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("STAGE6_JASON_TIMEOUT", raising=False)
+
+    config = Config()
+
+    assert config.stage6_jason_timeout == 600
 
 
 def test_stage1_model_defaults_to_pinned_deepseek_chat(monkeypatch):
@@ -77,7 +88,7 @@ def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("OPENAI_MODEL", "shell-model")
     monkeypatch.setenv("OPENAI_STAGE1_MODEL", "shell-stage1-model")
-    monkeypatch.delenv("OPENAI_STAGE3_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_STAGE3_MODEL", "shell-stage3-model")
 
     config = Config()
     config._merge_env_lines(
@@ -89,5 +100,5 @@ def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
     )
 
     assert config.openai_model == "shell-model"
-    assert config.openai_stage1_model == "shell-stage1-model"
-    assert config.openai_stage3_model == "file-stage3-model"
+    assert config.openai_stage1_model == "deepseek/deepseek-chat-v3-0324"
+    assert config.openai_stage3_model == "minimax/minimax-m2"

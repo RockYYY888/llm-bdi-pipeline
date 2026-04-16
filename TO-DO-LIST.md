@@ -13,6 +13,10 @@
 
 ## Recent Completed Milestones
 
+- [x] Milestone 25: Align Stage 6 guided-prefix target tracking with literal-based transition IDs,
+  render observation plans for completed targets, and relax transition-native support gating so
+  auxiliary-role requirements (for example calibration) are supported; masked marsrover `query_1`
+  runs through end-to-end again
 - [x] Milestone 24: Keep benchmark queries as single reverse-generated sentences from official
   `problem.hddl` root tasks plus available typed objects, update NL instruction guidance, and fix
   Stage 3 target-binding normalisation plus constructive-sibling pruning so official blocksworld

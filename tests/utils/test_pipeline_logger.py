@@ -7,6 +7,11 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from utils.pipeline_logger import PipelineLogger
+from stage1_interpretation.ltlf_formula import (
+	LTLFormula,
+	LTLSpecification,
+	TemporalOperator,
+)
 
 
 def test_stage3_success_summary_in_execution_json_is_derived_from_method_library(tmp_path):
@@ -290,6 +295,51 @@ def test_pipeline_logger_persists_structured_timing_profile(tmp_path):
     assert "TIMING PROFILE" in execution_txt
     assert "stage1: 1.235s" in execution_txt
     assert "prompt_build_seconds: 0.111s" in execution_txt
+
+
+def test_pipeline_logger_persists_stage2_formula_on_failure(tmp_path):
+    logger = PipelineLogger(logs_dir=str(tmp_path))
+    logger.start_pipeline(
+        "demo instruction",
+        mode="dfa_agentspeak",
+        domain_file="demo.hddl",
+        domain_name="ROVER",
+        problem_name="roverprob7182",
+        output_dir=str(tmp_path),
+    )
+
+    spec = LTLSpecification()
+    spec.add_formula(
+        LTLFormula(
+            operator=TemporalOperator.FINALLY,
+            predicate=None,
+            sub_formulas=[
+                LTLFormula(
+                    operator=None,
+                    predicate={"query_step_1": []},
+                    sub_formulas=[],
+                    logical_op=None,
+                ),
+            ],
+            logical_op=None,
+        ),
+    )
+
+    logger.log_stage2_dfas(
+        spec,
+        None,
+        "Failed",
+        "MONA exited with code -6. stdout_size=33 bytes.",
+    )
+    logger.end_pipeline(success=False)
+
+    log_dir = logger.current_log_dir
+    assert log_dir is not None
+    execution = json.loads((log_dir / "execution.json").read_text())
+
+    assert execution["stage2_status"] == "failed"
+    assert execution["stage2_formula"] == "F(query_step_1)"
+    assert execution["stage2_error"] == "MONA exited with code -6. stdout_size=33 bytes."
 
 
 def test_pipeline_logger_sanitises_stage6_artifact_path_lists(tmp_path):

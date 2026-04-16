@@ -5,10 +5,11 @@ Converts LTLf formulas to DFA (Deterministic Finite Automaton).
 The DFA is used as context for Stage 3 AgentSpeak generation.
 """
 
+import re
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 # Add parent src directory to path
 _parent_dir = str(Path(__file__).parent.parent)
@@ -62,6 +63,25 @@ class DFABuilder:
                 )
         timing_profile["formula_render_seconds"] = time.perf_counter() - formula_render_start
 
+        symbolic_monitor_start = time.perf_counter()
+        symbolic_monitor = self._build_symbolic_unordered_query_step_monitor(ltl_spec)
+        timing_profile["symbolic_fragment_seconds"] = (
+            time.perf_counter() - symbolic_monitor_start
+        )
+        if symbolic_monitor is not None:
+            timing_profile["convert_seconds"] = 0.0
+            timing_profile["stats_seconds"] = 0.0
+            timing_profile["total_seconds"] = time.perf_counter() - total_start
+            return {
+                "formula": formula_str,
+                "construction": "exact_symbolic_query_step_conjunction",
+                "num_states": symbolic_monitor["num_states"],
+                "num_transitions": symbolic_monitor["num_transitions"],
+                "num_predicates": len(symbolic_monitor["query_step_indices"]),
+                "symbolic_query_step_monitor": symbolic_monitor,
+                "timing_profile": timing_profile,
+            }
+
         # Step 1: Generate DFA using the convert method (takes ltl_spec object)
         convert_start = time.perf_counter()
         dfa_dot, metadata = self.converter.convert(ltl_spec)
@@ -87,6 +107,76 @@ class DFABuilder:
         }
 
         return result
+
+    def _build_symbolic_unordered_query_step_monitor(
+        self,
+        ltl_spec: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if bool(getattr(ltl_spec, "query_task_sequence_is_ordered", False)):
+            return None
+
+        formulas = list(getattr(ltl_spec, "formulas", ()) or ())
+        if not formulas:
+            return None
+
+        query_step_indices: List[int] = []
+        seen_indices: set[int] = set()
+        for formula in formulas:
+            query_step_index = self._extract_unordered_query_step_eventually_index(formula)
+            if query_step_index is None or query_step_index in seen_indices:
+                return None
+            seen_indices.add(query_step_index)
+            query_step_indices.append(query_step_index)
+
+        sorted_indices = sorted(query_step_indices)
+        expected_indices = list(range(1, len(sorted_indices) + 1))
+        if sorted_indices != expected_indices:
+            return None
+
+        query_count = len(sorted_indices)
+        return {
+            "mode": "unordered_eventually_conjunction",
+            "query_step_indices": sorted_indices,
+            "initial_state": "q0",
+            "accepting_states": [],
+            "num_states": 1 << query_count,
+            "num_transitions": query_count * (1 << (query_count - 1)),
+        }
+
+    @staticmethod
+    def _extract_unordered_query_step_eventually_index(formula: Any) -> Optional[int]:
+        operator = getattr(formula, "operator", None)
+        operator_name = getattr(operator, "value", None)
+        if operator_name != "F":
+            return None
+
+        sub_formulas = list(getattr(formula, "sub_formulas", ()) or ())
+        if len(sub_formulas) != 1:
+            return None
+
+        atom = sub_formulas[0]
+        if getattr(atom, "operator", None) is not None:
+            return None
+        if getattr(atom, "logical_op", None) is not None:
+            return None
+
+        predicate = getattr(atom, "predicate", None)
+        if isinstance(predicate, dict):
+            if len(predicate) != 1:
+                return None
+            predicate_name = next(iter(predicate.keys()))
+            args = predicate[predicate_name]
+            if list(args or ()):
+                return None
+        elif isinstance(predicate, str):
+            predicate_name = predicate
+        else:
+            return None
+
+        match = re.fullmatch(r"query_step_(\d+)", str(predicate_name).strip())
+        if match is None:
+            return None
+        return int(match.group(1))
     
     def _count_states(self, dfa_dot: str) -> int:
         """Count number of states in DFA"""

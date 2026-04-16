@@ -308,15 +308,58 @@ class HTNMethodLibrary:
     methods: List[HTNMethod] = field(default_factory=list)
     target_literals: List[HTNLiteral] = field(default_factory=list)
     target_task_bindings: List[HTNTargetTaskBinding] = field(default_factory=list)
+    _task_index: Optional[Dict[str, HTNTask]] = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _task_index_size: int = field(
+        default=-1,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _methods_index: Optional[Dict[str, List[HTNMethod]]] = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _methods_index_size: int = field(
+        default=-1,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def _ensure_task_index(self) -> None:
+        task_count = len(self.compound_tasks) + len(self.primitive_tasks)
+        if self._task_index is not None and self._task_index_size == task_count:
+            return
+        self._task_index = {
+            task.name: task
+            for task in [*self.compound_tasks, *self.primitive_tasks]
+        }
+        self._task_index_size = task_count
+
+    def _ensure_methods_index(self) -> None:
+        method_count = len(self.methods)
+        if self._methods_index is not None and self._methods_index_size == method_count:
+            return
+        index: Dict[str, List[HTNMethod]] = {}
+        for method in self.methods:
+            index.setdefault(method.task_name, []).append(method)
+        self._methods_index = index
+        self._methods_index_size = method_count
 
     def methods_for_task(self, task_name: str) -> List[HTNMethod]:
-        return [method for method in self.methods if method.task_name == task_name]
+        self._ensure_methods_index()
+        return list((self._methods_index or {}).get(task_name, ()))
 
     def task_for_name(self, task_name: str) -> Optional[HTNTask]:
-        for task in self.compound_tasks + self.primitive_tasks:
-            if task.name == task_name:
-                return task
-        return None
+        self._ensure_task_index()
+        return (self._task_index or {}).get(task_name)
 
     def task_name_for_literal(self, literal: HTNLiteral) -> Optional[str]:
         signature = literal.to_signature()
@@ -774,14 +817,23 @@ class HTNMethodLibrary:
                     f"Stage 3 branch '{branch_key}' for task '{task_name}' must be an object, string, or list."
                 )
 
-        raw_branch_parameters = list(branch_payload.get("parameters", task_parameters))
-        branch_parameters = [
-            _canonical_parameter_symbol(value)
-            for value in raw_branch_parameters
-        ]
+        raw_branch_parameters = list(branch_payload.get("parameters", []))
+        if raw_branch_parameters:
+            branch_parameters = []
+            for value in (*task_parameters, *raw_branch_parameters):
+                canonical = _canonical_parameter_symbol(value)
+                if canonical and canonical not in branch_parameters:
+                    branch_parameters.append(canonical)
+        else:
+            raw_branch_parameters = list(task_parameters)
+            branch_parameters = [
+                _canonical_parameter_symbol(value)
+                for value in raw_branch_parameters
+            ]
         symbol_aliases = dict(base_symbol_aliases or {})
         symbol_aliases.update(_parameter_aliases(task_parameters))
         symbol_aliases.update(_parameter_aliases(raw_branch_parameters))
+        symbol_aliases.update(_parameter_aliases(branch_parameters))
         default_task_args = [
             _normalise_symbol_with_aliases(value, symbol_aliases)
             for value in (
@@ -944,12 +996,19 @@ class HTNMethodLibrary:
         if not call_name:
             raise ValueError(f"Stage 3 step for task '{task_name}' is missing call/task_name.")
 
+        canonical_call_name = str(call_name).strip()
+        expected_arity: Optional[int] = None
+        if canonical_call_name in (call_arities or {}):
+            expected_arity = max(
+                int((call_arities or {}).get(canonical_call_name, 0)),
+                0,
+            )
+
         raw_args = step_payload.get("args")
         if raw_args in (None, []):
             if parsed_invocation is not None and parsed_invocation.get("args"):
                 raw_args = parsed_invocation["args"]
-            elif str(call_name).strip() in (call_arities or {}):
-                expected_arity = max(int((call_arities or {}).get(str(call_name).strip(), 0)), 0)
+            elif expected_arity is not None:
                 raw_args = list(default_step_args[:expected_arity]) if expected_arity else []
             else:
                 raw_args = step_payload.get("parameters") or list(default_step_args)
@@ -957,10 +1016,21 @@ class HTNMethodLibrary:
         explicit_step_kind = str(step_payload.get("kind", "")).strip()
         if explicit_step_kind:
             step_kind = explicit_step_kind
-        elif str(call_name).strip() in (primitive_aliases or set()):
+        elif canonical_call_name in (primitive_aliases or set()):
             step_kind = "primitive"
         else:
             step_kind = "compound"
+        if (
+            step_kind == "compound"
+            and expected_arity is not None
+            and isinstance(raw_args, (list, tuple))
+            and len(raw_args) > expected_arity
+        ):
+            # Stage 3 contracts own compound-task headers. If the provider spills
+            # branch-local AUX witnesses into a child call, keep only the callee's
+            # declared header arity instead of rejecting a mechanically recoverable
+            # invocation shape.
+            raw_args = list(raw_args[:expected_arity])
         action_name = None
         if step_kind == "primitive":
             action_name = (

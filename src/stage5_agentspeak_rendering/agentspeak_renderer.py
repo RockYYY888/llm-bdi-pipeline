@@ -16,11 +16,16 @@ from utils.hddl_condition_parser import HDDLConditionParser
 class AgentSpeakRenderer:
     """Render the HTN method library plus DFA wrappers as AgentSpeak code."""
 
+    _VARIABLE_MAP_INFERENCE_STEP_LIMIT = 64
+    _VARIABLE_MAP_INFERENCE_CONTEXT_LIMIT = 256
+
     def __init__(self) -> None:
         self.parser = HDDLConditionParser()
         self._object_symbol_set: set[str] = set()
         self._object_type_map: Dict[str, str] = {}
         self._type_parent_map: Dict[str, Optional[str]] = {}
+        self._asl_term_cache: Dict[str, str] = {}
+        self._transition_grounded_local_bindings: Dict[str, Dict[str, str]] = {}
 
     def generate(
         self,
@@ -30,20 +35,57 @@ class AgentSpeakRenderer:
         plan_records: Sequence[Dict[str, Any]],
         typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
         ordered_query_sequence: bool = True,
+        prompt_analysis: Optional[Dict[str, Any]] = None,
+        transition_specs: Optional[Sequence[Dict[str, Any]]] = None,
+        query_task_anchors: Optional[Sequence[Dict[str, Any]]] = None,
+        query_task_name_map: Optional[Dict[str, str]] = None,
     ) -> str:
+        self._asl_term_cache = {}
         self._object_symbol_set = {str(obj) for obj in objects}
         self._object_type_map = {
             str(name): str(type_name)
             for name, type_name in (typed_objects or ())
         }
         self._type_parent_map = self._build_type_parent_map(domain)
+        self._transition_grounded_local_bindings = (
+            self._build_transition_grounded_local_bindings(prompt_analysis)
+        )
         _ = ordered_query_sequence
+        raw_dfa_mode = transition_specs is not None
+        transition_specs = tuple(transition_specs or ())
+        query_task_anchors = tuple(query_task_anchors or ())
+        query_task_name_map = dict(query_task_name_map or {})
         lines: List[str] = []
-        lines.extend(self._render_header(domain, objects, plan_records))
+        lines.extend(
+            self._render_header(
+                domain,
+                objects,
+                plan_records,
+                raw_dfa_mode=raw_dfa_mode,
+                transition_specs=transition_specs,
+                query_task_anchors=query_task_anchors,
+            ),
+        )
         lines.extend(self._render_primitive_wrappers(domain))
-        lines.extend(self._render_method_plans(domain, method_library))
-        lines.extend(self._render_transition_plans(plan_records))
-        lines.extend(self._render_control_plans(plan_records))
+        lines.extend(self._render_method_plans(domain, method_library, plan_records))
+        if raw_dfa_mode:
+            lines.extend(
+                self._render_raw_dfa_transition_plans(
+                    transition_specs,
+                    query_task_anchors=query_task_anchors,
+                    query_task_name_map=query_task_name_map,
+                ),
+            )
+            lines.extend(
+                self._render_raw_dfa_control_plans(
+                    transition_specs,
+                    query_task_anchors=query_task_anchors,
+                    query_task_name_map=query_task_name_map,
+                ),
+            )
+        else:
+            lines.extend(self._render_transition_plans(plan_records))
+            lines.extend(self._render_control_plans(plan_records))
         return "\n".join(lines).strip() + "\n"
 
     def _render_header(
@@ -51,6 +93,10 @@ class AgentSpeakRenderer:
         domain: Any,
         objects: Sequence[str],
         plan_records: Sequence[Dict[str, Any]],
+        *,
+        raw_dfa_mode: bool = False,
+        transition_specs: Sequence[Dict[str, Any]] = (),
+        query_task_anchors: Sequence[Dict[str, Any]] = (),
     ) -> List[str]:
         lines = [
             "/* Initial Beliefs */",
@@ -65,24 +111,46 @@ class AgentSpeakRenderer:
                     f"{self._call('object_type', (obj, self._type_atom(closure_type)))}."
                 )
 
-        if plan_records:
-            initial_state = plan_records[0].get("initial_state")
+        dfa_records: Sequence[Dict[str, Any]] = transition_specs if raw_dfa_mode else plan_records
+        if dfa_records:
+            initial_state = dfa_records[0].get("initial_state")
             if initial_state:
                 lines.append(f"dfa_state({initial_state}).")
             accepting_states = sorted(
                 {
                     state
-                    for record in plan_records
+                    for record in dfa_records
                     for state in record.get("accepting_states", [])
                 },
             )
             for state in accepting_states:
                 lines.append(f"accepting_state({state}).")
 
-        for record in plan_records:
-            lines.append(
-                f"dfa_edge_label({record['transition_name']}, \"{record['label']}\")."
+        literal_label_by_query_step = {
+            index: literal_signature
+            for index, anchor in enumerate(query_task_anchors, start=1)
+            if (literal_signature := str(anchor.get("literal_signature") or "").strip())
+        }
+        for record in dfa_records:
+            transition_name = str(record.get("transition_name") or "").strip()
+            if not transition_name:
+                continue
+            query_step_index = record.get("query_step_index")
+            label = (
+                literal_label_by_query_step.get(query_step_index)
+                if raw_dfa_mode and isinstance(query_step_index, int)
+                else None
+            ) or (
+                record.get("label")
+                or record.get("raw_label")
+                or record.get("guard_context")
+                or ""
             )
+            lines.append(
+                f"dfa_edge_label({transition_name}, \"{label}\")."
+            )
+        if query_task_anchors:
+            lines.append("query_step(1).")
 
         lines.append("")
         return lines
@@ -132,7 +200,12 @@ class AgentSpeakRenderer:
 
         return lines
 
-    def _render_method_plans(self, domain: Any, method_library: HTNMethodLibrary) -> List[str]:
+    def _render_method_plans(
+        self,
+        domain: Any,
+        method_library: HTNMethodLibrary,
+        plan_records: Sequence[Dict[str, Any]],
+    ) -> List[str]:
         lines = ["/* HTN Method Plans */"]
         task_lookup = {
             task.name: task
@@ -144,6 +217,11 @@ class AgentSpeakRenderer:
         render_specs = self._build_task_render_specs(domain, method_library)
         effect_cache: Dict[str, Tuple[Any, ...]] = {}
         effect_predicate_cache: Dict[str, Tuple[str, ...]] = {}
+        self._populate_effect_predicate_cache(
+            methods_by_task,
+            render_specs,
+            effect_predicate_cache,
+        )
 
         for method in self._ordered_methods_for_rendering(
             method_library.methods,
@@ -166,6 +244,458 @@ class AgentSpeakRenderer:
             lines.append("")
 
         return lines
+
+    def _render_exact_grounded_method_plans(
+        self,
+        *,
+        method_library: HTNMethodLibrary,
+        plan_records: Sequence[Dict[str, Any]],
+        task_lookup: Dict[str, Any],
+        render_specs: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        if not plan_records:
+            return []
+
+        method_lookup = {
+            str(method.method_name).strip(): method
+            for method in method_library.methods
+            if str(method.method_name).strip()
+        }
+        methods_by_task: Dict[str, List[HTNMethod]] = defaultdict(list)
+        for method in method_library.methods:
+            methods_by_task[method.task_name].append(method)
+        rendered_chunks: List[str] = []
+        seen_chunks: set[str] = set()
+        for record in plan_records:
+            plan = record.get("plan")
+            if not isinstance(plan, PANDAPlanResult):
+                continue
+            actual_plan_text = str(plan.actual_plan or plan.raw_plan or "").strip()
+            if not actual_plan_text:
+                continue
+            for node in self._ordered_actual_plan_method_nodes(actual_plan_text):
+                method_name = str(node.get("method_name") or "").strip()
+                method = method_lookup.get(method_name)
+                if method is None:
+                    continue
+                chunk = self._render_exact_grounded_method_chunk(
+                    method=method,
+                    method_node=node,
+                    actual_plan_nodes=self._parse_actual_plan_nodes(actual_plan_text),
+                    method_lookup=method_lookup,
+                    methods_by_task=methods_by_task,
+                    task_lookup=task_lookup,
+                    render_specs=render_specs,
+                )
+                if not chunk or chunk in seen_chunks:
+                    continue
+                seen_chunks.add(chunk)
+                rendered_chunks.append(chunk)
+        return rendered_chunks
+
+    def _render_exact_grounded_method_chunk(
+        self,
+        *,
+        method: HTNMethod,
+        method_node: Dict[str, Any],
+        actual_plan_nodes: Dict[int, Dict[str, Any]],
+        method_lookup: Dict[str, HTNMethod],
+        methods_by_task: Dict[str, List[HTNMethod]],
+        task_lookup: Dict[str, Any],
+        render_specs: Dict[str, Dict[str, Any]],
+    ) -> Optional[str]:
+        task_name = str(method_node.get("task_name") or "").strip()
+        task_args = tuple(str(arg).strip() for arg in (method_node.get("task_args") or ()))
+        ordered_children = self._ordered_actual_plan_child_nodes(
+            method_node,
+            actual_plan_nodes,
+        )
+        binding = self._exact_method_binding(
+            method=method,
+            task_args=task_args,
+            ordered_children=ordered_children,
+        )
+        if binding is None or self._binding_has_synthetic_witness_tokens(binding):
+            return None
+
+        trigger = self._task_call(task_name, task_args)
+        render_spec = render_specs.get(method.task_name, {})
+        grounded_context_literals = self._merge_context_literals(
+            self._ground_method_context_literals(
+                method,
+                binding,
+            ),
+            self._ground_exact_prefix_noop_child_context_literals(
+                ordered_children,
+                actual_plan_nodes=actual_plan_nodes,
+                method_lookup=method_lookup,
+            ),
+        )
+        grounded_context_literals = self._merge_context_literals(
+            grounded_context_literals,
+            self._type_guard_literals(
+                task_args,
+                tuple(render_spec.get("task_param_types", ())),
+            ),
+        )
+        ordered_context_literals = self._order_context_literals_for_jason(
+            grounded_context_literals,
+            initially_bound=(),
+        )
+        context = self._literal_clause(ordered_context_literals, {})
+        body_lines = [
+            self._render_method_trace_statement(method, task_args),
+        ]
+        for child_node in ordered_children:
+            child_task_name = str(child_node.get("task_name") or "").strip()
+            if (
+                str(child_node.get("kind") or "") == "compound"
+                and self._compound_task_can_reach_task(
+                    child_task_name,
+                    method.task_name,
+                    methods_by_task,
+                )
+            ):
+                body_lines.append(
+                    self._call(
+                        "pipeline.no_ancestor_goal",
+                        (
+                            self._sanitize_name(child_task_name),
+                            *tuple(child_node.get("task_args") or ()),
+                        ),
+                    ),
+                )
+            body_lines.append(
+                f"!{self._task_call(str(child_node.get('task_name') or '').strip(), tuple(child_node.get('task_args') or ()))}"
+            )
+        if len(body_lines) == 1:
+            body_lines.append("true")
+        return "\n".join(
+            [
+                f"+!{trigger} : {context} <-",
+                *self._indent_body(body_lines),
+            ],
+        )
+
+    def _parse_actual_plan_nodes(
+        self,
+        plan_text: str,
+    ) -> Dict[int, Dict[str, Any]]:
+        nodes: Dict[int, Dict[str, Any]] = {}
+        for raw_line in str(plan_text or "").splitlines():
+            line = raw_line.strip()
+            if not line or line == "==>" or line.startswith("root "):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                node_id = int(parts[0])
+            except ValueError:
+                continue
+            if "->" in parts:
+                arrow_index = parts.index("->")
+                if arrow_index < 2 or arrow_index + 1 >= len(parts):
+                    continue
+                nodes[node_id] = {
+                    "node_id": node_id,
+                    "kind": "compound",
+                    "task_name": parts[1],
+                    "task_args": tuple(parts[2:arrow_index]),
+                    "method_name": parts[arrow_index + 1],
+                    "children": tuple(
+                        child_id
+                        for child_id in self._parse_plan_node_ids(parts[arrow_index + 2:])
+                    ),
+                }
+                continue
+            nodes[node_id] = {
+                "node_id": node_id,
+                "kind": "primitive",
+                "task_name": parts[1],
+                "task_args": tuple(parts[2:]),
+                "method_name": None,
+                "children": (),
+            }
+        return nodes
+
+    def _ordered_actual_plan_method_nodes(
+        self,
+        plan_text: str,
+    ) -> Tuple[Dict[str, Any], ...]:
+        nodes = self._parse_actual_plan_nodes(plan_text)
+        if not nodes:
+            return ()
+
+        root_ids: List[int] = []
+        for raw_line in str(plan_text or "").splitlines():
+            line = raw_line.strip()
+            if not line.startswith("root "):
+                continue
+            root_ids.extend(self._parse_plan_node_ids(line.split()[1:]))
+
+        first_primitive_cache: Dict[int, int] = {}
+
+        def first_primitive_id(node_id: int) -> int:
+            cached = first_primitive_cache.get(node_id)
+            if cached is not None:
+                return cached
+            node = nodes.get(node_id)
+            if node is None:
+                first_primitive_cache[node_id] = node_id
+                return node_id
+            if str(node.get("kind") or "") == "primitive":
+                first_primitive_cache[node_id] = node_id
+                return node_id
+            child_ids = tuple(node.get("children") or ())
+            if not child_ids:
+                first_primitive_cache[node_id] = node_id
+                return node_id
+            first_primitive_cache[node_id] = min(
+                first_primitive_id(child_id)
+                for child_id in child_ids
+            )
+            return first_primitive_cache[node_id]
+
+        ordered_nodes: List[Dict[str, Any]] = []
+        visited: set[int] = set()
+
+        def visit(node_id: int) -> None:
+            if node_id in visited:
+                return
+            node = nodes.get(node_id)
+            if node is None or str(node.get("kind") or "") != "compound":
+                return
+            visited.add(node_id)
+            ordered_nodes.append(node)
+            for child_id in sorted(
+                tuple(node.get("children") or ()),
+                key=lambda child_id: (first_primitive_id(child_id), child_id),
+            ):
+                visit(child_id)
+
+        for node_id in sorted(root_ids, key=lambda node_id: (first_primitive_id(node_id), node_id)):
+            visit(node_id)
+        for node_id in sorted(nodes, key=lambda node_id: (first_primitive_id(node_id), node_id)):
+            visit(node_id)
+        return tuple(ordered_nodes)
+
+    def _ordered_actual_plan_child_nodes(
+        self,
+        method_node: Dict[str, Any],
+        actual_plan_nodes: Dict[int, Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], ...]:
+        first_primitive_cache: Dict[int, int] = {}
+
+        def first_primitive_id(node_id: int) -> int:
+            cached = first_primitive_cache.get(node_id)
+            if cached is not None:
+                return cached
+            node = actual_plan_nodes.get(node_id)
+            if node is None:
+                first_primitive_cache[node_id] = node_id
+                return node_id
+            if str(node.get("kind") or "") == "primitive":
+                first_primitive_cache[node_id] = node_id
+                return node_id
+            child_ids = tuple(node.get("children") or ())
+            if not child_ids:
+                first_primitive_cache[node_id] = node_id
+                return node_id
+            first_primitive_cache[node_id] = min(
+                first_primitive_id(child_id)
+                for child_id in child_ids
+            )
+            return first_primitive_cache[node_id]
+
+        child_ids = sorted(
+            tuple(method_node.get("children") or ()),
+            key=lambda child_id: (first_primitive_id(child_id), child_id),
+        )
+        return tuple(
+            node
+            for child_id in child_ids
+            if (node := actual_plan_nodes.get(child_id)) is not None
+        )
+
+    def _exact_method_binding(
+        self,
+        *,
+        method: HTNMethod,
+        task_args: Sequence[str],
+        ordered_children: Sequence[Dict[str, Any]],
+    ) -> Optional[Dict[str, str]]:
+        binding: Dict[str, str] = {}
+        if not self._extend_exact_binding(
+            binding,
+            self._task_binding_parameters(method, len(task_args)),
+            task_args,
+        ):
+            return None
+
+        ordered_steps = [
+            step
+            for step in self._ordered_method_steps(method)
+            if getattr(step, "kind", None) in {"primitive", "compound"}
+        ]
+        if len(ordered_steps) != len(ordered_children):
+            return None
+
+        for step, child_node in zip(ordered_steps, ordered_children):
+            if not self._actual_child_matches_method_step(step, child_node):
+                return None
+            if not self._extend_exact_binding(
+                binding,
+                tuple(getattr(step, "args", ()) or ()),
+                tuple(child_node.get("task_args") or ()),
+            ):
+                return None
+        return binding
+
+    def _actual_child_matches_method_step(
+        self,
+        step: Any,
+        child_node: Dict[str, Any],
+    ) -> bool:
+        child_name = self._sanitize_name(str(child_node.get("task_name") or "").strip())
+        if getattr(step, "kind", None) == "primitive":
+            candidate_names = {
+                self._sanitize_name(str(getattr(step, "task_name", "") or "").strip()),
+                self._sanitize_name(str(getattr(step, "action_name", "") or "").strip()),
+            }
+            return child_name in candidate_names
+        if getattr(step, "kind", None) == "compound":
+            return child_name == self._sanitize_name(str(getattr(step, "task_name", "") or "").strip())
+        return False
+
+    def _extend_exact_binding(
+        self,
+        binding: Dict[str, str],
+        symbols: Sequence[str],
+        grounded_args: Sequence[str],
+    ) -> bool:
+        if len(symbols) != len(grounded_args):
+            return False
+        for symbol, grounded_arg in zip(symbols, grounded_args):
+            symbol_text = str(symbol).strip()
+            grounded_text = str(grounded_arg).strip()
+            if not symbol_text or not grounded_text:
+                return False
+            if self._looks_like_variable(symbol_text):
+                existing = binding.get(symbol_text)
+                if existing is None:
+                    binding[symbol_text] = grounded_text
+                    continue
+                if existing != grounded_text:
+                    return False
+                continue
+            if self._sanitize_name(symbol_text) != self._sanitize_name(grounded_text):
+                return False
+        return True
+
+    def _ground_method_context_literals(
+        self,
+        method: HTNMethod,
+        binding: Dict[str, str],
+    ) -> Tuple[Any, ...]:
+        grounded_literals: List[Any] = []
+        seen_signatures: set[Tuple[str, bool, Tuple[str, ...]]] = set()
+        for literal in tuple(getattr(method, "context", ()) or ()):
+            grounded_literal = self._ground_literal_with_exact_binding(
+                literal,
+                binding,
+            )
+            if grounded_literal is None:
+                continue
+            signature = self._literal_structural_key(grounded_literal)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            grounded_literals.append(grounded_literal)
+        return tuple(grounded_literals)
+
+    def _ground_literal_with_exact_binding(
+        self,
+        literal: Any,
+        binding: Dict[str, str],
+    ) -> Optional[Any]:
+        grounded_args: List[str] = []
+        for arg in tuple(getattr(literal, "args", ()) or ()):
+            arg_text = str(arg).strip()
+            if self._looks_like_variable(arg_text):
+                grounded_value = binding.get(arg_text)
+                if grounded_value is None:
+                    return None
+                grounded_args.append(grounded_value)
+                continue
+            grounded_args.append(arg_text)
+        return type(
+            "LiteralProxy",
+            (),
+            {
+                "predicate": str(getattr(literal, "predicate", "") or "").strip(),
+                "args": tuple(grounded_args),
+                "is_positive": bool(getattr(literal, "is_positive", True)),
+            },
+        )()
+
+    def _ground_exact_prefix_noop_child_context_literals(
+        self,
+        ordered_children: Sequence[Dict[str, Any]],
+        *,
+        actual_plan_nodes: Dict[int, Dict[str, Any]],
+        method_lookup: Dict[str, HTNMethod],
+    ) -> Tuple[Any, ...]:
+        grounded_literals: List[Any] = []
+        seen_signatures: set[Tuple[str, bool, Tuple[str, ...]]] = set()
+        for child_node in ordered_children:
+            if str(child_node.get("kind") or "") != "compound":
+                break
+            child_method_name = str(child_node.get("method_name") or "").strip()
+            child_method = method_lookup.get(child_method_name)
+            if child_method is None or not self._method_is_pure_noop(child_method):
+                break
+            child_binding = self._exact_method_binding(
+                method=child_method,
+                task_args=tuple(child_node.get("task_args") or ()),
+                ordered_children=self._ordered_actual_plan_child_nodes(
+                    child_node,
+                    actual_plan_nodes,
+                ),
+            )
+            if child_binding is None or self._binding_has_synthetic_witness_tokens(child_binding):
+                break
+            for literal in self._ground_method_context_literals(child_method, child_binding):
+                signature = self._literal_structural_key(literal)
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                grounded_literals.append(literal)
+        return tuple(grounded_literals)
+
+    @staticmethod
+    def _binding_has_synthetic_witness_tokens(binding: Dict[str, str]) -> bool:
+        return any(
+            AgentSpeakRenderer._is_synthetic_witness_token(value)
+            for value in binding.values()
+        )
+
+    @staticmethod
+    def _is_synthetic_witness_token(token: str) -> bool:
+        value = str(token or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        return value.startswith("witness_") or value.startswith("witness-")
+
+    @staticmethod
+    def _parse_plan_node_ids(tokens: Sequence[str]) -> Tuple[int, ...]:
+        node_ids: List[int] = []
+        for token in tokens:
+            try:
+                node_ids.append(int(str(token).strip()))
+            except ValueError:
+                continue
+        return tuple(node_ids)
 
     def _ordered_methods_for_rendering(
         self,
@@ -214,17 +744,10 @@ class AgentSpeakRenderer:
         effect_cache: Dict[str, Tuple[Any, ...]],
         effect_predicate_cache: Dict[str, Tuple[str, ...]],
     ) -> Tuple[HTNMethod, ...]:
-        task_effect_signatures = {
-            self._literal_signature(literal)
-            for literal in self._compound_task_effect_templates(
-                task_name,
-                task_lookup,
-                methods_by_task,
-                render_specs,
-                effect_cache,
-            )
-            if getattr(literal, "is_positive", True)
-        }
+        task_effect_signatures = self._task_render_priority_effect_signatures(
+            task_name,
+            task_lookup,
+        )
         enumerated_methods = list(enumerate(methods))
         enumerated_methods.sort(
             key=lambda entry: self._method_render_priority(
@@ -240,6 +763,36 @@ class AgentSpeakRenderer:
         )
         return tuple(method for _, method in enumerated_methods)
 
+    def _task_render_priority_effect_signatures(
+        self,
+        task_name: str,
+        task_lookup: Dict[str, Any],
+    ) -> set[str]:
+        task_schema = task_lookup.get(task_name)
+        if task_schema is None:
+            return set()
+
+        headline_literal = getattr(task_schema, "headline_literal", None)
+        if headline_literal is not None:
+            return {self._literal_signature(headline_literal)}
+
+        parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+        signatures: set[str] = set()
+        for predicate_name in tuple(getattr(task_schema, "source_predicates", ()) or ()):
+            if not str(predicate_name or "").strip():
+                continue
+            literal = type(
+                "LiteralProxy",
+                (),
+                {
+                    "predicate": str(predicate_name).strip(),
+                    "args": parameters,
+                    "is_positive": True,
+                },
+            )()
+            signatures.add(self._literal_signature(literal))
+        return signatures
+
     def _method_render_priority(
         self,
         method: HTNMethod,
@@ -252,28 +805,17 @@ class AgentSpeakRenderer:
         task_effect_signatures: set[str],
     ) -> Tuple[int, int, int, int]:
         ordered_steps = self._ordered_method_steps(method)
-        render_spec = render_specs.get(method.task_name, {})
-        variable_map = self._method_variable_map(
+        is_noop_like = self._method_is_pure_noop(method) or self._method_is_single_noop_primitive(
             method,
             ordered_steps,
-            render_spec,
-        )
-        context_literals = self._method_context_literals(
-            method,
-            ordered_steps,
-            task_lookup,
-            methods_by_task,
-            render_spec,
-            variable_map,
-            effect_cache,
-            effect_predicate_cache,
         )
         directly_supports_effect = self._context_literals_support_task_effect(
             method,
-            context_literals,
+            tuple(getattr(method, "context", ()) or ()),
             task_lookup,
             task_effect_signatures,
         )
+        noop_rank = 0 if is_noop_like else 1
         has_compound_subtasks = any(
             getattr(step, "kind", None) == "compound"
             for step in ordered_steps
@@ -284,11 +826,30 @@ class AgentSpeakRenderer:
             for step in ordered_steps
         )
         return (
+            noop_rank,
             0 if directly_supports_effect else 1,
             0 if not has_compound_subtasks else 1,
             0 if not is_recursive else 1,
             original_index,
         )
+
+    @staticmethod
+    def _method_is_single_noop_primitive(
+        method: HTNMethod,
+        ordered_steps: Sequence[Any],
+    ) -> bool:
+        _ = method
+        if len(ordered_steps) != 1:
+            return False
+        step = ordered_steps[0]
+        if getattr(step, "kind", None) != "primitive":
+            return False
+        action_name = str(
+            getattr(step, "action_name", None)
+            or getattr(step, "task_name", "")
+            or ""
+        ).strip()
+        return action_name in {"nop", "noop"}
 
     def _render_method_plan(
         self,
@@ -306,27 +867,46 @@ class AgentSpeakRenderer:
             render_spec.get("trigger_args")
             or (task_schema.parameters if task_schema else method.parameters)
         )
-        variable_map = self._method_variable_map(
-            method,
-            ordered_steps,
-            render_spec,
-        )
-        context_literals = self._method_context_literals(
-            method,
-            ordered_steps,
-            task_lookup,
-            methods_by_task,
-            render_spec,
-            variable_map,
-            effect_cache,
-            effect_predicate_cache,
-        )
-        context_literals = self._merge_context_literals(
-            context_literals,
-            self._method_type_guard_literals(
+        use_simple_variable_map = self._should_use_simple_variable_map(method, ordered_steps)
+        if use_simple_variable_map:
+            variable_map = self._simple_method_variable_map(method, trigger_args)
+        else:
+            variable_map = self._method_variable_map(
                 method,
+                ordered_steps,
+                render_spec,
+            )
+        variable_map = self._apply_exact_grounded_local_bindings(
+            method,
+            variable_map,
+        )
+        expand_render_context = self._should_expand_render_context(
+            ordered_steps,
+            methods_by_task,
+        )
+        if expand_render_context:
+            context_literals = self._method_context_literals(
+                method,
+                ordered_steps,
+                task_lookup,
+                methods_by_task,
                 render_spec,
                 variable_map,
+                effect_cache,
+                effect_predicate_cache,
+            )
+        else:
+            context_literals = tuple(getattr(method, "context", ()) or ())
+        context_literals = self._merge_context_literals(
+            context_literals,
+            (
+                ()
+                if use_simple_variable_map
+                else self._method_type_guard_literals(
+                    method,
+                    render_spec,
+                    variable_map,
+                )
             ),
         )
         context_literals = self._merge_context_literals(
@@ -336,15 +916,19 @@ class AgentSpeakRenderer:
                 ordered_steps,
             ),
         )
-        specialisations = self._first_compound_child_specialisations(
-            method,
-            ordered_steps,
-            task_lookup,
-            methods_by_task,
-            render_specs,
-            variable_map,
-            effect_cache,
-            effect_predicate_cache,
+        specialisations = (
+            self._first_compound_child_specialisations(
+                method,
+                ordered_steps,
+                task_lookup,
+                methods_by_task,
+                render_specs,
+                variable_map,
+                effect_cache,
+                effect_predicate_cache,
+            )
+            if expand_render_context
+            else ((),)
         )
         trigger = self._task_call(method.task_name, trigger_args)
         method_trace_line = self._render_method_trace_statement(
@@ -352,10 +936,12 @@ class AgentSpeakRenderer:
             self._map_args(trigger_args, variable_map),
         )
         body = [method_trace_line]
-        body.extend(
-            f"!{self._task_call(step.task_name, self._map_args(step.args, variable_map))}"
-            for step in ordered_steps
-        )
+        for step in ordered_steps:
+            if self._step_needs_recursive_ancestor_guard(method, step, methods_by_task):
+                body.append(self._recursive_ancestor_guard_call(step, variable_map))
+            body.append(
+                f"!{self._task_call(step.task_name, self._map_args(step.args, variable_map))}"
+            )
         if len(body) == 1:
             body.append("true")
 
@@ -379,16 +965,125 @@ class AgentSpeakRenderer:
             lines.extend(self._indent_body(body))
         return lines
 
+    def _step_needs_recursive_ancestor_guard(
+        self,
+        method: HTNMethod,
+        step: Any,
+        methods_by_task: Dict[str, List[HTNMethod]],
+    ) -> bool:
+        if getattr(step, "kind", None) != "compound":
+            return False
+        return self._compound_task_can_reach_task(
+            str(getattr(step, "task_name", "") or "").strip(),
+            method.task_name,
+            methods_by_task,
+        )
+
+    def _compound_task_can_reach_task(
+        self,
+        start_task: str,
+        target_task: str,
+        methods_by_task: Dict[str, List[HTNMethod]],
+        seen_tasks: Optional[set[str]] = None,
+    ) -> bool:
+        start_task = str(start_task or "").strip()
+        target_task = str(target_task or "").strip()
+        if not start_task or not target_task:
+            return False
+        if start_task == target_task:
+            return True
+        seen = seen_tasks if seen_tasks is not None else set()
+        if start_task in seen:
+            return False
+        seen.add(start_task)
+        for candidate_method in methods_by_task.get(start_task, ()):
+            for candidate_step in candidate_method.subtasks:
+                if getattr(candidate_step, "kind", None) != "compound":
+                    continue
+                child_task = str(getattr(candidate_step, "task_name", "") or "").strip()
+                if self._compound_task_can_reach_task(
+                    child_task,
+                    target_task,
+                    methods_by_task,
+                    seen,
+                ):
+                    return True
+        return False
+
+    def _recursive_ancestor_guard_call(
+        self,
+        step: Any,
+        variable_map: Dict[str, str],
+    ) -> str:
+        guard_args = (
+            self._sanitize_name(str(getattr(step, "task_name", "") or "").strip()),
+            *self._map_args(getattr(step, "args", ()) or (), variable_map),
+        )
+        return self._call("pipeline.no_ancestor_goal", guard_args)
+
+    def _should_expand_render_context(
+        self,
+        ordered_steps: Sequence[Any],
+        methods_by_task: Dict[str, List[HTNMethod]],
+    ) -> bool:
+        if any(getattr(step, "kind", None) == "primitive" for step in ordered_steps):
+            return True
+        for step in ordered_steps[1:]:
+            if getattr(step, "kind", None) != "compound":
+                continue
+            if methods_by_task.get(str(getattr(step, "task_name", "") or "").strip()):
+                return True
+        return False
+
+    def _should_use_simple_variable_map(
+        self,
+        method: HTNMethod,
+        ordered_steps: Sequence[Any],
+    ) -> bool:
+        if len(ordered_steps) > self._VARIABLE_MAP_INFERENCE_STEP_LIMIT:
+            return True
+        return (
+            len(tuple(getattr(method, "context", ()) or ()))
+            > self._VARIABLE_MAP_INFERENCE_CONTEXT_LIMIT
+        )
+
+    def _simple_method_variable_map(
+        self,
+        method: HTNMethod,
+        trigger_args: Sequence[str],
+    ) -> Dict[str, str]:
+        variable_map = {
+            original: canonical
+            for original, canonical in zip(
+                self._context_binding_parameters(method, trigger_args),
+                trigger_args,
+            )
+        }
+        used_names = set(variable_map.values())
+        for parameter in tuple(getattr(method, "parameters", ()) or ()):
+            parameter_name = str(parameter).strip()
+            if not parameter_name or parameter_name in variable_map:
+                continue
+            candidate = self._sanitize_name(parameter_name).upper() or "VAR"
+            if not candidate[0].isalpha():
+                candidate = f"VAR_{candidate}"
+            suffix = 2
+            while candidate in used_names:
+                candidate = f"{self._sanitize_name(parameter_name).upper() or 'VAR'}_{suffix}"
+                suffix += 1
+            variable_map[parameter_name] = candidate
+            used_names.add(candidate)
+        return variable_map
+
     def _render_method_trace_statement(
         self,
         method: HTNMethod,
         trigger_args: Sequence[str],
     ) -> str:
-        trace_term = self._call(
-            "trace_method",
-            (self._asl_atom_or_string(method.method_name), *trigger_args),
-        )
-        return f'.print("runtime trace method ", {trace_term})'
+        trace_args = [self._asl_string("runtime trace method flat "), self._asl_string(method.method_name)]
+        for arg in trigger_args:
+            trace_args.extend((self._asl_string("|"), self._asl_term(arg)))
+        return f".print({', '.join(trace_args)})"
 
     def _render_transition_plans(self, plan_records: Sequence[Dict[str, Any]]) -> List[str]:
         lines = ["/* DFA Transition Wrappers */"]
@@ -397,18 +1092,87 @@ class AgentSpeakRenderer:
             plan: PANDAPlanResult = record["plan"]
             source_state = record["source_state"]
             target_state = record["target_state"]
-            body = [f"!{self._task_call(plan.task_name, plan.task_args)}"]
-            if source_state != target_state:
+            body = [
+                f"-{self._call('dfa_state', (source_state,))}",
+                f"!{self._transition_runtime_call(record, plan)}",
+                f"+{self._call('dfa_state', (target_state,))}",
+            ]
+            lines.append(
+                f"+!{record['transition_name']} : {self._call('dfa_state', (source_state,))} <-"
+            )
+            lines.extend(self._indent_body(body))
+            lines.append("")
+
+        return lines
+
+    def _render_raw_dfa_transition_plans(
+        self,
+        transition_specs: Sequence[Dict[str, Any]],
+        *,
+        query_task_anchors: Sequence[Dict[str, Any]],
+        query_task_name_map: Dict[str, str],
+    ) -> List[str]:
+        lines = ["/* DFA Transition Wrappers */"]
+        anchors_by_index = {
+            index: anchor
+            for index, anchor in enumerate(query_task_anchors, start=1)
+        }
+
+        for spec in transition_specs:
+            source_state = str(spec.get("source_state") or "").strip()
+            target_state = str(spec.get("target_state") or "").strip()
+            guard_context = str(spec.get("guard_context") or "true").strip() or "true"
+            transition_name = str(spec.get("transition_name") or "").strip()
+            stateless_query_step = bool(spec.get("stateless_query_step"))
+            if not transition_name or not source_state or not target_state:
+                continue
+            query_step_index = spec.get("query_step_index")
+            anchor = (
+                anchors_by_index.get(int(query_step_index))
+                if isinstance(query_step_index, int)
+                else None
+            )
+            if anchor is not None:
+                anchor_task_name = str(anchor.get("task_name") or "").strip()
+                task_name = query_task_name_map.get(anchor_task_name, anchor_task_name)
+                task_args = tuple(
+                    str(arg).strip()
+                    for arg in (anchor.get("args") or ())
+                    if str(arg).strip()
+                )
+                if stateless_query_step:
+                    lines.append(f"+!{transition_name} : true <-")
+                    body = [f"!{self._task_call(task_name, task_args)}"] if task_name else ["true"]
+                    lines.extend(self._indent_body(body))
+                    lines.append("")
+                    continue
+                lines.append(
+                    f"+!{transition_name} : {self._call('dfa_state', (source_state,))} <-"
+                )
+                body = []
+                if task_name:
+                    body.append(f"!{self._task_call(task_name, task_args)}")
                 body.extend(
                     [
                         f"-{self._call('dfa_state', (source_state,))}",
                         f"+{self._call('dfa_state', (target_state,))}",
                     ],
                 )
+                lines.extend(self._indent_body(body))
+                lines.append("")
+                continue
             lines.append(
-                f"+!{record['transition_name']} : {self._call('dfa_state', (source_state,))} <-"
+                f"+!{transition_name} : {self._call('dfa_state', (source_state,))} & "
+                f"{guard_context} <-"
             )
-            lines.extend(self._indent_body(body))
+            lines.extend(
+                self._indent_body(
+                    [
+                        f"-{self._call('dfa_state', (source_state,))}",
+                        f"+{self._call('dfa_state', (target_state,))}",
+                    ],
+                ),
+            )
             lines.append("")
 
         return lines
@@ -433,10 +1197,20 @@ class AgentSpeakRenderer:
             lines.extend(self._indent_body(["true"]))
             lines.append("")
 
+        transition_distances = self._transition_distances_to_accepting_states(
+            plan_records,
+            accepting_states=accepting_states,
+        )
         for source_state in sorted(transitions_by_source):
             if source_state in accepting_states:
                 continue
-            state_records = transitions_by_source[source_state]
+            state_records = sorted(
+                transitions_by_source[source_state],
+                key=lambda record: self._transition_priority_key(
+                    record,
+                    transition_distances=transition_distances,
+                ),
+            )
             for record in state_records:
                 lines.append(
                     f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
@@ -452,6 +1226,223 @@ class AgentSpeakRenderer:
                 lines.append("")
 
         return lines
+
+    def _render_raw_dfa_control_plans(
+        self,
+        transition_specs: Sequence[Dict[str, Any]],
+        *,
+        query_task_anchors: Sequence[Dict[str, Any]],
+        query_task_name_map: Dict[str, str],
+    ) -> List[str]:
+        lines = ["/* DFA Control Plans */"]
+        query_step_mode = any(
+            isinstance(record.get("query_step_index"), int)
+            for record in transition_specs
+        )
+        transitions_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        accepting_states = {
+            str(state).strip()
+            for record in transition_specs
+            for state in record.get("accepting_states", [])
+            if str(state).strip()
+        }
+
+        for record in transition_specs:
+            source_state = str(record.get("source_state") or "").strip()
+            if source_state:
+                transitions_by_source[source_state].append(record)
+
+        for state in sorted(accepting_states):
+            lines.append(
+                f"+!run_dfa : {self._call('dfa_state', (state,))} & "
+                f"{self._call('accepting_state', (state,))} <-"
+            )
+            lines.extend(self._indent_body(["true"]))
+            lines.append("")
+
+        transition_distances = self._transition_distances_to_accepting_states(
+            transition_specs,
+            accepting_states=accepting_states,
+        )
+        for source_state in sorted(transitions_by_source):
+            if source_state in accepting_states:
+                continue
+            state_records = sorted(
+                transitions_by_source[source_state],
+                key=lambda record: self._transition_priority_key(
+                    record,
+                    transition_distances=transition_distances,
+                ),
+            )
+            if query_step_mode:
+                if all(bool(record.get("stateless_query_step")) for record in state_records):
+                    continue
+                for record in state_records:
+                    transition_name = str(record.get("transition_name") or "").strip()
+                    if not transition_name:
+                        continue
+                    lines.append(
+                        f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
+                    )
+                    lines.extend(
+                        self._indent_body(
+                            [
+                                f"!{transition_name}",
+                                "!run_dfa",
+                            ],
+                        ),
+                    )
+                    lines.append("")
+                continue
+            for record in state_records:
+                guard_context = str(record.get("guard_context") or "true").strip() or "true"
+                transition_name = str(record.get("transition_name") or "").strip()
+                if not transition_name:
+                    continue
+                lines.append(
+                    f"+!advance_dfa : {self._call('dfa_state', (source_state,))} & "
+                    f"{guard_context} <-"
+                )
+                lines.extend(
+                    self._indent_body(
+                        [
+                            f"!{transition_name}",
+                            "!advance_dfa",
+                        ],
+                    ),
+                )
+                lines.append("")
+
+        if query_step_mode:
+            if all(bool(record.get("stateless_query_step")) for record in transition_specs):
+                for record in transition_specs:
+                    transition_name = str(record.get("transition_name") or "").strip()
+                    if not transition_name:
+                        continue
+                    lines.append("+!run_dfa : true <-")
+                    lines.extend(
+                        self._indent_body(
+                            [
+                                f"!{transition_name}",
+                                "!run_dfa",
+                            ],
+                        ),
+                    )
+                    lines.append("")
+                lines.append("+!run_dfa : true <-")
+                lines.extend(self._indent_body(["true"]))
+                lines.append("")
+            return lines
+
+        lines.append("+!advance_dfa : true <-")
+        lines.extend(self._indent_body(["true"]))
+        lines.append("")
+
+        if not query_task_anchors:
+            lines.append("+!run_dfa : true <-")
+            lines.extend(self._indent_body(["!advance_dfa"]))
+            lines.append("")
+            return lines
+
+        for index, anchor in enumerate(query_task_anchors, start=1):
+            anchor_task_name = str(anchor.get("task_name") or "").strip()
+            task_name = query_task_name_map.get(anchor_task_name, anchor_task_name)
+            task_args = tuple(
+                str(arg).strip()
+                for arg in (anchor.get("args") or ())
+                if str(arg).strip()
+            )
+            if not task_name:
+                continue
+            lines.append(f"+!run_dfa : query_step({index}) <-")
+            lines.extend(
+                self._indent_body(
+                    [
+                        "!advance_dfa",
+                        f"!{self._task_call(task_name, task_args)}",
+                        f"-query_step({index})",
+                        f"+query_step({index + 1})",
+                        "!run_dfa",
+                    ],
+                ),
+            )
+            lines.append("")
+
+        terminal_index = len(query_task_anchors) + 1
+        lines.append(f"+!run_dfa : query_step({terminal_index}) <-")
+        lines.extend(self._indent_body(["!advance_dfa"]))
+        lines.append("")
+
+        return lines
+
+    def _transition_runtime_call(
+        self,
+        record: Dict[str, Any],
+        plan: PANDAPlanResult,
+    ) -> str:
+        transition_name = str(record.get("transition_name") or "").strip()
+        target_literal = record.get("target_literal") or getattr(plan, "target_literal", None)
+        target_args = tuple(
+            str(value).strip()
+            for value in getattr(target_literal, "args", ())
+            if str(value).strip()
+        )
+        if transition_name:
+            if target_args:
+                return self._task_call(transition_name, target_args)
+            if tuple(getattr(plan, "task_args", ()) or ()):
+                return self._task_call(transition_name, tuple(plan.task_args))
+        query_root_task_name = str(record.get("query_root_task_name") or "").strip()
+        query_root_task_args = tuple(
+            str(value).strip()
+            for value in (record.get("query_root_task_args") or ())
+            if str(value).strip()
+        )
+        if transition_name and query_root_task_args:
+            return self._task_call(transition_name, query_root_task_args)
+        if query_root_task_name:
+            return self._task_call(query_root_task_name, query_root_task_args)
+        return self._task_call(plan.task_name, plan.task_args)
+
+    @staticmethod
+    def _transition_distances_to_accepting_states(
+        plan_records: Sequence[Dict[str, Any]],
+        *,
+        accepting_states: set[str],
+    ) -> Dict[str, int]:
+        reverse_graph: Dict[str, List[str]] = defaultdict(list)
+        for item in plan_records:
+            source_state = str(item.get("source_state") or "").strip()
+            target_state = str(item.get("target_state") or "").strip()
+            if not source_state or not target_state:
+                continue
+            reverse_graph[target_state].append(source_state)
+
+        distances: Dict[str, int] = {}
+        frontier: List[str] = sorted(accepting_states)
+        for state in frontier:
+            distances[state] = 0
+        queue: List[str] = list(frontier)
+        cursor = 0
+        while cursor < len(queue):
+            state = queue[cursor]
+            cursor += 1
+            for predecessor in reverse_graph.get(state, ()):
+                if predecessor in distances:
+                    continue
+                distances[predecessor] = distances[state] + 1
+                queue.append(predecessor)
+        return distances
+
+    @staticmethod
+    def _transition_priority_key(
+        record: Dict[str, Any],
+        *,
+        transition_distances: Dict[str, int],
+    ) -> Tuple[float, str]:
+        target_state = str(record.get("target_state") or "").strip()
+        transition_name = str(record.get("transition_name") or "").strip()
+        return (float(transition_distances.get(target_state, 10 ** 9)), transition_name)
 
     def _ordered_method_steps(self, method: HTNMethod) -> List[Any]:
         if len(method.subtasks) <= 1 or not method.ordering:
@@ -526,15 +1517,34 @@ class AgentSpeakRenderer:
             default_type,
             render_spec.get("task_render_specs", {}),
         )
+        mutable_predicates = self._mutable_predicates(
+            render_spec,
+            methods_by_task,
+            effect_predicate_cache,
+        )
         bound_variables = set(method.parameters)
         bound_variables.update(self._bound_variables_from_literals(tuple(context_literals)))
         prior_effect_signatures: set[str] = set()
         prior_effect_literals: List[Any] = []
 
         first_step_id = ordered_steps[0].step_id if ordered_steps else None
+        prior_compound_step_seen = False
         for step in ordered_steps:
-            step_preconditions = list(self._step_precondition_literals(step, render_spec))
-            if getattr(step, "kind", None) == "compound" and step.step_id != first_step_id:
+            step_preconditions: List[Any] = []
+            if not prior_compound_step_seen:
+                step_preconditions.extend(self._step_precondition_literals(step, render_spec))
+            else:
+                step_preconditions.extend(
+                    self._static_step_precondition_literals(
+                        step,
+                        render_spec,
+                        mutable_predicates,
+                    )
+                )
+            if (
+                getattr(step, "kind", None) == "compound"
+                and step.step_id != first_step_id
+            ):
                 step_preconditions.extend(
                     self._later_compound_step_binding_literals(
                         step,
@@ -600,8 +1610,49 @@ class AgentSpeakRenderer:
             ):
                 prior_effect_signatures.add(self._literal_signature(effect))
                 prior_effect_literals.append(effect)
+            if getattr(step, "kind", None) == "compound":
+                prior_compound_step_seen = True
 
         return tuple(context_literals)
+
+    def _mutable_predicates(
+        self,
+        render_spec: Dict[str, Any],
+        methods_by_task: Dict[str, List[HTNMethod]],
+        effect_predicate_cache: Dict[str, Tuple[str, ...]],
+    ) -> set[str]:
+        mutable: set[str] = set()
+        for action_schema in render_spec.get("action_schemas", {}).values():
+            for effect in tuple(getattr(action_schema, "effects", ()) or ()):
+                predicate_name = str(getattr(effect, "predicate", "") or "").strip()
+                if predicate_name and predicate_name != "=":
+                    mutable.add(predicate_name)
+
+        self._populate_effect_predicate_cache(
+            methods_by_task,
+            render_spec.get("task_render_specs", {}),
+            effect_predicate_cache,
+        )
+        for predicate_names in effect_predicate_cache.values():
+            for predicate_name in tuple(predicate_names or ()):
+                rendered = str(predicate_name or "").strip()
+                if rendered and rendered != "=":
+                    mutable.add(rendered)
+        return mutable
+
+    def _static_step_precondition_literals(
+        self,
+        step: Any,
+        render_spec: Dict[str, Any],
+        mutable_predicates: set[str],
+    ) -> Tuple[Any, ...]:
+        static_literals: List[Any] = []
+        for literal in self._step_precondition_literals(step, render_spec):
+            predicate_name = str(getattr(literal, "predicate", "") or "").strip()
+            if not predicate_name or predicate_name in mutable_predicates:
+                continue
+            static_literals.append(literal)
+        return tuple(static_literals)
 
     def _literals_may_conflict(
         self,
@@ -675,16 +1726,24 @@ class AgentSpeakRenderer:
     ) -> Tuple[Any, ...]:
         merged: List[Any] = list(base_literals)
         seen_signatures = {
-            self._literal_signature(literal)
+            self._literal_structural_key(literal)
             for literal in merged
         }
         for literal in extra_literals:
-            signature = self._literal_signature(literal)
+            signature = self._literal_structural_key(literal)
             if signature in seen_signatures:
                 continue
             seen_signatures.add(signature)
             merged.append(literal)
         return tuple(merged)
+
+    @staticmethod
+    def _literal_structural_key(literal: Any) -> Tuple[str, bool, Tuple[str, ...]]:
+        return (
+            str(getattr(literal, "predicate", "") or ""),
+            bool(getattr(literal, "is_positive", True)),
+            tuple(str(arg) for arg in (getattr(literal, "args", ()) or ())),
+        )
 
     def _later_compound_step_binding_literals(
         self,
@@ -708,6 +1767,10 @@ class AgentSpeakRenderer:
             child_method,
             child_ordered_steps,
             child_render_spec,
+        )
+        child_variable_map = self._apply_exact_grounded_local_bindings(
+            child_method,
+            child_variable_map,
         )
         child_literals = self._method_context_literals(
             child_method,
@@ -744,24 +1807,132 @@ class AgentSpeakRenderer:
         variable_map: Dict[str, str],
         effect_cache: Dict[str, Tuple[Any, ...]],
         effect_predicate_cache: Dict[str, Tuple[str, ...]],
+        *,
+        specialisation_stack: Tuple[str, ...] = (),
     ) -> Tuple[Tuple[Any, ...], ...]:
-        first_compound_step = next(
-            (step for step in ordered_steps if getattr(step, "kind", None) == "compound"),
-            None,
-        )
-        if first_compound_step is None:
+        if not any(getattr(step, "kind", None) == "primitive" for step in ordered_steps):
             return ((),)
 
-        child_methods = tuple(methods_by_task.get(first_compound_step.task_name, ()))
-        if not child_methods:
+        method_name = str(getattr(method, "method_name", "") or "")
+        if method_name and method_name in specialisation_stack:
             return ((),)
-        if any(self._method_is_recursive(child_method) for child_method in child_methods):
+
+        first_compound_index = self._first_compound_step_index(ordered_steps)
+
+        if first_compound_index is None:
             return ((),)
 
         prior_effect_signatures: set[str] = set()
-        for step in ordered_steps:
-            if step.step_id == first_compound_step.step_id:
-                break
+        variant_records: List[Tuple[int, Tuple[Any, ...]]] = []
+        seen_variants: set[Tuple[str, ...]] = set()
+
+        preserve_generic_variant = False
+        for step_index, step in enumerate(ordered_steps):
+            if step_index == first_compound_index and getattr(step, "kind", None) == "compound":
+                child_methods = tuple(methods_by_task.get(step.task_name, ()))
+                child_has_non_noop_method = any(
+                    not self._method_is_pure_noop(child_method)
+                    for child_method in child_methods
+                )
+                has_recursive_child_method = any(
+                    self._method_is_recursive(child_method)
+                    for child_method in child_methods
+                )
+                if has_recursive_child_method:
+                    preserve_generic_variant = True
+                if child_methods:
+                    needs_specialisation = True
+                    if needs_specialisation:
+                        for child_method in child_methods:
+                            child_method_is_recursive = self._method_is_recursive(child_method)
+                            if child_method_is_recursive and child_method.task_name == method.task_name:
+                                continue
+                            child_render_spec = render_specs.get(step.task_name, {})
+                            child_ordered_steps = self._ordered_method_steps(child_method)
+                            child_variable_map = self._method_variable_map(
+                                child_method,
+                                child_ordered_steps,
+                                child_render_spec,
+                            )
+                            child_variable_map = self._apply_exact_grounded_local_bindings(
+                                child_method,
+                                child_variable_map,
+                            )
+                            child_context_literals = self._method_context_literals(
+                                child_method,
+                                child_ordered_steps,
+                                task_lookup,
+                                methods_by_task,
+                                child_render_spec,
+                                child_variable_map,
+                                effect_cache,
+                                effect_predicate_cache,
+                                respect_prior_effects=True,
+                            )
+                            child_specialisations = ((),)
+                            if not child_method_is_recursive:
+                                child_first_compound_index = self._first_compound_step_index(
+                                    child_ordered_steps,
+                                )
+                                if child_first_compound_index != 0:
+                                    child_first_compound_index = None
+                            else:
+                                child_first_compound_index = None
+                            if child_first_compound_index == 0:
+                                child_specialisations = self._first_compound_child_specialisations(
+                                    child_method,
+                                    child_ordered_steps,
+                                    task_lookup,
+                                    methods_by_task,
+                                    render_specs,
+                                    child_variable_map,
+                                    effect_cache,
+                                    effect_predicate_cache,
+                                    specialisation_stack=specialisation_stack + ((method_name,) if method_name else ()),
+                                )
+                            for child_extra_literals in child_specialisations:
+                                child_variant_literals = self._merge_context_literals(
+                                    child_context_literals,
+                                    child_extra_literals,
+                                )
+                                child_task_effect_signatures = (
+                                    self._task_render_priority_effect_signatures(
+                                        child_method.task_name,
+                                        task_lookup,
+                                    )
+                                )
+                                if not child_has_non_noop_method:
+                                    child_variant_literals = tuple(
+                                        literal
+                                        for literal in child_variant_literals
+                                        if not self._literal_supports_task_effect(
+                                            literal,
+                                            child_method,
+                                            task_lookup,
+                                            child_task_effect_signatures,
+                                        )
+                                    )
+                                translated = self._translate_child_context_literals(
+                                    child_method,
+                                    step,
+                                    child_variant_literals,
+                                    child_render_spec,
+                                    variable_map,
+                                )
+                                translated = tuple(
+                                    literal
+                                    for literal in translated
+                                    if self._literal_signature(literal) not in prior_effect_signatures
+                                )
+                                signature = tuple(
+                                    self._literal_signature(literal)
+                                    for literal in translated
+                                )
+                                if signature in seen_variants:
+                                    continue
+                                seen_variants.add(signature)
+                                variant_records.append((step_index, translated))
+
             for effect in self._step_effect_literals(
                 step,
                 task_lookup,
@@ -773,61 +1944,34 @@ class AgentSpeakRenderer:
             ):
                 prior_effect_signatures.add(self._literal_signature(effect))
 
-        needs_specialisation = len(child_methods) > 1 or any(
-            len(
-                self._compound_method_internal_parameters(
-                    child_method,
-                    len(first_compound_step.args),
-                ),
-            ) > 0
-            for child_method in child_methods
-        )
-        if not needs_specialisation:
+        if preserve_generic_variant:
+            base_signature: Tuple[str, ...] = ()
+            if base_signature not in seen_variants:
+                seen_variants.add(base_signature)
+                variant_records.append((len(ordered_steps), ()))
+
+        if not variant_records:
             return ((),)
 
-        variants: List[Tuple[Any, ...]] = []
-        seen_variants: set[Tuple[str, ...]] = set()
-        for child_method in child_methods:
-            child_render_spec = render_specs.get(first_compound_step.task_name, {})
-            child_ordered_steps = self._ordered_method_steps(child_method)
-            child_variable_map = self._method_variable_map(
-                child_method,
-                child_ordered_steps,
-                child_render_spec,
+        ordered_variants = [
+            variant
+            for _, variant in sorted(
+                variant_records,
+                key=lambda item: (
+                    1 if len(item[1]) == 0 else 0,
+                    -item[0],
+                    -len(item[1]),
+                ),
             )
-            child_context_literals = self._method_context_literals(
-                child_method,
-                child_ordered_steps,
-                task_lookup,
-                methods_by_task,
-                child_render_spec,
-                child_variable_map,
-                effect_cache,
-                effect_predicate_cache,
-                respect_prior_effects=True,
-            )
-            translated = self._translate_child_context_literals(
-                child_method,
-                first_compound_step,
-                child_context_literals,
-                child_render_spec,
-                variable_map,
-            )
-            translated = tuple(
-                literal
-                for literal in translated
-                if self._literal_signature(literal) not in prior_effect_signatures
-            )
-            signature = tuple(
-                self._literal_signature(literal)
-                for literal in translated
-            )
-            if signature in seen_variants:
-                continue
-            seen_variants.add(signature)
-            variants.append(translated)
+        ]
+        return tuple(ordered_variants)
 
-        return tuple(variants) if variants else ((),)
+    @staticmethod
+    def _first_compound_step_index(ordered_steps: Sequence[Any]) -> Optional[int]:
+        for step_index, step in enumerate(ordered_steps):
+            if getattr(step, "kind", None) == "compound":
+                return step_index
+        return None
 
     def _method_is_recursive(self, method: HTNMethod) -> bool:
         return any(
@@ -906,6 +2050,56 @@ class AgentSpeakRenderer:
                 return True
 
         return False
+
+    def _literal_supports_task_effect(
+        self,
+        literal: Any,
+        method: HTNMethod,
+        task_lookup: Dict[str, Any],
+        task_effect_signatures: set[str],
+    ) -> bool:
+        if not task_effect_signatures or not getattr(literal, "is_positive", True):
+            return False
+
+        task_schema = task_lookup.get(method.task_name)
+        if task_schema is None:
+            return False
+
+        task_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+        task_binding_parameters = self._task_binding_parameters(
+            method,
+            len(task_parameters),
+        )
+        task_bindings = {
+            parameter: task_parameter
+            for parameter, task_parameter in zip(task_binding_parameters, task_parameters)
+        }
+        lifted_literal = self._lift_literal_to_task_scope(
+            literal,
+            task_bindings,
+        )
+        if lifted_literal is None:
+            return False
+        if self._literal_signature(lifted_literal) in task_effect_signatures:
+            return True
+
+        source_predicates = {
+            str(predicate_name).strip()
+            for predicate_name in tuple(getattr(task_schema, "source_predicates", ()) or ())
+            if str(predicate_name).strip()
+        }
+        if str(getattr(lifted_literal, "predicate", "") or "").strip() not in source_predicates:
+            return False
+
+        task_parameter_sequence = tuple(str(parameter).strip() for parameter in task_parameters)
+        cursor = 0
+        for argument in tuple(getattr(lifted_literal, "args", ()) or ()):
+            while cursor < len(task_parameter_sequence) and task_parameter_sequence[cursor] != argument:
+                cursor += 1
+            if cursor >= len(task_parameter_sequence):
+                return False
+            cursor += 1
+        return True
 
     def _lift_literal_to_task_scope(
         self,
@@ -1148,13 +2342,19 @@ class AgentSpeakRenderer:
 
     def _asl_term(self, value: str) -> str:
         text = str(value or "").strip()
+        cached = self._asl_term_cache.get(text)
+        if cached is not None:
+            return cached
         if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
-            return text
-        if text in self._object_symbol_set:
-            return self._asl_atom_or_string(text)
-        if self._looks_like_variable(text):
-            return text
-        return self._asl_atom_or_string(text)
+            rendered = text
+        elif text in self._object_symbol_set:
+            rendered = self._asl_atom_or_string(text)
+        elif self._looks_like_variable(text):
+            rendered = text
+        else:
+            rendered = self._asl_atom_or_string(text)
+        self._asl_term_cache[text] = rendered
+        return rendered
 
     def _build_task_render_specs(
         self,
@@ -1232,17 +2432,17 @@ class AgentSpeakRenderer:
                 inferred = list(predicate_signature)
 
         for method in task_methods:
+            candidate_map, _ = self._method_variable_type_candidate_map(
+                method,
+                predicate_types,
+                action_types,
+            )
             for index, parameter in enumerate(
                 self._task_binding_parameters(method, len(task.parameters)),
             ):
                 if inferred[index] is not None:
                     continue
-                candidates = self._variable_type_candidates(
-                    method,
-                    parameter,
-                    predicate_types,
-                    action_types,
-                )
+                candidates = candidate_map.get(parameter, ())
                 if candidates:
                     inferred[index] = candidates[0]
 
@@ -1366,24 +2566,80 @@ class AgentSpeakRenderer:
                 continue
             variable_types[parameter] = task_param_types[index]
 
-        for variable in self._variables_in_method(method):
+        candidate_map, discovered_order = self._method_variable_type_candidate_map(
+            method,
+            predicate_types,
+            action_types,
+            task_render_specs,
+        )
+        for variable in discovered_order:
             if variable not in appearance_order:
                 appearance_order.append(variable)
+            candidates = candidate_map.get(variable, ())
             if variable in variable_types:
+                variable_types[variable] = self._narrow_variable_type(
+                    variable_types[variable],
+                    candidates,
+                )
                 continue
-            candidates = self._variable_type_candidates(
-                method,
-                variable,
-                predicate_types,
-                action_types,
-                task_render_specs,
-            )
             variable_types[variable] = candidates[0] if candidates else default_type
 
         for parameter in method.parameters:
             variable_types.setdefault(parameter, default_type)
 
         return variable_types, appearance_order
+
+    def _narrow_variable_type(
+        self,
+        current_type: str,
+        candidate_types: Sequence[str],
+    ) -> str:
+        normalized_current = str(current_type or "").strip().upper()
+        normalized_candidates = [
+            str(candidate or "").strip().upper()
+            for candidate in candidate_types
+            if str(candidate or "").strip()
+        ]
+        if not normalized_candidates:
+            return normalized_current or current_type
+
+        supported_types = []
+        if normalized_current:
+            supported_types.append(normalized_current)
+        supported_types.extend(normalized_candidates)
+        supported_types = list(dict.fromkeys(supported_types))
+
+        best_type: Optional[str] = None
+        best_depth = -1
+        for candidate in supported_types:
+            if all(self._is_type_compatible(candidate, required) for required in supported_types):
+                candidate_depth = len(self._type_closure(candidate))
+                if candidate_depth > best_depth:
+                    best_type = candidate
+                    best_depth = candidate_depth
+        if best_type is not None:
+            return best_type
+        return normalized_current or normalized_candidates[0]
+
+    def _is_type_compatible(
+        self,
+        candidate_type: str,
+        required_type: str,
+    ) -> bool:
+        normalized_candidate = str(candidate_type or "").strip().lower()
+        normalized_required = str(required_type or "").strip().lower()
+        if not normalized_candidate or not normalized_required:
+            return True
+        if normalized_candidate == normalized_required:
+            return True
+
+        closure = {
+            item.lower()
+            for item in self._type_closure(normalized_candidate)
+        }
+        closure.add(normalized_candidate)
+        closure.add("object")
+        return normalized_required in closure
 
     def _variables_in_method(self, method: HTNMethod) -> List[str]:
         ordered_steps = self._ordered_method_steps(method)
@@ -1415,37 +2671,58 @@ class AgentSpeakRenderer:
         action_types: Dict[str, Tuple[str, ...]],
         task_render_specs: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[str]:
-        candidates: List[str] = []
+        candidate_map, _ = self._method_variable_type_candidate_map(
+            method,
+            predicate_types,
+            action_types,
+            task_render_specs,
+        )
+        return list(candidate_map.get(variable, ()))
+
+    def _method_variable_type_candidate_map(
+        self,
+        method: HTNMethod,
+        predicate_types: Dict[str, Tuple[str, ...]],
+        action_types: Dict[str, Tuple[str, ...]],
+        task_render_specs: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Tuple[Dict[str, List[str]], List[str]]:
+        candidates: Dict[str, List[str]] = defaultdict(list)
+        appearance_order: List[str] = []
+
+        def remember(symbol: str) -> None:
+            if self._looks_like_variable(symbol) and symbol not in appearance_order:
+                appearance_order.append(symbol)
 
         def collect_from_literal(literal: Any) -> None:
             signature = predicate_types.get(literal.predicate)
-            if not signature:
-                return
             for index, arg in enumerate(literal.args):
-                if arg == variable and index < len(signature):
-                    candidates.append(signature[index])
+                remember(arg)
+                if signature and index < len(signature):
+                    candidates[arg].append(signature[index])
 
         for literal in method.context:
             collect_from_literal(literal)
-        for step in method.subtasks:
+        for step in self._ordered_method_steps(method):
+            for arg in step.args:
+                remember(arg)
             action_signature = action_types.get(step.action_name or "")
             if step.kind == "primitive" and not action_signature:
                 action_signature = action_types.get(step.task_name)
             if action_signature:
                 for index, arg in enumerate(step.args):
-                    if arg == variable and index < len(action_signature):
-                        candidates.append(action_signature[index])
+                    if index < len(action_signature):
+                        candidates[arg].append(action_signature[index])
             elif step.kind == "compound":
                 child_render_spec = (task_render_specs or {}).get(step.task_name, {})
                 child_signature = tuple(child_render_spec.get("task_param_types", ()))
                 for index, arg in enumerate(step.args):
-                    if arg == variable and index < len(child_signature):
-                        candidates.append(child_signature[index])
+                    if index < len(child_signature):
+                        candidates[arg].append(child_signature[index])
             for literal in (step.literal, *step.preconditions, *step.effects):
                 if literal is not None:
                     collect_from_literal(literal)
 
-        return candidates
+        return candidates, appearance_order
 
     def _canonical_param_names(
         self,
@@ -1786,31 +3063,16 @@ class AgentSpeakRenderer:
         if not task_name or task_name in stack:
             return tuple(predicates)
 
+        if task_name not in effect_predicate_cache:
+            self._populate_effect_predicate_cache(
+                methods_by_task,
+                render_spec.get("task_render_specs", {}),
+                effect_predicate_cache,
+            )
         if task_name in effect_predicate_cache:
             for predicate_name in effect_predicate_cache[task_name]:
                 add(predicate_name)
             return tuple(predicates)
-
-        child_render_specs = render_spec.get("task_render_specs", {})
-        child_render_spec = child_render_specs.get(task_name, {})
-        task_predicates: List[str] = []
-        task_seen: set[str] = set()
-        for method in methods_by_task.get(task_name, ()):
-            for predicate_name in self._method_effect_predicates(
-                method,
-                methods_by_task,
-                child_render_spec,
-                effect_predicate_cache,
-                stack + (task_name,),
-            ):
-                if predicate_name in task_seen:
-                    continue
-                task_seen.add(predicate_name)
-                task_predicates.append(predicate_name)
-
-        effect_predicate_cache[task_name] = tuple(task_predicates)
-        for predicate_name in task_predicates:
-            add(predicate_name)
         return tuple(predicates)
 
     def _method_effect_predicates(
@@ -1836,6 +3098,81 @@ class AgentSpeakRenderer:
                 seen.add(predicate_name)
                 predicates.append(predicate_name)
         return tuple(predicates)
+
+    def _populate_effect_predicate_cache(
+        self,
+        methods_by_task: Dict[str, List[HTNMethod]],
+        render_specs: Dict[str, Dict[str, Any]],
+        effect_predicate_cache: Dict[str, Tuple[str, ...]],
+    ) -> None:
+        task_names = list(
+            dict.fromkeys(
+                [
+                    *tuple(render_specs.keys()),
+                    *tuple(methods_by_task.keys()),
+                ],
+            ),
+        )
+        if not task_names or all(task_name in effect_predicate_cache for task_name in task_names):
+            return
+
+        direct_predicates_by_task: Dict[str, Tuple[str, ...]] = {}
+        child_dependencies_by_task: Dict[str, Tuple[str, ...]] = {}
+
+        for task_name in task_names:
+            task_render_spec = render_specs.get(task_name, {})
+            direct_predicates: List[str] = []
+            direct_seen: set[str] = set()
+            child_dependencies: List[str] = []
+            child_seen: set[str] = set()
+
+            def add_direct(predicate_name: Any) -> None:
+                name = str(predicate_name or "").strip()
+                if not name or name == "=" or name in direct_seen:
+                    return
+                direct_seen.add(name)
+                direct_predicates.append(name)
+
+            for method in methods_by_task.get(task_name, ()):
+                for step in self._ordered_method_steps(method):
+                    for literal in getattr(step, "effects", ()) or ():
+                        add_direct(getattr(literal, "predicate", None))
+                    if getattr(step, "kind", None) == "primitive":
+                        action_schema = self._resolve_action_schema(step, task_render_spec)
+                        if action_schema is None:
+                            continue
+                        for effect in getattr(action_schema, "effects", ()) or ():
+                            add_direct(getattr(effect, "predicate", None))
+                        continue
+                    if getattr(step, "kind", None) != "compound":
+                        continue
+                    child_task_name = str(getattr(step, "task_name", "") or "").strip()
+                    if not child_task_name or child_task_name in child_seen:
+                        continue
+                    child_seen.add(child_task_name)
+                    child_dependencies.append(child_task_name)
+
+            direct_predicates_by_task[task_name] = tuple(direct_predicates)
+            child_dependencies_by_task[task_name] = tuple(child_dependencies)
+            effect_predicate_cache.setdefault(task_name, tuple(direct_predicates))
+
+        changed = True
+        while changed:
+            changed = False
+            for task_name in task_names:
+                merged: List[str] = list(direct_predicates_by_task.get(task_name, ()))
+                merged_seen: set[str] = set(merged)
+                for child_task_name in child_dependencies_by_task.get(task_name, ()):
+                    for predicate_name in effect_predicate_cache.get(child_task_name, ()):
+                        if predicate_name in merged_seen:
+                            continue
+                        merged_seen.add(predicate_name)
+                        merged.append(predicate_name)
+                merged_tuple = tuple(merged)
+                if effect_predicate_cache.get(task_name) == merged_tuple:
+                    continue
+                effect_predicate_cache[task_name] = merged_tuple
+                changed = True
 
     def _compound_task_effect_templates(
         self,
@@ -1878,14 +3215,18 @@ class AgentSpeakRenderer:
                 collected.append(literal)
 
         # Seed the cache before descending into child methods so mutual-recursion
-        # cycles fall back to the task's own headline effect instead of recursing
+        # cycles can still reuse already-known headline effects without recursing
         # indefinitely through A -> B -> A support summaries.
         effect_cache[task_name] = tuple(collected)
-
+        candidate_methods = tuple(methods_by_task.get(task_name, ()))
         if task_name in stack:
-            return effect_cache[task_name]
+            candidate_methods = tuple(
+                method
+                for method in candidate_methods
+                if not self._method_is_recursive(method)
+            )
 
-        for method in methods_by_task.get(task_name, ()):
+        for method in candidate_methods:
             for literal in self._method_effect_templates(
                 method,
                 task_lookup,
@@ -2183,6 +3524,79 @@ class AgentSpeakRenderer:
             )
         return tuple(guards)
 
+    def _build_transition_grounded_local_bindings(
+        self,
+        prompt_analysis: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, str]]:
+        if not isinstance(prompt_analysis, dict):
+            return {}
+
+        bindings_by_task: Dict[str, Dict[str, str]] = {}
+        for payload in (prompt_analysis.get("transition_tasks") or ()):
+            if not isinstance(payload, dict):
+                continue
+            task_name = str(payload.get("name", "") or "").strip()
+            if not task_name:
+                continue
+            base_parameters = {
+                str(value).strip()
+                for value in (payload.get("parameters") or ())
+                if str(value).strip()
+            }
+            context_parameters = {
+                str(value).strip()
+                for value in (payload.get("context_parameters") or ())
+                if str(value).strip()
+            }
+            if not context_parameters:
+                continue
+            grounded_symbol_map = payload.get("grounded_symbol_map") or {}
+            if not isinstance(grounded_symbol_map, dict):
+                continue
+            task_bindings: Dict[str, str] = {}
+            for grounded_arg, symbol in grounded_symbol_map.items():
+                grounded_value = str(grounded_arg or "").strip()
+                symbol_name = str(symbol or "").strip()
+                if (
+                    not grounded_value
+                    or not symbol_name
+                    or self._is_synthetic_witness_token(grounded_value)
+                    or symbol_name in base_parameters
+                    or symbol_name not in context_parameters
+                ):
+                    continue
+                task_bindings[symbol_name] = grounded_value
+            if task_bindings:
+                bindings_by_task[task_name] = task_bindings
+        return bindings_by_task
+
+    def _apply_exact_grounded_local_bindings(
+        self,
+        method: HTNMethod,
+        variable_map: Dict[str, str],
+    ) -> Dict[str, str]:
+        task_bindings = self._transition_grounded_local_bindings.get(
+            str(getattr(method, "task_name", "") or "").strip(),
+        )
+        if not task_bindings:
+            return variable_map
+
+        local_parameters = {
+            str(parameter).strip()
+            for parameter in (getattr(method, "parameters", ()) or ())
+            if str(parameter).strip()
+        }
+        task_arguments = {
+            str(argument).strip()
+            for argument in (getattr(method, "task_args", ()) or ())
+            if str(argument).strip()
+        }
+        for parameter, grounded_value in task_bindings.items():
+            if parameter not in local_parameters or parameter in task_arguments:
+                continue
+            variable_map[parameter] = grounded_value
+        return variable_map
+
     def _method_type_guard_literals(
         self,
         method: HTNMethod,
@@ -2204,20 +3618,15 @@ class AgentSpeakRenderer:
             default_type,
             render_spec.get("task_render_specs", {}),
         )
-        context_variables = {
-            arg
-            for literal in method.context
-            for arg in literal.args
-            if self._looks_like_variable(arg)
-        }
-        task_binding_parameters = set(
-            self._task_binding_parameters(method, len(task_param_types)),
-        )
-        guarded_variables = task_binding_parameters | context_variables
         ordered_variables = list(variable_map.keys())
         for variable in appearance_order:
             if variable not in ordered_variables:
                 ordered_variables.append(variable)
+        guarded_variables = {
+            variable
+            for variable in ordered_variables
+            if self._looks_like_variable(variable)
+        }
 
         guards: List[Any] = []
         seen: set[Tuple[str, str]] = set()
