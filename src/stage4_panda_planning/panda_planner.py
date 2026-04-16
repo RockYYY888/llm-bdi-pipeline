@@ -85,7 +85,7 @@ class PANDAPlanner:
 	) -> PANDAPlanResult:
 		self._require_toolchain()
 		total_start = time.perf_counter()
-		timing_profile: Dict[str, float] = {}
+		timing_profile: Dict[str, Any] = {}
 
 		task_args_tuple = tuple(
 			task_args if task_args is not None else (target_literal.args if target_literal else ())
@@ -121,6 +121,75 @@ class PANDAPlanner:
 		)
 		timing_profile["hddl_export_seconds"] = time.perf_counter() - export_start
 
+		return self._plan_from_hddl_texts(
+			domain=domain,
+			domain_hddl=domain_hddl,
+			problem_hddl=problem_hddl,
+			task_name=task_name,
+			task_args_tuple=task_args_tuple,
+			target_literal=target_literal,
+			transition_name=transition_name,
+			allow_empty_plan=allow_empty_plan,
+			timeout_seconds=timeout_seconds,
+			total_start=total_start,
+			timing_profile=timing_profile,
+		)
+
+	def plan_hddl_files(
+		self,
+		*,
+		domain: Any,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		task_name: str,
+		transition_name: str,
+		task_args: Optional[Sequence[str]] = None,
+		target_literal: Optional[HTNLiteral] = None,
+		allow_empty_plan: bool = False,
+		timeout_seconds: Optional[float] = None,
+	) -> PANDAPlanResult:
+		self._require_toolchain()
+		total_start = time.perf_counter()
+		timing_profile: Dict[str, Any] = {}
+		domain_path = Path(domain_file).resolve()
+		problem_path = Path(problem_file).resolve()
+		read_start = time.perf_counter()
+		domain_hddl = domain_path.read_text()
+		problem_hddl = problem_path.read_text()
+		timing_profile["read_input_files_seconds"] = time.perf_counter() - read_start
+		task_args_tuple = tuple(task_args or ())
+		return self._plan_from_hddl_texts(
+			domain=domain,
+			domain_hddl=domain_hddl,
+			problem_hddl=problem_hddl,
+			task_name=task_name,
+			task_args_tuple=task_args_tuple,
+			target_literal=target_literal,
+			transition_name=transition_name,
+			allow_empty_plan=allow_empty_plan,
+			timeout_seconds=timeout_seconds,
+			total_start=total_start,
+			timing_profile=timing_profile,
+		)
+
+	def _plan_from_hddl_texts(
+		self,
+		*,
+		domain: Any,
+		domain_hddl: str,
+		problem_hddl: str,
+		task_name: str,
+		task_args_tuple: Tuple[str, ...],
+		target_literal: Optional[HTNLiteral],
+		transition_name: str,
+		allow_empty_plan: bool,
+		timeout_seconds: Optional[float],
+		total_start: float,
+		timing_profile: Dict[str, Any],
+	) -> PANDAPlanResult:
+		work_dir = self._resolve_work_dir(transition_name)
+		work_dir.mkdir(parents=True, exist_ok=True)
+
 		domain_path = work_dir / "domain.hddl"
 		problem_path = work_dir / "problem.hddl"
 		parsed_path = work_dir / "problem.psas"
@@ -150,16 +219,199 @@ class PANDAPlanner:
 		)
 		timing_profile["grounder_seconds"] = time.perf_counter() - grounder_start
 		engine_start = time.perf_counter()
-		engine_run = self._run_command(
-			self._build_command(self.engine_cmd, str(grounded_path)),
-			"engine",
-			work_dir,
-			timeout_seconds=timeout_seconds,
-		)
-		timing_profile["engine_seconds"] = time.perf_counter() - engine_start
-		raw_plan_text = engine_run["stdout"]
-		raw_plan_path.write_text(raw_plan_text)
+		engine_attempts: List[Dict[str, Any]] = []
+		conversion_total_seconds = 0.0
+		parse_total_seconds = 0.0
+		selected_engine_mode: Optional[str] = None
+		engine_run: Optional[Dict[str, str]] = None
+		raw_plan_text = ""
+		actual_plan_text = ""
+		conversion_stdout = ""
+		conversion_stderr = ""
+		steps: List[PANDAPlanStep] = []
+		for engine_mode in self._engine_mode_portfolio():
+			attempt_start = time.perf_counter()
+			attempt_timeout = self._remaining_timeout_seconds(total_start, timeout_seconds)
+			if attempt_timeout is not None and attempt_timeout <= 0:
+				engine_attempts.append(
+					{
+						"mode": engine_mode,
+						"status": "skipped",
+						"reason": "no_time_remaining",
+					},
+				)
+				continue
 
+			try:
+				candidate_engine_run = self._run_command(
+					self._build_engine_command(str(grounded_path), engine_mode),
+					"engine",
+					work_dir,
+					timeout_seconds=attempt_timeout,
+				)
+			except PANDAPlanningError as exc:
+				engine_attempts.append(
+					{
+						"mode": engine_mode,
+						"status": "failed",
+						"seconds": time.perf_counter() - attempt_start,
+						"error": str(exc),
+						"metadata": dict(exc.metadata or {}),
+					},
+				)
+				continue
+
+			candidate_raw_plan_text = candidate_engine_run["stdout"]
+			raw_plan_path.write_text(candidate_raw_plan_text)
+			try:
+				candidate_actual_plan_text, candidate_conversion_stdout, candidate_conversion_stderr = (
+					self._convert_plan_output(
+						raw_plan_path=raw_plan_path,
+						actual_plan_path=actual_plan_path,
+						work_dir=work_dir,
+						timeout_seconds=self._remaining_timeout_seconds(total_start, timeout_seconds),
+					)
+				)
+			except PANDAPlanningError as exc:
+				engine_attempts.append(
+					{
+						"mode": engine_mode,
+						"status": "failed",
+						"seconds": time.perf_counter() - attempt_start,
+						"error": str(exc),
+						"metadata": dict(exc.metadata or {}),
+					},
+				)
+				continue
+
+			candidate_conversion_seconds = time.perf_counter() - attempt_start
+			conversion_total_seconds += candidate_conversion_seconds
+			parse_plan_start = time.perf_counter()
+			candidate_steps = self._parse_plan_steps(
+				candidate_actual_plan_text or candidate_raw_plan_text,
+				domain,
+			)
+			parse_seconds = time.perf_counter() - parse_plan_start
+			parse_total_seconds += parse_seconds
+			candidate_has_hierarchical_trace = "->" in candidate_actual_plan_text
+			has_executable_plan = bool(candidate_steps) or allow_empty_plan or candidate_has_hierarchical_trace
+			engine_attempts.append(
+				{
+					"mode": engine_mode,
+					"status": "success" if has_executable_plan else "no_plan",
+					"seconds": time.perf_counter() - attempt_start,
+					"step_count": len(candidate_steps),
+					"has_hierarchical_trace": candidate_has_hierarchical_trace,
+					"stdout_head": "\n".join(candidate_engine_run["stdout"].splitlines()[:12]),
+					"stderr_head": "\n".join(candidate_engine_run["stderr"].splitlines()[:12]),
+				},
+			)
+			if not has_executable_plan:
+				continue
+
+			selected_engine_mode = engine_mode
+			engine_run = candidate_engine_run
+			raw_plan_text = candidate_raw_plan_text
+			actual_plan_text = candidate_actual_plan_text or candidate_raw_plan_text
+			conversion_stdout = candidate_conversion_stdout
+			conversion_stderr = candidate_conversion_stderr
+			steps = candidate_steps
+			break
+
+		timing_profile["engine_seconds"] = time.perf_counter() - engine_start
+		timing_profile["conversion_seconds"] = conversion_total_seconds
+		timing_profile["parse_plan_seconds"] = parse_total_seconds
+		timing_profile["engine_mode_attempts"] = list(engine_attempts)
+		timing_profile["engine_mode"] = selected_engine_mode
+
+		if selected_engine_mode is None or engine_run is None:
+			raise PANDAPlanningError(
+				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args_tuple)})",
+				metadata={
+					"backend": "pandaPI",
+					"transition_name": transition_name,
+					"task_name": task_name,
+					"task_args": list(task_args_tuple),
+					"work_dir": str(work_dir),
+					"domain_hddl": domain_hddl,
+					"problem_hddl": problem_hddl,
+					"parser_stdout": parser_run["stdout"],
+					"parser_stderr": parser_run["stderr"],
+					"grounder_stdout": grounder_run["stdout"],
+					"grounder_stderr": grounder_run["stderr"],
+					"engine_attempts": list(engine_attempts),
+				},
+			)
+
+		timing_profile["total_seconds"] = time.perf_counter() - total_start
+		return PANDAPlanResult(
+			task_name=task_name,
+			task_args=task_args_tuple,
+			target_literal=target_literal,
+			engine_mode=selected_engine_mode,
+			steps=steps,
+			domain_hddl=domain_hddl,
+			problem_hddl=problem_hddl,
+			parser_stdout=parser_run["stdout"] + conversion_stdout,
+			parser_stderr=parser_run["stderr"] + conversion_stderr,
+			grounder_stdout=grounder_run["stdout"],
+			grounder_stderr=grounder_run["stderr"],
+			engine_stdout=engine_run["stdout"],
+			engine_stderr=engine_run["stderr"],
+			raw_plan=raw_plan_text,
+			actual_plan=actual_plan_text or raw_plan_text,
+			work_dir=str(work_dir),
+			timing_profile=timing_profile,
+		)
+
+	def _engine_mode_portfolio(self) -> Tuple[str, ...]:
+		raw_value = os.getenv("PANDA_PI_ENGINE_MODES", "sat,default,bdd")
+		canonical_modes = {
+			"default": "default",
+			"engine": "default",
+			"sat": "sat",
+			"bdd": "bdd",
+			"translate": "translate",
+			"translation": "translate",
+		}
+		selected: List[str] = []
+		for token in raw_value.split(","):
+			mode = canonical_modes.get(token.strip().lower())
+			if mode and mode not in selected:
+				selected.append(mode)
+		return tuple(selected or ("sat", "default", "bdd"))
+
+	def _build_engine_command(self, grounded_path: str, engine_mode: str) -> List[str]:
+		mode_flags = {
+			"default": (),
+			"sat": ("-s",),
+			"bdd": ("-b",),
+			"translate": ("-2",),
+		}
+		return self._build_command(
+			self.engine_cmd,
+			*mode_flags.get(engine_mode, ()),
+			grounded_path,
+		)
+
+	@staticmethod
+	def _remaining_timeout_seconds(
+		total_start: float,
+		timeout_seconds: Optional[float],
+	) -> Optional[float]:
+		if timeout_seconds is None:
+			return None
+		elapsed = time.perf_counter() - total_start
+		return max(timeout_seconds - elapsed, 0.0)
+
+	def _convert_plan_output(
+		self,
+		*,
+		raw_plan_path: Path,
+		actual_plan_path: Path,
+		work_dir: Path,
+		timeout_seconds: Optional[float],
+	) -> Tuple[str, str, str]:
 		actual_plan_text = ""
 		conversion_stdout = ""
 		conversion_stderr = ""
@@ -170,13 +422,11 @@ class PANDAPlanner:
 			str(actual_plan_path),
 		)
 		try:
-			conversion_start = time.perf_counter()
 			conversion_result = self._run_subprocess(
 				conversion_command,
 				work_dir,
 				timeout_seconds=timeout_seconds,
 			)
-			timing_profile["conversion_seconds"] = time.perf_counter() - conversion_start
 			conversion_stdout = conversion_result["stdout"]
 			conversion_stderr = conversion_result["stderr"]
 		except PANDAPlanningError as exc:
@@ -198,53 +448,7 @@ class PANDAPlanner:
 			actual_plan_text = actual_plan_path.read_text()
 		elif raw_plan_path.exists():
 			actual_plan_text = raw_plan_path.read_text()
-
-		parse_plan_start = time.perf_counter()
-		steps = self._parse_plan_steps(actual_plan_text or raw_plan_text, domain)
-		timing_profile["parse_plan_seconds"] = time.perf_counter() - parse_plan_start
-		if not steps and not allow_empty_plan and "->" not in actual_plan_text:
-			raise PANDAPlanningError(
-				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args_tuple)})",
-				metadata={
-					"backend": "pandaPI",
-					"transition_name": transition_name,
-					"task_name": task_name,
-					"task_args": list(task_args_tuple),
-					"work_dir": str(work_dir),
-					"domain_hddl": domain_hddl,
-					"problem_hddl": problem_hddl,
-					"parser_stdout": parser_run["stdout"],
-					"parser_stderr": parser_run["stderr"],
-					"grounder_stdout": grounder_run["stdout"],
-					"grounder_stderr": grounder_run["stderr"],
-					"engine_stdout": engine_run["stdout"],
-					"engine_stderr": engine_run["stderr"],
-					"raw_plan": raw_plan_text,
-					"actual_plan": actual_plan_text,
-					"conversion_stdout": conversion_stdout,
-					"conversion_stderr": conversion_stderr,
-				},
-			)
-
-		timing_profile["total_seconds"] = time.perf_counter() - total_start
-		return PANDAPlanResult(
-			task_name=task_name,
-			task_args=task_args_tuple,
-			target_literal=target_literal,
-			steps=steps,
-			domain_hddl=domain_hddl,
-			problem_hddl=problem_hddl,
-			parser_stdout=parser_run["stdout"] + conversion_stdout,
-			parser_stderr=parser_run["stderr"] + conversion_stderr,
-			grounder_stdout=grounder_run["stdout"],
-			grounder_stderr=grounder_run["stderr"],
-			engine_stdout=engine_run["stdout"],
-			engine_stderr=engine_run["stderr"],
-			raw_plan=raw_plan_text,
-			actual_plan=actual_plan_text or raw_plan_text,
-			work_dir=str(work_dir),
-			timing_profile=timing_profile,
-		)
+		return actual_plan_text, conversion_stdout, conversion_stderr
 
 	def extract_method_trace(self, plan_text: str) -> List[Dict[str, Any]]:
 		lines = [
@@ -690,14 +894,14 @@ class PANDAPlanner:
 				return head
 			return None
 
-		resolved = shutil.which(head)
-		if resolved:
-			return resolved
-
 		for directory in self._default_command_dirs():
 			candidate = directory / head
 			if candidate.is_file() and os.access(candidate, os.X_OK):
 				return str(candidate)
+
+		resolved = shutil.which(head)
+		if resolved:
+			return resolved
 
 		return None
 
@@ -709,6 +913,7 @@ class PANDAPlanner:
 		panda_bin = os.getenv("PANDA_PI_BIN")
 		if panda_bin:
 			directories.append(Path(panda_bin))
+		directories.append(Path.home() / ".local" / "pandaPI-full" / "bin")
 		directories.append(Path.home() / ".local" / "pandaPI" / "bin")
 
 		unique: List[Path] = []

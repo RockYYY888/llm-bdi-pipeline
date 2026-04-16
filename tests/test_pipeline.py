@@ -1178,7 +1178,7 @@ def assert_stage5_hierarchical_planning_passes_configured_timeout(tmp_path, monk
 		def toolchain_available(self):
 			return True
 
-		def plan(self, **kwargs):
+		def plan_hddl_files(self, **kwargs):
 			captured.update(kwargs)
 			return PANDAPlanResult(
 				task_name="do_put_on",
@@ -1237,7 +1237,7 @@ def assert_stage5_problem_root_planning_passes_configured_timeout(tmp_path, monk
 		def toolchain_available(self):
 			return True
 
-		def plan(self, **kwargs):
+		def plan_hddl_files(self, **kwargs):
 			captured.update(kwargs)
 			return PANDAPlanResult(
 				task_name="do_put_on",
@@ -1267,6 +1267,8 @@ def assert_stage5_problem_root_planning_passes_configured_timeout(tmp_path, monk
 
 	assert stage5 is not None
 	assert captured["timeout_seconds"] == 11.0
+	assert Path(captured["domain_file"]).resolve() == Path(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE).resolve()
+	assert Path(captured["problem_file"]).resolve() == problem_path.resolve()
 	assert stage5["summary"]["status"] == "success"
 	assert stage5["summary"]["planning_mode"] == "official_problem_root"
 	assert stage5["artifacts"]["action_path"] == ["stack(b4, b2)"]

@@ -920,15 +920,6 @@ class LTL_BDI_Pipeline:
             problem_objects = tuple(self.problem.objects or ())
             if not problem_objects:
                 raise ValueError("Problem file contains no declared objects.")
-            typed_objects = self._typed_object_entries(
-                problem_objects,
-                dict(self.problem.object_types or {}),
-            )
-            initial_facts = tuple(
-                self._render_problem_fact(fact)
-                for fact in (self.problem.init_facts or ())
-                if getattr(fact, "is_positive", True)
-            )
             task_network = tuple(
                 (str(task.task_name), tuple(str(arg) for arg in (task.args or ())))
                 for task in (self.problem.htn_tasks or ())
@@ -936,27 +927,17 @@ class LTL_BDI_Pipeline:
             ordering_edges = self._problem_root_task_network_ordering_edges()
             task_network_ordered = bool(self.problem.htn_ordered) and not ordering_edges
             primary_task_name, primary_task_args = task_network[0]
-            plan = planner.plan(
+            plan = planner.plan_hddl_files(
                 domain=self.domain,
-                method_library=method_library,
-                objects=problem_objects,
-                target_literal=None,
+                domain_file=self.domain_file,
+                problem_file=self.problem_file,
                 task_name=str(primary_task_name),
                 transition_name="official_problem_root",
-                typed_objects=typed_objects,
-                htn_parameters=tuple(
-                    (str(name), str(type_name))
-                    for name, type_name in dict(self.problem.htn_parameter_types or {}).items()
-                ),
                 task_args=tuple(primary_task_args),
-                task_network=task_network,
-                task_network_ordered=task_network_ordered,
-                ordering_edges=ordering_edges,
+                target_literal=None,
                 allow_empty_plan=False,
-                initial_facts=initial_facts,
                 timeout_seconds=float(self.config.stage5_planning_timeout),
             )
-
             action_path = [
                 (
                     f"{step.action_name}({', '.join(step.args)})"
@@ -980,6 +961,7 @@ class LTL_BDI_Pipeline:
                 "backend": "pandaPI",
                 "status": "success",
                 "planning_mode": "official_problem_root",
+                "engine_mode": plan.engine_mode,
                 "task_network": [
                     {
                         "task_name": task_name,
@@ -1013,6 +995,7 @@ class LTL_BDI_Pipeline:
                 "backend": "pandaPI",
                 "status": "success",
                 "planning_mode": "official_problem_root",
+                "engine_mode": plan.engine_mode,
                 "task_count": len(task_network),
                 "precedence_edge_count": len(ordering_edges),
                 "step_count": len(action_path),
@@ -1043,9 +1026,11 @@ class LTL_BDI_Pipeline:
                 "artifacts": artifacts,
             }
         except Exception as exc:
+            failure_metadata = dict(getattr(exc, "metadata", {}) or {})
             failure_artifacts = {
                 "backend": "pandaPI",
                 "status": "failed",
+                "planning_mode": "official_problem_root",
                 "task_network": [
                     {
                         "task_name": str(task.task_name),
@@ -1059,6 +1044,7 @@ class LTL_BDI_Pipeline:
                     for before, after in self._problem_root_task_network_ordering_edges()
                 ] if self.problem is not None else [],
                 "step_count": 0,
+                "failure_metadata": failure_metadata,
             }
             self.logger.log_stage5_hierarchical_planning(
                 failure_artifacts,
@@ -1068,6 +1054,7 @@ class LTL_BDI_Pipeline:
                     "backend": "pandaPI",
                     "status": "failed",
                     "planning_mode": "official_problem_root",
+                    "engine_mode": failure_metadata.get("engine_mode"),
                 },
             )
             self._record_stage_timing("stage5", stage_start)
@@ -5878,9 +5865,14 @@ class LTL_BDI_Pipeline:
             return None
 
         stage6_artifacts = stage6_data.get("artifacts") or {}
-        domain_build_start = time.perf_counter()
-        verification_domain_file = self._stage7_build_verification_domain(method_library)
-        domain_build_seconds = time.perf_counter() - domain_build_start
+        planning_mode = str(stage6_artifacts.get("planning_mode") or "")
+        if planning_mode == "official_problem_root":
+            verification_domain_file = Path(self.domain_file).resolve()
+            domain_build_seconds = 0.0
+        else:
+            domain_build_start = time.perf_counter()
+            verification_domain_file = self._stage7_build_verification_domain(method_library)
+            domain_build_seconds = time.perf_counter() - domain_build_start
         guided_plan_text = stage6_artifacts.get("guided_hierarchical_plan_text")
         verifier_start = time.perf_counter()
         if guided_plan_text:

@@ -498,14 +498,14 @@ class IPCPlanVerifier:
 				return head
 			return None
 
-		resolved = shutil.which(head)
-		if resolved:
-			return resolved
-
 		for directory in self._default_command_dirs():
 			candidate = directory / head
 			if candidate.is_file() and os.access(candidate, os.X_OK):
 				return str(candidate)
+
+		resolved = shutil.which(head)
+		if resolved:
+			return resolved
 
 		return None
 
@@ -517,6 +517,7 @@ class IPCPlanVerifier:
 		panda_bin = os.getenv("PANDA_PI_BIN")
 		if panda_bin:
 			directories.append(Path(panda_bin))
+		directories.append(Path.home() / ".local" / "pandaPI-full" / "bin")
 		directories.append(Path.home() / ".local" / "pandaPI" / "bin")
 
 		unique: List[Path] = []

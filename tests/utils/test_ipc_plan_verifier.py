@@ -35,6 +35,27 @@ def test_tool_available_discovers_parser_from_panda_pi_bin(tmp_path, monkeypatch
 	assert verifier.tool_available() is True
 
 
+def test_verifier_prefers_panda_pi_bin_over_path(tmp_path, monkeypatch):
+	old_dir = tmp_path / "old_bin"
+	old_dir.mkdir()
+	old_parser = old_dir / "pandaPIparser"
+	old_parser.write_text("#!/bin/sh\nexit 0\n")
+	old_parser.chmod(0o755)
+
+	new_dir = tmp_path / "new_bin"
+	new_dir.mkdir()
+	new_parser = new_dir / "pandaPIparser"
+	new_parser.write_text("#!/bin/sh\nexit 0\n")
+	new_parser.chmod(0o755)
+
+	monkeypatch.setenv("PATH", str(old_dir))
+	monkeypatch.setenv("PANDA_PI_BIN", str(new_dir))
+
+	verifier = IPCPlanVerifier()
+
+	assert verifier._resolve_command_head("pandaPIparser") == str(new_parser)
+
+
 def test_planning_toolchain_available_discovers_all_tools_from_panda_pi_bin(tmp_path, monkeypatch):
 	parser_dir = tmp_path / "bin"
 	parser_dir.mkdir()

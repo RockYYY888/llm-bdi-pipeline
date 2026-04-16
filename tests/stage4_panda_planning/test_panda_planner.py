@@ -96,6 +96,27 @@ def test_panda_planner_resolves_relative_workspace_to_absolute_path():
 	assert planner.workspace.is_absolute()
 
 
+def test_panda_planner_prefers_panda_pi_bin_over_path(tmp_path, monkeypatch):
+	old_dir = tmp_path / "old_bin"
+	old_dir.mkdir()
+	old_engine = old_dir / "pandaPIengine"
+	old_engine.write_text("#!/bin/sh\nexit 0\n")
+	old_engine.chmod(0o755)
+
+	new_dir = tmp_path / "new_bin"
+	new_dir.mkdir()
+	new_engine = new_dir / "pandaPIengine"
+	new_engine.write_text("#!/bin/sh\nexit 0\n")
+	new_engine.chmod(0o755)
+
+	monkeypatch.setenv("PATH", str(old_dir))
+	monkeypatch.setenv("PANDA_PI_BIN", str(new_dir))
+
+	planner = PANDAPlanner()
+
+	assert planner._resolve_command_head("pandaPIengine") == str(new_engine)
+
+
 def test_panda_problem_export_uses_explicit_blocksworld_style_defaults_when_requested():
 	builder = PANDAProblemBuilder(
 		config=PANDAProblemBuilderConfig(
@@ -319,6 +340,62 @@ def test_panda_run_command_kills_process_group_on_timeout(monkeypatch, tmp_path)
 
 	assert "timed out" in str(excinfo.value)
 	assert killpg_calls == [("killpg", 12345, signal.SIGKILL)]
+
+
+def test_panda_planner_tries_next_engine_mode_when_first_mode_has_no_plan(
+	monkeypatch,
+	tmp_path,
+):
+	planner = PANDAPlanner(workspace=str(tmp_path))
+	monkeypatch.setenv("PANDA_PI_ENGINE_MODES", "default,sat")
+	monkeypatch.setattr(planner, "_require_toolchain", lambda: None)
+
+	engine_commands = []
+
+	def fake_run_command(command, stage, work_dir, timeout_seconds=None):
+		if stage == "parser":
+			return {"stdout": "", "stderr": ""}
+		if stage == "grounder":
+			return {"stdout": "", "stderr": ""}
+		if stage == "engine":
+			engine_commands.append(list(command))
+			if "-s" in command:
+				return {
+					"stdout": "==>\n0 stack a b\nroot 1\n1 do_put_on a b -> m_do_put_on 0\n",
+					"stderr": "",
+				}
+			return {
+				"stdout": "Problem is unsolvable\n",
+				"stderr": "",
+			}
+		raise AssertionError(f"unexpected stage: {stage}")
+
+	def fake_run_subprocess(command, work_dir, timeout_seconds=None):
+		if command[1:2] != ["-c"]:
+			raise AssertionError(f"unexpected command: {command}")
+		raw_plan = Path(command[2]).read_text()
+		Path(command[3]).write_text(raw_plan)
+		return {"returncode": 0, "stdout": "", "stderr": ""}
+
+	monkeypatch.setattr(planner, "_run_command", fake_run_command)
+	monkeypatch.setattr(planner, "_run_subprocess", fake_run_subprocess)
+
+	result = planner.plan(
+		domain=_domain(),
+		method_library=_library(),
+		objects=("a", "b"),
+		target_literal=None,
+		task_name="place_on",
+		transition_name="test_transition",
+		task_args=("a", "b"),
+		timeout_seconds=5.0,
+	)
+
+	assert result.engine_mode == "sat"
+	assert [step.action_name for step in result.steps] == ["stack"]
+	assert len(engine_commands) == 2
+	assert "-s" not in engine_commands[0]
+	assert "-s" in engine_commands[1]
 
 
 def test_panda_domain_export_preserves_declared_typed_task_and_method_signatures():

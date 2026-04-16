@@ -35,6 +35,7 @@ class PANDAPlanResult:
 	task_name: str
 	task_args: Tuple[str, ...]
 	target_literal: Optional[HTNLiteral]
+	engine_mode: Optional[str] = None
 	steps: List[PANDAPlanStep] = field(default_factory=list)
 	domain_hddl: str = ""
 	problem_hddl: str = ""
@@ -54,6 +55,7 @@ class PANDAPlanResult:
 			"task_name": self.task_name,
 			"task_args": list(self.task_args),
 			"target_literal": self.target_literal.to_dict() if self.target_literal else None,
+			"engine_mode": self.engine_mode,
 			"steps": [step.to_dict() for step in self.steps],
 			"domain_hddl": self.domain_hddl,
 			"problem_hddl": self.problem_hddl,
