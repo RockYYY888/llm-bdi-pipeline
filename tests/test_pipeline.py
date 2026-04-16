@@ -29,6 +29,7 @@ if _src_dir not in sys.path:
 
 import ltl_bdi_pipeline as pipeline_module
 from ltl_bdi_pipeline import LTL_BDI_Pipeline, TypeResolutionError
+from pipeline_artifacts import DomainBuildArtifact, persist_domain_build_artifact
 from stage1_interpretation.grounding_map import GroundingMap
 from stage1_interpretation.ltlf_formula import (
 	LTLFormula,
@@ -50,7 +51,10 @@ from stage3_method_synthesis.htn_schema import (
 	_parse_invocation_signature,
 	_parse_signature_literal,
 )
-from stage3_method_synthesis.htn_prompts import build_prompt_analysis_payload
+from stage3_method_synthesis.htn_prompts import (
+	build_domain_prompt_analysis_payload,
+	build_prompt_analysis_payload,
+)
 from stage4_panda_planning.panda_planner import PANDAPlanner
 from stage4_panda_planning.panda_schema import PANDAPlanResult, PANDAPlanStep
 from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
@@ -734,15 +738,15 @@ OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS: Dict[str, Dict[str, Any]] = {
 def _official_domain_method_library(
 	domain_key: str,
 	*,
-	target_literal_signatures: List[str],
-	query_task_anchors: List[Dict[str, Any]],
+	target_literal_signatures: List[str] | None = None,
+	query_task_anchors: List[Dict[str, Any]] | None = None,
 ) -> HTNMethodLibrary:
 	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
 	return _official_hddl_method_library(
 		domain_file=domain_config["domain_file"],
 		task_source_predicates=OFFICIAL_STAGE3_MASK_TASK_SOURCE_PREDICATES[domain_key],
-		target_literal_signatures=target_literal_signatures,
-		query_task_anchors=query_task_anchors,
+		target_literal_signatures=target_literal_signatures or [],
+		query_task_anchors=query_task_anchors or [],
 	)
 
 def _build_oracle_task_grounded_stage1_spec(
@@ -798,6 +802,182 @@ def _build_oracle_task_grounded_stage1_spec(
 	ltl_spec.grounding_map = NLToLTLfGenerator()._create_grounding_map(ltl_spec)
 	return ltl_spec
 
+
+def assert_query_execution_context_derives_targets_outside_stage3():
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	method_library = _official_domain_method_library("blocksworld")
+	method_library.target_literals = []
+	method_library.target_task_bindings = []
+	ltl_spec = _build_oracle_task_grounded_stage1_spec(
+		pipeline,
+		BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+	)
+
+	query_context = pipeline._build_query_execution_context(ltl_spec, method_library)
+
+	assert list(method_library.target_literals) == []
+	assert list(method_library.target_task_bindings) == []
+	assert [literal.to_signature() for literal in query_context.target_literals] == list(
+		ltl_spec.query_task_literal_signatures,
+	)
+	assert len(query_context.target_task_bindings) == len(query_context.target_literals)
+	assert query_context.query_task_anchors
+	assert query_context.query_task_network
+
+
+def assert_stage4_domain_gate_omits_query_runtime_records(monkeypatch):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	pipeline.output_dir = Path(tempfile.mkdtemp(prefix="stage4_domain_gate_"))
+	method_library = _official_domain_method_library("blocksworld")
+	method_library.target_literals = []
+	method_library.target_task_bindings = []
+
+	class FakePlanner:
+		def __init__(self, workspace=None):
+			self.workspace = workspace
+
+		def plan(
+			self,
+			domain,
+			method_library,
+			objects,
+			target_literal,
+			task_name,
+			transition_name,
+			**kwargs,
+		):
+			work_dir = Path(tempfile.mkdtemp(prefix=f"{transition_name}_"))
+			return PANDAPlanResult(
+				task_name=task_name,
+				task_args=tuple(kwargs.get("task_args") or ()),
+				target_literal=target_literal,
+				steps=[],
+				raw_plan="noop",
+				actual_plan="noop",
+				work_dir=str(work_dir),
+				timing_profile={},
+			)
+
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", FakePlanner)
+	monkeypatch.setattr(
+		pipeline,
+		"_task_witness_initial_facts",
+		lambda *args, **kwargs: (),
+	)
+
+	stage4_data = pipeline._stage4_domain_gate(method_library)
+
+	assert stage4_data is not None
+	assert stage4_data["gate_type"] == "domain_complete"
+	assert stage4_data["query_specific_runtime_records"] == 0
+	assert "unordered_runtime_plan_records" not in stage4_data
+	assert "query_validations" not in stage4_data
+	assert stage4_data["validated_task_count"] == len(method_library.compound_tasks)
+
+
+def assert_build_domain_library_persists_stable_artifacts(monkeypatch, tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	test_logs_dir = Path(__file__).parent / "logs"
+	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	method_library = _official_domain_method_library("blocksworld")
+	method_library.target_literals = []
+	method_library.target_task_bindings = []
+
+	stage3_summary = {
+		"used_llm": False,
+		"declared_compound_tasks": [task.name for task in method_library.compound_tasks],
+		"compound_tasks": len(method_library.compound_tasks),
+		"primitive_tasks": len(method_library.primitive_tasks),
+		"methods": len(method_library.methods),
+	}
+	stage4_summary = {
+		"gate_type": "domain_complete",
+		"validated_task_count": len(method_library.compound_tasks),
+		"query_specific_runtime_records": 0,
+	}
+
+	monkeypatch.setattr(
+		pipeline,
+		"_stage3_domain_method_synthesis",
+		lambda: (method_library, stage3_summary),
+	)
+	monkeypatch.setattr(
+		pipeline,
+		"_stage4_domain_gate",
+		lambda library: stage4_summary,
+	)
+
+	result = pipeline.build_domain_library(output_root=str(tmp_path))
+
+	assert result["success"] is True
+	method_library_path = Path(result["artifact_paths"]["method_library"])
+	stage3_metadata_path = Path(result["artifact_paths"]["stage3_metadata"])
+	stage4_domain_gate_path = Path(result["artifact_paths"]["stage4_domain_gate"])
+	assert method_library_path.exists()
+	assert stage3_metadata_path.exists()
+	assert stage4_domain_gate_path.exists()
+	loaded_method_library = HTNMethodLibrary.from_dict(json.loads(method_library_path.read_text()))
+	assert loaded_method_library.target_literals == []
+	assert loaded_method_library.target_task_bindings == []
+
+
+def assert_execute_query_with_library_uses_cached_domain_artifact(monkeypatch, tmp_path):
+	pipeline = LTL_BDI_Pipeline(domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+	test_logs_dir = Path(__file__).parent / "logs"
+	pipeline.logger = PipelineLogger(logs_dir=str(test_logs_dir), run_origin="tests")
+	method_library = _official_domain_method_library("blocksworld")
+	method_library.target_literals = []
+	method_library.target_task_bindings = []
+	artifact_root = tmp_path / "blocksworld"
+	artifact = DomainBuildArtifact(
+		domain_name="blocksworld",
+		method_library=method_library,
+		stage3_metadata={"used_llm": False},
+		stage4_domain_gate={"gate_type": "domain_complete"},
+	)
+	persist_domain_build_artifact(
+		artifact_root=artifact_root,
+		artifact=artifact,
+	)
+
+	def oracle_stage1_parse_nl(nl_instruction: str):
+		return _build_oracle_task_grounded_stage1_spec(pipeline, nl_instruction)
+
+	monkeypatch.setattr(pipeline, "_stage1_parse_nl", oracle_stage1_parse_nl)
+	monkeypatch.setattr(
+		pipeline,
+		"_stage2_dfa_generation",
+		lambda ltl_spec: {"states": ["q0"], "transitions": [], "accepting_states": ["q0"]},
+	)
+
+	def fake_stage5(ltl_spec, dfa_result, runtime_method_library, plan_records, *, query_context=None):
+		assert query_context is not None
+		assert runtime_method_library.target_literals
+		assert runtime_method_library.target_task_bindings
+		assert method_library.target_literals == []
+		assert method_library.target_task_bindings == []
+		return "+!run_dfa <- true.", {"transition_count": 0}
+
+	monkeypatch.setattr(pipeline, "_stage5_agentspeak_rendering", fake_stage5)
+	monkeypatch.setattr(
+		pipeline,
+		"_stage6_jason_validation",
+		lambda *args, **kwargs: {"summary": {"status": "success"}, "artifacts": {}},
+	)
+	monkeypatch.setattr(
+		pipeline,
+		"_stage7_official_verification",
+		lambda *args, **kwargs: {"summary": {"status": "success"}},
+	)
+
+	result = pipeline.execute_query_with_library(
+		BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+		library_artifact=artifact_root,
+	)
+
+	assert result["success"] is True
+	assert result["query_execution_context"]["target_literals"]
+
 def _run_domain_query_case_with_official_stage3_mask(
 	domain_key: str,
 	query_id: str,
@@ -813,6 +993,39 @@ def _run_domain_query_case_with_official_stage3_mask(
 	class OfficialStage3MaskSynthesizer:
 		def __init__(self, *args, **kwargs):
 			self._delegate = RealHTNMethodSynthesizer()
+
+		def synthesize_domain_complete(
+			self,
+			domain,
+			*,
+			derived_analysis=None,
+		):
+			method_library = _official_domain_method_library(domain_key)
+			method_library.target_literals = []
+			method_library.target_task_bindings = []
+			prompt_analysis = build_domain_prompt_analysis_payload(
+				domain,
+				action_analysis={},
+			)
+			return method_library, {
+				"used_llm": False,
+				"model": None,
+				"declared_compound_tasks": list(prompt_analysis.get("declared_compound_tasks") or ()),
+				"domain_task_contracts": list(prompt_analysis.get("domain_task_contracts") or ()),
+				"action_analysis": {},
+				"derived_analysis": prompt_analysis,
+				"compound_tasks": len(method_library.compound_tasks),
+				"primitive_tasks": len(method_library.primitive_tasks),
+				"methods": len(method_library.methods),
+				"failure_stage": None,
+				"failure_reason": None,
+				"failure_class": None,
+				"llm_prompt": None,
+				"llm_response": None,
+				"llm_finish_reason": None,
+				"llm_attempts": 0,
+				"llm_generation_attempts": 0,
+			}
 
 		def synthesize(
 			self,

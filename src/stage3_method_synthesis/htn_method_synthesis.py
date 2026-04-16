@@ -23,6 +23,9 @@ from stage3_method_synthesis.htn_schema import (
 	_parse_invocation_signature,
 )
 from stage3_method_synthesis.htn_prompts import (
+	build_domain_htn_system_prompt,
+	build_domain_htn_user_prompt,
+	build_domain_prompt_analysis_payload,
 	_render_producer_mode_options_for_predicate,
 	build_htn_system_prompt,
 	build_htn_user_prompt,
@@ -69,7 +72,7 @@ class LLMStreamingResponseError(RuntimeError):
 		self.finish_reason = finish_reason
 
 class HTNMethodSynthesizer:
-	"""Build an HTN method library for the current DFA targets."""
+	"""Build HTN method libraries for query-conditioned or domain-complete flows."""
 
 	def __init__(
 		self,
@@ -103,6 +106,103 @@ class HTNMethodSynthesizer:
 					timeout=self.timeout,
 					max_retries=0,
 				)
+
+	def synthesize_domain_complete(
+		self,
+		domain: Any,
+		*,
+		derived_analysis: Optional[Dict[str, Any]] = None,
+	) -> Tuple[HTNMethodLibrary, Dict[str, Any]]:
+		"""Create one domain-complete method library for all declared compound tasks."""
+
+		action_analysis = self._analyse_domain_actions(domain)
+		primitive_tasks = self._build_primitive_tasks(domain)
+		prompt_analysis = dict(
+			derived_analysis
+			or build_domain_prompt_analysis_payload(
+				domain,
+				action_analysis=action_analysis,
+			),
+		)
+		metadata: Dict[str, Any] = {
+			"used_llm": False,
+			"model": self.model if self.client else None,
+			"declared_compound_tasks": list(prompt_analysis.get("declared_compound_tasks") or ()),
+			"domain_task_contracts": list(prompt_analysis.get("domain_task_contracts") or ()),
+			"action_analysis": action_analysis,
+			"derived_analysis": prompt_analysis,
+			"compound_tasks": 0,
+			"primitive_tasks": len(primitive_tasks),
+			"methods": 0,
+			"failure_stage": None,
+			"failure_reason": None,
+			"failure_class": None,
+			"llm_prompt": None,
+			"llm_response": None,
+			"llm_finish_reason": None,
+			"llm_attempts": 0,
+			"llm_generation_attempts": 0,
+			"timing_profile": {},
+		}
+
+		if not self.client:
+			raise self._build_synthesis_error(
+				metadata,
+				"preflight",
+				(
+					"Stage 3 requires a configured OPENAI_API_KEY. "
+					"HTN method synthesis only accepts live LLM output."
+				),
+			)
+
+		prompt_build_start = time.monotonic()
+		prompt = {
+			"system": build_domain_htn_system_prompt(),
+			"user": build_domain_htn_user_prompt(
+				domain,
+				schema_hint=self._schema_hint(),
+				action_analysis=action_analysis,
+				derived_analysis=prompt_analysis,
+			),
+		}
+		metadata["timing_profile"]["prompt_build_seconds"] = round(
+			time.monotonic() - prompt_build_start,
+			6,
+		)
+		metadata["llm_prompt"] = prompt
+		request_max_tokens = self._estimate_stage3_response_token_budget(
+			prompt_analysis=prompt_analysis,
+			ast_compiler_defaults=None,
+			default_max_tokens=self.max_tokens,
+		)
+		request_max_tokens = self._apply_stage3_provider_token_ceiling(request_max_tokens)
+		metadata["llm_request_max_tokens"] = request_max_tokens
+		metadata["llm_generation_attempts"] = 1
+
+		llm_library, response_text, finish_reason = self._request_complete_llm_library(
+			prompt,
+			domain,
+			metadata,
+			prompt_analysis=prompt_analysis,
+			ast_compiler_defaults=None,
+			max_tokens=request_max_tokens,
+		)
+		metadata["llm_response"] = response_text
+		metadata["llm_finish_reason"] = finish_reason
+
+		llm_only_library = HTNMethodLibrary(
+			compound_tasks=list(llm_library.compound_tasks),
+			primitive_tasks=primitive_tasks,
+			methods=list(llm_library.methods),
+			target_literals=[],
+			target_task_bindings=[],
+		)
+		self._validate_domain_complete_coverage(domain, llm_only_library)
+		metadata["used_llm"] = True
+		metadata["compound_tasks"] = len(llm_only_library.compound_tasks)
+		metadata["primitive_tasks"] = len(llm_only_library.primitive_tasks)
+		metadata["methods"] = len(llm_only_library.methods)
+		return llm_only_library, metadata
 
 	def synthesize(
 		self,
@@ -3066,6 +3166,27 @@ class HTNMethodSynthesizer:
 					f"target_task_binding for '{target_signature}' must use the ordered "
 					f"query task anchor '{anchor_task_name}', not '{bound_task_name}'.",
 				)
+
+	def _validate_domain_complete_coverage(
+		self,
+		domain: Any,
+		library: HTNMethodLibrary,
+	) -> None:
+		"""Ensure the domain-complete library covers every declared compound task."""
+
+		raw_task_to_alias, _alias_to_raw_task = self._declared_task_alias_maps(domain)
+		expected_aliases = set(raw_task_to_alias.values())
+		library_aliases = {
+			str(getattr(task, "name", "")).strip()
+			for task in library.compound_tasks
+			if str(getattr(task, "name", "")).strip()
+		}
+		missing_aliases = sorted(expected_aliases - library_aliases)
+		if missing_aliases:
+			raise ValueError(
+				"Stage 3 domain-complete output omitted declared compound tasks: "
+				f"{missing_aliases}",
+			)
 
 	@staticmethod
 

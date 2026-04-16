@@ -171,12 +171,20 @@ def test_stage5_agentspeak_rendering_grounds_parameterised_query_anchors_from_li
 	)
 
 
+def test_query_execution_context_derives_targets_outside_stage3():
+	pipeline_tests.assert_query_execution_context_derives_targets_outside_stage3()
+
+
 def test_stage4_same_library_query_task_gate_plans_unique_query_task_schema_cases():
 	pipeline_tests.assert_stage4_same_library_query_task_gate_plans_unique_query_task_schema_cases()
 
 
 def test_stage4_query_task_gate_declares_generated_witness_objects():
 	pipeline_tests.assert_stage4_query_task_gate_declares_generated_witness_objects()
+
+
+def test_stage4_domain_gate_omits_query_runtime_records(monkeypatch):
+	pipeline_tests.assert_stage4_domain_gate_omits_query_runtime_records(monkeypatch)
 
 
 def test_stage6_object_types_use_problem_type_map_without_target_binding_scan():
@@ -343,6 +351,17 @@ def test_stage3_uses_query_inventory_for_grounding_even_when_semantic_objects_ar
 
 def test_stage6_problem_seed_facts_ignore_stage4_witness_facts():
 	pipeline_tests.assert_stage6_problem_seed_facts_ignore_stage4_witness_facts()
+
+
+def test_build_domain_library_persists_stable_artifacts(monkeypatch, tmp_path):
+	pipeline_tests.assert_build_domain_library_persists_stable_artifacts(monkeypatch, tmp_path)
+
+
+def test_execute_query_with_library_uses_cached_domain_artifact(monkeypatch, tmp_path):
+	pipeline_tests.assert_execute_query_with_library_uses_cached_domain_artifact(
+		monkeypatch,
+		tmp_path,
+	)
 
 
 def test_method_validation_initial_facts_are_branch_specific(tmp_path):

@@ -19,22 +19,26 @@ def main():
 	"""Main entry point"""
 	# Parse command line arguments
 	parser = argparse.ArgumentParser(
-		description='LTL-BDI Pipeline - DFA-AgentSpeak Generation from Natural Language',
+		description='LTL-BDI Pipeline - domain build and query execution entrypoints',
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog='''
 Examples:
   python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl
-  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --mode dfa_agentspeak
-  python src/main.py "Given blocks a, b, c on table, stack a on b on c" --domain-file ./src/domains/blocksworld/domain.hddl
+  python src/main.py --build-domain-library --domain-file ./src/domains/blocksworld/domain.hddl
+  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --library-artifact ./artifacts/domain_builds/blocks
 
 Note:
   Only 'dfa_agentspeak' mode is supported.
   Domain file is mandatory and must be provided with --domain-file.
-  The pipeline runs Stage 3 (HTN synthesis), Stage 4 (PANDA planning),
-  Stage 5 (AgentSpeak rendering), and Stage 6 (Jason runtime validation).
+  The compatibility wrapper still runs the full pipeline, but the refactored
+  public flow separates domain build from query execution.
 		''',
 	)
-	parser.add_argument('instruction', help='Natural language instruction')
+	parser.add_argument(
+		'instruction',
+		nargs='?',
+		help='Natural language instruction used by the compatibility wrapper or query execution path',
+	)
 	parser.add_argument(
 		'--domain-file',
 		required=True,
@@ -50,9 +54,21 @@ Note:
 		default='dfa_agentspeak',
 		help='Execution mode (default: dfa_agentspeak)',
 	)
+	parser.add_argument(
+		'--build-domain-library',
+		action='store_true',
+		help='Run only the domain build pipeline and persist a cached domain library artifact',
+	)
+	parser.add_argument(
+		'--library-artifact',
+		help='Path to a cached domain library artifact directory or method_library.json file',
+	)
+	parser.add_argument(
+		'--artifact-output-root',
+		help='Optional explicit output root for persisted domain build artifacts',
+	)
 
 	args = parser.parse_args()
-	nl_instruction = args.instruction
 	mode = args.mode
 	domain_file = str(Path(args.domain_file).expanduser().resolve())
 	problem_file = (
@@ -94,7 +110,19 @@ Note:
 
 	# Execute pipeline
 	pipeline = LTL_BDI_Pipeline(domain_file=domain_file, problem_file=problem_file)
-	results = pipeline.execute(nl_instruction, mode=mode)
+	if args.build_domain_library:
+		results = pipeline.build_domain_library(output_root=args.artifact_output_root)
+	else:
+		if not args.instruction:
+			parser.error("instruction is required unless --build-domain-library is used")
+		if args.library_artifact:
+			results = pipeline.execute_query_with_library(
+				args.instruction,
+				library_artifact=args.library_artifact,
+				mode=mode,
+			)
+		else:
+			results = pipeline.execute(args.instruction, mode=mode)
 
 	# Exit with appropriate code
 	sys.exit(0 if results.get("success", False) else 1)

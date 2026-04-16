@@ -27,6 +27,7 @@ from stage3_method_synthesis.htn_schema import (
     HTNMethod,
     HTNMethodLibrary,
     HTNTask,
+    HTNTargetTaskBinding,
     _parse_signature_literal,
 )
 from stage3_method_synthesis.task_naming import query_root_alias_task_name, sanitize_identifier
@@ -35,6 +36,13 @@ from stage5_agentspeak_rendering.agentspeak_renderer import AgentSpeakRenderer
 from stage5_agentspeak_rendering.asl_method_lowering import ASLMethodLowering
 from stage5_agentspeak_rendering.dfa_runtime import build_agentspeak_transition_specs
 from stage6_jason_validation.jason_runner import JasonRunner, JasonValidationError
+from pipeline_artifacts import (
+    DomainBuildArtifact,
+    QueryExecutionContext,
+    load_domain_build_artifact,
+    persist_domain_build_artifact,
+    query_bound_method_library,
+)
 from utils.hddl_condition_parser import HDDLConditionParser
 from utils.ipc_plan_verifier import IPCPlanVerifier
 from utils.pipeline_logger import PipelineLogger
@@ -73,6 +81,7 @@ class LTL_BDI_Pipeline:
         # Use absolute path for logs directory (project root/logs)
         # This ensures logs go to same location regardless of where tests are run from
         project_root = Path(__file__).parent.parent  # src/ -> project root
+        self.project_root = project_root
         self.logger = PipelineLogger(logs_dir=str(project_root / "logs"))
 
         if not domain_file:
@@ -129,7 +138,7 @@ class LTL_BDI_Pipeline:
 
     def execute(self, nl_instruction: str, mode: str = "dfa_agentspeak") -> Dict[str, Any]:
         """
-        Execute the default Stage 1 -> Stage 7 pipeline mainline.
+        Execute the compatibility wrapper over the refactored two-pipeline flow.
 
         Args:
             nl_instruction: Natural language instruction
@@ -169,67 +178,37 @@ class LTL_BDI_Pipeline:
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-"*80)
 
-        # Stage 1: NL -> LTLf
-        ltl_spec = self._stage1_parse_nl(nl_instruction)
-        if not ltl_spec:
-            log_filepath = self.logger.end_pipeline(success=False)
-            print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
-
-        # Stage 2: LTLf -> DFA Generation
-        dfa_result = self._stage2_dfa_generation(ltl_spec)
-        if not dfa_result:
-            log_filepath = self.logger.end_pipeline(success=False)
-            print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
-
-        method_library, stage3_data = self._stage3_method_synthesis(ltl_spec)
+        method_library, stage3_data = self._stage3_domain_method_synthesis()
         if not method_library:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 3", "error": "HTN method synthesis failed"}
+            return {"success": False, "stage": "Stage 3", "error": "Domain HTN synthesis failed"}
 
-        plan_records, stage4_data = self._stage4_panda_planning(
-            ltl_spec,
-            method_library,
-        )
-        if plan_records is None:
+        stage4_data = self._stage4_domain_gate(method_library)
+        if stage4_data is None:
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 4", "error": "PANDA planning failed"}
+            return {"success": False, "stage": "Stage 4", "error": "Domain gate failed"}
 
-        asl_code, _ = self._stage5_agentspeak_rendering(
-            ltl_spec,
-            dfa_result,
-            method_library,
-            plan_records,
+        artifact = DomainBuildArtifact(
+            domain_name=self.domain.name,
+            method_library=method_library,
+            stage3_metadata=stage3_data,
+            stage4_domain_gate=stage4_data,
         )
-        if not asl_code:
+        artifact_paths = self._persist_domain_build_artifact(artifact)
+
+        query_result = self._execute_query_with_loaded_library(
+            nl_instruction,
+            artifact,
+        )
+        if not query_result.get("success", False):
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 5", "error": "AgentSpeak rendering failed"}
-
-        stage6_data = self._stage6_jason_validation(
-            ltl_spec,
-            method_library,
-            plan_records,
-            stage4_data,
-            asl_code,
-        )
-        if stage6_data is None:
-            log_filepath = self.logger.end_pipeline(success=False)
-            print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 6", "error": "Jason runtime validation failed"}
+            return query_result
 
         print("\n" + "="*80)
-        # Stage 7: Official IPC verifier on generated hierarchical plan
-        stage7_data = self._stage7_official_verification(ltl_spec, method_library, stage6_data)
-        if stage7_data is None:
-            log_filepath = self.logger.end_pipeline(success=False)
-            print(f"\nExecution log saved to: {log_filepath}")
-            return {"success": False, "stage": "Stage 7", "error": "Official IPC verification failed"}
-
-        stage7_summary = stage7_data.get("summary") or {}
+        stage7_summary = (query_result.get("stage7") or {}).get("summary") or {}
         if stage7_summary.get("status") == "skipped":
             print("STAGES 1-6 COMPLETED SUCCESSFULLY (STAGE 7 SKIPPED)")
         else:
@@ -242,14 +221,213 @@ class LTL_BDI_Pipeline:
 
         return {
             "success": True,
+            "domain_build": {
+                "method_library": method_library.to_dict(),
+                "stage3_metadata": stage3_data,
+                "stage4_domain_gate": stage4_data,
+                "artifact_paths": artifact_paths,
+            },
+            **query_result,
+        }
+
+    def build_domain_library(
+        self,
+        *,
+        output_root: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build and persist one domain-complete Stage 3/Stage 4 artifact."""
+
+        self.logger.start_pipeline(
+            f"Build domain-complete HTN library for {self.domain.name}",
+            mode="domain_build",
+            domain_file=self.domain_file,
+            problem_file=None,
+            domain_name=self.domain.name,
+            problem_name=None,
+            output_dir="logs",
+        )
+        self.output_dir = self.logger.current_log_dir
+        if self.logger.current_record is not None and self.output_dir is not None:
+            self.logger.current_record.output_dir = str(self.output_dir)
+            self.logger._save_current_state()
+
+        method_library, stage3_data = self._stage3_domain_method_synthesis()
+        if not method_library:
+            log_filepath = self.logger.end_pipeline(success=False)
+            return {
+                "success": False,
+                "stage": "Stage 3",
+                "error": "Domain HTN synthesis failed",
+                "log_path": str(log_filepath),
+            }
+
+        stage4_data = self._stage4_domain_gate(method_library)
+        if stage4_data is None:
+            log_filepath = self.logger.end_pipeline(success=False)
+            return {
+                "success": False,
+                "stage": "Stage 4",
+                "error": "Domain gate failed",
+                "log_path": str(log_filepath),
+            }
+
+        artifact = DomainBuildArtifact(
+            domain_name=self.domain.name,
+            method_library=method_library,
+            stage3_metadata=stage3_data,
+            stage4_domain_gate=stage4_data,
+        )
+        artifact_paths = self._persist_domain_build_artifact(
+            artifact,
+            output_root=output_root,
+        )
+        log_filepath = self.logger.end_pipeline(success=True)
+        return {
+            "success": True,
+            "domain_name": self.domain.name,
+            "artifact": artifact.to_dict(),
+            "artifact_paths": artifact_paths,
+            "log_path": str(log_filepath),
+        }
+
+    def execute_query_with_library(
+        self,
+        nl_query: str,
+        *,
+        library_artifact,
+        mode: str = "dfa_agentspeak",
+    ) -> Dict[str, Any]:
+        """Execute one query against a cached domain-complete library artifact."""
+
+        if mode != "dfa_agentspeak":
+            raise ValueError(
+                f"Unknown mode '{mode}'. Only 'dfa_agentspeak' is supported.",
+            )
+
+        self.logger.start_pipeline(
+            nl_query,
+            mode="query_execution",
+            domain_file=self.domain_file,
+            problem_file=self.problem_file,
+            domain_name=self.domain.name,
+            problem_name=self.problem.name if self.problem is not None else None,
+            output_dir="logs",
+        )
+        self.output_dir = self.logger.current_log_dir
+        if self.logger.current_record is not None and self.output_dir is not None:
+            self.logger.current_record.output_dir = str(self.output_dir)
+            self.logger._save_current_state()
+
+        result = self._execute_query_with_loaded_library(
+            nl_query,
+            load_domain_build_artifact(library_artifact),
+        )
+        log_filepath = self.logger.end_pipeline(success=result.get("success", False))
+        result["log_path"] = str(log_filepath)
+        return result
+
+    def _stable_domain_artifact_root(self, output_root: Optional[str] = None) -> Path:
+        if output_root:
+            return Path(output_root).expanduser().resolve()
+        if getattr(self.logger, "run_origin", "") == "tests" and self.output_dir is not None:
+            return (
+                Path(self.output_dir)
+                / "domain_build_artifacts"
+                / sanitize_identifier(self.domain.name)
+            )
+        return (
+            self.project_root
+            / "artifacts"
+            / "domain_builds"
+            / sanitize_identifier(self.domain.name)
+        )
+
+    def _persist_domain_build_artifact(
+        self,
+        artifact: DomainBuildArtifact,
+        *,
+        output_root: Optional[str] = None,
+    ) -> Dict[str, str]:
+        return persist_domain_build_artifact(
+            artifact_root=self._stable_domain_artifact_root(output_root),
+            artifact=artifact,
+        )
+
+    def _execute_query_with_loaded_library(
+        self,
+        nl_instruction: str,
+        artifact: DomainBuildArtifact,
+    ) -> Dict[str, Any]:
+        """Run Stage 1, Stage 2, Stage 5, Stage 6, and Stage 7 with a prebuilt library."""
+
+        ltl_spec = self._stage1_parse_nl(nl_instruction)
+        if not ltl_spec:
+            return {"success": False, "stage": "Stage 1", "error": "LTLf parsing failed"}
+
+        dfa_result = self._stage2_dfa_generation(ltl_spec)
+        if not dfa_result:
+            return {"success": False, "stage": "Stage 2", "error": "DFA generation failed"}
+
+        domain_library = artifact.method_library
+        query_context = self._build_query_execution_context(
+            ltl_spec,
+            domain_library,
+        )
+        runtime_method_library = query_bound_method_library(
+            domain_library,
+            target_literals=query_context.target_literals,
+            target_task_bindings=query_context.target_task_bindings,
+        )
+
+        asl_code, stage5_metadata = self._stage5_agentspeak_rendering(
+            ltl_spec,
+            dfa_result,
+            runtime_method_library,
+            (),
+            query_context=query_context,
+        )
+        if not asl_code:
+            return {
+                "success": False,
+                "stage": "Stage 5",
+                "error": "AgentSpeak rendering failed",
+            }
+
+        stage6_data = self._stage6_jason_validation(
+            ltl_spec,
+            runtime_method_library,
+            (),
+            None,
+            asl_code,
+            query_context=query_context,
+        )
+        if stage6_data is None:
+            return {
+                "success": False,
+                "stage": "Stage 6",
+                "error": "Jason runtime validation failed",
+            }
+
+        stage7_data = self._stage7_official_verification(
+            ltl_spec,
+            runtime_method_library,
+            stage6_data,
+        )
+        if stage7_data is None:
+            return {
+                "success": False,
+                "stage": "Stage 7",
+                "error": "Official IPC verification failed",
+            }
+
+        return {
+            "success": True,
             "ltl_spec": ltl_spec,
-            "method_library": stage3_data["method_library"],
-            "plans": (
-                stage4_data.get("query_validations")
-                or stage4_data.get("transitions")
-                or []
-            ),
+            "method_library": domain_library.to_dict(),
+            "query_execution_context": query_context.to_dict(),
+            "plans": [],
             "agentspeak_code": asl_code,
+            "stage5": stage5_metadata,
             "stage6": stage6_data,
             "stage7": stage7_data,
         }
@@ -1372,6 +1550,304 @@ class LTL_BDI_Pipeline:
                 },
             )
         return tuple(inventory)
+
+    def _stage3_domain_method_synthesis(self):
+        """Stage 3: domain-only HTN method synthesis over declared compound tasks."""
+        print("\n[STAGE 3] Domain-Complete HTN Method Synthesis")
+        print("-"*80)
+        stage_start = time.perf_counter()
+
+        try:
+            synthesizer = HTNMethodSynthesizer(
+                api_key=self.config.openai_api_key,
+                model=self.config.openai_stage3_model,
+                base_url=self.config.openai_base_url,
+                timeout=float(self.config.openai_stage3_timeout),
+                max_tokens=int(self.config.openai_stage3_max_tokens),
+            )
+            synthesis_start = time.perf_counter()
+            method_library, synthesis_meta = synthesizer.synthesize_domain_complete(
+                domain=self.domain,
+            )
+            synthesis_seconds = time.perf_counter() - synthesis_start
+            validation_start = time.perf_counter()
+            self._validate_method_library_typing(method_library)
+            typing_validation_seconds = time.perf_counter() - validation_start
+            summary = {
+                "used_llm": synthesis_meta["used_llm"],
+                "llm_attempted": synthesis_meta["llm_prompt"] is not None,
+                "llm_finish_reason": synthesis_meta.get("llm_finish_reason"),
+                "llm_attempts": synthesis_meta.get("llm_attempts"),
+                "llm_response_time_seconds": synthesis_meta.get("llm_response_time_seconds"),
+                "llm_attempt_durations_seconds": synthesis_meta.get(
+                    "llm_attempt_durations_seconds",
+                ),
+                "domain_task_contracts": synthesis_meta.get("domain_task_contracts", []),
+                "action_analysis": synthesis_meta.get("action_analysis", {}),
+                "derived_analysis": synthesis_meta.get("derived_analysis", {}),
+                "failure_class": synthesis_meta.get("failure_class"),
+                "declared_compound_tasks": synthesis_meta.get("declared_compound_tasks", []),
+                "compound_tasks": synthesis_meta["compound_tasks"],
+                "primitive_tasks": synthesis_meta["primitive_tasks"],
+                "methods": synthesis_meta["methods"],
+            }
+            self._latest_transition_prompt_analysis = {}
+            self._record_stage_timing(
+                "stage3",
+                stage_start,
+                breakdown={
+                    "synthesis_seconds": synthesis_seconds,
+                    "typing_validation_seconds": typing_validation_seconds,
+                    "llm_response_seconds": synthesis_meta.get("llm_response_time_seconds"),
+                },
+                metadata={
+                    "used_llm": synthesis_meta.get("used_llm"),
+                    "llm_attempted": synthesis_meta.get("llm_prompt") is not None,
+                    "domain_complete": True,
+                },
+            )
+            self.logger.log_stage3_method_synthesis(
+                method_library.to_dict(),
+                "Success",
+                model=synthesis_meta["model"] if synthesis_meta["llm_prompt"] is not None else None,
+                llm_prompt=synthesis_meta["llm_prompt"],
+                llm_response=synthesis_meta["llm_response"],
+                metadata=summary,
+            )
+
+            print("✓ Domain-complete HTN method synthesis complete")
+            print(f"  Attempted LLM synthesis: {summary['llm_attempted']}")
+            print(f"  Accepted LLM output: {summary['used_llm']}")
+            print(f"  Declared compound tasks: {len(summary['declared_compound_tasks'])}")
+            print(f"  Synthesised compound tasks: {summary['compound_tasks']}")
+            print(f"  Primitive tasks: {summary['primitive_tasks']}")
+            print(f"  Methods: {summary['methods']}")
+            return method_library, summary
+
+        except Exception as e:
+            self._latest_transition_specs = ()
+            self._latest_transition_prompt_analysis = {}
+            self._record_stage_timing("stage3", stage_start)
+            self.logger.log_stage3_method_synthesis(
+                None,
+                "Failed",
+                error=str(e),
+                model=getattr(e, "model", None),
+                llm_prompt=getattr(e, "llm_prompt", None),
+                llm_response=getattr(e, "llm_response", None),
+                metadata=getattr(e, "metadata", None),
+            )
+            print(f"✗ Stage 3 Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+
+    def _stage4_domain_gate(self, method_library):
+        """Stage 4: run the Panda hard-fail gate once per declared compound task."""
+        print("\n[STAGE 4] Domain Gate")
+        print("-"*80)
+        stage_start = time.perf_counter()
+        planner = PANDAPlanner(workspace=str(self.output_dir))
+
+        try:
+            declared_compound_names = {
+                str(getattr(task, "name", "")).strip()
+                for task in getattr(self.domain, "tasks", ())
+                if str(getattr(task, "name", "")).strip()
+            }
+            library_compound_names = {
+                str(getattr(task, "name", "")).strip()
+                for task in getattr(method_library, "compound_tasks", ())
+                if str(getattr(task, "name", "")).strip()
+            }
+            missing_tasks = sorted(declared_compound_names - library_compound_names)
+            if missing_tasks:
+                raise ValueError(
+                    "Stage 4 domain gate missing declared compound tasks: "
+                    f"{missing_tasks}",
+                )
+
+            referenced_child_names = sorted(
+                {
+                    str(getattr(step, "task_name", "")).strip()
+                    for method in getattr(method_library, "methods", ()) or ()
+                    for step in (getattr(method, "subtasks", ()) or ())
+                    if getattr(step, "kind", "") == "compound"
+                    and str(getattr(step, "task_name", "")).strip()
+                }
+            )
+            undefined_child_names = sorted(
+                child_name
+                for child_name in referenced_child_names
+                if child_name not in library_compound_names
+            )
+            if undefined_child_names:
+                raise ValueError(
+                    "Stage 4 domain gate found undefined compound children: "
+                    f"{undefined_child_names}",
+                )
+
+            gate_cases = self._stage4_domain_gate_cases(method_library)
+            gate_results: List[Dict[str, Any]] = []
+            planner_seconds = 0.0
+            witness_fact_seconds = 0.0
+            object_scope_seconds = 0.0
+
+            for case in gate_cases:
+                task_name = case["task_name"]
+                task_args = case["task_args"]
+                object_types = case["object_types"]
+                object_pool = case["object_pool"]
+                object_scope_start = time.perf_counter()
+                case_object_pool = list(object_pool)
+                case_object_types = dict(object_types)
+                object_scope_seconds += time.perf_counter() - object_scope_start
+
+                witness_start = time.perf_counter()
+                initial_facts = self._task_witness_initial_facts(
+                    planner,
+                    task_name,
+                    method_library,
+                    task_args,
+                    case_object_pool,
+                    object_pool=case_object_pool,
+                    object_types=case_object_types,
+                )
+                witness_fact_seconds += time.perf_counter() - witness_start
+
+                validation_library, validation_args, projection = (
+                    self._stage4_compact_validation_library_for_task(
+                        method_library,
+                        task_name,
+                        task_args,
+                        target_literal=None,
+                        compact_arg_threshold=self.STAGE4_COMPACT_TASK_ARG_THRESHOLD,
+                        max_compound_steps=self.STAGE4_MAX_VALIDATION_COMPOUND_STEPS,
+                    )
+                )
+                plan_start = time.perf_counter()
+                plan = planner.plan(
+                    domain=self.domain,
+                    method_library=validation_library,
+                    objects=case_object_pool,
+                    target_literal=None,
+                    task_name=task_name,
+                    transition_name=f"domain_gate_{sanitize_identifier(task_name)}",
+                    typed_objects=tuple(case_object_types.items()),
+                    task_args=validation_args,
+                    initial_facts=initial_facts,
+                    allow_empty_plan=True,
+                )
+                planner_seconds += time.perf_counter() - plan_start
+                gate_results.append(
+                    {
+                        "task_name": task_name,
+                        "task_args": list(validation_args),
+                        "object_types": dict(case_object_types),
+                        "initial_fact_count": len(initial_facts),
+                        "plan": self._stage4_plan_artifact_summary(plan),
+                        "projection": projection,
+                    }
+                )
+
+            summary = {
+                "gate_type": "domain_complete",
+                "declared_compound_task_count": len(declared_compound_names),
+                "validated_task_count": len(gate_results),
+                "validated_tasks": [record["task_name"] for record in gate_results],
+                "undefined_child_task_count": 0,
+                "missing_declared_task_count": 0,
+                "query_specific_runtime_records": 0,
+                "task_validations": gate_results,
+            }
+            self._record_stage_timing(
+                "stage4",
+                stage_start,
+                breakdown={
+                    "object_scope_seconds": object_scope_seconds,
+                    "witness_initial_facts_seconds": witness_fact_seconds,
+                    "planner_seconds": planner_seconds,
+                },
+                metadata={
+                    "gate_type": "domain_complete",
+                    "validated_task_count": len(gate_results),
+                },
+            )
+            self.logger.log_stage4_panda_planning(
+                summary,
+                "Success",
+                metadata={
+                    "backend": "pandaPI",
+                    "gate_type": "domain_complete",
+                    "validated_task_count": len(gate_results),
+                },
+            )
+
+            print("✓ Domain gate complete")
+            print(f"  Declared compound tasks: {len(declared_compound_names)}")
+            print(f"  Validated tasks: {len(gate_results)}")
+            return summary
+
+        except Exception as e:
+            self._record_stage_timing("stage4", stage_start)
+            self.logger.log_stage4_panda_planning(
+                None,
+                "Failed",
+                error=str(e),
+                metadata={"gate_type": "domain_complete"},
+            )
+            print(f"✗ Stage 4 Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _stage4_domain_gate_cases(self, method_library) -> Tuple[Dict[str, Any], ...]:
+        """Build synthetic task validation cases for the domain gate."""
+
+        candidate_root_types = sorted(
+            type_name
+            for type_name in self.domain_type_names
+            if self.type_parent_map.get(type_name) is None
+        )
+        default_type_name = (
+            "object"
+            if "object" in self.domain_type_names
+            else (candidate_root_types[0] if candidate_root_types else "")
+        )
+        cases: List[Dict[str, Any]] = []
+        for task in getattr(method_library, "compound_tasks", ()) or ():
+            task_name = str(getattr(task, "name", "") or "").strip()
+            if not task_name:
+                continue
+            type_signature = tuple(
+                type_name or default_type_name
+                for type_name in self._task_type_signature(task_name, method_library)
+            )
+            task_args: List[str] = []
+            object_pool: List[str] = []
+            object_types: Dict[str, str] = {}
+            parameters = tuple(getattr(task, "parameters", ()) or ())
+            for index, parameter in enumerate(parameters, start=1):
+                object_name = f"gate_{sanitize_identifier(task_name)}_{index}"
+                type_name = (
+                    type_signature[index - 1]
+                    if index - 1 < len(type_signature)
+                    else default_type_name
+                )
+                task_args.append(object_name)
+                object_pool.append(object_name)
+                if type_name:
+                    object_types[object_name] = type_name
+            cases.append(
+                {
+                    "task_name": task_name,
+                    "task_args": tuple(task_args),
+                    "type_signature": type_signature,
+                    "object_pool": tuple(object_pool),
+                    "object_types": object_types,
+                }
+            )
+        return tuple(cases)
 
     def _stage4_panda_planning(self, ltl_spec, method_library):
         """Stage 4: hard-fail reachability gate for the same Stage 3 method library."""
@@ -3787,7 +4263,103 @@ class LTL_BDI_Pipeline:
             if fact != target_fact
         )
 
-    def _stage5_agentspeak_rendering(self, ltl_spec, dfa_result, method_library, plan_records):
+    def _build_query_execution_context(
+        self,
+        ltl_spec,
+        method_library,
+    ) -> QueryExecutionContext:
+        """Build all query-time bindings outside the Stage 3 domain artifact."""
+
+        query_text = str(getattr(ltl_spec, "source_instruction", "") or "")
+        literal_signatures = tuple(
+            str(signature).strip()
+            for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
+            if str(signature).strip()
+        )
+        query_object_inventory = tuple(getattr(ltl_spec, "query_object_inventory", ()) or ())
+        if not query_object_inventory:
+            query_object_inventory = self._extract_query_object_inventory(query_text)
+
+        query_task_name_map = self._method_library_source_task_name_map(method_library)
+        variable_assignments: Dict[str, str] = {}
+        query_task_anchors: List[Dict[str, Any]] = []
+        query_task_network: List[Tuple[str, Tuple[str, ...]]] = []
+        target_literals: List[HTNLiteral] = []
+        target_task_bindings: List[Any] = []
+
+        for index, anchor in enumerate(self._extract_query_task_anchors(query_text), start=1):
+            source_task_name = str(anchor.get("task_name") or "").strip()
+            resolved_task_name = query_task_name_map.get(source_task_name, source_task_name)
+            literal_signature = (
+                literal_signatures[index - 1]
+                if index - 1 < len(literal_signatures)
+                else None
+            )
+            grounded_args = self._stage6_ground_query_task_arguments(
+                task_name=resolved_task_name,
+                task_args=tuple(
+                    str(arg).strip()
+                    for arg in (anchor.get("args") or ())
+                    if str(arg).strip()
+                ),
+                literal_signature=literal_signature,
+                method_library=method_library,
+                query_object_inventory=query_object_inventory,
+                variable_assignments=variable_assignments,
+            )
+            grounded_anchor = {
+                **dict(anchor),
+                "task_name": source_task_name,
+                "resolved_task_name": resolved_task_name,
+                "args": list(grounded_args),
+                "literal_signature": literal_signature,
+            }
+            query_task_anchors.append(grounded_anchor)
+            query_task_network.append(
+                (
+                    query_root_alias_task_name(index, source_task_name),
+                    tuple(grounded_args),
+                )
+            )
+            if literal_signature:
+                literal = _parse_signature_literal(literal_signature)
+                if literal is not None:
+                    target_literals.append(literal)
+                    target_task_bindings.append(
+                        HTNTargetTaskBinding(
+                            target_literal=literal_signature,
+                            task_name=resolved_task_name,
+                        )
+                    )
+
+        query_objects = tuple(
+            object_name
+            for entry in query_object_inventory
+            for object_name in entry.get("objects", ())
+        )
+        return QueryExecutionContext(
+            query_text=query_text,
+            ordered_query_sequence=self._query_task_sequence_is_ordered(ltl_spec),
+            query_task_anchors=tuple(query_task_anchors),
+            query_task_network=tuple(query_task_network),
+            query_task_name_map=query_task_name_map,
+            target_literals=tuple(target_literals),
+            target_task_bindings=tuple(target_task_bindings),
+            literal_signatures=literal_signatures,
+            query_object_inventory=query_object_inventory,
+            query_objects=query_objects,
+            typed_objects=dict(self._stage5_query_typed_objects(ltl_spec) or ()),
+        )
+
+    def _stage5_agentspeak_rendering(
+        self,
+        ltl_spec,
+        dfa_result,
+        method_library,
+        plan_records,
+        *,
+        query_context: Optional[QueryExecutionContext] = None,
+    ):
         """Stage 5: Stage 3 methods + raw DFA -> runnable AgentSpeak code."""
         print("\n[STAGE 5] AgentSpeak Rendering")
         print("-"*80)
@@ -3795,7 +4367,13 @@ class LTL_BDI_Pipeline:
 
         try:
             renderer = AgentSpeakRenderer()
-            typed_objects = self._stage5_query_typed_objects(ltl_spec)
+            if query_context is None:
+                query_context = self._build_query_execution_context(ltl_spec, method_library)
+            typed_objects = (
+                tuple(query_context.typed_objects.items())
+                if query_context.typed_objects
+                else self._stage5_query_typed_objects(ltl_spec)
+            )
             transition_specs_start = time.perf_counter()
             transition_specs = build_agentspeak_transition_specs(
                 dfa_result=dfa_result,
@@ -3805,43 +4383,15 @@ class LTL_BDI_Pipeline:
             transition_specs_seconds = time.perf_counter() - transition_specs_start
             self._latest_transition_specs = tuple(transition_specs)
             query_anchor_setup_start = time.perf_counter()
-            query_task_name_map = self._method_library_source_task_name_map(method_library)
-            query_text = str(getattr(ltl_spec, "source_instruction", "") or "")
-            literal_signatures = tuple(
-                str(signature).strip()
-                for signature in (getattr(ltl_spec, "query_task_literal_signatures", ()) or ())
-                if str(signature).strip()
-            )
-            query_object_inventory = tuple(getattr(ltl_spec, "query_object_inventory", ()) or ())
-            if not query_object_inventory:
-                query_object_inventory = self._extract_query_object_inventory(query_text)
-            variable_assignments: Dict[str, str] = {}
-            query_task_anchors: List[Dict[str, Any]] = []
-            for index, anchor in enumerate(
-                self._extract_query_task_anchors(query_text),
-            ):
-                source_task_name = str(anchor.get("task_name") or "").strip()
-                resolved_task_name = query_task_name_map.get(source_task_name, source_task_name)
-                literal_signature = (
-                    literal_signatures[index]
-                    if index < len(literal_signatures)
-                    else None
-                )
-                grounded_args = self._stage6_ground_query_task_arguments(
-                    task_name=resolved_task_name,
-                    task_args=tuple(str(arg).strip() for arg in (anchor.get("args") or ()) if str(arg).strip()),
-                    literal_signature=literal_signature,
-                    method_library=method_library,
-                    query_object_inventory=query_object_inventory,
-                    variable_assignments=variable_assignments,
-                )
-                query_task_anchors.append(
-                    {
-                        **dict(anchor),
-                        "args": list(grounded_args),
-                        "literal_signature": literal_signature,
-                    },
-                )
+            query_task_name_map = dict(query_context.query_task_name_map)
+            query_task_anchors = [
+                {
+                    key: value
+                    for key, value in dict(anchor).items()
+                    if key != "resolved_task_name"
+                }
+                for anchor in query_context.query_task_anchors
+            ]
             query_anchor_setup_seconds = time.perf_counter() - query_anchor_setup_start
             render_start = time.perf_counter()
             asl_code = renderer.generate(
@@ -4048,6 +4598,7 @@ class LTL_BDI_Pipeline:
         plan_records,
         stage4_data=None,
         asl_code="",
+        query_context: Optional[QueryExecutionContext] = None,
     ):
         """Stage 6: run generated AgentSpeak with Jason (RunLocalMAS)."""
         print("\n[STAGE 6] Jason Runtime Validation")
@@ -4061,9 +4612,11 @@ class LTL_BDI_Pipeline:
                 timeout_seconds=int(self.config.stage6_jason_timeout),
             )
             preparation_start = time.perf_counter()
+            if query_context is None:
+                query_context = self._build_query_execution_context(ltl_spec, method_library)
             seed_facts, seed_transition = self._stage6_runtime_seed_facts(
                 plan_records,
-                method_library.target_literals,
+                query_context.target_literals,
             )
             stage6_objects = self._stage6_runtime_objects(ltl_spec.objects, seed_facts)
             stage6_object_types = self._stage6_object_types(
@@ -4093,6 +4646,7 @@ class LTL_BDI_Pipeline:
                     ltl_spec=ltl_spec,
                     method_library=method_library,
                     action_schemas=action_schemas,
+                    query_context=query_context,
                 )
                 if ordered_query_sequence
                 else ()
@@ -4100,7 +4654,7 @@ class LTL_BDI_Pipeline:
             validation_start = time.perf_counter()
             result = runner.validate(
                 agentspeak_code=runtime_ready_asl_code,
-                target_literals=method_library.target_literals,
+                target_literals=query_context.target_literals,
                 protected_target_literals=protected_target_literals,
                 method_library=method_library,
                 action_schemas=action_schemas,
@@ -4114,9 +4668,7 @@ class LTL_BDI_Pipeline:
                 completion_mode="target_literals",
                 ordered_query_sequence=ordered_query_sequence,
                 planning_domain=self.domain,
-                runtime_plan_records=tuple(
-                    (stage4_data or {}).get("unordered_runtime_plan_records") or ()
-                ),
+                runtime_plan_records=(),
             )
             validation_seconds = time.perf_counter() - validation_start
             summary = {
@@ -4129,7 +4681,7 @@ class LTL_BDI_Pipeline:
                 "exit_code": result.exit_code,
                 "timed_out": result.timed_out,
                 "transition_count": len(plan_records),
-                "target_literal_count": len(method_library.target_literals),
+                "target_literal_count": len(query_context.target_literals),
                 "protected_target_literal_count": len(protected_target_literals),
                 "seed_fact_count": len(seed_facts),
                 "seed_transition": seed_transition,
@@ -4510,7 +5062,14 @@ class LTL_BDI_Pipeline:
             return self._stage6_problem_seed_facts()
         return self._stage6_seed_facts(plan_records, target_literals)
 
-    def _stage6_query_task_network(self, ltl_spec, method_library=None):
+    def _stage6_query_task_network(
+        self,
+        ltl_spec,
+        method_library=None,
+        query_context: Optional[QueryExecutionContext] = None,
+    ):
+        if query_context is not None and query_context.query_task_network:
+            return tuple(query_context.query_task_network)
         query_text = getattr(ltl_spec, "source_instruction", "") or ""
         query_task_anchors = self._extract_query_task_anchors(query_text)
         literal_signatures = tuple(
@@ -4717,12 +5276,21 @@ class LTL_BDI_Pipeline:
         ltl_spec,
         method_library,
         action_schemas,
+        query_context: Optional[QueryExecutionContext] = None,
     ):
-        target_literals = tuple(getattr(method_library, "target_literals", ()) or ())
+        target_literals = (
+            tuple(query_context.target_literals)
+            if query_context is not None
+            else tuple(getattr(method_library, "target_literals", ()) or ())
+        )
         if not target_literals:
             return ()
 
-        task_network = self._stage6_query_task_network(ltl_spec, method_library)
+        task_network = self._stage6_query_task_network(
+            ltl_spec,
+            method_library,
+            query_context=query_context,
+        )
         if not task_network:
             return ()
 

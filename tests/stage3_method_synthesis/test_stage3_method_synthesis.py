@@ -36,6 +36,9 @@ from stage3_method_synthesis.htn_prompts import (
 	_render_producer_mode_options_for_predicate,
 	_same_arity_caller_shared_requirements,
 	_same_arity_packaging_candidates_for_query_task,
+	build_domain_htn_system_prompt,
+	build_domain_htn_user_prompt,
+	build_domain_prompt_analysis_payload,
 	build_prompt_analysis_payload,
 	build_htn_system_prompt,
 	build_htn_user_prompt,
@@ -50,6 +53,7 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTargetTaskBinding,
 )
 from utils.config import get_config
+from utils.hddl_condition_parser import HDDLConditionParser
 from utils.hddl_parser import HDDLParser
 
 OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
@@ -88,6 +92,85 @@ def _transport_domain():
 		/ "domain.hddl"
 	)
 	return HDDLParser.parse_domain(str(domain_path))
+
+
+def test_domain_prompt_analysis_payload_lists_all_declared_compound_tasks():
+	domain = _domain()
+	payload = build_domain_prompt_analysis_payload(domain)
+
+	assert len(payload["domain_task_contracts"]) == len(domain.tasks)
+	assert payload["declared_compound_tasks"]
+	assert "query_task_contracts" not in payload
+	assert any(
+		str(contract.get("task_name") or "").strip() == "do_move"
+		for contract in payload["domain_task_contracts"]
+	)
+
+
+def test_domain_htn_user_prompt_omits_query_bindings_and_grounded_constants():
+	domain = _domain()
+	prompt_analysis = build_domain_prompt_analysis_payload(domain)
+	system_prompt = build_domain_htn_system_prompt()
+	user_prompt = build_domain_htn_user_prompt(
+		domain,
+		schema_hint='{"tasks":[...]}',
+		derived_analysis=prompt_analysis,
+	)
+
+	assert "ordered_query_bindings" not in user_prompt
+	assert "target_task_bindings" not in user_prompt
+	assert "declared_compound_tasks" in user_prompt
+	assert "do_move(?x, ?y)" in user_prompt
+	assert "whole domain" in user_prompt.lower()
+	assert "top-level key tasks" in system_prompt
+
+
+def test_synthesize_domain_complete_returns_domain_only_library(monkeypatch):
+	domain = _domain()
+	synthesizer = HTNMethodSynthesizer()
+	condition_parser = HDDLConditionParser()
+	primitive_tasks = synthesizer._build_primitive_tasks(domain)
+	compound_tasks = [
+		HTNTask(
+			name=task.name,
+			parameters=tuple(condition_parser._extract_parameter_names(task.parameters)),
+			is_primitive=False,
+			source_predicates=(),
+			source_name=task.name,
+		)
+		for task in domain.tasks
+	]
+	library = HTNMethodLibrary(
+		compound_tasks=compound_tasks,
+		primitive_tasks=primitive_tasks,
+		methods=[
+			HTNMethod(
+				method_name=f"m_{task.name}_noop",
+				task_name=task.name,
+				parameters=tuple(condition_parser._extract_parameter_names(task.parameters)),
+				task_args=tuple(condition_parser._extract_parameter_names(task.parameters)),
+				context=(),
+				subtasks=(),
+				ordering=(),
+				origin="unit_test",
+			)
+			for task in domain.tasks
+		],
+	)
+
+	monkeypatch.setattr(synthesizer, "client", object())
+	monkeypatch.setattr(
+		synthesizer,
+		"_request_complete_llm_library",
+		lambda *args, **kwargs: (library, '{"tasks":[]}', "stop"),
+	)
+
+	domain_library, metadata = synthesizer.synthesize_domain_complete(domain)
+
+	assert domain_library.target_literals == []
+	assert domain_library.target_task_bindings == []
+	assert metadata["compound_tasks"] == len(domain.tasks)
+	assert metadata["declared_compound_tasks"]
 
 def _live_stage3_kwargs() -> dict:
 	config = get_config()

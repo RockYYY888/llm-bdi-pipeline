@@ -9758,3 +9758,235 @@ def build_htn_user_prompt(
 			),
 	]
 	return "\n\n".join(section for section in sections if section).strip() + "\n"
+
+
+def build_domain_prompt_analysis_payload(
+	domain: Any,
+	*,
+	action_analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+	"""Build compact domain-complete contracts for all declared compound tasks."""
+
+	analysis = _normalise_action_analysis(domain, action_analysis)
+	task_headline_candidates = _task_headline_candidate_map(domain, analysis)
+	shared_dynamic_prerequisites_by_task: Dict[str, list[str]] = {}
+	producer_consumer_templates_by_task: Dict[str, list[str]] = {}
+	domain_task_contracts: list[Dict[str, Any]] = []
+
+	for task in getattr(domain, "tasks", []):
+		task_name = str(getattr(task, "name", "")).strip()
+		if not task_name:
+			continue
+		sanitized_task_name = _sanitize_name(task_name)
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task.parameters)
+		headline_candidates = tuple(
+			dict.fromkeys(
+				str(predicate_name).strip()
+				for predicate_name in (
+					getattr(task, "source_predicates", ())
+					or task_headline_candidates.get(sanitized_task_name, ())
+				)
+				if str(predicate_name).strip()
+			)
+		)
+		shared_requirements: list[str] = []
+		template_summaries: list[str] = []
+		for predicate_name in headline_candidates:
+			for requirement in _shared_dynamic_requirements_for_predicate(
+				predicate_name,
+				task_parameters,
+				analysis,
+			):
+				if requirement not in shared_requirements:
+					shared_requirements.append(requirement)
+			constructive_template = _constructive_template_summary_for_task(
+				task_name,
+				task_parameters,
+				predicate_name,
+				analysis,
+			)
+			if constructive_template and constructive_template not in template_summaries:
+				template_summaries.append(constructive_template)
+			consumer_template = _render_consumer_template_summary_for_task(
+				task_name,
+				task_parameters,
+				predicate_name,
+				analysis,
+			)
+			if consumer_template and consumer_template not in template_summaries:
+				template_summaries.append(consumer_template)
+		shared_dynamic_prerequisites_by_task[sanitized_task_name] = shared_requirements
+		producer_consumer_templates_by_task[sanitized_task_name] = template_summaries
+		domain_task_contracts.append(
+			{
+				"task_name": task_name,
+				"task_signature": _task_invocation_signature(task_name, task_parameters),
+				"parameters": list(task_parameters),
+				"headline_candidates": list(headline_candidates),
+				"shared_dynamic_prerequisites": list(shared_requirements),
+				"producer_consumer_templates": list(template_summaries),
+			}
+		)
+
+	return {
+		"declared_compound_tasks": [
+			_task_invocation_signature(
+				str(getattr(task, "name", "")).strip(),
+				tuple(_parameter_token(parameter) for parameter in task.parameters),
+			)
+			for task in getattr(domain, "tasks", [])
+			if str(getattr(task, "name", "")).strip()
+		],
+		"task_headline_candidates": task_headline_candidates,
+		"shared_dynamic_prerequisites_by_task": shared_dynamic_prerequisites_by_task,
+		"producer_consumer_templates_by_task": producer_consumer_templates_by_task,
+		"reusable_dynamic_resource_predicates": _reusable_dynamic_resource_payloads(analysis),
+		"domain_task_contracts": domain_task_contracts,
+	}
+
+
+def build_domain_htn_system_prompt() -> str:
+	"""System prompt for one-shot domain-complete Stage 3 synthesis."""
+
+	return (
+		"Synthesize one executable domain-complete HTN method library from declared "
+		"compound tasks, predicates, and primitive action schemas only.\n"
+		"Emit JSON only. No markdown or reasoning trace.\n"
+		"Return minified JSON only: no breaks or extra fields.\n"
+		"Single shot only: no second pass, repair, or hidden methods.\n"
+		"Return one JSON object with top-level key tasks.\n"
+		"\n"
+		"GLOBAL RULES:\n"
+		"- Define every declared compound task exactly once in tasks.\n"
+		"- Do not use grounded query constants, problem facts, or benchmark-specific bindings.\n"
+		"- Keep methods schematic and domain-complete.\n"
+		"- ordering must be explicit pairwise edges. Never emit a chain edge like [[\"s1\",\"s2\",\"s3\"]].\n"
+		"- Every compound child you call must also appear as another task entry in tasks.\n"
+		"- Prefer declared support structure implied by the contracts; do not invent aggregate wrappers.\n"
+		"- Support dynamic prerequisites before the consuming producer step.\n"
+		"- Use ARG* for task-signature roles and AUX_* for extra witness roles.\n"
+		"- Think in HDDL :method grammar: each constructive branch is one reusable method.\n"
+		"\n"
+		"OUTPUT SHAPE:\n"
+		"- Only emit tasks; primitive tasks are injected automatically.\n"
+		"- Each tasks entry defines one compound task once, with fields name, parameters, noop, constructive.\n"
+		"- constructive is non-empty.\n"
+		"- Branch precondition may be written as precondition or context.\n"
+		"- For total orders, prefer compact slots: precondition/context, support_before, producer, followup(s).\n"
+		"- Use explicit ordered_subtasks/ordering only when compact slots are insufficient.\n"
+	)
+
+
+def _render_domain_task_contract_blocks(domain_task_contracts: Sequence[Dict[str, Any]]) -> str:
+	blocks: list[str] = []
+	for payload in domain_task_contracts:
+		task_signature = str(payload.get("task_signature", "")).strip()
+		if not task_signature:
+			continue
+		headline_candidates = payload.get("headline_candidates") or ["none"]
+		shared_dynamic_prerequisites = payload.get("shared_dynamic_prerequisites") or ["none"]
+		producer_consumer_templates = payload.get("producer_consumer_templates") or ["none"]
+		blocks.append(
+			"\n".join(
+				[
+					f"task_signature: {task_signature}",
+					f"headline_candidates: {', '.join(str(item) for item in headline_candidates)}",
+					"shared_dynamic_prerequisites:",
+					*[
+						f"- {item}"
+						for item in shared_dynamic_prerequisites
+					],
+					"producer_consumer_templates:",
+					*[
+						f"- {item}"
+						for item in producer_consumer_templates
+					],
+				]
+			)
+		)
+	return "\n\n".join(blocks).strip()
+
+
+def build_domain_htn_user_prompt(
+	domain: Any,
+	schema_hint: str,
+	*,
+	action_analysis: Optional[Dict[str, Any]] = None,
+	derived_analysis: Optional[Dict[str, Any]] = None,
+) -> str:
+	"""User prompt for one-shot domain-complete Stage 3 synthesis."""
+
+	analysis = _normalise_action_analysis(domain, action_analysis)
+	prompt_analysis = dict(
+		derived_analysis
+		or build_domain_prompt_analysis_payload(
+			domain,
+			action_analysis=analysis,
+		)
+	)
+	declared_compound_tasks = list(prompt_analysis.get("declared_compound_tasks") or ())
+	domain_task_contracts = list(prompt_analysis.get("domain_task_contracts") or ())
+	relevant_dynamic_predicates = _unique_preserve_order(
+		predicate_name
+		for payload in domain_task_contracts
+		for predicate_name in (payload.get("headline_candidates") or ())
+		if str(predicate_name).strip()
+	)
+	action_names = _relevant_action_names_for_prompt(relevant_dynamic_predicates, analysis)
+	if not action_names:
+		action_names = [
+			str(getattr(action, "name", "")).strip()
+			for action in getattr(domain, "actions", [])
+			if str(getattr(action, "name", "")).strip()
+		]
+	resource_lines = [
+		f"- {payload['predicate']}"
+		for payload in (prompt_analysis.get("reusable_dynamic_resource_predicates") or ())
+		if str(payload.get("predicate") or "").strip()
+	] or ["- none"]
+	task_lines = [f"- {task_signature}" for task_signature in declared_compound_tasks] or ["- none"]
+	action_lines = [f"- {action_name}" for action_name in action_names] or ["- none"]
+	domain_summary_block = "\n".join(
+		[
+			f"domain: {domain.name}",
+			"declared_compound_tasks:",
+			*task_lines,
+			"",
+			"relevant_primitive_actions:",
+			*action_lines,
+			"",
+			"reusable_dynamic_resources:",
+			*resource_lines,
+		]
+	)
+	instructions_block = "\n".join(
+		[
+			"1. Read domain_task_contracts first; they define the full declared task coverage you must materialize.",
+			"2. Define every declared compound task exactly once in tasks.",
+			"3. Keep methods schematic. Do not ground with benchmark constants or problem objects.",
+			"4. If a task contract lists shared dynamic prerequisites, support them before the consuming producer step.",
+			"5. Preserve argument positions exactly across task headlines, producers, and support tasks.",
+			"6. Keep child-internal support inside the child unless the contract marks it as caller-shared.",
+			"7. Prefer reusable support structure over duplicating primitive producer logic in multiple parents.",
+		]
+	)
+	sections = [
+		_format_tagged_block(
+			"task",
+			"Generate one executable JSON HTN library for the whole domain. "
+			"Do not condition the library on any single benchmark query.",
+		),
+		_format_tagged_block("domain_summary", domain_summary_block),
+		_format_tagged_block(
+			"domain_task_contracts",
+			_render_domain_task_contract_blocks(domain_task_contracts),
+		),
+		_format_tagged_block("instructions", instructions_block),
+		_format_tagged_block(
+			"output_schema",
+			"Only define tasks; primitive tasks are injected automatically.\n"
+			"Each noop or constructive entry compiles to one HDDL method. Prefer precondition/subtasks/ordering field names because they mirror HDDL grammar. Omit source_predicates when unsure; the compiler can recover task headlines from contracts.\n"
+			f"{schema_hint}",
+		),
+	]
+	return "\n\n".join(section for section in sections if section).strip() + "\n"
