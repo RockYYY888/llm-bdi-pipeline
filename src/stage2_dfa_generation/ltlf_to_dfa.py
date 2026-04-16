@@ -31,8 +31,14 @@ if _parent_dir not in sys.path:
 from utils.setup_mona_path import setup_mona
 setup_mona()
 
+import re
+import subprocess
+from collections import defaultdict
+from tempfile import TemporaryDirectory
 from typing import Dict, List, Any, Tuple
 from ltlf2dfa.parser.ltlf import LTLfParser
+from ltlf2dfa.ltlf2dfa import UNSAT_DOT
+from ltlf2dfa.base import MonaProgram
 from utils.symbol_normalizer import SymbolNormalizer
 
 
@@ -107,6 +113,8 @@ class LTLfToDFA:
     Pipeline: Predicate LTLf → Propositional LTLf → DFA (DOT format)
     """
 
+    MONA_TIMEOUT_SECONDS = 300
+
     def __init__(self):
         self.ltlf_parser = LTLfParser()
         self.encoder = PredicateToProposition()
@@ -143,7 +151,7 @@ class LTLfToDFA:
         # Parse and convert to DFA
         try:
             formula_obj = self.ltlf_parser(propositional_formula)
-            dfa_dot = formula_obj.to_dfa()
+            dfa_dot, parse_metadata = self._convert_formula_object_to_dot(formula_obj)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to convert LTLf to DFA.\n"
@@ -158,21 +166,264 @@ class LTLfToDFA:
             "propositional_formula": propositional_formula,
             "predicate_to_prop_mapping": self.encoder.get_mapping(),
             "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
-            "num_states": self._count_dfa_states(dfa_dot),
-            "num_transitions": self._count_dfa_transitions(dfa_dot),
+            "num_states": int(
+                parse_metadata.get("num_states") or self._count_dfa_states(dfa_dot)
+            ),
+            "num_transitions": int(
+                parse_metadata.get("num_transitions")
+                or self._count_dfa_transitions(dfa_dot)
+            ),
             "alphabet": self._extract_alphabet(dfa_dot),
         }
 
         return dfa_dot, metadata
 
+    def _convert_formula_object_to_dot(self, formula_obj: Any) -> Tuple[str, Dict[str, Any]]:
+        """Convert an ltlf2dfa formula object to DOT without relying on sympy-heavy guard simplification."""
+        if not hasattr(formula_obj, "to_mona") or not hasattr(formula_obj, "find_labels"):
+            # Test doubles in the suite still expose the older zero-argument shape.
+            return formula_obj.to_dfa(), {}
+        mona_output = self._invoke_mona_directly(formula_obj)
+
+        if mona_output is False:
+            raise RuntimeError("MONA timed out while converting LTLf to DFA.")
+
+        rendered_output = str(mona_output or "").strip()
+        if not rendered_output:
+            raise RuntimeError("MONA returned empty output while converting LTLf to DFA.")
+        if rendered_output.lstrip().startswith("digraph"):
+            return rendered_output, {}
+        if "Formula is unsatisfiable" in rendered_output:
+            return UNSAT_DOT, {
+                "num_states": 1,
+                "num_transitions": 1,
+            }
+
+        graph = self._parse_mona_output(rendered_output)
+        return self._render_mona_graph_as_dot(graph), {
+            "num_states": graph["num_states"],
+            "num_transitions": graph["num_transitions"],
+        }
+
+    def _invoke_mona_directly(self, formula_obj: Any) -> str | bool:
+        """Invoke MONA directly so we can strip oversized debug comments and tune timeout safely."""
+        mona_program = self._render_mona_program(formula_obj)
+
+        with TemporaryDirectory(prefix="ltlf2dfa_mona_") as temp_dir:
+            program_path = Path(temp_dir) / "automa.mona"
+            stdout_path = Path(temp_dir) / "stdout.txt"
+            program_path.write_text(mona_program, encoding="utf-8")
+
+            with stdout_path.open("w", encoding="utf-8") as stdout_handle:
+                try:
+                    completed = subprocess.run(
+                        ["mona", "-q", "-u", "-w", str(program_path)],
+                        stdout=stdout_handle,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=self.MONA_TIMEOUT_SECONDS,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    return False
+
+            stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
+            stderr = str(completed.stderr or "").strip()
+            if completed.returncode != 0:
+                error_parts = [
+                    f"MONA exited with code {completed.returncode}.",
+                    f"stdout_size={stdout_size} bytes.",
+                ]
+                if stderr:
+                    error_parts.append(f"stderr={stderr[:500]}")
+                raise RuntimeError(" ".join(error_parts))
+            if not stdout_size and stderr:
+                raise RuntimeError(stderr[:500])
+            return stdout_path.read_text(encoding="utf-8").strip()
+
+
+    @staticmethod
+    def _render_mona_program(formula_obj: Any) -> str:
+        """Render a MONA program without embedding the full source formula as a leading comment."""
+        program = MonaProgram(formula_obj).mona_program()
+        lines = program.splitlines()
+        if lines and lines[0].startswith("#"):
+            return "\n".join(lines[1:]) + "\n"
+        return program
+
+    def _parse_mona_output(self, mona_output: str) -> Dict[str, Any]:
+        """Parse raw MONA output into a grouped graph representation."""
+        free_variables = self._extract_mona_free_variables(mona_output)
+        accepting_states = self._extract_mona_accepting_states(mona_output)
+        grouped_guards: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+        init_targets: List[str] = []
+        states: set[str] = set()
+
+        for line in mona_output.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("State "):
+                continue
+
+            match = re.match(r"State\s+(\d+):\s*([01X]+)\s*->\s*state\s+(\d+)\s*$", stripped)
+            if not match:
+                continue
+
+            source_state, guard_bits, target_state = match.groups()
+            if source_state == "0":
+                init_targets.append(target_state)
+                continue
+
+            grouped_guards[(source_state, target_state)].append(guard_bits)
+            states.add(source_state)
+            states.add(target_state)
+
+        init_state = init_targets[0] if init_targets else (min(states) if states else "1")
+        states.add(init_state)
+        states.update(accepting_states)
+
+        return {
+            "free_variables": free_variables,
+            "accepting_states": tuple(sorted(accepting_states, key=self._numeric_state_sort_key)),
+            "init_state": init_state,
+            "grouped_guards": {
+                key: tuple(guards)
+                for key, guards in grouped_guards.items()
+            },
+            "num_states": len(states),
+            "num_transitions": len(grouped_guards),
+        }
+
+    @staticmethod
+    def _extract_mona_free_variables(mona_output: str) -> Tuple[str, ...]:
+        match = re.search(
+            r"DFA for formula with free variables:\s*(.*?)\s*\n",
+            mona_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ()
+        raw_tokens = [
+            token.strip().lower()
+            for token in match.group(1).split()
+            if token.strip()
+        ]
+        if len(raw_tokens) == 1 and raw_tokens[0] == "state":
+            return ()
+        return tuple(raw_tokens)
+
+    @staticmethod
+    def _extract_mona_accepting_states(mona_output: str) -> Tuple[str, ...]:
+        match = re.search(
+            r"Accepting states:\s*(.*?)\s*\n",
+            mona_output,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return ()
+        return tuple(
+            token.strip()
+            for token in match.group(1).split()
+            if token.strip()
+        )
+
+    def _render_mona_graph_as_dot(self, graph: Dict[str, Any]) -> str:
+        """Render a grouped MONA graph into a compact DOT projection."""
+        lines = [
+            "digraph MONA_DFA {",
+            ' rankdir = LR;',
+            " center = true;",
+            ' size = "7.5,10.5";',
+            " edge [fontname = Courier];",
+            " node [height = .5, width = .5];",
+        ]
+
+        accepting_states = tuple(graph.get("accepting_states", ()))
+        if accepting_states:
+            lines.append(
+                f" node [shape = doublecircle]; {'; '.join(accepting_states)};",
+            )
+        else:
+            lines.append(" node [shape = doublecircle];")
+
+        init_state = str(graph.get("init_state") or "1")
+        lines.append(f" node [shape = circle]; {init_state};")
+        lines.append(' init [shape = plaintext, label = ""];')
+        lines.append(f" init -> {init_state};")
+
+        free_variables = tuple(graph.get("free_variables", ()))
+        grouped_guards = graph.get("grouped_guards", {})
+        for (source_state, target_state), guards in sorted(
+            grouped_guards.items(),
+            key=lambda item: (
+                self._numeric_state_sort_key(item[0][0]),
+                self._numeric_state_sort_key(item[0][1]),
+            ),
+        ):
+            label = self._render_guard_group_label(tuple(guards), free_variables)
+            lines.append(f' {source_state} -> {target_state} [label="{label}"];')
+
+        lines.append("}")
+        return "\n".join(lines)
+
+    def _render_guard_group_label(
+        self,
+        guards: Tuple[str, ...],
+        free_variables: Tuple[str, ...],
+    ) -> str:
+        """Render a guard group compactly; large disjunctions stay opaque but parseable."""
+        unique_guards = tuple(dict.fromkeys(str(guard).strip() for guard in guards if str(guard).strip()))
+        if not unique_guards:
+            return "false"
+        if all(re.fullmatch(r"[01X]+", guard) is None for guard in unique_guards):
+            return " | ".join(unique_guards)
+        if len(unique_guards) == 1:
+            return self._render_guard_cube(unique_guards[0], free_variables)
+        if len(unique_guards) <= 8:
+            rendered_cubes = [
+                self._render_guard_cube(guard, free_variables)
+                for guard in unique_guards
+            ]
+            return " | ".join(
+                rendered if rendered == "true" else f"({rendered})"
+                for rendered in rendered_cubes
+            )
+        return f"guard_group_{len(unique_guards)}"
+
+    @staticmethod
+    def _render_guard_cube(guard: str, free_variables: Tuple[str, ...]) -> str:
+        literals: List[str] = []
+        for index, value in enumerate(str(guard).strip()):
+            if value == "X":
+                continue
+            if index >= len(free_variables):
+                continue
+            symbol = free_variables[index]
+            literals.append(symbol if value == "1" else f"~{symbol}")
+        return " & ".join(literals) if literals else "true"
+
+    @staticmethod
+    def _numeric_state_sort_key(state: str) -> Tuple[int, str]:
+        token = str(state).strip()
+        return (int(token), token) if token.isdigit() else (10**9, token)
+
     def _count_dfa_states(self, dfa_dot: str) -> int:
         """Count number of states in DFA from DOT representation"""
-        # Simple heuristic: count lines with state transitions
-        lines = dfa_dot.strip().split('\n')
-        # Count lines that contain "->" which indicate transitions
-        transition_lines = [line for line in lines if '->' in line and 'init' not in line]
-        # Rough estimate - not exact but good enough for metadata
-        return max(10, len(transition_lines) // 2)  # Placeholder logic
+        states = set()
+        for line in dfa_dot.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            grouped_match = re.search(r'node\s+\[.*?\];\s*([^;]+);', stripped)
+            if grouped_match:
+                tokens = re.findall(r"[A-Za-z0-9_]+", grouped_match.group(1))
+                states.update(token for token in tokens if token != "init")
+                continue
+            single_match = re.search(r"([A-Za-z0-9_]+)\s*\[\s*shape\s*=\s*", stripped)
+            if single_match:
+                token = single_match.group(1)
+                if token != "init":
+                    states.add(token)
+        return len(states)
 
     def _count_dfa_transitions(self, dfa_dot: str) -> int:
         """Count DFA transitions cheaply for large generic ltlf2dfa outputs."""

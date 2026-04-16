@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from stage3_method_synthesis.htn_schema import HTNMethod, HTNMethodLibrary
+from stage3_method_synthesis.task_naming import query_root_alias_task_name
 from utils.hddl_parser import HDDLParser
 
 
@@ -558,12 +559,15 @@ class IPCPlanVerifier:
 		actions = [self._parse_action_step(step) for step in action_path]
 		trace_entries = self._normalise_method_trace(method_trace)
 		root_tasks = list(problem.htn_tasks)
+		root_tasks_ordered = bool(problem.htn_ordered)
+		if root_tasks_ordered and self._root_tasks_use_query_root_aliases(root_tasks, method_library):
+			root_tasks_ordered = False
 		root_nodes, action_index, trace_index = self._reconstruct_hierarchy(
 			method_library=method_library,
 			root_tasks=root_tasks,
 			actions=actions,
 			trace_entries=trace_entries,
-			root_tasks_ordered=bool(problem.htn_ordered),
+			root_tasks_ordered=root_tasks_ordered,
 		)
 		warnings: List[str] = []
 		if action_index != len(actions):
@@ -578,6 +582,37 @@ class IPCPlanVerifier:
 			)
 		self._last_hierarchical_build_warning = "; ".join(warnings) if warnings else None
 		return self._render_hierarchical_plan(root_nodes)
+
+	@staticmethod
+	def _all_query_root_alias_tasks(root_tasks: Sequence[Any]) -> bool:
+		if not root_tasks:
+			return False
+		for task in tuple(root_tasks):
+			task_name = str(
+				getattr(task, "task_name", None) or getattr(task, "name", "") or "",
+			)
+			if re.fullmatch(r"query_root_\d+_[A-Za-z0-9_]+", task_name) is None:
+				return False
+		return True
+
+	@classmethod
+	def _root_tasks_use_query_root_aliases(
+		cls,
+		root_tasks: Sequence[Any],
+		method_library: HTNMethodLibrary,
+	) -> bool:
+		query_root_sources = {
+			str(getattr(task, "source_name", None) or getattr(task, "name", "") or "")
+			for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ())
+			if cls._all_query_root_alias_tasks((task,))
+		}
+		if not query_root_sources:
+			return False
+		for task in tuple(root_tasks or ()):
+			source_task_name = str(getattr(task, "task_name", "") or "")
+			if source_task_name not in query_root_sources:
+				return False
+		return True
 
 	def _reconstruct_hierarchy(
 		self,
@@ -664,7 +699,9 @@ class IPCPlanVerifier:
 
 			next_trace_index += 1
 			child_nodes: List[_PlanNode] = []
-			for step in self._ordered_method_steps(method):
+			remaining_steps = list(self._ordered_method_steps(method))
+			while remaining_steps:
+				step = remaining_steps[0]
 				if step.kind == "primitive":
 					expected_action_name = step.action_name or step.task_name
 					if next_action_index >= len(actions):
@@ -690,38 +727,85 @@ class IPCPlanVerifier:
 						),
 					)
 					next_action_index += 1
+					remaining_steps.pop(0)
 					continue
 
-				child_internal_name = step.task_name
-				if next_trace_index >= len(trace_entries):
-					raise ValueError(
-						f"method trace ended before child task '{child_internal_name}' could be reconstructed",
+				reorderable_prefix_end = 0
+				while (
+					reorderable_prefix_end < len(remaining_steps)
+					and remaining_steps[reorderable_prefix_end].kind == "compound"
+				):
+					reorderable_prefix_end += 1
+				prefix_steps = remaining_steps[:reorderable_prefix_end]
+				prefix_nodes: List[Optional[_PlanNode]] = [None] * len(prefix_steps)
+				unmatched_prefix_indices = list(range(len(prefix_steps)))
+
+				while unmatched_prefix_indices:
+					if next_trace_index >= len(trace_entries):
+						raise ValueError(
+							f"method trace ended before child task '{prefix_steps[0].task_name}' could be reconstructed",
+						)
+					child_entry = trace_entries[next_trace_index]
+					child_method = method_lookup.get(child_entry.method_name)
+					selected_step_index = unmatched_prefix_indices[0]
+					if child_method is not None:
+						for candidate_index in unmatched_prefix_indices:
+							candidate_step = prefix_steps[candidate_index]
+							if child_method.task_name != candidate_step.task_name:
+								continue
+							try:
+								self._unify_arguments(
+									candidate_step.args,
+									child_entry.task_args,
+									dict(bindings),
+									method.parameters,
+								)
+							except ValueError:
+								continue
+							selected_step_index = candidate_index
+							break
+
+					step = prefix_steps[selected_step_index]
+					child_internal_name = step.task_name
+					child_task_args = child_entry.task_args
+					bindings = self._unify_arguments(
+						step.args,
+						child_task_args,
+						bindings,
+						method.parameters,
 					)
-				child_entry = trace_entries[next_trace_index]
-				child_task_args = child_entry.task_args
-				bindings = self._unify_arguments(
-					step.args,
-					child_task_args,
-					bindings,
-					method.parameters,
+					child_source_name = source_task_by_internal.get(
+						child_internal_name,
+						child_internal_name,
+					)
+					child_node, next_action_index, next_trace_index = reconstruct_task(
+						child_internal_name,
+						child_task_args,
+						child_source_name,
+						next_action_index,
+						next_trace_index,
+					)
+					prefix_nodes[selected_step_index] = child_node
+					unmatched_prefix_indices.remove(selected_step_index)
+
+				child_nodes.extend(
+					node
+					for node in prefix_nodes
+					if node is not None
 				)
-				child_source_name = source_task_by_internal.get(
-					child_internal_name,
-					child_internal_name,
-				)
-				child_node, next_action_index, next_trace_index = reconstruct_task(
-					child_internal_name,
-					child_task_args,
-					child_source_name,
-					next_action_index,
-					next_trace_index,
-				)
-				child_nodes.append(child_node)
+				remaining_steps = remaining_steps[reorderable_prefix_end:]
+
+			refined_task_args = self._refine_task_args_from_method_bindings(
+				task_args=grounded_task_args,
+				method=method,
+				task_lookup=task_lookup,
+				bindings=bindings,
+			)
 
 			return (
 				_AbstractNode(
 					task_name=source_task_name,
-					args=grounded_task_args,
+					args=refined_task_args,
 					method_name=method.source_method_name or method.method_name,
 					children=child_nodes,
 				),
@@ -732,12 +816,48 @@ class IPCPlanVerifier:
 		def candidate_internal_task_names(
 			source_task_name: str,
 			occurrence_index: int = 0,
+			root_index: Optional[int] = None,
 		) -> List[str]:
 			candidates = list(
 				internal_tasks_by_source.get(source_task_name, [source_task_name])
 			)
 			if not candidates:
 				return [source_task_name]
+			query_root_candidates = [
+				name
+				for name in candidates
+				if self._all_query_root_alias_tasks((type("TaskRef", (), {"name": name})(),))
+			]
+			non_query_root_candidates = [
+				name
+				for name in candidates
+				if name not in query_root_candidates
+			]
+			if query_root_candidates:
+				if root_index is not None:
+					expected_query_root = query_root_alias_task_name(root_index, source_task_name)
+					if expected_query_root in query_root_candidates:
+						query_root_candidates = [expected_query_root] + [
+							name
+							for name in query_root_candidates
+							if name != expected_query_root
+						]
+				elif 0 <= occurrence_index < len(query_root_candidates):
+					preferred = query_root_candidates[occurrence_index]
+					query_root_candidates = [preferred] + [
+						name
+						for name in query_root_candidates
+						if name != preferred
+					]
+				return query_root_candidates + non_query_root_candidates
+			if root_index is not None:
+				expected_query_root = query_root_alias_task_name(root_index, source_task_name)
+				if expected_query_root in candidates:
+					return [expected_query_root] + [
+						name
+						for name in candidates
+						if name != expected_query_root
+					]
 			if len(candidates) == 1:
 				return candidates
 			if 0 <= occurrence_index < len(candidates):
@@ -750,7 +870,7 @@ class IPCPlanVerifier:
 		next_trace_index = 0
 		if root_tasks_ordered:
 			source_occurrence_counts: Dict[str, int] = {}
-			for task in root_tasks:
+			for root_index, task in enumerate(root_tasks, start=1):
 				source_task_name = getattr(task, "task_name")
 				task_args = tuple(getattr(task, "args"))
 				occurrence_index = source_occurrence_counts.get(source_task_name, 0)
@@ -760,6 +880,7 @@ class IPCPlanVerifier:
 				for internal_task_name in candidate_internal_task_names(
 					source_task_name,
 					occurrence_index,
+					root_index=root_index,
 				):
 					try:
 						root_node, candidate_action_index, candidate_trace_index = reconstruct_task(
@@ -938,6 +1059,24 @@ class IPCPlanVerifier:
 		)
 
 	@staticmethod
+	def _refine_task_args_from_method_bindings(
+		task_args: Sequence[str],
+		method: HTNMethod,
+		task_lookup: Dict[str, Any],
+		bindings: Dict[str, str],
+	) -> Tuple[str, ...]:
+		pattern = method.task_args or IPCPlanVerifier._default_task_args(method, task_lookup)
+		refined: List[str] = []
+		for current_arg, pattern_arg in zip(task_args, pattern):
+			if IPCPlanVerifier._looks_like_variable(current_arg):
+				bound_value = bindings.get(pattern_arg)
+				if bound_value and not IPCPlanVerifier._looks_like_variable(bound_value):
+					refined.append(bound_value)
+					continue
+			refined.append(current_arg)
+		return tuple(refined)
+
+	@staticmethod
 	def _unify_arguments(
 		pattern_args: Sequence[str],
 		grounded_args: Sequence[str],
@@ -955,6 +1094,17 @@ class IPCPlanVerifier:
 			if pattern_arg in known_variable_set or IPCPlanVerifier._looks_like_variable(pattern_arg):
 				existing = next_bindings.get(pattern_arg)
 				if existing is not None and existing != grounded_arg:
+					if (
+						IPCPlanVerifier._looks_like_variable(existing)
+						and not IPCPlanVerifier._looks_like_variable(grounded_arg)
+					):
+						next_bindings[pattern_arg] = grounded_arg
+						continue
+					if (
+						not IPCPlanVerifier._looks_like_variable(existing)
+						and IPCPlanVerifier._looks_like_variable(grounded_arg)
+					):
+						continue
 					raise ValueError(
 						f"variable binding mismatch for '{pattern_arg}': "
 						f"expected '{existing}', got '{grounded_arg}'",
@@ -982,8 +1132,6 @@ class IPCPlanVerifier:
 		if task_schema is None:
 			return tuple(method.parameters)
 		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
-		if not declared_parameters:
-			return tuple(method.parameters)
 		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
 		if len(leading_parameters) == len(declared_parameters):
 			return leading_parameters

@@ -284,7 +284,10 @@ class PipelineLogger:
 		if status == "Success" and dfa_result:
 			self.current_record.stage2_status = "success"
 			self.current_record.stage2_dfa_result = self._sanitise_stage2_dfa_result(dfa_result)
-			self.current_record.stage2_formula = dfa_result.get("formula", "N/A")
+			self.current_record.stage2_formula = self._derive_stage2_formula(
+				ltl_spec,
+				dfa_result,
+			)
 			self.current_record.stage2_num_states = dfa_result.get("num_states", 0)
 			self.current_record.stage2_num_transitions = dfa_result.get("num_transitions", 0)
 
@@ -293,9 +296,41 @@ class PipelineLogger:
 					(self.current_log_dir / "dfa.dot").write_text(dfa_result["dfa_dot"])
 		elif error:
 			self.current_record.stage2_status = "failed"
+			self.current_record.stage2_formula = self._derive_stage2_formula(
+				ltl_spec,
+				dfa_result,
+			)
 			self.current_record.stage2_error = str(error)
 
 		self._save_current_state()
+
+	@staticmethod
+	def _derive_stage2_formula(ltl_spec: Any, dfa_result: Any) -> str:
+		if isinstance(dfa_result, dict):
+			formula = str(dfa_result.get("formula") or "").strip()
+			if formula:
+				return formula
+		if hasattr(ltl_spec, "combined_formula_string"):
+			try:
+				formula = str(ltl_spec.combined_formula_string() or "").strip()
+			except Exception:
+				formula = ""
+			if formula:
+				return formula
+		if hasattr(ltl_spec, "formulas"):
+			try:
+				formula_strings = [
+					str(formula.to_string()).strip()
+					for formula in list(getattr(ltl_spec, "formulas") or ())
+					if hasattr(formula, "to_string")
+				]
+			except Exception:
+				formula_strings = []
+			if len(formula_strings) == 1:
+				return formula_strings[0]
+			if formula_strings:
+				return " & ".join(f"({formula})" for formula in formula_strings)
+		return "N/A"
 
 	@staticmethod
 	def _sanitise_stage2_dfa_result(dfa_result: Any) -> Any:
@@ -303,7 +338,7 @@ class PipelineLogger:
 			return dfa_result
 		sanitised = dict(dfa_result)
 		sanitised.pop("dfa_dot", None)
-		if "dfa_path" not in sanitised:
+		if "dfa_path" not in sanitised and "dfa_dot" in dfa_result:
 			sanitised["dfa_path"] = "dfa.dot"
 		return sanitised
 
@@ -450,7 +485,7 @@ class PipelineLogger:
 		self.current_record.stage5_metadata = metadata
 		if status == "Success" and agentspeak_code is not None:
 			self.current_record.stage5_status = "success"
-			self.current_record.stage5_agentspeak = "agentspeak_generated.asl"
+			self.current_record.stage5_agentspeak = "stage5_agentspeak.asl"
 			self.current_record.stage5_code_size_chars = len(agentspeak_code)
 		elif error:
 			self.current_record.stage5_status = "failed"
@@ -736,6 +771,9 @@ class PipelineLogger:
 		self._write_stage_timing(handle, record, "stage2")
 
 		if record["stage2_status"] == "success" and record["stage2_dfa_result"]:
+			stage2_result = record["stage2_dfa_result"] or {}
+			dfa_path = str(stage2_result.get("dfa_path") or "").strip()
+			symbolic_monitor = stage2_result.get("symbolic_query_step_monitor") or {}
 			handle.write("\n" + "~" * 40 + "\n")
 			handle.write("DFA GENERATION RESULT\n")
 			handle.write("~" * 40 + "\n")
@@ -743,11 +781,20 @@ class PipelineLogger:
 			handle.write("Raw DFA:\n")
 			handle.write(f"  States: {record.get('stage2_num_states', 0)}\n")
 			handle.write(f"  Transitions: {record.get('stage2_num_transitions', 0)}\n")
-			handle.write("  File: dfa.dot\n\n")
-			handle.write(
-				"Full DFA bodies are stored in dfa.dot; "
-				"execution artifacts keep only metadata to avoid pathological log bloat.\n\n"
-			)
+			if isinstance(symbolic_monitor, dict) and symbolic_monitor:
+				handle.write(
+					"  Representation: exact symbolic unordered query-step conjunction monitor\n",
+				)
+				query_step_indices = list(symbolic_monitor.get("query_step_indices") or ())
+				handle.write(f"  Query Steps: {len(query_step_indices)}\n\n")
+			elif dfa_path:
+				handle.write(f"  File: {dfa_path}\n\n")
+				handle.write(
+					f"Full DFA bodies are stored in {dfa_path}; "
+					"execution artifacts keep only metadata to avoid pathological log bloat.\n\n"
+				)
+			else:
+				handle.write("\n")
 		elif record["stage2_error"]:
 			handle.write(f"\nError: {record['stage2_error']}\n\n")
 		else:

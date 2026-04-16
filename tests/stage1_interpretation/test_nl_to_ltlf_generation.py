@@ -317,7 +317,7 @@ def test_generator_uses_skeletal_mode_for_very_long_task_lists():
     )
 
 
-def test_generator_main_path_keeps_long_task_lists_in_compact_mode():
+def test_generator_main_path_uses_skeletal_mode_for_long_task_lists():
     generator = NLToLTLfGenerator(domain_file=_blocksworld_domain_file())
     generator.client = _RecordingClient([
         _stage1_json_response('{"objects":[],"ltl_formulas":[],"atoms":[]}'),
@@ -330,8 +330,8 @@ def test_generator_main_path_keeps_long_task_lists_in_compact_mode():
     )
 
     user_prompt = generator.client.completions.calls[0]["messages"][1]["content"]
-    assert "Compact task-query rule:" in user_prompt
-    assert "Skeletal task-query rule:" not in user_prompt
+    assert "Skeletal task-query rule:" in user_prompt
+    assert "Use only item 1 below as the skeletal summary anchor:" in user_prompt
 
 
 def test_generator_extracts_task_invocation_clauses_from_instruction():

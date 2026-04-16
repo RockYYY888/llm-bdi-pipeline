@@ -275,12 +275,27 @@ class LTLSpecification:
             raise ValueError("No LTLf formulas in specification")
         if len(self.formulas) == 1:
             return self.formulas[0]
-        return LTLFormula(
-            operator=None,
-            predicate=None,
-            sub_formulas=list(self.formulas),
-            logical_op=LogicalOperator.AND,
-        )
+        current_level = list(self.formulas)
+        while len(current_level) > 1:
+            next_level: List[LTLFormula] = []
+            index = 0
+            while index < len(current_level):
+                left = current_level[index]
+                if index + 1 >= len(current_level):
+                    next_level.append(left)
+                    break
+                right = current_level[index + 1]
+                next_level.append(
+                    LTLFormula(
+                        operator=None,
+                        predicate=None,
+                        sub_formulas=[left, right],
+                        logical_op=LogicalOperator.AND,
+                    ),
+                )
+                index += 2
+            current_level = next_level
+        return current_level[0]
 
     def combined_formula_string(self) -> str:
         """Render the full specification semantics as one LTLf string."""

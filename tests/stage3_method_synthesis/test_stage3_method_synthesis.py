@@ -49,15 +49,6 @@ from stage3_method_synthesis.htn_schema import (
 	HTNTask,
 	HTNTargetTaskBinding,
 )
-from stage3_method_synthesis.transition_native import (
-	build_transition_native_ast_compiler_defaults,
-	build_transition_native_prompt_analysis,
-	build_transition_native_required_branch_contracts,
-	build_transition_native_system_prompt,
-	build_transition_native_user_prompt,
-	_helper_caller_shared_requirements,
-	_recommended_helper_literals,
-)
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 
@@ -65,10 +56,8 @@ OFFICIAL_BLOCKSWORLD_DOMAIN_FILE = (
 	Path(__file__).parent.parent.parent / "src" / "domains" / "blocksworld" / "domain.hddl"
 )
 
-
 def _domain():
 	return HDDLParser.parse_domain(str(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE))
-
 
 def _marsrover_domain():
 	domain_path = (
@@ -80,6 +69,25 @@ def _marsrover_domain():
 	)
 	return HDDLParser.parse_domain(str(domain_path))
 
+def _satellite_domain():
+	domain_path = (
+		Path(__file__).parent.parent.parent
+		/ "src"
+		/ "domains"
+		/ "satellite"
+		/ "domain.hddl"
+	)
+	return HDDLParser.parse_domain(str(domain_path))
+
+def _transport_domain():
+	domain_path = (
+		Path(__file__).parent.parent.parent
+		/ "src"
+		/ "domains"
+		/ "transport"
+		/ "domain.hddl"
+	)
+	return HDDLParser.parse_domain(str(domain_path))
 
 def _live_stage3_kwargs() -> dict:
 	config = get_config()
@@ -93,7 +101,6 @@ def _live_stage3_kwargs() -> dict:
 		"timeout": float(config.openai_stage3_timeout),
 	}
 
-
 def _atomic_formula(predicate: str, args: list[str]) -> LTLFormula:
 	return LTLFormula(
 		operator=None,
@@ -101,7 +108,6 @@ def _atomic_formula(predicate: str, args: list[str]) -> LTLFormula:
 		sub_formulas=[],
 		logical_op=None,
 	)
-
 
 def _eventually_on_spec() -> LTLSpecification:
 	spec = LTLSpecification()
@@ -118,20 +124,6 @@ def _eventually_on_spec() -> LTLSpecification:
 	]
 	return spec
 
-
-def _dfa_result_for_labels(*labels: str) -> dict:
-	edges = "\n".join(f'  0 -> 1 [label="{label}"];' for label in labels)
-	return {
-		"dfa_dot": (
-			"digraph {\n"
-			"  0 [shape=circle];\n"
-			"  1 [shape=doublecircle];\n"
-			f"{edges}\n"
-			"}\n"
-		),
-	}
-
-
 def _extract_prompt_section(text: str, header: str, next_header: str | None = None) -> str:
 	start = text.index(header) + len(header)
 	if next_header is None:
@@ -139,35 +131,16 @@ def _extract_prompt_section(text: str, header: str, next_header: str | None = No
 	end = text.index(next_header, start)
 	return text[start:end].strip()
 
-
-def test_extract_target_literals_discards_non_progressing_transitions():
+def test_extract_target_literals_reads_stage1_signatures_only():
 	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("clear_a", "clear", ["a"])
-	grounding_map.add_atom("on_a_b", "on", ["a", "b"])
-	grounding_map.add_atom("on_b_c", "on", ["b", "c"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  node [shape = doublecircle]; 3;\n"
-			"  node [shape = circle]; 1 2 s1 s2;\n"
-			"  init [shape = plaintext, label = \"\"];\n"
-			"  init -> 1;\n"
-			"  1 -> 2 [label=\"!clear_a\"];\n"
-			"  1 -> s1 [label=\"clear_a\"];\n"
-			"  2 -> 2 [label=\"!clear_a\"];\n"
-			"  2 -> 2 [label=\"clear_a\"];\n"
-			"  3 -> 3 [label=\"!clear_a\"];\n"
-			"  3 -> 3 [label=\"clear_a\"];\n"
-			"  s1 -> 2 [label=\"!on_a_b\"];\n"
-			"  s1 -> s2 [label=\"on_a_b\"];\n"
-			"  s2 -> 2 [label=\"!on_b_c\"];\n"
-			"  s2 -> 3 [label=\"on_b_c\"];\n"
-			"}\n"
-		),
-	}
 
-	literals = synthesizer.extract_target_literals(grounding_map, dfa_result)
+	literals = synthesizer.extract_target_literals(
+		ordered_literal_signatures=[
+			"clear(a)",
+			"on(a, b)",
+			"on(b, c)",
+		],
+	)
 
 	assert [literal.to_signature() for literal in literals] == [
 		"clear(a)",
@@ -175,89 +148,10 @@ def test_extract_target_literals_discards_non_progressing_transitions():
 		"on(b, c)",
 	]
 
-	transition_specs = synthesizer.extract_progressing_transitions(grounding_map, dfa_result)
-
-	assert [
-		(
-			spec["transition_name"],
-			spec["source_state"],
-			spec["target_state"],
-			spec["label"],
-		)
-		for spec in transition_specs
-	] == [
-		("dfa_step_q1_q2_clear_a", "q1", "q2", "clear(a)"),
-		("dfa_step_q2_q3_on_a_b", "q2", "q3", "on(a, b)"),
-		("dfa_step_q3_q4_on_b_c", "q3", "q4", "on(b, c)"),
-	]
-
-
-def test_extract_progressing_transitions_preserves_raw_dfa_edge_order():
+def test_extract_target_literals_deduplicates_repeated_signatures():
 	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
-	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
-	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  node [shape = doublecircle]; 3;\n"
-			"  node [shape = circle]; 1 s1 s2;\n"
-			"  init [shape = plaintext, label = \"\"];\n"
-			"  init -> 1;\n"
-			"  1 -> s1 [label=\"on_b1_b4\"];\n"
-			"  s1 -> s2 [label=\"on_b3_b1\"];\n"
-			"  s2 -> 3 [label=\"on_b4_b2\"];\n"
-			"}\n"
-		),
-	}
 
-	transition_specs = synthesizer.extract_progressing_transitions(
-		grounding_map,
-		dfa_result,
-		ordered_literal_signatures=[
-			"on(b4, b2)",
-			"on(b1, b4)",
-			"on(b3, b1)",
-		],
-	)
-
-	assert [
-		(
-			spec["transition_name"],
-			spec["source_state"],
-			spec["target_state"],
-			spec["label"],
-		)
-		for spec in transition_specs
-	] == [
-		("dfa_step_q1_q2_on_b1_b4", "q1", "q2", "on(b1, b4)"),
-		("dfa_step_q2_q3_on_b3_b1", "q2", "q3", "on(b3, b1)"),
-		("dfa_step_q3_q4_on_b4_b2", "q3", "q4", "on(b4, b2)"),
-	]
-
-
-def test_extract_progressing_transitions_preserves_raw_duplicate_edges_only_once_per_edge():
-	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("on_b10_b6", "on", ["b10", "b6"])
-	grounding_map.add_atom("on_b5_b10", "on", ["b5", "b10"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  node [shape = doublecircle]; 2;\n"
-			"  node [shape = circle]; 1;\n"
-			"  init [shape = plaintext, label = \"\"];\n"
-			"  init -> 1;\n"
-			"  1 -> 2 [label=\"on_b10_b6\"];\n"
-			"  1 -> 2 [label=\"on_b5_b10\"];\n"
-			"}\n"
-		),
-	}
-
-	transition_specs = synthesizer.extract_progressing_transitions(
-		grounding_map,
-		dfa_result,
+	literals = synthesizer.extract_target_literals(
 		ordered_literal_signatures=[
 			"on(b10, b6)",
 			"on(b5, b10)",
@@ -265,137 +159,10 @@ def test_extract_progressing_transitions_preserves_raw_duplicate_edges_only_once
 		],
 	)
 
-	assert [
-		(
-			spec["transition_name"],
-			spec["source_state"],
-			spec["target_state"],
-			spec["label"],
-		)
-		for spec in transition_specs
-	] == [
-		("dfa_step_q1_q2_on_b10_b6", "q1", "q2", "on(b10, b6)"),
-		("dfa_step_q1_q2_on_b5_b10", "q1", "q2", "on(b5, b10)"),
+	assert [literal.to_signature() for literal in literals] == [
+		"on(b10, b6)",
+		"on(b5, b10)",
 	]
-
-
-def test_extract_progressing_transitions_rejects_negative_raw_transition_labels():
-	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
-	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
-	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  node [shape = doublecircle]; 4;\n"
-			"  node [shape = circle]; 1 s1 s2 s3;\n"
-			"  init [shape = plaintext, label = \"\"];\n"
-			"  init -> 1;\n"
-			"  1 -> s1 [label=\"on_b1_b4\"];\n"
-			"  s1 -> s2 [label=\"!on_b1_b4\"];\n"
-			"  s2 -> s3 [label=\"on_b3_b1\"];\n"
-			"  s3 -> 4 [label=\"on_b4_b2\"];\n"
-			"}\n"
-		),
-	}
-
-	with pytest.raises(ValueError, match="raw non-atomic transition label unsupported"):
-		synthesizer.extract_progressing_transitions(
-			grounding_map,
-			dfa_result,
-			ordered_literal_signatures=[
-				"on(b4, b2)",
-				"on(b1, b4)",
-				"on(b3, b1)",
-			],
-		)
-
-
-def test_extract_progressing_transitions_uses_raw_dfa_graph_even_when_ordered_literals_are_known():
-	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-
-	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
-	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
-	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
-	transition_specs = synthesizer.extract_progressing_transitions(
-		grounding_map,
-		{
-			"dfa_dot": (
-				"digraph MONA_DFA {\n"
-				"  node [shape = doublecircle]; 3;\n"
-				"  node [shape = circle]; 1 s1 s2;\n"
-				"  init [shape = plaintext, label = \"\"];\n"
-				"  init -> 1;\n"
-				"  1 -> s1 [label=\"on_b1_b4\"];\n"
-				"  s1 -> s2 [label=\"on_b3_b1\"];\n"
-				"  s2 -> 3 [label=\"on_b4_b2\"];\n"
-				"}\n"
-			),
-		},
-		ordered_literal_signatures=[
-			"on(b4, b2)",
-			"on(b1, b4)",
-			"on(b3, b1)",
-		],
-	)
-
-	assert [
-		(
-			spec["transition_name"],
-			spec["source_state"],
-			spec["target_state"],
-			spec["label"],
-		)
-		for spec in transition_specs
-	] == [
-		("dfa_step_q1_q2_on_b1_b4", "q1", "q2", "on(b1, b4)"),
-		("dfa_step_q2_q3_on_b3_b1", "q2", "q3", "on(b3, b1)"),
-		("dfa_step_q3_q4_on_b4_b2", "q3", "q4", "on(b4, b2)"),
-	]
-
-
-def test_extract_progressing_transitions_uses_raw_dfa_graph_for_unordered_queries():
-	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("goal_a", "goal", ["a"])
-	grounding_map.add_atom("goal_b", "goal", ["b"])
-
-	transition_specs = synthesizer.extract_progressing_transitions(
-		grounding_map,
-		{
-			"dfa_dot": (
-				"digraph MONA_DFA {\n"
-				"  node [shape = doublecircle]; 2;\n"
-				"  node [shape = circle]; 1;\n"
-				"  init [shape = plaintext, label = \"\"];\n"
-				"  init -> 1;\n"
-				"  1 -> 2 [label=\"goal_a\"];\n"
-				"  1 -> 2 [label=\"goal_b\"];\n"
-				"}\n"
-			),
-		},
-		ordered_literal_signatures=[
-			"goal(a)",
-			"goal(b)",
-		],
-		linearise_ordered_literals=False,
-	)
-
-	assert [
-		(
-			spec["transition_name"],
-			spec["source_state"],
-			spec["target_state"],
-			spec["label"],
-		)
-		for spec in transition_specs
-	] == [
-		("dfa_step_q1_q2_goal_a", "q1", "q2", "goal(a)"),
-		("dfa_step_q1_q2_goal_b", "q1", "q2", "goal(b)"),
-	]
-
 
 def test_synthesize_requires_live_llm():
 	domain_path = (
@@ -406,68 +173,32 @@ def test_synthesize_requires_live_llm():
 		/ "domain.hddl"
 	)
 	domain = HDDLParser.parse_domain(str(domain_path))
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("on_b4_b2", "on", ["b4", "b2"])
-	grounding_map.add_atom("on_b1_b4", "on", ["b1", "b4"])
-	grounding_map.add_atom("on_b3_b1", "on", ["b3", "b1"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  node [shape = doublecircle]; 3;\n"
-			"  node [shape = circle]; 1 s1 s2;\n"
-			"  init [shape = plaintext, label = \"\"];\n"
-			"  init -> 1;\n"
-			"  1 -> s1 [label=\"on_b1_b4\"];\n"
-			"  s1 -> s2 [label=\"on_b3_b1\"];\n"
-			"  s2 -> 3 [label=\"on_b4_b2\"];\n"
-			"}\n"
-		),
-	}
 
 	with pytest.raises(HTNSynthesisError) as exc_info:
 		HTNMethodSynthesizer().synthesize(
 			domain=domain,
-			grounding_map=grounding_map,
-			dfa_result=dfa_result,
 			ordered_literal_signatures=["on(b4, b2)", "on(b1, b4)", "on(b3, b1)"],
 		)
 
 	assert "requires a configured OPENAI_API_KEY" in str(exc_info.value)
 
-
-def test_extract_target_literals_keeps_accepting_loops_when_no_progress_edge_exists():
+def test_extract_target_literals_supports_negative_signatures():
 	synthesizer = HTNMethodSynthesizer()
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("clear_a", "clear", ["a"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  0 [shape = doublecircle];\n"
-			"  1 [shape = circle];\n"
-			"  0 -> 0 [label=\"clear_a\"];\n"
-			"  0 -> 1 [label=\"!clear_a\"];\n"
-			"  1 -> 1 [label=\"clear_a\"];\n"
-			"  1 -> 1 [label=\"!clear_a\"];\n"
-			"}\n"
-		),
-	}
 
-	literals = synthesizer.extract_target_literals(grounding_map, dfa_result)
+	literals = synthesizer.extract_target_literals(
+		ordered_literal_signatures=["!clear(a)"],
+	)
 
-	assert [literal.to_signature() for literal in literals] == ["clear(a)"]
-
+	assert [literal.to_signature() for literal in literals] == ["!clear(a)"]
 
 def test_method_synthesizer_uses_live_llm_output():
 	domain = _domain()
-	spec = _eventually_on_spec()
-	dfa_result = _dfa_result_for_labels("on_a_b")
 	synthesizer = HTNMethodSynthesizer(**_live_stage3_kwargs())
 
 	try:
 		library, metadata = synthesizer.synthesize(
 			domain=domain,
-			grounding_map=spec.grounding_map,
-			dfa_result=dfa_result,
+			ordered_literal_signatures=["on(a, b)"],
 		)
 	except HTNSynthesisError as exc:
 		metadata = exc.metadata
@@ -506,7 +237,6 @@ def test_method_synthesizer_uses_live_llm_output():
 	bound_task = library.task_name_for_literal(library.target_literals[0])
 	assert bound_task in compound_task_names
 
-
 def test_method_synthesizer_requires_target_task_binding_for_each_target_literal():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -533,7 +263,6 @@ def test_method_synthesizer_requires_target_task_binding_for_each_target_literal
 
 	with pytest.raises(ValueError, match="missing a target_task_binding"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_validate_library_no_longer_requires_obsolete_helper_contract_tasks():
 	domain = _domain()
@@ -607,7 +336,6 @@ def test_validate_library_no_longer_requires_obsolete_helper_contract_tasks():
 		domain,
 		prompt_analysis=prompt_analysis,
 	)
-
 
 def test_validate_library_accepts_direct_parent_support_when_no_required_helper_exists():
 	domain = _domain()
@@ -735,7 +463,6 @@ def test_validate_library_accepts_direct_parent_support_when_no_required_helper_
 		prompt_analysis=prompt_analysis,
 	)
 
-
 def test_validate_library_accepts_required_helper_with_parent_local_parameter_names():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -849,7 +576,6 @@ def test_validate_library_accepts_required_helper_with_parent_local_parameter_na
 		prompt_analysis=prompt_analysis,
 	)
 
-
 def test_normalise_library_repairs_subtask_kind_by_declared_task_sets():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -893,7 +619,6 @@ def test_normalise_library_repairs_subtask_kind_by_declared_task_sets():
 	assert step.kind == "compound"
 	assert step.task_name == "communicate_rock_data"
 
-
 def test_validate_library_rejects_constant_symbol_type_conflicts():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -927,7 +652,6 @@ def test_validate_library_rejects_constant_symbol_type_conflicts():
 
 	with pytest.raises(ValueError, match="objective0"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_validate_library_rejects_task_source_predicate_arity_mismatch():
 	domain = _marsrover_domain()
@@ -1059,7 +783,6 @@ def test_stage3_prompts_make_binding_and_naming_rules_explicit():
 	assert "inferred_task_headline_candidates:" not in user_prompt
 	assert "likely headline predicates" not in user_prompt
 
-
 def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_query_tasks():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1136,7 +859,6 @@ def test_stage3_prompt_makes_child_shared_support_requirements_explicit_for_quer
 	assert "copy one producer invocation verbatim into producer and still keep the listed branch obligations" in user_prompt
 	assert "support-task contract names a cleanup followup after the producer" in user_prompt
 
-
 def test_same_arity_packaging_contract_uses_refined_parent_envelope():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1163,7 +885,6 @@ def test_same_arity_packaging_contract_uses_refined_parent_envelope():
 		action_analysis,
 		candidates[0],
 	) == ("clear(ARG1)", "clear(ARG2)", "handempty")
-
 
 def test_prune_unreachable_task_structures_preserves_required_contract_tasks():
 	library = HTNMethodLibrary(
@@ -1225,82 +946,6 @@ def test_prune_unreachable_task_structures_preserves_required_contract_tasks():
 	}
 	assert pruned_count == 2
 
-
-def test_prune_unreachable_task_structures_preserves_required_transition_native_tasks():
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask("query_root_1_do_put_on", ("ARG1", "ARG2"), False, ("on",), source_name="do_put_on"),
-			HTNTask("dfa_step_q1_q2_on_a_b", ("ARG1", "ARG2"), False, ("on",)),
-			HTNTask("helper_holding", ("ARG1",), False, ("holding",)),
-			HTNTask("unused_task", ("ARG1",), False, ("clear",)),
-		],
-		primitive_tasks=[],
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_noop",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-			),
-			HTNMethod(
-				method_name="m_dfa_step_constructive",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep("s1", "helper_holding", ("ARG1",), "compound"),
-				),
-				ordering=(),
-			),
-			HTNMethod(
-				method_name="m_helper_noop",
-				task_name="helper_holding",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("holding", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-			),
-			HTNMethod(
-				method_name="m_unused_noop",
-				task_name="unused_task",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("clear", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-			),
-		],
-		target_literals=[HTNLiteral("on", ("a", "b"), True)],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "query_root_1_do_put_on")],
-	)
-
-	pruned_library, pruned_count = HTNMethodSynthesizer._prune_unreachable_task_structures(
-		library,
-		prompt_analysis={
-			"transition_native": True,
-			"query_root_alias_tasks": [{"name": "query_root_1_do_put_on"}],
-			"transition_tasks": [{"name": "dfa_step_q1_q2_on_a_b"}],
-		},
-	)
-
-	assert {task.name for task in pruned_library.compound_tasks} == {
-		"query_root_1_do_put_on",
-		"dfa_step_q1_q2_on_a_b",
-		"helper_holding",
-	}
-	assert {method.task_name for method in pruned_library.methods} == {
-		"query_root_1_do_put_on",
-		"dfa_step_q1_q2_on_a_b",
-		"helper_holding",
-	}
-	assert pruned_count == 2
-
-
 def test_required_helper_specs_skip_internal_packaging_support_when_parent_envelope_is_refined():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1314,7 +959,6 @@ def test_required_helper_specs_skip_internal_packaging_support_when_parent_envel
 	)
 
 	assert helper_specs == []
-
 
 def test_stage3_validation_rejects_compound_child_calls_with_no_reachable_child_method():
 	domain = _domain()
@@ -1376,13 +1020,11 @@ def test_stage3_validation_rejects_compound_child_calls_with_no_reachable_child_
 	with pytest.raises(ValueError, match="no child method for 'do_clear' is compatible"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_render_signature_with_mapping_does_not_cascade_replacements():
 	assert _render_signature_with_mapping(
 		"on(?x, ?y)",
 		{"?y": "?x", "?x": "BLOCK1"},
 	) == "on(BLOCK1, ?x)"
-
 
 def test_stage3_prompt_uses_declared_source_names_for_hyphenated_task_anchors():
 	domain = _marsrover_domain()
@@ -1406,7 +1048,6 @@ def test_stage3_prompt_uses_declared_source_names_for_hyphenated_task_anchors():
 	assert "ordered_binding #1: empty(s0) -> empty-store(s0, rover0)" in user_prompt
 	assert "<query_task_contract name=\"empty-store\">" in user_prompt
 	assert "empty_store(s0, rover0)" not in user_prompt
-
 
 def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
@@ -1477,7 +1118,6 @@ def test_stage3_prompt_stays_compact_for_multi_goal_blocksworld_case():
 	assert "Declaring AUX_* is not enough; constrain it before first use." in user_prompt
 	assert "Keep template argument positions exact." in user_prompt
 	assert "inferred_task_headline_candidates:" not in user_prompt
-
 
 def test_prompt_analysis_payload_keeps_role_stabilizer_and_packaging_child_contracts_live():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
@@ -1555,7 +1195,6 @@ def test_prompt_analysis_payload_keeps_role_stabilizer_and_packaging_child_contr
 		for line in support_contracts["do_move"]
 	)
 
-
 def test_stage3_prompt_stays_compact_for_marsrover_benchmark_case():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1608,7 +1247,6 @@ def test_stage3_prompt_stays_compact_for_marsrover_benchmark_case():
 	assert "calibrated(AUX_CAMERA1, AUX_ROVER1)" in user_prompt
 	assert "at(AUX_ROVER1, AUX_WAYPOINT1)" in user_prompt
 
-
 def test_stage3_prompt_filters_same_arity_packaging_by_parameter_types():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1639,7 +1277,6 @@ def test_stage3_prompt_filters_same_arity_packaging_by_parameter_types():
 	assert "prefer same-arity declared tasks navigate_abs(" not in user_prompt
 	assert "when chosen by get_image_data(?objective, ?mode) as same-arity packaging" not in user_prompt
 
-
 def test_same_arity_packaging_candidates_require_real_headline_match():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1655,7 +1292,6 @@ def test_same_arity_packaging_candidates_require_real_headline_match():
 	)
 
 	assert candidates == []
-
 
 def test_rover_support_task_headline_inference_prefers_discriminative_semantic_tokens():
 	domain = _marsrover_domain()
@@ -1677,7 +1313,6 @@ def test_rover_support_task_headline_inference_prefers_discriminative_semantic_t
 		1,
 		action_analysis,
 	)[0] == "communicated_soil_data"
-
 
 def test_rover_support_task_contracts_render_effect_aligned_headline_roles():
 	domain = _marsrover_domain()
@@ -1708,7 +1343,6 @@ def test_rover_support_task_contracts_render_effect_aligned_headline_roles():
 		"calibrate_abs(?rover, ?camera) supports calibrated(?camera, ?rover); "
 		"templates: calibrate(?rover, ?camera"
 	) in user_prompt
-
 
 def test_rover_support_task_internal_support_siblings_include_child_shared_requirements():
 	domain = _marsrover_domain()
@@ -1741,7 +1375,6 @@ def test_rover_support_task_internal_support_siblings_include_child_shared_requi
 	) in user_prompt
 	assert '"available(ARG1)"],"support_before":["navigate_abs(ARG1, AUX_WAYPOINT1)"],"producer":"calibrate(' in user_prompt
 
-
 def test_rover_support_task_contracts_expose_full_caller_shared_envelope():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1767,7 +1400,6 @@ def test_rover_support_task_contracts_expose_full_caller_shared_envelope():
 	) in user_prompt
 	assert "valid internal-support sibling for the false-at(ARG1, ARG2) case" in user_prompt
 	assert "available(ARG1); support_before navigate_abs(ARG1, ARG2);" in user_prompt
-
 
 def test_rover_support_task_invocations_align_with_task_signature_order():
 	domain = _marsrover_domain()
@@ -1806,7 +1438,6 @@ def test_rover_support_task_invocations_align_with_task_signature_order():
 		"available(ARG1); support_before navigate_abs(ARG1, AUX_WAYPOINT1); "
 		"producer take_image(ARG1, AUX_WAYPOINT1, ARG2, AUX_CAMERA1, ARG3)."
 	) in user_prompt
-
 
 def test_rover_query_task_contract_materialises_declared_support_sibling_slots():
 	domain = _marsrover_domain()
@@ -1854,7 +1485,6 @@ def test_rover_query_task_contract_materialises_declared_support_sibling_slots()
 		'AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)"}.'
 	) in user_prompt
 
-
 def test_support_task_candidates_do_not_overmatch_generic_data_tokens():
 	domain = _marsrover_domain()
 	assert _candidate_support_task_names(
@@ -1863,7 +1493,6 @@ def test_support_task_candidates_do_not_overmatch_generic_data_tokens():
 		("AUX_LANDER1",),
 		("communicate_soil_data", "communicate_rock_data", "communicate_image_data"),
 	) == []
-
 
 def test_stage3_prompt_does_not_invent_cross_task_packaging_for_rover_data_queries():
 	domain = _marsrover_domain()
@@ -1894,7 +1523,6 @@ def test_stage3_prompt_does_not_invent_cross_task_packaging_for_rover_data_queri
 		"communicated_soil_data(?waypoint)"
 	) not in user_prompt
 
-
 def test_stage3_prompt_forbids_grounded_constants_and_type_predicates_in_methods():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -1924,7 +1552,6 @@ def test_stage3_prompt_forbids_grounded_constants_and_type_predicates_in_methods
 	assert "Do not copy grounded object names into methods; methods must stay schematic." in user_prompt
 	assert "Use the ordered query bindings below as the canonical decomposition." in user_prompt
 	assert "do not invent aggregate/root wrappers such as do_world, do_all, goal_root, or __top." in user_prompt.lower()
-
 
 def test_common_child_constructive_requirements_ignore_extra_role_blockers():
 	synthesizer = HTNMethodSynthesizer()
@@ -2005,7 +1632,6 @@ def test_common_child_constructive_requirements_ignore_extra_role_blockers():
 	assert "handempty" in requirements
 	assert "on(Y, Z)" not in requirements
 
-
 def test_common_child_constructive_requirements_do_not_alias_unbound_child_locals():
 	synthesizer = HTNMethodSynthesizer()
 	domain = _domain()
@@ -2078,7 +1704,6 @@ def test_common_child_constructive_requirements_do_not_alias_unbound_child_local
 	assert "clear(AUX_BLOCK1)" not in requirements
 	assert "handempty" in requirements
 
-
 def test_common_compatible_child_dynamic_requirements_ignore_internal_branch_split():
 	synthesizer = HTNMethodSynthesizer()
 	domain = _marsrover_domain()
@@ -2146,7 +1771,6 @@ def test_common_compatible_child_dynamic_requirements_ignore_internal_branch_spl
 	)
 
 	assert requirements == ()
-
 
 def test_constructive_validator_rejects_compound_prep_that_does_not_feed_later_requirements():
 	domain = _domain()
@@ -2277,200 +1901,6 @@ def test_constructive_validator_rejects_compound_prep_that_does_not_feed_later_r
 	):
 		synthesizer._validate_library(library, domain)
 
-
-def test_transition_validator_allows_prefix_restoration_before_headline_producer():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True),
-		HTNLiteral("on", ("b6", "b3"), True),
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": HTNLiteral("on", ("b3", "b5"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b3_b5",
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": HTNLiteral("on", ("b6", "b3"), True),
-			"source_state": "q2",
-			"target_state": "q3",
-			"raw_label": "on_b6_b3",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-	synthesizer = HTNMethodSynthesizer()
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"tasks": [
-					{
-						"name": "query_root_1_do_put_on",
-						"constructive": [{"producer": "dfa_step_q1_q2_on_b3_b5"}],
-					},
-					{
-						"name": "query_root_2_do_put_on",
-						"constructive": [
-							{
-								"precondition": ["on(ARG2, AUX_CTX1)"],
-								"producer": "dfa_step_q2_q3_on_b6_b3(ARG1, ARG2, AUX_CTX1)",
-							},
-						],
-					},
-					{
-						"name": "dfa_step_q1_q2_on_b3_b5",
-						"constructive": [
-							{
-								"support_before": ["helper_holding(ARG1)", "helper_clear(ARG2)"],
-								"producer": "stack(ARG1, ARG2)",
-							},
-						],
-					},
-					{
-						"name": "dfa_step_q2_q3_on_b6_b3",
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"helper_holding(ARG1)",
-									"helper_clear(ARG2)",
-									"helper_on(ARG2, AUX_CTX1)",
-									"stack(ARG1, ARG2)",
-								],
-							},
-						],
-					},
-					{
-						"name": "helper_holding",
-						"constructive": [
-							{
-								"parameters": ["ARG1"],
-								"support_before": [
-									"helper_clear(ARG1)",
-									"helper_ontable(ARG1)",
-									"helper_handempty",
-								],
-								"producer": "pick_up(ARG1)",
-							},
-							{
-								"parameters": ["ARG1", "AUX_BLOCK1"],
-								"precondition": ["on(ARG1, AUX_BLOCK1)"],
-								"support_before": ["helper_clear(ARG1)", "helper_handempty"],
-								"producer": "unstack(ARG1, AUX_BLOCK1)",
-							},
-						],
-					},
-					{
-						"name": "helper_clear",
-						"constructive": [
-							{
-								"parameters": ["ARG1"],
-								"support_before": ["helper_holding(ARG1)"],
-								"producer": "put_down(ARG1)",
-							},
-							{
-								"parameters": ["ARG1", "AUX_BLOCK1"],
-								"support_before": ["helper_holding(ARG1)", "helper_clear(AUX_BLOCK1)"],
-								"producer": "stack(ARG1, AUX_BLOCK1)",
-							},
-							{
-								"parameters": ["ARG1", "AUX_BLOCK1"],
-								"precondition": ["on(AUX_BLOCK1, ARG1)"],
-								"support_before": ["helper_clear(AUX_BLOCK1)", "helper_handempty"],
-								"producer": "unstack(AUX_BLOCK1, ARG1)",
-							},
-						],
-					},
-					{
-						"name": "helper_ontable",
-						"constructive": [
-							{
-								"parameters": ["ARG1"],
-								"support_before": ["helper_holding(ARG1)"],
-								"producer": "put_down(ARG1)",
-							},
-						],
-					},
-					{
-						"name": "helper_handempty",
-						"constructive": [
-							{
-								"parameters": ["AUX_BLOCK1"],
-								"support_before": ["helper_holding(AUX_BLOCK1)"],
-								"producer": "put_down(AUX_BLOCK1)",
-							},
-							{
-								"parameters": ["AUX_BLOCK1", "AUX_BLOCK2"],
-								"support_before": ["helper_holding(AUX_BLOCK1)", "helper_clear(AUX_BLOCK2)"],
-								"producer": "stack(AUX_BLOCK1, AUX_BLOCK2)",
-							},
-						],
-					},
-					{
-						"name": "helper_on",
-						"constructive": [
-							{
-								"support_before": ["helper_holding(ARG1)", "helper_clear(ARG2)"],
-								"producer": "stack(ARG1, ARG2)",
-							},
-						],
-					},
-				],
-			},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-	task_lookup = {task.name: task for task in library.compound_tasks}
-	methods_by_task: Dict[str, List[HTNMethod]] = {}
-	for candidate in library.methods:
-		methods_by_task.setdefault(candidate.task_name, []).append(candidate)
-	method = next(
-		candidate
-		for candidate in library.methods
-		if candidate.method_name == "m_dfa_step_q2_q3_on_b6_b3_constructive"
-	)
-	task = task_lookup["dfa_step_q2_q3_on_b6_b3"]
-	expected_literal = synthesizer._materialise_task_headline_literal(
-		task,
-		predicate_arities={
-			predicate.name: len(predicate.parameters)
-			for predicate in getattr(domain, "predicates", [])
-		},
-	)
-
-	synthesizer._validate_headline_extra_role_support(
-		method,
-		task,
-		expected_literal,
-		methods_by_task,
-		task_lookup,
-		synthesizer._action_schema_map(domain),
-		{
-			predicate.name: len(predicate.parameters)
-			for predicate in getattr(domain, "predicates", [])
-		},
-		dynamic_predicates={
-			effect.predicate
-			for action_schema in dict.fromkeys(synthesizer._action_schema_map(domain).values())
-			for effect in getattr(action_schema, "effects", ())
-			if effect.predicate != "="
-		},
-	)
-
-
 def test_ast_header_only_duplicate_task_entry_does_not_become_empty_constructive_branch():
 	library = HTNMethodLibrary.from_dict(
 		{
@@ -2519,7 +1949,6 @@ def test_ast_header_only_duplicate_task_entry_does_not_become_empty_constructive
 		if method.task_name == "helper_handempty"
 	)
 
-
 def test_stage3_user_prompt_carries_branchy_action_schemas_into_domain_summary():
 	domain = type(
 		"DomainStub",
@@ -2565,7 +1994,6 @@ def test_stage3_user_prompt_carries_branchy_action_schemas_into_domain_summary()
 	assert "- seal_if_clear" not in user_prompt
 	assert "needs clear(?x) -> holding(?x)" not in user_prompt
 
-
 def test_action_analysis_includes_producer_effect_patterns():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
 	analysis = HTNMethodSynthesizer()._analyse_domain_actions(domain)
@@ -2578,7 +2006,6 @@ def test_action_analysis_includes_producer_effect_patterns():
 		and "on(?x, ?y)" in pattern["dynamic_precondition_signatures"]
 		for pattern in clear_patterns
 	)
-
 
 def test_validate_library_requires_query_anchor_tasks_and_bindings():
 	domain = _marsrover_domain()
@@ -2626,7 +2053,6 @@ def test_validate_library_requires_query_anchor_tasks_and_bindings():
 			static_predicates=tuple(analysis["static_predicates"]),
 		)
 
-
 def test_validate_library_rejects_fresh_helper_for_static_predicate():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -2657,7 +2083,6 @@ def test_validate_library_rejects_fresh_helper_for_static_predicate():
 			domain,
 			static_predicates=tuple(analysis["static_predicates"]),
 		)
-
 
 def test_validate_library_rejects_primitive_step_literal_not_in_action_effects():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
@@ -2692,7 +2117,6 @@ def test_validate_library_rejects_primitive_step_literal_not_in_action_effects()
 	with pytest.raises(ValueError, match="does not make that positive effect true"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_validate_library_requires_compound_task_to_support_its_headline_predicate():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
 	synthesizer = HTNMethodSynthesizer()
@@ -2718,7 +2142,6 @@ def test_validate_library_requires_compound_task_to_support_its_headline_predica
 
 	with pytest.raises(ValueError, match="headlines 'ontable\\(X\\)'"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_validate_library_rejects_constructive_branch_that_still_requires_headline_literal():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
@@ -2780,7 +2203,6 @@ def test_validate_library_rejects_constructive_branch_that_still_requires_headli
 	with pytest.raises(ValueError, match="headline literal is currently false"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_validate_library_requires_dynamic_preconditions_to_be_supported_before_primitive_step():
 	domain = HDDLParser.parse_domain("src/domains/blocksworld/domain.hddl")
 	synthesizer = HTNMethodSynthesizer()
@@ -2830,7 +2252,6 @@ def test_validate_library_requires_dynamic_preconditions_to_be_supported_before_
 
 	with pytest.raises(ValueError, match="without first supporting its dynamic preconditions"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_validate_library_rejects_compound_steps_that_skip_shared_child_dynamic_support():
 	domain = _domain()
@@ -2930,7 +2351,6 @@ def test_validate_library_rejects_compound_steps_that_skip_shared_child_dynamic_
 	with pytest.raises(ValueError, match="shared dynamic prerequisites"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_validate_library_rejects_grounded_query_object_leakage():
 	domain = _marsrover_domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -2972,7 +2392,6 @@ def test_validate_library_rejects_grounded_query_object_leakage():
 			domain,
 			query_objects=("camera0", "objective1", "high_res"),
 		)
-
 
 def test_method_validation_rejects_multi_step_methods_without_explicit_ordering():
 	domain = _marsrover_domain()
@@ -3019,7 +2438,6 @@ def test_method_validation_rejects_multi_step_methods_without_explicit_ordering(
 	with pytest.raises(ValueError, match="explicit ordering edges"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3051,7 +2469,6 @@ def test_method_synthesizer_rejects_llm_identifiers_that_need_silent_sanitising(
 	with pytest.raises(ValueError, match="Invalid task identifier 'place-on'"):
 		synthesizer._validate_library(normalised, domain)
 
-
 def test_normalise_llm_library_canonicalises_method_strategy_suffixes():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3081,7 +2498,6 @@ def test_normalise_llm_library_canonicalises_method_strategy_suffixes():
 	assert normalised.methods[0].method_name == "m_place_on_b1c_xt"
 	assert normalised.methods[0].source_method_name == "m_place_on_B1c_Xt"
 	synthesizer._validate_library(normalised, domain)
-
 
 def test_normalise_llm_library_rewrites_primitive_action_name_to_source_hddl_name():
 	domain = _domain()
@@ -3134,7 +2550,6 @@ def test_normalise_llm_library_rewrites_primitive_action_name_to_source_hddl_nam
 	assert primitive_step.task_name == "pick_up_from_table"
 	assert primitive_step.action_name == "pick-up-from-table"
 
-
 def test_normalise_llm_library_promotes_used_local_variables_into_method_parameters():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3177,7 +2592,6 @@ def test_normalise_llm_library_promotes_used_local_variables_into_method_paramet
 
 	assert normalised.methods[0].parameters == ("BLOCK", "BLOCK1")
 
-
 def test_method_validation_rejects_deprecated_task_prefixes():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3203,7 +2617,6 @@ def test_method_validation_rejects_deprecated_task_prefixes():
 
 	with pytest.raises(ValueError, match="Legacy task name 'achieve_on' is not allowed"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_method_validation_enforces_method_name_contract():
 	domain = _domain()
@@ -3246,7 +2659,6 @@ def test_method_validation_enforces_method_name_contract():
 	with pytest.raises(ValueError, match="must follow the exact naming pattern"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_negative_target_requires_constructive_method():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3278,7 +2690,6 @@ def test_negative_target_requires_constructive_method():
 
 	with pytest.raises(ValueError, match="has no constructive non-zero-subtask method"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_negative_target_binding_must_match_negative_semantics():
 	domain = _domain()
@@ -3330,25 +2741,10 @@ def test_negative_target_binding_must_match_negative_semantics():
 	with pytest.raises(ValueError, match="none of that task's methods exposes an already-satisfied context"):
 		synthesizer._validate_library(library, domain)
 
-
-def test_synthesize_rejects_negative_raw_transition_labels(monkeypatch):
+def test_synthesize_preserves_negative_query_target_signatures(monkeypatch):
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
 	synthesizer.client = object()
-
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("on_a_b", "on", ["a", "b"])
-	dfa_result = {
-		"dfa_dot": (
-			"digraph MONA_DFA {\n"
-			"  node [shape = doublecircle]; 1;\n"
-			"  node [shape = circle]; 0;\n"
-			"  init [shape = plaintext, label = \"\"];\n"
-			"  init -> 0;\n"
-			"  0 -> 1 [label=\"!on_a_b\"];\n"
-			"}\n"
-		),
-	}
 
 	llm_library = HTNMethodLibrary(
 		compound_tasks=[
@@ -3401,7 +2797,10 @@ def test_synthesize_rejects_negative_raw_transition_labels(monkeypatch):
 		metadata,
 		*,
 		prompt_analysis=None,
+		ast_compiler_defaults=None,
+		max_tokens=None,
 	):
+		del ast_compiler_defaults, max_tokens
 		return llm_library, '{"ok": true}', "stop"
 
 	monkeypatch.setattr(
@@ -3410,14 +2809,14 @@ def test_synthesize_rejects_negative_raw_transition_labels(monkeypatch):
 		_fake_request_complete_llm_library,
 	)
 
-	with pytest.raises(ValueError, match="raw non-atomic transition label unsupported"):
-		synthesizer.synthesize(
-			domain=domain,
-			grounding_map=grounding_map,
-			dfa_result=dfa_result,
-			query_text="Keep on(a,b) explicitly false.",
-		)
+	library, metadata = synthesizer.synthesize(
+		domain=domain,
+		query_text="Keep on(a,b) explicitly false.",
+		ordered_literal_signatures=["!on(a, b)"],
+	)
 
+	assert metadata["target_literals"] == ["!on(a, b)"]
+	assert [literal.to_signature() for literal in library.target_literals] == ["!on(a, b)"]
 
 def test_target_binding_normalisation_accepts_object_form_literal():
 	synthesizer = HTNMethodSynthesizer()
@@ -3443,7 +2842,6 @@ def test_target_binding_normalisation_accepts_object_form_literal():
 	normalised = synthesizer._normalise_target_binding_signatures(library)
 
 	assert normalised.target_task_bindings[0].target_literal == "on(a, b)"
-
 
 def test_method_validation_rejects_unbound_free_variables_in_subtasks():
 	domain = _domain()
@@ -3486,7 +2884,6 @@ def test_method_validation_rejects_unbound_free_variables_in_subtasks():
 	with pytest.raises(ValueError, match="uses unbound variable 'TOP'"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_method_validation_allows_local_variables_when_bound_in_context():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3528,7 +2925,6 @@ def test_method_validation_allows_local_variables_when_bound_in_context():
 	)
 
 	synthesizer._validate_library(library, domain)
-
 
 def test_method_validation_allows_local_variables_when_bound_in_preconditions():
 	domain = _domain()
@@ -3587,7 +2983,6 @@ def test_method_validation_allows_local_variables_when_bound_in_preconditions():
 
 	synthesizer._validate_library(library, domain)
 
-
 def test_method_validation_allows_auxiliary_method_parameters_constrained_in_context():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -3624,935 +3019,6 @@ def test_method_validation_allows_auxiliary_method_parameters_constrained_in_con
 
 	synthesizer._validate_library(library, domain)
 
-
-def test_transition_native_query_root_bridge_may_delegate_child_entry_support():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("on", ("a", "b"), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_on_a_b",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_do_put_on",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				HTNLiteral("on", ("ARG1", "ARG2"), True, None),
-				"do_put_on",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_on_a_b",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				HTNLiteral("on", ("ARG1", "ARG2"), True, None),
-			),
-			HTNTask(
-				"helper_holding",
-				("ARG1",),
-				False,
-				("holding",),
-				HTNLiteral("holding", ("ARG1",), True, None),
-			),
-			HTNTask(
-				"helper_clear",
-				("ARG1",),
-				False,
-				("clear",),
-				HTNLiteral("clear", ("ARG1",), True, None),
-			),
-			HTNTask(
-				"helper_ontable",
-				("ARG1",),
-				False,
-				("ontable",),
-				HTNLiteral("ontable", ("ARG1",), True, None),
-			),
-			HTNTask(
-				"helper_handempty",
-				(),
-				False,
-				("handempty",),
-				HTNLiteral("handempty", (), True, None),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_noop",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True, None),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_constructive",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="dfa_step_q1_q2_on_a_b",
-						args=("ARG1", "ARG2"),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_on_a_b_noop",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True, None),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_on_a_b_constructive",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="helper_holding",
-						args=("ARG1",),
-						kind="compound",
-					),
-					HTNMethodStep(
-						step_id="s2",
-						task_name="helper_clear",
-						args=("ARG2",),
-						kind="compound",
-					),
-					HTNMethodStep(
-						step_id="s3",
-						task_name="stack",
-						args=("ARG1", "ARG2"),
-						kind="primitive",
-						action_name="stack",
-					),
-				),
-				ordering=(("s1", "s2"), ("s2", "s3")),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_holding_noop",
-				task_name="helper_holding",
-				parameters=("ARG1",),
-				context=(HTNLiteral("holding", ("ARG1",), True, None),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_holding_constructive",
-				task_name="helper_holding",
-				parameters=("ARG1",),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="helper_clear",
-						args=("ARG1",),
-						kind="compound",
-					),
-					HTNMethodStep(
-						step_id="s2",
-						task_name="helper_ontable",
-						args=("ARG1",),
-						kind="compound",
-					),
-					HTNMethodStep(
-						step_id="s3",
-						task_name="helper_handempty",
-						args=(),
-						kind="compound",
-					),
-					HTNMethodStep(
-						step_id="s4",
-						task_name="pick_up",
-						args=("ARG1",),
-						kind="primitive",
-						action_name="pick-up",
-					),
-				),
-				ordering=(("s1", "s2"), ("s2", "s3"), ("s3", "s4")),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_clear_noop",
-				task_name="helper_clear",
-				parameters=("ARG1",),
-				context=(HTNLiteral("clear", ("ARG1",), True, None),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_ontable_noop",
-				task_name="helper_ontable",
-				parameters=("ARG1",),
-				context=(HTNLiteral("ontable", ("ARG1",), True, None),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_handempty_noop",
-				task_name="helper_handempty",
-				parameters=(),
-				context=(HTNLiteral("handempty", (), True, None),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "query_root_1_do_put_on")],
-	)
-
-	synthesizer._validate_library(
-		library,
-		domain,
-		query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-		prompt_analysis=prompt_analysis,
-		static_predicates=(),
-	)
-
-
-def test_transition_native_query_root_constructive_must_bridge_to_required_transition_task():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("on", ("a", "b"), True, "on_a_b")
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_on_a_b",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_do_put_on",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True),
-				source_name="do_put_on",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_on_a_b",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_noop",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_constructive",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="stack",
-						args=("ARG1", "ARG2"),
-						kind="primitive",
-						action_name="stack",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_on_a_b_noop",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "query_root_1_do_put_on")],
-	)
-
-	with pytest.raises(ValueError, match="must bridge through a compound transition task"):
-		synthesizer._validate_library(
-			library,
-			domain,
-			query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-			prompt_analysis=prompt_analysis,
-			static_predicates=(),
-		)
-
-
-def test_transition_native_query_root_requires_all_matching_transition_branches():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{"task_name": "get_soil_data", "source_name": "get_soil_data", "args": ["waypoint2"]},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-			{
-				"transition_name": "dfa_step_q3_q5_communicated_soil_data_waypoint2",
-				"literal": target_literal,
-				"source_state": "q3",
-				"target_state": "q5",
-				"accepting_states": ["q5"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-	prompt_analysis["required_branch_contracts"] = {
-		"query_root_1_get_soil_data": required_branch_contracts["query_root_1_get_soil_data"],
-	}
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_get_soil_data",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-				source_name="get_soil_data",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-			),
-			HTNTask(
-				"dfa_step_q3_q5_communicated_soil_data_waypoint2",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_noop",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("communicated_soil_data", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_constructive",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="dfa_step_q1_q2_communicated_soil_data_waypoint2",
-						args=("ARG1",),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_communicated_soil_data_waypoint2_noop",
-				task_name="dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("communicated_soil_data", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q3_q5_communicated_soil_data_waypoint2_noop",
-				task_name="dfa_step_q3_q5_communicated_soil_data_waypoint2",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("communicated_soil_data", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[
-			HTNTargetTaskBinding(
-				"communicated_soil_data(waypoint2)",
-				"query_root_1_get_soil_data",
-			),
-		],
-	)
-
-	with pytest.raises(ValueError, match="query_root_1_get_soil_data.*missing a required constructive branch"):
-		synthesizer._validate_library(
-			library,
-			domain,
-			query_task_anchors=[
-				{"task_name": "get_soil_data", "source_name": "get_soil_data", "args": ["waypoint2"]},
-			],
-			prompt_analysis=prompt_analysis,
-			static_predicates=(),
-		)
-
-
-def test_transition_native_constructive_method_rejects_positive_dynamic_context():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("on", ("a", "b"), True, "on_a_b")
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_on_a_b",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_do_put_on",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True),
-				source_name="do_put_on",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_on_a_b",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_noop",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_constructive",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="dfa_step_q1_q2_on_a_b",
-						args=("ARG1", "ARG2"),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_on_a_b_constructive",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(
-					HTNLiteral("holding", ("ARG1",), True),
-					HTNLiteral("clear", ("ARG2",), True),
-				),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="stack",
-						args=("ARG1", "ARG2"),
-						kind="primitive",
-						action_name="stack",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "query_root_1_do_put_on")],
-	)
-
-	with pytest.raises(ValueError, match="leaves positive dynamic requirements"):
-		synthesizer._validate_library(
-			library,
-			domain,
-			query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-			prompt_analysis=prompt_analysis,
-			static_predicates=(),
-		)
-
-
-def test_transition_native_constructive_method_allows_aux_binding_dynamic_context():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("handempty", (), True, "handempty")
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[{"task_name": "empty_hand", "source_name": "empty_hand", "args": []}],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_handempty",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_empty_hand",
-				(),
-				False,
-				("handempty",),
-				headline_literal=HTNLiteral("handempty", (), True),
-				source_name="empty_hand",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_handempty",
-				(),
-				False,
-				("handempty",),
-				headline_literal=HTNLiteral("handempty", (), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_empty_hand_noop",
-				task_name="query_root_1_empty_hand",
-				parameters=(),
-				task_args=(),
-				context=(HTNLiteral("handempty", (), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_empty_hand_constructive",
-				task_name="query_root_1_empty_hand",
-				parameters=(),
-				task_args=(),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="dfa_step_q1_q2_handempty",
-						args=(),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_handempty_constructive",
-				task_name="dfa_step_q1_q2_handempty",
-				parameters=("AUX1",),
-				task_args=(),
-				context=(HTNLiteral("holding", ("AUX1",), True),),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="put_down",
-						args=("AUX1",),
-						kind="primitive",
-						action_name="put-down",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[HTNTargetTaskBinding("handempty", "query_root_1_empty_hand")],
-	)
-
-	synthesizer._validate_library(
-		library,
-		domain,
-		query_task_anchors=[{"task_name": "empty_hand", "source_name": "empty_hand", "args": []}],
-		prompt_analysis=prompt_analysis,
-		static_predicates=(),
-	)
-
-
-def test_transition_native_constructive_method_allows_unsupportable_dynamic_context():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"helper_at",
-				("ARG1", "ARG2"),
-				False,
-				("at",),
-				headline_literal=HTNLiteral("at", ("ARG1", "ARG2"), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_helper_at_noop",
-				task_name="helper_at",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("at", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_at_constructive",
-				task_name="helper_at",
-				parameters=("ARG1", "ARG2", "AUX_WAYPOINT1"),
-				task_args=("ARG1", "ARG2"),
-				context=(
-					HTNLiteral("available", ("ARG1",), True),
-					HTNLiteral("at", ("ARG1", "AUX_WAYPOINT1"), True),
-				),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="navigate",
-						args=("ARG1", "AUX_WAYPOINT1", "ARG2"),
-						kind="primitive",
-						action_name="navigate",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[],
-		target_task_bindings=[],
-	)
-
-	synthesizer._validate_library(
-		library,
-		domain,
-		prompt_analysis={"transition_native": True},
-		static_predicates=(),
-	)
-
-
-def test_transition_native_validation_allows_extra_task_context_parameters():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"dfa_step_q2_q3_on_b1_b4",
-				("ARG1", "ARG2", "AUX_CTX1"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral(
-					predicate="on",
-					args=("ARG1", "ARG2"),
-					is_positive=True,
-					source_symbol=None,
-					negation_mode="naf",
-				),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_dfa_step_q2_q3_on_b1_b4_constructive",
-				task_name="dfa_step_q2_q3_on_b1_b4",
-				parameters=("ARG1", "ARG2", "AUX_CTX1"),
-				task_args=("ARG1", "ARG2", "AUX_CTX1"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s0",
-						task_name="unstack",
-						args=("AUX_CTX1", "ARG1"),
-						kind="primitive",
-						action_name="unstack",
-					),
-					HTNMethodStep(
-						step_id="s1",
-						task_name="stack",
-						args=("ARG1", "ARG2"),
-						kind="primitive",
-						action_name="stack",
-					),
-				),
-				ordering=(("s0", "s1"),),
-				origin="llm",
-			),
-		],
-		target_literals=[],
-		target_task_bindings=[],
-	)
-
-	synthesizer._validate_method_variable_types(
-		library.methods[0],
-		{task.name: task for task in library.compound_tasks},
-		synthesizer._action_type_map(domain),
-		synthesizer._task_type_map(domain),
-		{
-			predicate.name: tuple(
-				synthesizer._parameter_type(parameter)
-				for parameter in predicate.parameters
-			)
-			for predicate in domain.predicates
-		},
-	)
-
-
-def test_transition_native_constructive_method_allows_branch_selector_dynamic_context():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("holding", ("a",), True, "holding_a")
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[{"task_name": "get_holding", "source_name": "get_holding", "args": ["a"]}],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_holding_a",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_get_holding",
-				("ARG1",),
-				False,
-				("holding",),
-				headline_literal=HTNLiteral("holding", ("ARG1",), True),
-				source_name="get_holding",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_holding_a",
-				("ARG1",),
-				False,
-				("holding",),
-				headline_literal=HTNLiteral("holding", ("ARG1",), True),
-			),
-			HTNTask(
-				"helper_holding",
-				("ARG1",),
-				False,
-				("holding",),
-				headline_literal=HTNLiteral("holding", ("ARG1",), True),
-			),
-			HTNTask(
-				"helper_clear",
-				("ARG1",),
-				False,
-				("clear",),
-				headline_literal=HTNLiteral("clear", ("ARG1",), True),
-			),
-			HTNTask(
-				"helper_handempty",
-				(),
-				False,
-				("handempty",),
-				headline_literal=HTNLiteral("handempty", (), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_get_holding_noop",
-				task_name="query_root_1_get_holding",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("holding", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_get_holding_constructive",
-				task_name="query_root_1_get_holding",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="dfa_step_q1_q2_holding_a",
-						args=("ARG1",),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_holding_a_constructive",
-				task_name="dfa_step_q1_q2_holding_a",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="helper_holding",
-						args=("ARG1",),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_holding_noop",
-				task_name="helper_holding",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("holding", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_holding_constructive",
-				task_name="helper_holding",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("ontable", ("ARG1",), True),),
-				subtasks=(
-					HTNMethodStep("s1", "helper_clear", ("ARG1",), "compound"),
-					HTNMethodStep("s2", "helper_handempty", (), "compound"),
-					HTNMethodStep("s3", "pick_up", ("ARG1",), "primitive", action_name="pick-up"),
-				),
-				ordering=(("s1", "s2"), ("s2", "s3")),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_holding_constructive_2",
-				task_name="helper_holding",
-				parameters=("ARG1", "AUX1"),
-				task_args=("ARG1",),
-				context=(HTNLiteral("on", ("ARG1", "AUX1"), True),),
-				subtasks=(
-					HTNMethodStep("s1", "helper_clear", ("ARG1",), "compound"),
-					HTNMethodStep("s2", "helper_handempty", (), "compound"),
-					HTNMethodStep("s3", "unstack", ("ARG1", "AUX1"), "primitive", action_name="unstack"),
-				),
-				ordering=(("s1", "s2"), ("s2", "s3")),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_clear_noop",
-				task_name="helper_clear",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("clear", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_handempty_noop",
-				task_name="helper_handempty",
-				parameters=(),
-				task_args=(),
-				context=(HTNLiteral("handempty", (), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[HTNTargetTaskBinding("holding(a)", "query_root_1_get_holding")],
-	)
-
-	synthesizer._validate_library(
-		library,
-		domain,
-		query_task_anchors=[{"task_name": "get_holding", "source_name": "get_holding", "args": ["a"]}],
-		prompt_analysis=prompt_analysis,
-		static_predicates=(),
-	)
-
-
 def test_method_validation_rejects_auxiliary_method_parameters_used_before_constraint():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -4588,7 +3054,6 @@ def test_method_validation_rejects_auxiliary_method_parameters_used_before_const
 
 	with pytest.raises(ValueError, match="uses auxiliary parameter 'SUPPORT'"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_method_validation_allows_auxiliary_parameters_first_used_in_compound_step():
 	domain = _domain()
@@ -4698,7 +3163,6 @@ def test_method_validation_rejects_constructive_branch_that_does_not_support_hea
 	):
 		synthesizer._validate_library(library, domain)
 
-
 def test_method_validation_accepts_renamed_task_parameters_without_explicit_task_args():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -4744,7 +3208,6 @@ def test_method_validation_accepts_renamed_task_parameters_without_explicit_task
 	)
 
 	synthesizer._validate_library(library, domain)
-
 
 def test_method_validation_rejects_extra_role_support_left_only_in_context():
 	domain = _domain()
@@ -4797,7 +3260,6 @@ def test_method_validation_rejects_extra_role_support_left_only_in_context():
 		match=r"leaves extra-role dynamic prerequisite 'clear\(SUPPORT\)' only as context",
 	):
 		synthesizer._validate_library(library, domain)
-
 
 def test_method_validation_allows_consumed_mode_selector_to_stay_in_context():
 	domain = _domain()
@@ -4878,7 +3340,6 @@ def test_method_validation_allows_consumed_mode_selector_to_stay_in_context():
 
 	synthesizer._validate_library(library, domain)
 
-
 def test_method_validation_rejects_recursive_support_literal_left_in_same_context():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -4944,7 +3405,6 @@ def test_method_validation_rejects_recursive_support_literal_left_in_same_contex
 	):
 		synthesizer._validate_library(library, domain)
 
-
 def test_stage3_prompt_promotes_same_arity_final_producer_prerequisites_to_child_entry():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -4966,7 +3426,6 @@ def test_stage3_prompt_promotes_same_arity_final_producer_prerequisites_to_child
 	assert "non-leading support/base role" not in user_prompt
 	assert "Parent-side caller-shared prerequisites: clear(?x), clear(?y), handempty." in user_prompt
 	assert "do_move(?x, ?y): with parent-side caller-shared prerequisites holding(?x)" not in user_prompt
-
 
 def test_primitive_alias_cannot_use_non_primitive_subtask_kind():
 	domain = _domain()
@@ -5015,7 +3474,6 @@ def test_primitive_alias_cannot_use_non_primitive_subtask_kind():
 
 	with pytest.raises(ValueError, match="Primitive aliases must use kind='primitive'"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_sibling_constructive_methods_must_have_distinguishable_contexts():
 	domain = _domain()
@@ -5095,7 +3553,6 @@ def test_sibling_constructive_methods_must_have_distinguishable_contexts():
 
 	with pytest.raises(ValueError, match="semantically duplicate|not semantically distinguishable"):
 		synthesizer._validate_library(library, domain)
-
 
 def test_redundant_constructive_siblings_are_pruned_before_validation():
 	domain = _domain()
@@ -5222,7 +3679,6 @@ def test_redundant_constructive_siblings_are_pruned_before_validation():
 	}
 	synthesizer._validate_library(pruned_library, domain)
 
-
 def test_unreachable_wrapper_tasks_are_pruned_before_validation():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -5292,7 +3748,6 @@ def test_unreachable_wrapper_tasks_are_pruned_before_validation():
 		"m_do_put_on_stack",
 	}
 	synthesizer._validate_library(pruned_library, domain)
-
 
 def test_direct_self_recursive_siblings_are_preserved_when_contexts_are_distinct():
 	domain = _domain()
@@ -5372,7 +3827,6 @@ def test_direct_self_recursive_siblings_are_preserved_when_contexts_are_distinct
 		"m_clear_top_noop",
 	}
 
-
 def test_pruning_removes_more_specific_constructive_sibling_when_simpler_one_dominates():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -5441,7 +3895,6 @@ def test_pruning_removes_more_specific_constructive_sibling_when_simpler_one_dom
 		"m_do_clear_already",
 		"m_do_clear_putdown",
 	}
-
 
 def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 	domain = _domain()
@@ -5534,7 +3987,6 @@ def test_single_empty_context_fallback_constructive_sibling_is_preserved():
 	}
 	synthesizer._validate_library(pruned_library, domain)
 
-
 def test_multiple_empty_context_fallback_constructive_siblings_are_rejected():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -5598,7 +4050,6 @@ def test_multiple_empty_context_fallback_constructive_siblings_are_rejected():
 	with pytest.raises(ValueError, match="empty-context fallback branches"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_declared_hyphenated_task_names_are_normalised_internally_but_keep_source_names():
 	synthesizer = HTNMethodSynthesizer()
 	domain = _marsrover_domain()
@@ -5650,7 +4101,6 @@ def test_declared_hyphenated_task_names_are_normalised_internally_but_keep_sourc
 	assert [method.task_name for method in normalised.methods] == ["empty_store"]
 	assert [method.method_name for method in normalised.methods] == ["m_empty_store_ready"]
 	assert [binding.task_name for binding in normalised.target_task_bindings] == ["empty_store"]
-
 
 def test_method_validation_rejects_conflicting_variable_types():
 	domain = SimpleNamespace(
@@ -5720,7 +4170,6 @@ def test_method_validation_rejects_conflicting_variable_types():
 	with pytest.raises(ValueError, match="conflicting inferred types"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_method_type_validation_prefers_declared_task_signature_over_source_predicate_order():
 	synthesizer = HTNMethodSynthesizer()
 	task_lookup = {
@@ -5755,6 +4204,64 @@ def test_method_type_validation_prefers_declared_task_signature_over_source_pred
 		predicate_types={"calibrated": ("CAMERA", "ROVER")},
 	)
 
+def test_method_type_validation_accepts_subtype_compatible_argument_reuse():
+	domain = _satellite_domain()
+	synthesizer = HTNMethodSynthesizer()
+	task_lookup = {
+		"dfa_step_q1_q1_t1_have_image": HTNTask(
+			"dfa_step_q1_q1_t1_have_image",
+			("ARG1", "ARG2"),
+			False,
+			("have_image",),
+			headline_literal=HTNLiteral("have_image", ("ARG1", "ARG2"), True),
+		),
+		"helper_power_on": HTNTask("helper_power_on", ("ARG1",), False, ("power_on",)),
+		"helper_calibrated": HTNTask("helper_calibrated", ("ARG1",), False, ("calibrated",)),
+		"helper_pointing": HTNTask("helper_pointing", ("ARG1", "ARG2"), False, ("pointing",)),
+	}
+	method = HTNMethod(
+		method_name="m_dfa_step_q1_q1_t1_have_image_constructive",
+		task_name="dfa_step_q1_q1_t1_have_image",
+		parameters=("ARG1", "ARG2", "AUX_SATELLITE1", "AUX_INSTRUMENT1"),
+		context=(
+			HTNLiteral("on_board", ("AUX_INSTRUMENT1", "AUX_SATELLITE1"), True),
+			HTNLiteral("supports", ("AUX_INSTRUMENT1", "ARG2"), True),
+		),
+		subtasks=(
+			HTNMethodStep("s1", "helper_power_on", ("AUX_INSTRUMENT1",), "compound"),
+			HTNMethodStep("s2", "helper_calibrated", ("AUX_INSTRUMENT1",), "compound"),
+			HTNMethodStep("s3", "helper_pointing", ("AUX_SATELLITE1", "ARG1"), "compound"),
+			HTNMethodStep(
+				"s4",
+				"take_image",
+				("AUX_SATELLITE1", "ARG1", "AUX_INSTRUMENT1", "ARG2"),
+				"primitive",
+				action_name="take_image",
+			),
+		),
+		ordering=(("s1", "s2"), ("s2", "s3"), ("s3", "s4")),
+		origin="llm",
+	)
+
+	synthesizer._validate_method_variable_types(
+		method,
+		task_lookup,
+		synthesizer._action_type_map(domain),
+		{
+			"dfa_step_q1_q1_t1_have_image": ("IMAGE_DIRECTION", "MODE"),
+			"helper_power_on": ("INSTRUMENT",),
+			"helper_calibrated": ("INSTRUMENT",),
+			"helper_pointing": ("SATELLITE", "DIRECTION"),
+		},
+		{
+			predicate.name: tuple(
+				synthesizer._parameter_type(parameter)
+				for parameter in predicate.parameters
+			)
+			for predicate in domain.predicates
+		},
+		type_parent_map=synthesizer._build_domain_type_parent_map(domain),
+	)
 
 def test_parse_llm_library_ast_task_preserves_explicit_headline_literal():
 	synthesizer = HTNMethodSynthesizer()
@@ -5787,7 +4294,6 @@ def test_parse_llm_library_ast_task_preserves_explicit_headline_literal():
 		library.compound_tasks[0].headline_literal.to_signature()
 		== "calibrated(CAMERA, ROVER)"
 	)
-
 
 def test_validate_library_infers_reordered_task_headline_from_noop_context():
 	synthesizer = HTNMethodSynthesizer()
@@ -5835,7 +4341,6 @@ def test_validate_library_infers_reordered_task_headline_from_noop_context():
 	assert task.headline_literal is not None
 	assert task.headline_literal.to_signature() == "calibrated(ARG2, ARG1)"
 	synthesizer._validate_library(normalised, domain)
-
 
 def test_method_validation_allows_mixed_arg_aux_mode_selector_in_context():
 	synthesizer = HTNMethodSynthesizer()
@@ -5923,7 +4428,6 @@ def test_method_validation_allows_mixed_arg_aux_mode_selector_in_context():
 
 	synthesizer._validate_library(library, domain)
 
-
 def test_method_validation_accepts_supported_equality_constraints():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -5951,7 +4455,6 @@ def test_method_validation_accepts_supported_equality_constraints():
 
 	synthesizer._validate_library(library, domain)
 
-
 def test_parse_llm_library_rejects_truncated_json_with_clear_error():
 	synthesizer = HTNMethodSynthesizer()
 
@@ -5959,7 +4462,6 @@ def test_parse_llm_library_rejects_truncated_json_with_clear_error():
 		synthesizer._parse_llm_library(
 			'{"target_task_bindings": [], "compound_tasks": [',
 		)
-
 
 def test_parse_llm_library_rejects_non_pairwise_ordering_edges():
 	synthesizer = HTNMethodSynthesizer()
@@ -5994,7 +4496,6 @@ def test_parse_llm_library_rejects_non_pairwise_ordering_edges():
 				},
 			),
 		)
-
 
 def test_parse_llm_library_accepts_orderings_alias():
 	synthesizer = HTNMethodSynthesizer()
@@ -6045,7 +4546,6 @@ def test_parse_llm_library_accepts_orderings_alias():
 
 	assert library.methods[0].ordering == (("s1", "s2"),)
 
-
 def test_parse_llm_library_accepts_ordering_edges_alias():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -6094,7 +4594,6 @@ def test_parse_llm_library_accepts_ordering_edges_alias():
 	)
 
 	assert library.methods[0].ordering == (("s1", "s2"),)
-
 
 def test_parse_llm_library_accepts_ast_style_task_branches():
 	synthesizer = HTNMethodSynthesizer()
@@ -6145,7 +4644,6 @@ def test_parse_llm_library_accepts_ast_style_task_branches():
 	assert library.methods[1].subtasks[0].task_name == "stack"
 	assert library.methods[1].subtasks[0].action_name == "stack"
 
-
 def test_parse_llm_library_ast_defaults_override_model_target_task_bindings():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -6192,7 +4690,6 @@ def test_parse_llm_library_ast_defaults_override_model_target_task_bindings():
 
 	assert [binding.target_literal for binding in library.target_task_bindings] == ["on(b3, b5)"]
 	assert [binding.task_name for binding in library.target_task_bindings] == ["query_root_1_do_put_on"]
-
 
 def test_parse_llm_library_ast_defaults_accepts_branch_array_inside_task_level_ordered_subtasks():
 	synthesizer = HTNMethodSynthesizer()
@@ -6258,7 +4755,6 @@ def test_parse_llm_library_ast_defaults_accepts_branch_array_inside_task_level_o
 		"stack",
 	]
 
-
 def test_parse_llm_library_accepts_constructive_branch_wrapper():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -6313,7 +4809,6 @@ def test_parse_llm_library_accepts_constructive_branch_wrapper():
 		"primitive",
 	]
 
-
 def test_parse_llm_library_normalises_ast_style_parameter_aliases():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -6358,7 +4853,6 @@ def test_parse_llm_library_normalises_ast_style_parameter_aliases():
 	assert library.methods[0].context[0].to_signature() == "on(X, Y)"
 	assert library.methods[1].context[0].to_signature() == "holding(X)"
 	assert library.methods[1].subtasks[0].args == ("Y",)
-
 
 def test_parse_llm_library_merges_duplicate_ast_task_entries():
 	synthesizer = HTNMethodSynthesizer()
@@ -6443,7 +4937,6 @@ def test_parse_llm_library_merges_duplicate_ast_task_entries():
 	assert library.methods[2].subtasks[0].task_name == "do_clear"
 	assert library.methods[2].subtasks[1].task_name == "stack"
 
-
 def test_parse_llm_library_accepts_hddl_grammar_style_branch_aliases():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -6494,7 +4987,6 @@ def test_parse_llm_library_accepts_hddl_grammar_style_branch_aliases():
 	assert [step.task_name for step in library.methods[1].subtasks] == ["do_clear", "stack"]
 	assert library.methods[1].ordering == (("s1", "s2"),)
 
-
 def test_parse_llm_library_accepts_hddl_style_literal_and_subtask_shorthand():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -6531,7 +5023,6 @@ def test_parse_llm_library_accepts_hddl_style_literal_and_subtask_shorthand():
 	assert [step.step_id for step in library.methods[1].subtasks] == ["s1", "s2"]
 	assert [step.task_name for step in library.methods[1].subtasks] == ["do_clear", "stack"]
 	assert library.methods[1].ordering == (("s1", "s2"),)
-
 
 def test_normalise_llm_library_inferrs_missing_source_predicates_from_contracts():
 	domain = _domain()
@@ -6595,7 +5086,6 @@ def test_normalise_llm_library_inferrs_missing_source_predicates_from_contracts(
 	assert task_lookup["do_move"].source_predicates == ("on",)
 	assert task_lookup["do_clear"].source_predicates == ("clear",)
 
-
 def test_ast_payload_accepts_support_before_producer_followup_shortcut():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -6629,7 +5119,6 @@ def test_ast_payload_accepts_support_before_producer_followup_shortcut():
 	constructive = next(method for method in methods if method.method_name.endswith("constructive"))
 	assert [step.task_name for step in constructive.subtasks] == ["do_clear", "pick_up", "do_move"]
 	assert constructive.ordering == (("s1", "s2"), ("s2", "s3"))
-
 
 def test_ast_payload_accepts_bare_branch_level_producer_with_task_argument_passthrough():
 	library = HTNMethodLibrary.from_dict(
@@ -6667,7 +5156,6 @@ def test_ast_payload_accepts_bare_branch_level_producer_with_task_argument_passt
 	)
 	assert [step.task_name for step in query_root_method.subtasks] == ["dfa_step_q1_q2_on_a_b"]
 	assert [step.args for step in query_root_method.subtasks] == [("ARG1", "ARG2")]
-
 
 def test_ast_payload_accepts_query_root_compact_branches_wrapper():
 	library = HTNMethodLibrary.from_dict(
@@ -6723,7 +5211,6 @@ def test_ast_payload_accepts_query_root_compact_branches_wrapper():
 		("dfa_step_q3_q4_on_a_b",),
 	}
 
-
 def test_ast_payload_accepts_task_level_single_method_shorthand():
 	library = HTNMethodLibrary.from_dict(
 		{
@@ -6757,7 +5244,6 @@ def test_ast_payload_accepts_task_level_single_method_shorthand():
 	assert [step.task_name for step in query_root_method.subtasks] == ["dfa_step_q1_q2_on_a_b"]
 	assert [step.args for step in query_root_method.subtasks] == [("ARG1", "ARG2")]
 
-
 def test_ast_payload_inferrs_missing_task_parameters_from_headline():
 	library = HTNMethodLibrary.from_dict(
 		{
@@ -6782,6 +5268,45 @@ def test_ast_payload_inferrs_missing_task_parameters_from_headline():
 	assert task.headline_literal is not None
 	assert task.headline_literal.to_signature() == "full(ARG1)"
 
+def test_method_library_lookup_indexes_refresh_after_list_mutation():
+	library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("task_a", ("ARG1",), False, ("done_a",)),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_task_a",
+				task_name="task_a",
+				parameters=("ARG1",),
+				subtasks=(),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	assert library.task_for_name("task_a") is not None
+	assert [method.method_name for method in library.methods_for_task("task_a")] == [
+		"m_task_a",
+	]
+
+	library.compound_tasks.append(
+		HTNTask("task_b", ("ARG1",), False, ("done_b",)),
+	)
+	library.methods.append(
+		HTNMethod(
+			method_name="m_task_b",
+			task_name="task_b",
+			parameters=("ARG1",),
+			subtasks=(),
+		),
+	)
+
+	assert library.task_for_name("task_b") is not None
+	assert [method.method_name for method in library.methods_for_task("task_b")] == [
+		"m_task_b",
+	]
 
 def test_ast_payload_accepts_ordered_subtask_objects_with_producer_and_parameters():
 	library = HTNMethodLibrary.from_dict(
@@ -6814,922 +5339,6 @@ def test_ast_payload_accepts_ordered_subtask_objects_with_producer_and_parameter
 	assert [step.task_name for step in method.subtasks] == ["pick_up", "stack"]
 	assert [step.args for step in method.subtasks] == [("ARG1",), ("ARG1", "ARG2")]
 
-
-def test_ast_compiler_defaults_migrate_task_level_aux_parameters_to_constructive_branch():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("communicated_soil_data", ("waypoint1",), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "get_soil_data",
-				"source_name": "get_soil_data",
-				"args": ["waypoint1"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint1",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"target_task_bindings": [],
-				"tasks": [
-					{
-						"name": "query_root_1_get_soil_data",
-						"constructive": [
-							{
-								"producer": (
-									"dfa_step_q1_q2_communicated_soil_data_waypoint1(ARG1)"
-								),
-							},
-						],
-					},
-					{
-						"name": "dfa_step_q1_q2_communicated_soil_data_waypoint1",
-						"parameters": [
-							"ARG1",
-							"AUX_ROVER1",
-							"AUX_LANDER1",
-							"AUX_WAYPOINT1",
-							"AUX_WAYPOINT2",
-						],
-						"constructive": [
-							{
-								"precondition": [
-									"available(AUX_ROVER1)",
-									"at(AUX_ROVER1, ARG1)",
-									"at_soil_sample(ARG1)",
-									"channel_free(AUX_LANDER1)",
-									"at_lander(AUX_LANDER1, AUX_WAYPOINT2)",
-									"visible(AUX_WAYPOINT1, AUX_WAYPOINT2)",
-								],
-								"support_before": [
-									"navigate_abs(AUX_ROVER1, AUX_WAYPOINT1)",
-									"send_soil_data(AUX_ROVER1, ARG1)",
-								],
-								"producer": (
-									"communicate_soil_data("
-									"AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)"
-								),
-							},
-						],
-					},
-				],
-			},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	method = next(
-		method
-		for method in library.methods
-		if method.task_name == "dfa_step_q1_q2_communicated_soil_data_waypoint1"
-		and method.method_name.endswith("constructive")
-	)
-	assert method.parameters == (
-		"ARG1",
-		"AUX_ROVER1",
-		"AUX_LANDER1",
-		"AUX_WAYPOINT1",
-		"AUX_WAYPOINT2",
-	)
-	assert [step.task_name for step in method.subtasks] == [
-		"navigate_abs",
-		"send_soil_data",
-		"communicate_soil_data",
-	]
-	assert [step.args for step in method.subtasks] == [
-		("AUX_ROVER1", "AUX_WAYPOINT1"),
-		("AUX_ROVER1", "ARG1"),
-		("AUX_ROVER1", "AUX_LANDER1", "ARG1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"),
-	]
-
-
-def test_transition_native_prompt_includes_canonical_hddl_shaped_step_examples():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b4", "b2"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2"),
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-	]
-
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	system_prompt = build_transition_native_system_prompt()
-	user_prompt = build_transition_native_user_prompt(
-		domain,
-		query_text=(
-			"Using blocks b4 and b2, complete the task do_put_on(b4, b2)."
-		),
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-		query_object_inventory=[{"type": "block", "objects": ["b4", "b2"]}],
-	)
-
-	assert "Return exactly one object with top-level keys: target_task_bindings, tasks." in system_prompt
-	assert "Use [] for target_task_bindings unless you intentionally need non-default bindings." in system_prompt
-	assert "Only query_root_* may set source_name" in system_prompt
-	assert "Do not restate default task headers, headline literals, source_name, or noop branches." in system_prompt
-	assert "Each task object may contain only: name, optional parameters, optional source_name" in system_prompt
-	assert "Any referenced helper_* or other compound child must also appear in tasks[]" in system_prompt
-	assert "fixed context" in system_prompt
-	assert "Each constructive branch may contain only: optional parameters, optional precondition, required ordered_subtasks." in system_prompt
-	assert "Do not merge required branches." in system_prompt
-	assert "Each query_root_* task is a pure administrative alias bridge to required dfa_step_* tasks." in system_prompt
-	assert "Never inline helper_* calls, primitive actions, or the body of a dfa_step_* branch inside query_root_*." in system_prompt
-	assert "Do not use task-level ordered_subtasks as a branch shorthand." in system_prompt
-	assert "Never add the query_root headline literal or any other extra dynamic predicate to a query_root constructive precondition/context." in system_prompt
-	assert "genuine AUX witness-binding literal" in system_prompt
-	assert "Call every compound child with exactly the task-header parameters listed in TASK INVENTORY JSON." in system_prompt
-	assert "preserve ARG/AUX argument order" in system_prompt
-	assert "ALLOWED PRIMITIVE ACTIONS JSON:" in user_prompt
-	assert "TASK INVENTORY JSON:" in user_prompt
-	assert "REQUIRED QUERY_ROOT BRIDGE RULES:" in user_prompt
-	assert "REQUIRED BRANCH CONTRACTS JSON:" in user_prompt
-	assert "OUTPUT SHAPE EXAMPLES:" in user_prompt
-	assert "HARD PROHIBITIONS:" in user_prompt
-	assert '- {"name":"query_root_*","constructive":[{"ordered_subtasks":["dfa_step_q1_q2_goal(ARG1)"]}]}' in user_prompt
-	assert '- {"name":"dfa_step_*","constructive":[{"ordered_subtasks":["helper_x(ARG1)","primitive_or_helper(ARG1, ARG2)"]}]}' in user_prompt
-	task_inventory = json.loads(
-		_extract_prompt_section(
-			user_prompt,
-			"TASK INVENTORY JSON:\n",
-			"REQUIRED QUERY_ROOT BRIDGE RULES:\n",
-		),
-	)
-	query_root_bridge_rules = _extract_prompt_section(
-		user_prompt,
-		"REQUIRED QUERY_ROOT BRIDGE RULES:\n",
-		"REQUIRED BRANCH CONTRACTS JSON:\n",
-	)
-	branch_contracts = json.loads(
-		_extract_prompt_section(
-			user_prompt,
-			"REQUIRED BRANCH CONTRACTS JSON:\n",
-			"ALLOWED PRIMITIVE ACTIONS JSON:\n",
-		),
-	)
-	assert {
-		entry.get("name")
-		for entry in task_inventory
-	} >= {
-		"query_root_1_do_put_on",
-		"dfa_step_q1_q2_on_b4_b2",
-		"helper_holding",
-		"helper_clear",
-	}
-	assert any(
-		entry.get("name") == "helper_handempty" and entry.get("parameters") == []
-		for entry in task_inventory
-	)
-	assert "query_root_1_do_put_on -> required bridge branches: 1" in query_root_bridge_rules
-	assert 'exact compact task payload suffix: {"ordered_subtasks":["dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)"]}' in query_root_bridge_rules
-	assert branch_contracts["query_root_1_do_put_on"] == [
-		{"ordered_subtasks": ["dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)"]},
-	]
-	assert branch_contracts["dfa_step_q1_q2_on_b4_b2"] == [
-		{
-			"ordered_subtasks": [
-				"helper_clear(ARG2)",
-				"helper_holding(ARG1)",
-				"stack(ARG1, ARG2)",
-			],
-		},
-	]
-	assert branch_contracts["helper_holding"] == [
-		{
-			"precondition": ["ontable(ARG1)"],
-			"ordered_subtasks": [
-				"helper_clear(ARG1)",
-				"helper_handempty",
-				"pick_up(ARG1)",
-			],
-		},
-		{
-			"parameters": ["ARG1", "AUX_BLOCK1"],
-			"precondition": ["on(ARG1, AUX_BLOCK1)"],
-			"ordered_subtasks": [
-				"helper_clear(ARG1)",
-				"helper_handempty",
-				"unstack(ARG1, AUX_BLOCK1)",
-			],
-		},
-	]
-	assert branch_contracts["helper_clear"] == [
-		{
-			"precondition": ["holding(ARG1)"],
-			"ordered_subtasks": ["put_down(ARG1)"],
-		},
-		{
-			"parameters": ["ARG1", "AUX_BLOCK1"],
-			"precondition": ["on(AUX_BLOCK1, ARG1)"],
-			"ordered_subtasks": [
-				"helper_clear(AUX_BLOCK1)",
-				"helper_handempty",
-				"unstack(AUX_BLOCK1, ARG1)",
-			],
-		},
-	]
-	assert prompt_analysis["query_root_alias_tasks"][0]["headline_literal"]["source_symbol"] is None
-	assert prompt_analysis["transition_tasks"][0]["headline_literal"]["source_symbol"] is None
-
-
-def test_transition_native_prompt_recursively_supports_aux_unary_needs():
-	domain = _domain()
-	target_literals = [HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2")]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2"),
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	user_prompt = build_transition_native_user_prompt(
-		domain,
-		query_text="Using blocks b4 and b2, complete the task do_put_on(b4, b2).",
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-		query_object_inventory=[{"type": "block", "objects": ["b4", "b2"]}],
-	)
-	branch_contracts = json.loads(
-		_extract_prompt_section(
-			user_prompt,
-			"REQUIRED BRANCH CONTRACTS JSON:\n",
-			"ALLOWED PRIMITIVE ACTIONS JSON:\n",
-		),
-	)
-	assert branch_contracts["helper_handempty"] == [
-		{
-			"parameters": ["AUX_BLOCK1"],
-			"precondition": ["holding(AUX_BLOCK1)"],
-			"ordered_subtasks": ["put_down(AUX_BLOCK1)"],
-		},
-	]
-	assert branch_contracts["helper_clear"][1] == {
-		"parameters": ["ARG1", "AUX_BLOCK1"],
-		"precondition": ["on(AUX_BLOCK1, ARG1)"],
-		"ordered_subtasks": [
-			"helper_clear(AUX_BLOCK1)",
-			"helper_handempty",
-			"unstack(AUX_BLOCK1, ARG1)",
-		],
-	}
-
-
-def test_transition_native_required_branch_contracts_capture_helper_clear_modes():
-	domain = _domain()
-	target_literals = [HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2")]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2"),
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-
-	helper_clear_contracts = required_branch_contracts["helper_clear"]
-	assert any(
-		contract["parameters"] == ["ARG1"]
-		and contract["precondition"] == ["holding(ARG1)"]
-		and contract["ordered_subtasks"] == ["put_down(ARG1)"]
-		for contract in helper_clear_contracts
-	)
-	assert any(
-		contract["parameters"] == ["ARG1", "AUX_BLOCK1"]
-		and contract["precondition"] == ["on(AUX_BLOCK1, ARG1)"]
-		and contract["ordered_subtasks"] == [
-			"helper_clear(AUX_BLOCK1)",
-			"helper_handempty",
-			"unstack(AUX_BLOCK1, ARG1)",
-		]
-		for contract in helper_clear_contracts
-	)
-	assert len(helper_clear_contracts) == 2
-
-
-def test_transition_native_required_branch_contracts_restabilise_volatile_holding_after_clear():
-	domain = _domain()
-	target_literal = HTNLiteral("on", ("b3", "b5"), True, "on_b3_b5")
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "do_put_on",
-				"source_name": "do_put_on",
-				"args": ["b3", "b5"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_on_b3_b5",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-
-	assert required_branch_contracts["dfa_step_q1_q2_on_b3_b5"] == [
-		{
-			"parameters": ["ARG1", "ARG2"],
-			"precondition": [],
-			"ordered_subtasks": [
-				"helper_clear(ARG2)",
-				"helper_holding(ARG1)",
-				"stack(ARG1, ARG2)",
-			],
-		},
-	]
-
-
-def test_transition_native_prompt_analysis_carries_ordered_prefix_retention_context():
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True, None),
-		HTNLiteral("on", ("b6", "b3"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": target_literals[0],
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q3"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": target_literals[1],
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q3"],
-		},
-	]
-
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-
-	second_transition = prompt_analysis["transition_tasks"][1]
-	second_query_root = prompt_analysis["query_root_alias_tasks"][1]
-
-	assert second_transition["parameters"] == ["ARG1", "ARG2", "AUX_CTX1"]
-	assert second_transition["headline_literal"]["args"] == ["ARG1", "ARG2"]
-	assert second_transition["retained_prefix_literals"] == ["on(ARG2, AUX_CTX1)"]
-	assert second_query_root["bridge_parameters"] == ["ARG1", "ARG2", "AUX_CTX1"]
-	assert second_query_root["bridge_precondition"] == ["on(ARG2, AUX_CTX1)"]
-
-
-def test_transition_native_required_branch_contracts_restore_ordered_prefix_literals():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True, None),
-		HTNLiteral("on", ("b6", "b3"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": target_literals[0],
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q3"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": target_literals[1],
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q3"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-
-	assert required_branch_contracts["query_root_2_do_put_on"] == [
-		{
-			"parameters": ["ARG1", "ARG2", "AUX_CTX1"],
-			"precondition": ["on(ARG2, AUX_CTX1)"],
-			"ordered_subtasks": ["dfa_step_q2_q3_on_b6_b3(ARG1, ARG2, AUX_CTX1)"],
-		},
-	]
-	assert any(
-		contract.get("precondition") == []
-		and contract.get("ordered_subtasks") == [
-			"helper_clear(ARG1)",
-			"helper_ontable(ARG1)",
-			"dfa_step_q1_q2_on_b3_b5(ARG2, AUX_CTX1)",
-			"helper_clear(ARG2)",
-			"helper_holding(ARG1)",
-			"stack(ARG1, ARG2)",
-		]
-		for contract in required_branch_contracts["dfa_step_q2_q3_on_b6_b3"]
-	)
-	assert "helper_on" in required_branch_contracts
-
-
-def test_transition_native_required_branch_contracts_carry_multi_step_prefix_context():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b4", "b2"), True, None),
-		HTNLiteral("on", ("b1", "b4"), True, None),
-		HTNLiteral("on", ("b3", "b1"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b1", "b4"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b1"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": target_literals[0],
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b1_b4",
-			"literal": target_literals[1],
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q3_q4_on_b3_b1",
-			"literal": target_literals[2],
-			"source_state": "q3",
-			"target_state": "q4",
-			"accepting_states": ["q4"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-
-	assert any(
-		contract.get("precondition") == []
-		and contract.get("ordered_subtasks") == [
-			"helper_clear(ARG1)",
-			"helper_ontable(ARG1)",
-			"dfa_step_q2_q3_on_b1_b4(ARG2, AUX_CTX1, AUX_CTX2)",
-			"helper_clear(ARG2)",
-			"helper_holding(ARG1)",
-			"stack(ARG1, ARG2)",
-		]
-		for contract in required_branch_contracts["dfa_step_q3_q4_on_b3_b1"]
-	)
-
-
-def test_transition_native_recommended_helper_literals_follow_recursive_support_closure():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "get_soil_data",
-				"source_name": "get_soil_data",
-				"args": ["waypoint2"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	helper_signatures = {
-		literal.to_signature()
-		for literal in _recommended_helper_literals(
-			prompt_analysis=prompt_analysis,
-			action_analysis=synthesizer._analyse_domain_actions(domain),
-		)
-	}
-
-	assert "empty(AUX_STORE1)" in helper_signatures
-	assert "full(AUX_STORE1)" in helper_signatures
-
-
-def test_transition_native_helper_caller_shared_requirements_keep_only_unsupportable_residuals():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-
-	assert _helper_caller_shared_requirements(
-		"have_soil_analysis",
-		("ARG1", "ARG2"),
-		action_analysis,
-	) == ("at_soil_sample(ARG2)",)
-
-
-def test_transition_native_helper_caller_shared_requirements_do_not_leak_hidden_aux_roles():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-
-	assert _helper_caller_shared_requirements(
-		"have_image",
-		("ARG1", "ARG2", "ARG3"),
-		action_analysis,
-	) == ()
-
-
-def test_transition_native_required_branch_contracts_hoist_unsupportable_helper_entry_needs():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-	target_literal = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "get_soil_data",
-				"source_name": "get_soil_data",
-				"args": ["waypoint2"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-	contract = required_branch_contracts["dfa_step_q1_q2_communicated_soil_data_waypoint2"][0]
-
-	assert contract["ordered_subtasks"] == [
-		"helper_have_soil_analysis(AUX_ROVER1, ARG1)",
-		"helper_at(AUX_ROVER1, AUX_WAYPOINT1)",
-		"communicate_soil_data(AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)",
-	]
-	assert "support_before" not in contract
-	assert "followup" not in contract
-	assert "at_soil_sample(ARG1)" in contract["precondition"]
-	assert "available(AUX_ROVER1)" in contract["precondition"]
-	assert "channel_free(AUX_LANDER1)" in contract["precondition"]
-	assert "at_lander(AUX_LANDER1, AUX_WAYPOINT2)" in contract["precondition"]
-	assert "visible(AUX_WAYPOINT1, AUX_WAYPOINT2)" in contract["precondition"]
-
-
-def test_transition_native_required_branch_contracts_keep_helper_hidden_aux_internal():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-	target_literal = HTNLiteral(
-		"communicated_image_data",
-		("objective1", "high_res"),
-		True,
-		None,
-	)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "get_image_data",
-				"source_name": "get_image_data",
-				"args": ["objective1", "high_res"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q4_communicated_image_data_objective1_high_res",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q4",
-				"accepting_states": ["q4"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-	contract = required_branch_contracts[
-		"dfa_step_q1_q4_communicated_image_data_objective1_high_res"
-	][0]
-
-	assert contract["ordered_subtasks"] == [
-		"helper_have_image(AUX_ROVER1, ARG1, ARG2)",
-		"helper_at(AUX_ROVER1, AUX_WAYPOINT1)",
-		"communicate_image_data(AUX_ROVER1, AUX_LANDER1, ARG1, ARG2, AUX_WAYPOINT1, AUX_WAYPOINT2)",
-	]
-	assert "available(AUX_ROVER1)" in contract["precondition"]
-	assert "channel_free(AUX_LANDER1)" in contract["precondition"]
-	assert "at_lander(AUX_LANDER1, AUX_WAYPOINT2)" in contract["precondition"]
-	assert "visible(AUX_WAYPOINT1, AUX_WAYPOINT2)" in contract["precondition"]
-	assert "calibrated(AUX_CAMERA1, AUX_ROVER1)" not in contract["precondition"]
-
-
-def test_transition_native_helper_at_contract_keeps_recursive_reachability_as_subtask():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-	target_literal = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "get_soil_data",
-				"source_name": "get_soil_data",
-				"args": ["waypoint2"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-	helper_contract = required_branch_contracts["helper_at"][0]
-
-	assert helper_contract["ordered_subtasks"] == [
-		"helper_at(ARG1, AUX_WAYPOINT1)",
-		"navigate(ARG1, AUX_WAYPOINT1, ARG2)",
-	]
-	assert "at(ARG1, AUX_WAYPOINT1)" not in helper_contract["precondition"]
-	assert "can_traverse(ARG1, AUX_WAYPOINT1, ARG2)" in helper_contract["precondition"]
-	assert "visible(AUX_WAYPOINT1, ARG2)" in helper_contract["precondition"]
-	assert "available(ARG1)" in helper_contract["precondition"]
-
-
-def test_transition_native_helper_have_image_supports_calibration():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-	target_literal = HTNLiteral("communicated_image_data", ("objective1", "high_res"), True, None)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{
-				"task_name": "get_image_data",
-				"source_name": "get_image_data",
-				"args": ["objective1", "high_res"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q4_communicated_image_data_objective1_high_res",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q4",
-				"accepting_states": ["q4"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-	helper_contracts = required_branch_contracts["helper_have_image"]
-
-	assert any(
-		"helper_calibrated" in step
-		for contract in helper_contracts
-		for step in contract["ordered_subtasks"]
-	)
-
-
-def test_transition_native_required_branch_contracts_keep_static_selector_preconditions():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-	target_literals = [
-		HTNLiteral("communicated_soil_data", ("waypoint2",), True, None),
-		HTNLiteral("communicated_rock_data", ("waypoint3",), True, None),
-		HTNLiteral("communicated_image_data", ("objective1", "high_res"), True, None),
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=[
-			{
-				"task_name": "get_soil_data",
-				"source_name": "get_soil_data",
-				"args": ["waypoint2"],
-			},
-			{
-				"task_name": "get_rock_data",
-				"source_name": "get_rock_data",
-				"args": ["waypoint3"],
-			},
-			{
-				"task_name": "get_image_data",
-				"source_name": "get_image_data",
-				"args": ["objective1", "high_res"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": target_literals[0],
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q8"],
-			},
-			{
-				"transition_name": "dfa_step_q1_q3_communicated_rock_data_waypoint3",
-				"literal": target_literals[1],
-				"source_state": "q1",
-				"target_state": "q3",
-				"accepting_states": ["q8"],
-			},
-			{
-				"transition_name": "dfa_step_q1_q4_communicated_image_data_objective1_high_res",
-				"literal": target_literals[2],
-				"source_state": "q1",
-				"target_state": "q4",
-				"accepting_states": ["q8"],
-			},
-		],
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-
-	soil_helper_contract = required_branch_contracts["helper_have_soil_analysis"][0]
-	rock_helper_contract = required_branch_contracts["helper_have_rock_analysis"][0]
-	image_helper_contract = required_branch_contracts["helper_have_image"][0]
-	empty_helper_contract = required_branch_contracts["helper_empty"][0]
-
-	assert "equipped_for_soil_analysis(ARG1)" in soil_helper_contract["precondition"]
-	assert "store_of(AUX_STORE1, ARG1)" in soil_helper_contract["precondition"]
-	assert "equipped_for_rock_analysis(ARG1)" in rock_helper_contract["precondition"]
-	assert "store_of(AUX_STORE1, ARG1)" in rock_helper_contract["precondition"]
-	assert "equipped_for_imaging(ARG1)" in image_helper_contract["precondition"]
-	assert "on_board(AUX_CAMERA1, ARG1)" in image_helper_contract["precondition"]
-	assert "supports(AUX_CAMERA1, ARG3)" in image_helper_contract["precondition"]
-	assert "visible_from(ARG2, AUX_WAYPOINT1)" in image_helper_contract["precondition"]
-	assert "store_of(ARG1, AUX_ROVER1)" in empty_helper_contract["precondition"]
-
-
-def test_transition_native_same_arity_envelope_shares_only_static_selectors():
-	blocksworld_domain = _domain()
-	marsrover_domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	blocksworld_analysis = synthesizer._analyse_domain_actions(blocksworld_domain)
-	marsrover_analysis = synthesizer._analyse_domain_actions(marsrover_domain)
-
-	blocksworld_target = HTNLiteral("on", ("b3", "b5"), True, None)
-	blocksworld_prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[blocksworld_target],
-		query_task_anchors=[
-			{
-				"task_name": "do_put_on",
-				"source_name": "do_put_on",
-				"args": ["b3", "b5"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_on_b3_b5",
-				"literal": blocksworld_target,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	blocksworld_contract = build_transition_native_required_branch_contracts(
-		prompt_analysis=blocksworld_prompt_analysis,
-		action_analysis=blocksworld_analysis,
-	)["dfa_step_q1_q2_on_b3_b5"][0]
-
-	marsrover_target = HTNLiteral("communicated_soil_data", ("waypoint2",), True, None)
-	marsrover_prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[marsrover_target],
-		query_task_anchors=[
-			{
-				"task_name": "get_soil_data",
-				"source_name": "get_soil_data",
-				"args": ["waypoint2"],
-			},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": marsrover_target,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	marsrover_contract = build_transition_native_required_branch_contracts(
-		prompt_analysis=marsrover_prompt_analysis,
-		action_analysis=marsrover_analysis,
-	)["dfa_step_q1_q2_communicated_soil_data_waypoint2"][0]
-
-	assert blocksworld_contract["precondition"] == []
-	assert "equipped_for_soil_analysis(AUX_ROVER1)" in marsrover_contract["precondition"]
-	assert "at(AUX_ROVER1, ARG1)" not in marsrover_contract["precondition"]
-	assert "at_soil_sample(ARG1)" in marsrover_contract["precondition"]
-
-
 def test_render_producer_mode_options_prunes_dominated_modes():
 	action_analysis = HTNMethodSynthesizer()._analyse_domain_actions(_domain())
 
@@ -7752,7 +5361,6 @@ def test_render_producer_mode_options_prunes_dominated_modes():
 		"put_down(AUX_BLOCK1)",
 	]
 
-
 def test_render_producer_mode_options_rejects_identity_preserving_dynamic_modes():
 	action_analysis = HTNMethodSynthesizer()._analyse_domain_actions(_marsrover_domain())
 
@@ -7771,1802 +5379,6 @@ def test_render_producer_mode_options_rejects_identity_preserving_dynamic_modes(
 
 	assert available_modes == ()
 	assert channel_free_modes == ()
-
-
-def test_transition_native_validation_rejects_missing_required_helper_constructive_branch():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("on", ("a", "b"), True, "on_a_b")
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_on_a_b",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	prompt_analysis["required_branch_contracts"] = {
-		"helper_clear": [
-			{
-				"parameters": ["ARG1"],
-				"precondition": [],
-				"support_before": ["helper_holding(ARG1)"],
-				"producer": "put_down(ARG1)",
-				"followup": [],
-			},
-		],
-	}
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_do_put_on",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True),
-				source_name="do_put_on",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_on_a_b",
-				("ARG1", "ARG2"),
-				False,
-				("on",),
-				headline_literal=HTNLiteral("on", ("ARG1", "ARG2"), True),
-			),
-			HTNTask(
-				"helper_clear",
-				("ARG1",),
-				False,
-				("clear",),
-				headline_literal=HTNLiteral("clear", ("ARG1",), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_noop",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_do_put_on_constructive",
-				task_name="query_root_1_do_put_on",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="dfa_step_q1_q2_on_a_b",
-						args=("ARG1", "ARG2"),
-						kind="compound",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_on_a_b_noop",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(HTNLiteral("on", ("ARG1", "ARG2"), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_dfa_step_q1_q2_on_a_b_constructive",
-				task_name="dfa_step_q1_q2_on_a_b",
-				parameters=("ARG1", "ARG2"),
-				task_args=("ARG1", "ARG2"),
-				context=(),
-				subtasks=(
-					HTNMethodStep(
-						step_id="s1",
-						task_name="stack",
-						args=("ARG1", "ARG2"),
-						kind="primitive",
-						action_name="stack",
-					),
-				),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_helper_clear_noop",
-				task_name="helper_clear",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("clear", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[target_literal],
-		target_task_bindings=[HTNTargetTaskBinding("on(a, b)", "query_root_1_do_put_on")],
-	)
-
-	with pytest.raises(ValueError, match="Task 'helper_clear' omitted all required constructive branches"):
-		synthesizer._validate_library(
-			library,
-			domain,
-			query_task_anchors=[{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["a", "b"]}],
-			prompt_analysis=prompt_analysis,
-			static_predicates=(),
-		)
-
-
-def test_transition_native_pruning_preserves_required_helper_branch_contracts():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literals = [
-		HTNLiteral("on", ("b4", "b2"), True, None),
-		HTNLiteral("on", ("b1", "b4"), True, None),
-		HTNLiteral("on", ("b3", "b1"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b1", "b4"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b1"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": target_literals[0],
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b1_b4",
-			"literal": target_literals[1],
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q3_q4_on_b3_b1",
-			"literal": target_literals[2],
-			"source_state": "q3",
-			"target_state": "q4",
-			"accepting_states": ["q4"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	prompt_analysis["required_branch_contracts"] = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-	response_text = json.dumps(
-		{
-			"target_task_bindings": [
-				{"target_literal": "on(b4,b2)", "task_name": "query_root_1_do_put_on"},
-				{"target_literal": "on(b1, b4)", "task_name": "query_root_2_do_put_on"},
-				{"target_literal": "on(b3, b1)", "task_name": "query_root_3_do_put_on"},
-			],
-			"tasks": [
-				{
-					"name": "query_root_1_do_put_on",
-					"constructive": [{"ordered_subtasks": ["dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)"]}],
-				},
-				{
-					"name": "query_root_2_do_put_on",
-					"constructive": [{"ordered_subtasks": ["dfa_step_q2_q3_on_b1_b4(ARG1, ARG2, AUX_CTX1)"]}],
-				},
-				{
-					"name": "query_root_3_do_put_on",
-					"constructive": [{"ordered_subtasks": ["dfa_step_q3_q4_on_b3_b1(ARG1, ARG2, AUX_CTX1, AUX_CTX2)"]}],
-				},
-				{
-					"name": "dfa_step_q1_q2_on_b4_b2",
-					"constructive": [
-						{
-							"parameters": ["ARG1", "ARG2"],
-							"ordered_subtasks": [
-								"helper_holding(ARG1)",
-								"helper_clear(ARG2)",
-								"stack(ARG1, ARG2)",
-							],
-						},
-					],
-				},
-				{
-					"name": "dfa_step_q2_q3_on_b1_b4",
-					"constructive": [
-						{
-							"parameters": ["ARG1", "ARG2", "AUX_CTX1"],
-							"ordered_subtasks": [
-								"dfa_step_q1_q2_on_b4_b2(ARG2, AUX_CTX1)",
-								"helper_holding(ARG1)",
-								"helper_clear(ARG2)",
-								"stack(ARG1, ARG2)",
-							],
-						},
-					],
-				},
-				{
-					"name": "dfa_step_q3_q4_on_b3_b1",
-					"constructive": [
-						{
-							"parameters": ["ARG1", "ARG2", "AUX_CTX1", "AUX_CTX2"],
-							"ordered_subtasks": [
-								"dfa_step_q2_q3_on_b1_b4(ARG2, AUX_CTX1, AUX_CTX2)",
-								"helper_holding(ARG1)",
-								"helper_clear(ARG2)",
-								"stack(ARG1, ARG2)",
-							],
-						},
-					],
-				},
-				{
-					"name": "helper_holding",
-					"constructive": [
-						{
-							"parameters": ["ARG1"],
-							"ordered_subtasks": [
-								"helper_clear(ARG1)",
-								"helper_ontable(ARG1)",
-								"helper_handempty",
-								"pick_up(ARG1)",
-							],
-						},
-						{
-							"parameters": ["ARG1", "AUX_BLOCK1"],
-							"precondition": ["on(ARG1, AUX_BLOCK1)"],
-							"ordered_subtasks": [
-								"helper_clear(ARG1)",
-								"helper_handempty",
-								"unstack(ARG1, AUX_BLOCK1)",
-							],
-						},
-					],
-				},
-				{
-					"name": "helper_clear",
-					"constructive": [
-						{
-							"parameters": ["ARG1"],
-							"ordered_subtasks": ["helper_holding(ARG1)", "put_down(ARG1)"],
-						},
-						{
-							"parameters": ["ARG1", "AUX_BLOCK1"],
-							"ordered_subtasks": [
-								"helper_holding(ARG1)",
-								"helper_clear(AUX_BLOCK1)",
-								"stack(ARG1, AUX_BLOCK1)",
-							],
-						},
-						{
-							"parameters": ["ARG1", "AUX_BLOCK1"],
-							"precondition": ["on(AUX_BLOCK1, ARG1)"],
-							"ordered_subtasks": [
-								"helper_clear(AUX_BLOCK1)",
-								"helper_handempty",
-								"unstack(AUX_BLOCK1, ARG1)",
-							],
-						},
-					],
-				},
-				{
-					"name": "helper_ontable",
-					"constructive": [
-						{
-							"parameters": ["ARG1"],
-							"ordered_subtasks": ["helper_holding(ARG1)", "put_down(ARG1)"],
-						},
-					],
-				},
-				{
-					"name": "helper_handempty",
-					"constructive": [
-						{
-							"parameters": ["AUX_BLOCK1"],
-							"ordered_subtasks": ["helper_holding(AUX_BLOCK1)", "put_down(AUX_BLOCK1)"],
-						},
-						{
-							"parameters": ["AUX_BLOCK1", "AUX_BLOCK2"],
-							"ordered_subtasks": [
-								"helper_holding(AUX_BLOCK1)",
-								"helper_clear(AUX_BLOCK2)",
-								"stack(AUX_BLOCK1, AUX_BLOCK2)",
-							],
-						},
-					],
-				},
-			],
-		},
-	)
-	library = synthesizer._parse_llm_library(
-		response_text,
-		ast_compiler_defaults=compiler_defaults,
-	)
-	library = HTNMethodLibrary(
-		compound_tasks=list(library.compound_tasks),
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=list(library.methods),
-		target_literals=target_literals,
-		target_task_bindings=list(library.target_task_bindings),
-	)
-
-	pruned_library, pruned_count = synthesizer._prune_redundant_constructive_siblings(
-		library,
-		domain,
-		prompt_analysis=prompt_analysis,
-	)
-
-	assert pruned_count > 0
-	assert {
-		(tuple(method.parameters), tuple(step.task_name for step in synthesizer._ordered_method_steps(method)))
-		for method in pruned_library.methods
-		if method.task_name == "helper_clear" and method.subtasks
-	} >= {
-		(("ARG1",), ("helper_holding", "put_down")),
-		(("ARG1", "AUX_BLOCK1"), ("helper_clear", "helper_handempty", "unstack")),
-	}
-
-
-def test_prune_redundant_constructive_siblings_preserves_required_query_root_bridges():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	prompt_analysis = {
-		"transition_native": True,
-		"required_branch_contracts": {
-			"query_root_1_get_soil_data": [
-				{"parameters": ["ARG1"], "precondition": [], "ordered_subtasks": ["dfa_step_q1_q2_communicated_soil_data_waypoint2(ARG1)"]},
-				{"parameters": ["ARG1"], "precondition": [], "ordered_subtasks": ["dfa_step_q3_q5_communicated_soil_data_waypoint2(ARG1)"]},
-			],
-		},
-	}
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_get_soil_data",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-				source_name="get_soil_data",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-			),
-			HTNTask(
-				"dfa_step_q3_q5_communicated_soil_data_waypoint2",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_noop",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("communicated_soil_data", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_constructive",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=(),
-				context=(),
-				subtasks=(HTNMethodStep("s1", "dfa_step_q1_q2_communicated_soil_data_waypoint2", ("ARG1",), "compound"),),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_constructive_2",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=(),
-				context=(),
-				subtasks=(HTNMethodStep("s1", "dfa_step_q3_q5_communicated_soil_data_waypoint2", ("ARG1",), "compound"),),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[HTNLiteral("communicated_soil_data", ("waypoint2",), True)],
-		target_task_bindings=[HTNTargetTaskBinding("communicated_soil_data(waypoint2)", "query_root_1_get_soil_data")],
-	)
-
-	pruned_library, pruned_count = synthesizer._prune_redundant_constructive_siblings(
-		library,
-		domain,
-		prompt_analysis=prompt_analysis,
-	)
-
-	assert pruned_count == 0
-	assert {
-		method.method_name
-		for method in pruned_library.methods
-		if method.task_name == "query_root_1_get_soil_data" and method.subtasks
-	} == {
-		"m_query_root_1_get_soil_data_constructive",
-		"m_query_root_1_get_soil_data_constructive_2",
-	}
-
-
-def test_transition_native_query_root_bridge_methods_may_share_empty_context():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	library = HTNMethodLibrary(
-		compound_tasks=[
-			HTNTask(
-				"query_root_1_get_soil_data",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-				source_name="get_soil_data",
-			),
-			HTNTask(
-				"dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-			),
-			HTNTask(
-				"dfa_step_q3_q5_communicated_soil_data_waypoint2",
-				("ARG1",),
-				False,
-				("communicated_soil_data",),
-				headline_literal=HTNLiteral("communicated_soil_data", ("ARG1",), True),
-			),
-		],
-		primitive_tasks=synthesizer._build_primitive_tasks(domain),
-		methods=[
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_noop",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=("ARG1",),
-				context=(HTNLiteral("communicated_soil_data", ("ARG1",), True),),
-				subtasks=(),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_constructive",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=(),
-				context=(),
-				subtasks=(HTNMethodStep("s1", "dfa_step_q1_q2_communicated_soil_data_waypoint2", ("ARG1",), "compound"),),
-				ordering=(),
-				origin="llm",
-			),
-			HTNMethod(
-				method_name="m_query_root_1_get_soil_data_constructive_2",
-				task_name="query_root_1_get_soil_data",
-				parameters=("ARG1",),
-				task_args=(),
-				context=(),
-				subtasks=(HTNMethodStep("s1", "dfa_step_q3_q5_communicated_soil_data_waypoint2", ("ARG1",), "compound"),),
-				ordering=(),
-				origin="llm",
-			),
-		],
-		target_literals=[HTNLiteral("communicated_soil_data", ("waypoint2",), True)],
-		target_task_bindings=[HTNTargetTaskBinding("communicated_soil_data(waypoint2)", "query_root_1_get_soil_data")],
-	)
-	task_lookup = {task.name: task for task in library.compound_tasks}
-
-	synthesizer._validate_sibling_method_distinguishability(
-		library,
-		task_lookup,
-		action_schemas={},
-		predicate_arities={"communicated_soil_data": 1},
-		prompt_analysis={"transition_native": True},
-	)
-
-
-def test_parse_llm_library_rejects_obsolete_transition_native_branch_shorthand():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literals = [
-		HTNLiteral("on", ("b4", "b2"), True, None),
-		HTNLiteral("on", ("b1", "b4"), True, None),
-		HTNLiteral("on", ("b3", "b1"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b1", "b4"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b1"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": target_literals[0],
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b1_b4",
-			"literal": target_literals[1],
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q3_q4_on_b3_b1",
-			"literal": target_literals[2],
-			"source_state": "q3",
-			"target_state": "q4",
-			"accepting_states": ["q4"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-	response_text = (
-		'{"target_task_bindings":[{"target_literal":"on(b4, b2)","task_name":"query_root_1_do_put_on"},'
-		'{"target_literal":"on(b1, b4)","task_name":"query_root_2_do_put_on"},'
-		'{"target_literal":"on(b3, b1)","task_name":"query_root_3_do_put_on"}],'
-		'"tasks":[{"name":"query_root_1_do_put_on","constructive":[{"ordered_subtasks":["dfa_step_q1_q2_on_b4_b2(b4, b2)"]}]},'
-		'{"name":"query_root_2_do_put_on","constructive":[{"ordered_subtasks":["dfa_step_q2_q3_on_b1_b4(b1, b4)"]}]},'
-		'{"name":"query_root_3_do_put_on","constructive":[{"ordered_subtasks":["dfa_step_q3_q4_on_b3_b1(b3, b1)"]}]},'
-		'{"name":"dfa_step_q1_q2_on_b4_b2","parameters":["ARG1","ARG2"],"constructive":[{"support_before":["helper_holding(ARG1)","helper_clear(ARG2)"],"producer":"stack(ARG1, ARG2)"}]},'
-		'{"name":"dfa_step_q2_q3_on_b1_b4","parameters":["ARG1","ARG2"],"constructive":[{"support_before":["helper_holding(ARG1)","helper_clear(ARG2)"],"producer":"stack(ARG1, ARG2)"}]},'
-		'{"name":"dfa_step_q3_q4_on_b3_b1","parameters":["ARG1","ARG2"],"constructive":[{"support_before":["helper_holding(ARG1)","helper_clear(ARG2)"],"producer":"stack(ARG1, ARG2)"}]}]}'
-	)
-
-	with pytest.raises(ValueError, match="unsupported branch keys"):
-		synthesizer._parse_llm_library(
-			response_text,
-			ast_compiler_defaults=compiler_defaults,
-		)
-
-
-def test_transition_native_parser_normalises_query_root_bridge_task_level_layout():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literals = [
-		HTNLiteral("on", ("b4", "b2"), True, None),
-		HTNLiteral("on", ("b1", "b4"), True, None),
-		HTNLiteral("on", ("b3", "b1"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b1", "b4"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b1"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": target_literals[0],
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b1_b4",
-			"literal": target_literals[1],
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q3_q4_on_b3_b1",
-			"literal": target_literals[2],
-			"source_state": "q3",
-			"target_state": "q4",
-			"accepting_states": ["q4"],
-		},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"target_task_bindings": [],
-				"tasks": [
-					{
-						"name": "query_root_1_do_put_on",
-						"constructive": [
-							{"ordered_subtasks": ["dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)"]},
-						],
-					},
-					{
-						"name": "query_root_2_do_put_on",
-						"parameters": ["ARG1", "ARG2", "AUX_CTX1"],
-						"precondition": ["on(ARG2, AUX_CTX1)"],
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"dfa_step_q2_q3_on_b1_b4(ARG1, ARG2, AUX_CTX1)",
-								],
-							},
-						],
-					},
-					{
-						"name": "query_root_3_do_put_on",
-						"parameters": ["ARG1", "ARG2", "AUX_CTX1", "AUX_CTX2"],
-						"precondition": ["on(AUX_CTX1, AUX_CTX2)", "on(ARG2, AUX_CTX1)"],
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"dfa_step_q3_q4_on_b3_b1(ARG1, ARG2, AUX_CTX1, AUX_CTX2)",
-								],
-							},
-						],
-					},
-					{
-						"name": "dfa_step_q1_q2_on_b4_b2",
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"helper_clear(ARG2)",
-									"helper_holding(ARG1)",
-									"stack(ARG1, ARG2)",
-								],
-							},
-						],
-					},
-					{
-						"name": "dfa_step_q2_q3_on_b1_b4",
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"dfa_step_q1_q2_on_b4_b2(ARG2, AUX_CTX1)",
-									"helper_clear(ARG2)",
-									"helper_holding(ARG1)",
-									"stack(ARG1, ARG2)",
-								],
-							},
-						],
-					},
-					{
-						"name": "dfa_step_q3_q4_on_b3_b1",
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"dfa_step_q2_q3_on_b1_b4(ARG2, AUX_CTX1, AUX_CTX2)",
-									"helper_clear(ARG2)",
-									"helper_holding(ARG1)",
-									"stack(ARG1, ARG2)",
-								],
-							},
-						],
-					},
-					{
-						"name": "helper_clear",
-						"constructive": [
-							{
-								"precondition": ["holding(ARG1)"],
-								"ordered_subtasks": ["put_down(ARG1)"],
-							},
-							{
-								"parameters": ["ARG1", "AUX_BLOCK1"],
-								"precondition": ["on(AUX_BLOCK1, ARG1)"],
-								"ordered_subtasks": [
-									"helper_clear(AUX_BLOCK1)",
-									"helper_handempty",
-									"unstack(AUX_BLOCK1, ARG1)",
-								],
-							},
-						],
-					},
-					{
-						"name": "helper_handempty",
-						"constructive": [
-							{
-								"parameters": ["AUX_BLOCK1"],
-								"precondition": ["holding(AUX_BLOCK1)"],
-								"ordered_subtasks": ["put_down(AUX_BLOCK1)"],
-							},
-						],
-					},
-					{
-						"name": "helper_holding",
-						"constructive": [
-							{
-								"precondition": ["ontable(ARG1)"],
-								"ordered_subtasks": [
-									"helper_clear(ARG1)",
-									"helper_handempty",
-									"pick_up(ARG1)",
-								],
-							},
-							{
-								"parameters": ["ARG1", "AUX_BLOCK1"],
-								"precondition": ["on(ARG1, AUX_BLOCK1)"],
-								"ordered_subtasks": [
-									"helper_clear(ARG1)",
-									"helper_handempty",
-									"unstack(ARG1, AUX_BLOCK1)",
-								],
-							},
-						],
-					},
-					{
-						"name": "helper_on",
-						"constructive": [
-							{
-								"ordered_subtasks": [
-									"helper_clear(ARG2)",
-									"helper_holding(ARG1)",
-									"stack(ARG1, ARG2)",
-								],
-							},
-						],
-					},
-					{
-						"name": "helper_ontable",
-						"constructive": [
-							{"ordered_subtasks": ["helper_holding(ARG1)", "put_down(ARG1)"]},
-						],
-					},
-				],
-			},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	query_root_task = next(
-		task
-		for task in library.compound_tasks
-		if task.name == "query_root_2_do_put_on"
-	)
-	assert query_root_task.parameters == ("ARG1", "ARG2")
-	query_root_method = next(
-		method
-		for method in library.methods
-		if method.task_name == "query_root_2_do_put_on"
-		and method.method_name.endswith("constructive")
-	)
-	assert query_root_method.parameters == ("ARG1", "ARG2", "AUX_CTX1")
-	assert [literal.to_signature() for literal in query_root_method.context] == ["on(ARG2, AUX_CTX1)"]
-	assert [step.task_name for step in query_root_method.subtasks] == ["dfa_step_q2_q3_on_b1_b4"]
-	assert [step.args for step in query_root_method.subtasks] == [
-		("ARG1", "ARG2", "AUX_CTX1"),
-	]
-
-
-def test_transition_native_branch_contract_accepts_extra_prefix_support_for_aux_preconditions():
-	synthesizer = HTNMethodSynthesizer()
-	task_lookup = {
-		"helper_at": HTNTask(
-			"helper_at",
-			("ARG1", "ARG2"),
-			False,
-			("at",),
-			headline_literal=HTNLiteral("at", ("ARG1", "ARG2"), True),
-		),
-		"helper_have_soil_analysis": HTNTask(
-			"helper_have_soil_analysis",
-			("ARG1", "ARG2"),
-			False,
-			("have_soil_analysis",),
-			headline_literal=HTNLiteral("have_soil_analysis", ("ARG1", "ARG2"), True),
-		),
-		"helper_available": HTNTask(
-			"helper_available",
-			("ARG1",),
-			False,
-			("available",),
-			headline_literal=HTNLiteral("available", ("ARG1",), True),
-		),
-		"helper_channel_free": HTNTask(
-			"helper_channel_free",
-			("ARG1",),
-			False,
-			("channel_free",),
-			headline_literal=HTNLiteral("channel_free", ("ARG1",), True),
-		),
-	}
-	method = HTNMethod(
-		method_name="m_transition_constructive",
-		task_name="dfa_step_q1_q2_communicated_soil_data_waypoint2",
-		parameters=("ARG1", "AUX_ROVER1", "AUX_LANDER1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"),
-		context=(),
-		subtasks=(
-			HTNMethodStep("s1", "helper_at", ("AUX_ROVER1", "AUX_WAYPOINT1"), "compound"),
-			HTNMethodStep("s2", "helper_have_soil_analysis", ("AUX_ROVER1", "ARG1"), "compound"),
-			HTNMethodStep("s3", "helper_available", ("AUX_ROVER1",), "compound"),
-			HTNMethodStep("s4", "helper_channel_free", ("AUX_LANDER1",), "compound"),
-			HTNMethodStep(
-				"s5",
-				"communicate_soil_data",
-				("AUX_ROVER1", "AUX_LANDER1", "ARG1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"),
-				"primitive",
-				action_name="communicate_soil_data",
-			),
-		),
-		ordering=(("s1", "s2"), ("s2", "s3"), ("s3", "s4"), ("s4", "s5")),
-		origin="llm",
-	)
-	contract = {
-		"parameters": ["ARG1", "AUX_ROVER1", "AUX_LANDER1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"],
-		"precondition": [
-			"at(AUX_ROVER1, AUX_WAYPOINT1)",
-			"have_soil_analysis(AUX_ROVER1, ARG1)",
-		],
-		"support_before": [
-			"helper_available(AUX_ROVER1)",
-			"helper_channel_free(AUX_LANDER1)",
-		],
-		"producer": "communicate_soil_data(AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)",
-		"followup": [],
-	}
-
-	assert synthesizer._transition_native_method_matches_branch_contract(
-		method,
-		contract,
-		task_lookup=task_lookup,
-	)
-
-
-def test_transition_native_branch_contract_accepts_ordered_subtasks_for_restabilisation():
-	synthesizer = HTNMethodSynthesizer()
-	task_lookup = {
-		"helper_have_soil_analysis": HTNTask(
-			"helper_have_soil_analysis",
-			("ARG1", "ARG2"),
-			False,
-			("have_soil_analysis",),
-			headline_literal=HTNLiteral("have_soil_analysis", ("ARG1", "ARG2"), True),
-		),
-		"helper_at": HTNTask(
-			"helper_at",
-			("ARG1", "ARG2"),
-			False,
-			("at",),
-			headline_literal=HTNLiteral("at", ("ARG1", "ARG2"), True),
-		),
-	}
-	method = HTNMethod(
-		method_name="m_transition_constructive",
-		task_name="dfa_step_q1_q2_communicated_soil_data_waypoint2",
-		parameters=("ARG1", "AUX_ROVER1", "AUX_LANDER1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"),
-		context=(
-			HTNLiteral("at_soil_sample", ("ARG1",), True),
-			HTNLiteral("available", ("AUX_ROVER1",), True),
-			HTNLiteral("channel_free", ("AUX_LANDER1",), True),
-		),
-		subtasks=(
-			HTNMethodStep("s1", "helper_have_soil_analysis", ("AUX_ROVER1", "ARG1"), "compound"),
-			HTNMethodStep("s2", "helper_at", ("AUX_ROVER1", "AUX_WAYPOINT1"), "compound"),
-			HTNMethodStep(
-				"s3",
-				"communicate_soil_data",
-				("AUX_ROVER1", "AUX_LANDER1", "ARG1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"),
-				"primitive",
-				action_name="communicate_soil_data",
-			),
-		),
-		ordering=(("s1", "s2"), ("s2", "s3")),
-		origin="llm",
-	)
-	contract = {
-		"parameters": ["ARG1", "AUX_ROVER1", "AUX_LANDER1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"],
-		"precondition": [
-			"at_soil_sample(ARG1)",
-			"available(AUX_ROVER1)",
-			"channel_free(AUX_LANDER1)",
-		],
-		"ordered_subtasks": [
-			"helper_have_soil_analysis(AUX_ROVER1, ARG1)",
-			"helper_at(AUX_ROVER1, AUX_WAYPOINT1)",
-			"communicate_soil_data(AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)",
-		],
-	}
-
-	assert synthesizer._transition_native_method_matches_branch_contract(
-		method,
-		contract,
-		task_lookup=task_lookup,
-	)
-
-
-def test_transition_native_ast_compiler_defaults_fill_contract_metadata():
-	domain = _domain()
-	target_literals = [HTNLiteral("on", ("b4", "b2"), True)]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b4_b2",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-	synthesizer = HTNMethodSynthesizer()
-	library = synthesizer._parse_llm_library(
-			json.dumps(
-				{
-					"tasks": [
-						{
-							"name": "query_root_1_do_put_on",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"dfa_step_q1_q2_on_b4_b2(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-						{
-							"name": "dfa_step_q1_q2_on_b4_b2",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_holding(ARG1)",
-										"helper_clear(ARG2)",
-										"stack(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-						{
-							"name": "helper_holding",
-							"constructive": [
-								{
-									"precondition": ["ontable(ARG1)"],
-									"ordered_subtasks": ["pick_up(ARG1)"],
-								},
-							],
-						},
-						{
-							"name": "helper_clear",
-							"constructive": [
-								{
-									"parameters": ["ARG1", "AUX1"],
-									"precondition": ["on(AUX1, ARG1)"],
-									"ordered_subtasks": ["unstack(AUX1, ARG1)"],
-								},
-							],
-						},
-					],
-				},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	assert [binding.task_name for binding in library.target_task_bindings] == [
-		"query_root_1_do_put_on",
-	]
-	query_root_task = next(task for task in library.compound_tasks if task.name == "query_root_1_do_put_on")
-	assert query_root_task.source_name == "do_put_on"
-	assert query_root_task.headline_literal.to_signature() == "on(ARG1, ARG2)"
-	query_root_method = next(
-		method
-		for method in library.methods
-		if method.task_name == "query_root_1_do_put_on" and method.subtasks
-	)
-	assert [step.args for step in query_root_method.subtasks] == [("ARG1", "ARG2")]
-	transition_method = next(
-		method
-		for method in library.methods
-		if method.task_name == "dfa_step_q1_q2_on_b4_b2" and method.subtasks
-	)
-	assert [step.args for step in transition_method.subtasks] == [
-		("ARG1",),
-		("ARG2",),
-		("ARG1", "ARG2"),
-	]
-	assert [step.kind for step in transition_method.subtasks] == [
-		"compound",
-		"compound",
-		"primitive",
-	]
-	assert transition_method.subtasks[2].action_name == "stack"
-	helper_holding = next(task for task in library.compound_tasks if task.name == "helper_holding")
-	assert helper_holding.parameters == ("ARG1",)
-	assert helper_holding.headline_literal.to_signature() == "holding(ARG1)"
-	helper_clear = next(task for task in library.compound_tasks if task.name == "helper_clear")
-	assert helper_clear.parameters == ("ARG1",)
-	assert helper_clear.headline_literal.to_signature() == "clear(ARG1)"
-
-
-def test_transition_native_query_root_bridge_uses_compiled_bridge_parameters():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True),
-		HTNLiteral("on", ("b6", "b3"), True),
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": HTNLiteral("on", ("b3", "b5"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b3_b5",
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": HTNLiteral("on", ("b6", "b3"), True),
-			"source_state": "q2",
-			"target_state": "q3",
-			"raw_label": "on_b6_b3",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-	synthesizer = HTNMethodSynthesizer()
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"tasks": [
-					{
-						"name": "query_root_1_do_put_on",
-						"constructive": [
-							{"ordered_subtasks": ["dfa_step_q1_q2_on_b3_b5(ARG1, ARG2)"]},
-						],
-					},
-					{
-						"name": "query_root_2_do_put_on",
-						"constructive": [
-							{
-								"precondition": ["on(ARG2, AUX_CTX1)"],
-								"ordered_subtasks": [
-									"dfa_step_q2_q3_on_b6_b3(ARG1, ARG2, AUX_CTX1)",
-								],
-							},
-						],
-					},
-						{
-							"name": "dfa_step_q1_q2_on_b3_b5",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_clear(ARG2)",
-										"helper_holding(ARG1)",
-										"stack(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-						{
-							"name": "dfa_step_q2_q3_on_b6_b3",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_clear(ARG1)",
-										"helper_ontable(ARG1)",
-										"dfa_step_q1_q2_on_b3_b5(ARG2, AUX_CTX1)",
-										"helper_clear(ARG2)",
-										"helper_holding(ARG1)",
-										"stack(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-					{
-						"name": "helper_holding",
-						"constructive": [
-							{
-								"precondition": "ontable(ARG1)",
-								"ordered_subtasks": ["pick_up(ARG1)"],
-							},
-						],
-					},
-					{
-						"name": "helper_clear",
-						"constructive": [
-							{
-								"parameters": ["ARG1", "AUX1"],
-								"precondition": "on(AUX1, ARG1)",
-								"ordered_subtasks": ["unstack(AUX1, ARG1)"],
-							},
-						],
-					},
-					],
-				},
-			),
-			ast_compiler_defaults=compiler_defaults,
-		)
-
-	query_root_method = next(
-		method
-		for method in library.methods
-		if method.task_name == "query_root_2_do_put_on" and method.subtasks
-	)
-	assert [step.args for step in query_root_method.subtasks] == [
-		("ARG1", "ARG2", "AUX_CTX1"),
-	]
-
-
-def test_transition_native_ast_compiler_defaults_noop_preserves_retained_prefix_literals():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True),
-		HTNLiteral("on", ("b6", "b3"), True),
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": HTNLiteral("on", ("b3", "b5"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b3_b5",
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": HTNLiteral("on", ("b6", "b3"), True),
-			"source_state": "q2",
-			"target_state": "q3",
-			"raw_label": "on_b6_b3",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-
-	assert compiler_defaults["task_defaults"]["dfa_step_q2_q3_on_b6_b3"]["noop"] == [
-		"on(ARG2, AUX_CTX1)",
-		"on(ARG1, ARG2)",
-	]
-	assert "precondition" not in compiler_defaults["task_defaults"]["dfa_step_q2_q3_on_b6_b3"]
-
-
-def test_transition_native_generated_task_type_map_uses_compiler_retained_prefix_types():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True),
-		HTNLiteral("on", ("b6", "b3"), True),
-		HTNLiteral("on", ("b1", "b6"), True),
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": HTNLiteral("on", ("b3", "b5"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b3_b5",
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": HTNLiteral("on", ("b6", "b3"), True),
-			"source_state": "q2",
-			"target_state": "q3",
-			"raw_label": "on_b6_b3",
-		},
-		{
-			"transition_name": "dfa_step_q3_q4_on_b1_b6",
-			"literal": HTNLiteral("on", ("b1", "b6"), True),
-			"source_state": "q3",
-			"target_state": "q4",
-			"raw_label": "on_b1_b6",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b1", "b6"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	predicate_types = {
-		predicate.name: tuple(
-			synthesizer._parameter_type(parameter)
-			for parameter in predicate.parameters
-		)
-		for predicate in getattr(domain, "predicates", [])
-	}
-
-	task_types = synthesizer._compiler_generated_task_type_map(
-		prompt_analysis=prompt_analysis,
-		predicate_types=predicate_types,
-	)
-
-	assert task_types["dfa_step_q3_q4_on_b1_b6"] == ("BLOCK", "BLOCK", "BLOCK", "BLOCK")
-
-
-def test_transition_native_validator_allows_compiler_owned_retained_prefix_context():
-	domain = _domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literals = [
-		HTNLiteral("on", ("b3", "b5"), True),
-		HTNLiteral("on", ("b6", "b3"), True),
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b3_b5",
-			"literal": HTNLiteral("on", ("b3", "b5"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b3_b5",
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b6_b3",
-			"literal": HTNLiteral("on", ("b6", "b3"), True),
-			"source_state": "q2",
-			"target_state": "q3",
-			"raw_label": "on_b6_b3",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b3", "b5"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b6", "b3"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	action_analysis = synthesizer._analyse_domain_actions(domain)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-	required_branch_contracts = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=action_analysis,
-	)
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"tasks": [
-					{
-						"name": "query_root_1_do_put_on",
-						"constructive": [
-							{
-								"parameters": ["ARG1", "ARG2"],
-								"ordered_subtasks": ["dfa_step_q1_q2_on_b3_b5(ARG1, ARG2)"],
-							},
-						],
-					},
-					{
-						"name": "query_root_2_do_put_on",
-						"constructive": [
-							{
-								"parameters": ["ARG1", "ARG2", "AUX_CTX1"],
-								"precondition": ["on(ARG2, AUX_CTX1)"],
-								"ordered_subtasks": ["dfa_step_q2_q3_on_b6_b3(ARG1, ARG2, AUX_CTX1)"],
-							},
-						],
-					},
-						{
-							"name": "dfa_step_q1_q2_on_b3_b5",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_clear(ARG2)",
-										"helper_holding(ARG1)",
-										"stack(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-						{
-							"name": "dfa_step_q2_q3_on_b6_b3",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_clear(ARG1)",
-										"helper_ontable(ARG1)",
-										"dfa_step_q1_q2_on_b3_b5(ARG2, AUX_CTX1)",
-										"helper_clear(ARG2)",
-										"helper_holding(ARG1)",
-										"stack(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-						{
-							"name": "helper_holding",
-							"constructive": [
-								{
-									"parameters": ["ARG1"],
-									"precondition": ["ontable(ARG1)"],
-									"ordered_subtasks": [
-										"helper_clear(ARG1)",
-										"helper_handempty",
-										"pick_up(ARG1)",
-									],
-								},
-								{
-									"parameters": ["ARG1", "AUX_BLOCK1"],
-									"precondition": ["on(ARG1, AUX_BLOCK1)"],
-									"ordered_subtasks": [
-										"helper_clear(ARG1)",
-										"helper_handempty",
-										"unstack(ARG1, AUX_BLOCK1)",
-									],
-								},
-							],
-						},
-						{
-							"name": "helper_clear",
-							"constructive": [
-								{
-									"parameters": ["ARG1"],
-									"precondition": ["holding(ARG1)"],
-									"ordered_subtasks": ["put_down(ARG1)"],
-								},
-								{
-									"parameters": ["ARG1", "AUX_BLOCK1"],
-									"precondition": ["on(AUX_BLOCK1, ARG1)"],
-									"ordered_subtasks": [
-										"helper_clear(AUX_BLOCK1)",
-										"helper_handempty",
-										"unstack(AUX_BLOCK1, ARG1)",
-									],
-								},
-							],
-						},
-						{
-							"name": "helper_handempty",
-							"constructive": [
-								{
-									"parameters": ["AUX_BLOCK1"],
-									"precondition": ["holding(AUX_BLOCK1)"],
-									"ordered_subtasks": ["put_down(AUX_BLOCK1)"],
-								},
-							],
-						},
-						{
-							"name": "helper_ontable",
-							"constructive": [
-								{
-									"parameters": ["ARG1"],
-									"ordered_subtasks": ["helper_holding(ARG1)", "put_down(ARG1)"],
-								},
-							],
-						},
-						{
-							"name": "helper_on",
-							"constructive": [
-								{
-									"parameters": ["ARG1", "ARG2"],
-									"ordered_subtasks": [
-										"helper_clear(ARG2)",
-										"helper_holding(ARG1)",
-										"stack(ARG1, ARG2)",
-									],
-								},
-							],
-						},
-					],
-				},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	synthesizer._validate_transition_native_contracts(
-		library,
-		compound_names={task.name for task in library.compound_tasks},
-		task_lookup={task.name: task for task in library.compound_tasks},
-		binding_lookup={
-			(
-				binding.target_literal.to_signature()
-				if hasattr(binding.target_literal, "to_signature")
-				else str(binding.target_literal)
-			): binding.task_name
-			for binding in library.target_task_bindings
-		},
-		required_query_root_tasks=prompt_analysis["query_root_alias_tasks"],
-		required_transition_tasks=prompt_analysis["transition_tasks"],
-		required_branch_contracts=required_branch_contracts,
-		dynamic_predicates={
-			effect.predicate
-			for action_schema in dict.fromkeys(synthesizer._action_schema_map(domain).values())
-			for effect in getattr(action_schema, "effects", ())
-			if effect.predicate != "="
-		},
-		action_analysis=action_analysis,
-	)
-
-
-def test_transition_native_ast_compiler_accepts_branch_level_aux_parameters():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literal = HTNLiteral("communicated_soil_data", ("waypoint2",), True)
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=[target_literal],
-		query_task_anchors=[
-			{"task_name": "get_soil_data", "source_name": "get_soil_data", "args": ["waypoint2"]},
-		],
-		transition_specs=[
-			{
-				"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-				"literal": target_literal,
-				"source_state": "q1",
-				"target_state": "q2",
-				"accepting_states": ["q2"],
-			},
-		],
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"tasks": [
-					{
-						"name": "dfa_step_q1_q2_communicated_soil_data_waypoint2",
-						"constructive": [
-							{
-								"parameters": ["ARG1", "AUX_ROVER1", "AUX_LANDER1", "AUX_WAYPOINT1", "AUX_WAYPOINT2"],
-								"precondition": [
-									"available(AUX_ROVER1)",
-									"at_soil_sample(ARG1)",
-									"channel_free(AUX_LANDER1)",
-								],
-								"ordered_subtasks": [
-									"helper_have_soil_analysis(AUX_ROVER1, ARG1)",
-									"helper_at(AUX_ROVER1, AUX_WAYPOINT1)",
-									"communicate_soil_data(AUX_ROVER1, AUX_LANDER1, ARG1, AUX_WAYPOINT1, AUX_WAYPOINT2)",
-								],
-							},
-						],
-					},
-				],
-			},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	method = next(
-		item
-		for item in library.methods
-		if item.task_name == "dfa_step_q1_q2_communicated_soil_data_waypoint2" and item.subtasks
-	)
-	assert method.parameters == (
-		"ARG1",
-		"AUX_ROVER1",
-		"AUX_LANDER1",
-		"AUX_WAYPOINT1",
-		"AUX_WAYPOINT2",
-	)
-	assert {literal.to_signature() for literal in method.context} == {
-		"available(AUX_ROVER1)",
-		"at_soil_sample(ARG1)",
-		"channel_free(AUX_LANDER1)",
-	}
-	assert [step.task_name for step in method.subtasks] == [
-		"helper_have_soil_analysis",
-		"helper_at",
-		"communicate_soil_data",
-	]
-
-
-def test_transition_native_ast_compiler_defaults_preserve_zero_arity_helper_calls():
-	domain = _domain()
-	target_literals = [HTNLiteral("on", ("b4", "b2"), True)]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b4_b2",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-	synthesizer = HTNMethodSynthesizer()
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-					"tasks": [
-						{
-							"name": "helper_holding",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_clear(ARG1)",
-										"helper_ontable(ARG1)",
-										"helper_handempty",
-										"pick_up(ARG1)",
-									],
-								},
-							],
-						},
-						{
-							"name": "helper_handempty",
-							"constructive": [
-								{
-									"ordered_subtasks": [
-										"helper_holding(AUX_BLOCK1)",
-										"put_down(AUX_BLOCK1)",
-									],
-								},
-							],
-						},
-					],
-				},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	holding_method = next(
-		method
-		for method in library.methods
-		if method.task_name == "helper_holding" and method.subtasks
-	)
-	assert [step.args for step in holding_method.subtasks] == [
-		("ARG1",),
-		("ARG1",),
-		(),
-		("ARG1",),
-	]
-
-
-def test_transition_native_ast_compiler_defaults_keep_fixed_zero_arity_helper_metadata():
-	domain = _domain()
-	target_literals = [HTNLiteral("on", ("b4", "b2"), True)]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True),
-			"source_state": "q1",
-			"target_state": "q2",
-			"raw_label": "on_b4_b2",
-		},
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	compiler_defaults = build_transition_native_ast_compiler_defaults(
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-	)
-	synthesizer = HTNMethodSynthesizer()
-	library = synthesizer._parse_llm_library(
-		json.dumps(
-			{
-				"tasks": [
-						{
-							"name": "helper_handempty",
-							"parameters": ["AUX_BLOCK1"],
-							"headline": "handempty(AUX_BLOCK1)",
-							"constructive": [
-								{
-									"parameters": ["AUX_BLOCK1"],
-									"ordered_subtasks": [
-										"helper_holding(AUX_BLOCK1)",
-										"put_down(AUX_BLOCK1)",
-									],
-								},
-							],
-						},
-					],
-				},
-		),
-		ast_compiler_defaults=compiler_defaults,
-	)
-
-	helper_handempty = next(task for task in library.compound_tasks if task.name == "helper_handempty")
-	assert helper_handempty.parameters == ()
-	assert helper_handempty.headline_literal.to_signature() == "handempty"
-
-
-def test_transition_native_prompt_groups_repeated_transition_contracts_by_headline():
-	domain = _domain()
-	target_literals = [
-		HTNLiteral("on", ("b4", "b2"), True, None),
-		HTNLiteral("on", ("b1", "b4"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b4", "b2"]},
-		{"task_name": "do_put_on", "source_name": "do_put_on", "args": ["b1", "b4"]},
-	]
-	transition_specs = [
-		{
-			"transition_name": "dfa_step_q1_q2_on_b4_b2",
-			"literal": HTNLiteral("on", ("b4", "b2"), True, "on_b4_b2"),
-			"source_state": "q1",
-			"target_state": "q2",
-			"accepting_states": ["q4"],
-		},
-		{
-			"transition_name": "dfa_step_q2_q3_on_b1_b4",
-			"literal": HTNLiteral("on", ("b1", "b4"), True, "on_b1_b4"),
-			"source_state": "q2",
-			"target_state": "q3",
-			"accepting_states": ["q4"],
-		},
-	]
-
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	user_prompt = build_transition_native_user_prompt(
-		domain,
-		query_text="Using blocks b4, b2, b1, and b4, complete the tasks do_put_on(b4, b2) and do_put_on(b1, b4).",
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-		prompt_analysis=prompt_analysis,
-		action_analysis=HTNMethodSynthesizer()._analyse_domain_actions(domain),
-		query_object_inventory=[{"type": "block", "objects": ["b4", "b2", "b1"]}],
-	)
-	branch_contracts = json.loads(
-		_extract_prompt_section(
-			user_prompt,
-			"REQUIRED BRANCH CONTRACTS JSON:\n",
-			"ALLOWED PRIMITIVE ACTIONS JSON:\n",
-		),
-	)
-	assert branch_contracts["dfa_step_q1_q2_on_b4_b2"] == [
-		{
-			"ordered_subtasks": [
-				"helper_clear(ARG2)",
-				"helper_holding(ARG1)",
-				"stack(ARG1, ARG2)",
-			],
-		},
-	]
-	assert branch_contracts["dfa_step_q2_q3_on_b1_b4"] == [
-		{
-			"ordered_subtasks": [
-				"helper_clear(ARG1)",
-				"helper_ontable(ARG1)",
-				"dfa_step_q1_q2_on_b4_b2(ARG2, AUX_CTX1)",
-				"helper_clear(ARG2)",
-				"helper_holding(ARG1)",
-				"stack(ARG1, ARG2)",
-			],
-			},
-		]
-	assert '"parameters":["ARG1","ARG2","AUX_CTX1"]' in user_prompt
-	assert '"precondition":["on(ARG2, AUX_CTX1)"]' in user_prompt
-	assert '"ordered_subtasks":["dfa_step_q2_q3_on_b1_b4(ARG1, ARG2, AUX_CTX1)"]' in user_prompt
-	assert "QUERY-ROOT BRIDGE CONTRACTS:" not in user_prompt
-	assert "TRANSITION TASK CONTRACTS:" not in user_prompt
-	assert "HELPER TASK CONTRACTS:" not in user_prompt
-
-
-def test_transition_native_prompt_keeps_marsrover_single_query_compact():
-	domain = _marsrover_domain()
-	synthesizer = HTNMethodSynthesizer()
-	target_literals = [
-		HTNLiteral("communicated_soil_data", ("waypoint2",), True, None),
-		HTNLiteral("communicated_rock_data", ("waypoint3",), True, None),
-		HTNLiteral("communicated_image_data", ("objective1", "high_res"), True, None),
-	]
-	query_task_anchors = [
-		{"task_name": "get_soil_data", "source_name": "get_soil_data", "args": ["waypoint2"]},
-		{"task_name": "get_rock_data", "source_name": "get_rock_data", "args": ["waypoint3"]},
-		{"task_name": "get_image_data", "source_name": "get_image_data", "args": ["objective1", "high_res"]},
-	]
-	transition_specs = [
-		{"transition_name": "dfa_step_q1_q2_communicated_soil_data_waypoint2", "literal": target_literals[0], "source_state": "q1", "target_state": "q2", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q1_q3_communicated_rock_data_waypoint3", "literal": target_literals[1], "source_state": "q1", "target_state": "q3", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q1_q4_communicated_image_data_objective1_high_res", "literal": target_literals[2], "source_state": "q1", "target_state": "q4", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q2_q5_communicated_rock_data_waypoint3", "literal": target_literals[1], "source_state": "q2", "target_state": "q5", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q2_q6_communicated_image_data_objective1_high_res", "literal": target_literals[2], "source_state": "q2", "target_state": "q6", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q3_q5_communicated_soil_data_waypoint2", "literal": target_literals[0], "source_state": "q3", "target_state": "q5", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q3_q7_communicated_image_data_objective1_high_res", "literal": target_literals[2], "source_state": "q3", "target_state": "q7", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q5_q8_communicated_image_data_objective1_high_res", "literal": target_literals[2], "source_state": "q5", "target_state": "q8", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q4_q6_communicated_soil_data_waypoint2", "literal": target_literals[0], "source_state": "q4", "target_state": "q6", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q4_q7_communicated_rock_data_waypoint3", "literal": target_literals[1], "source_state": "q4", "target_state": "q7", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q6_q8_communicated_rock_data_waypoint3", "literal": target_literals[1], "source_state": "q6", "target_state": "q8", "accepting_states": ["q8"]},
-		{"transition_name": "dfa_step_q7_q8_communicated_soil_data_waypoint2", "literal": target_literals[0], "source_state": "q7", "target_state": "q8", "accepting_states": ["q8"]},
-	]
-	prompt_analysis = build_transition_native_prompt_analysis(
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-	)
-	prompt_analysis["required_branch_contracts"] = build_transition_native_required_branch_contracts(
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-	)
-	user_prompt = build_transition_native_user_prompt(
-		domain,
-		query_text=(
-			"Using waypoints waypoint2 and waypoint3, objective objective1, and mode high_res, "
-			"complete the tasks get_soil_data(waypoint2), get_rock_data(waypoint3), and "
-			"get_image_data(objective1, high_res)."
-		),
-		target_literals=target_literals,
-		query_task_anchors=query_task_anchors,
-		transition_specs=transition_specs,
-		prompt_analysis=prompt_analysis,
-		action_analysis=synthesizer._analyse_domain_actions(domain),
-		query_object_inventory=[
-			{"type": "waypoint", "objects": ["waypoint2", "waypoint3"]},
-			{"type": "objective", "objects": ["objective1"]},
-			{"type": "mode", "objects": ["high_res"]},
-		],
-	)
-
-	assert len(user_prompt) < 14000
-
 
 def test_ast_payload_accepts_compact_target_task_binding_invocation_strings():
 	library = HTNMethodLibrary.from_dict(
@@ -9599,7 +5411,6 @@ def test_ast_payload_accepts_compact_target_task_binding_invocation_strings():
 	)
 
 	assert [binding.task_name for binding in library.target_task_bindings] == ["do_put_on"]
-
 
 def test_ast_payload_accepts_compact_noop_string_and_task_level_producer():
 	library = HTNMethodLibrary.from_dict(
@@ -9639,7 +5450,6 @@ def test_ast_payload_accepts_compact_noop_string_and_task_level_producer():
 	)
 	assert [step.task_name for step in method.subtasks] == ["dfa_step_q1_q2_on_a_b"]
 	assert [step.args for step in method.subtasks] == [("ARG1", "ARG2")]
-
 
 def test_ast_payload_accepts_compact_constructive_subtask_list_and_string_precondition():
 	library = HTNMethodLibrary.from_dict(
@@ -9695,7 +5505,6 @@ def test_ast_payload_accepts_compact_constructive_subtask_list_and_string_precon
 	assert aux_method.parameters == ("AUX1",)
 	assert [literal.to_signature() for literal in aux_method.context] == ["holding(AUX1)"]
 
-
 def test_ast_payload_splits_conjunctive_string_preconditions_and_normalises_constructive_nop():
 	library = HTNMethodLibrary.from_dict(
 		{
@@ -9749,7 +5558,6 @@ def test_ast_payload_splits_conjunctive_string_preconditions_and_normalises_cons
 		"handempty",
 	]
 
-
 def test_ast_payload_accepts_constructive_branch_list_shorthand():
 	library = HTNMethodLibrary.from_dict(
 		{
@@ -9776,7 +5584,6 @@ def test_ast_payload_accepts_constructive_branch_list_shorthand():
 	assert [step.task_name for step in methods[0].subtasks] == ["pick_up"]
 	assert [step.task_name for step in methods[1].subtasks] == ["unstack"]
 
-
 def test_ast_payload_defaults_missing_invocation_args_to_task_parameters():
 	library = HTNMethodLibrary.from_dict(
 		{
@@ -9798,7 +5605,6 @@ def test_ast_payload_defaults_missing_invocation_args_to_task_parameters():
 		if method.task_name == "query_root_1_do_put_on" and method.subtasks
 	)
 	assert [step.args for step in method.subtasks] == [("ARG1", "ARG2")]
-
 
 def test_stage3_prompt_forbids_leaving_supportable_extra_needs_in_constructive_context():
 	domain = _domain()
@@ -9823,7 +5629,6 @@ def test_stage3_prompt_forbids_leaving_supportable_extra_needs_in_constructive_c
 		"For supportable AUX_* needs, use earlier subtasks instead of leaving unmet dynamic prerequisites in constructive context."
 		in user_prompt
 	)
-
 
 def test_validate_library_rejects_semantically_duplicate_methods():
 	domain = _domain()
@@ -9874,7 +5679,6 @@ def test_validate_library_rejects_semantically_duplicate_methods():
 	with pytest.raises(ValueError, match="semantically duplicate"):
 		synthesizer._validate_library(library, domain)
 
-
 def test_request_complete_llm_library_fails_on_truncated_json():
 	domain = _domain()
 	synthesizer = HTNMethodSynthesizer()
@@ -9900,7 +5704,6 @@ def test_request_complete_llm_library_fails_on_truncated_json():
 	assert metadata["llm_attempts"] == 1
 	assert len(metadata["llm_attempt_durations_seconds"]) == 1
 	assert metadata["llm_response_time_seconds"] >= 0
-
 
 def test_request_complete_llm_library_preserves_partial_streaming_response_on_failure():
 	domain = _domain()
@@ -9930,7 +5733,6 @@ def test_request_complete_llm_library_preserves_partial_streaming_response_on_fa
 
 	assert metadata["llm_response"].startswith('{"target_task_bindings":[],"tasks"')
 	assert metadata["llm_finish_reason"] == "length"
-
 
 def test_validate_library_rejects_nop_inside_constructive_branch():
 	domain = _domain()
@@ -9988,7 +5790,6 @@ def test_validate_library_rejects_nop_inside_constructive_branch():
 			static_predicates=(),
 		)
 
-
 def test_default_method_task_args_keeps_zero_arity_tasks_argument_free():
 	synthesizer = HTNMethodSynthesizer()
 	task = HTNTask(
@@ -10010,7 +5811,6 @@ def test_default_method_task_args_keeps_zero_arity_tasks_argument_free():
 
 	assert synthesizer._default_method_task_args(method, task) == ()
 
-
 class _FakeStage3Completions:
 	def __init__(self, scripted_results):
 		self.scripted_results = list(scripted_results)
@@ -10023,7 +5823,6 @@ class _FakeStage3Completions:
 			raise next_result
 		return next_result
 
-
 def _stage3_response(
 	*,
 	content=None,
@@ -10032,7 +5831,6 @@ def _stage3_response(
 ):
 	message = SimpleNamespace(content=content, parsed=parsed)
 	return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish_reason)])
-
 
 def test_stage3_create_chat_completion_uses_single_non_streaming_text_path():
 	synthesizer = HTNMethodSynthesizer()
@@ -10047,7 +5845,6 @@ def test_stage3_create_chat_completion_uses_single_non_streaming_text_path():
 	assert completions.calls[0]["stream"] is False
 	assert "response_format" not in completions.calls[0]
 	assert "extra_body" not in completions.calls[0]
-
 
 def test_stage3_create_chat_completion_routes_openrouter_to_model_provider():
 	synthesizer = HTNMethodSynthesizer(
@@ -10070,16 +5867,9 @@ def test_stage3_create_chat_completion_routes_openrouter_to_model_provider():
 		},
 	}
 
-
-def test_stage3_estimates_compact_one_shot_token_budget_from_contract_size():
+def test_stage3_estimates_compact_one_shot_token_budget_from_task_defaults():
 	estimated = HTNMethodSynthesizer._estimate_stage3_response_token_budget(
-		prompt_analysis={
-			"query_root_alias_tasks": [{"name": "query_root_1"} for _ in range(6)],
-			"required_branch_contracts": {
-				f"task_{index}": [{} for _ in range(2)]
-				for index in range(10)
-			},
-		},
+		prompt_analysis={},
 		ast_compiler_defaults={
 			"task_defaults": {f"task_{index}": {} for index in range(10)},
 		},
@@ -10088,19 +5878,16 @@ def test_stage3_estimates_compact_one_shot_token_budget_from_contract_size():
 
 	assert estimated == 12000
 
-
 def test_stage3_caps_minimax_one_shot_token_budget_to_provider_safe_ceiling():
 	synthesizer = HTNMethodSynthesizer(model="minimax/minimax-m2")
 
 	assert synthesizer._apply_stage3_provider_token_ceiling(13120) == 8192
 	assert synthesizer._apply_stage3_provider_token_ceiling(4096) == 4096
 
-
 def test_stage3_preserves_non_minimax_one_shot_token_budget():
 	synthesizer = HTNMethodSynthesizer(model="openai/gpt-4.1")
 
 	assert synthesizer._apply_stage3_provider_token_ceiling(13120) == 13120
-
 
 def test_stage3_extract_response_text_falls_back_to_response_model_dump():
 	synthesizer = HTNMethodSynthesizer()
@@ -10125,7 +5912,6 @@ def test_stage3_extract_response_text_falls_back_to_response_model_dump():
 	assert synthesizer._extract_response_text(_Response()) == (
 		'{"target_task_bindings":[],"tasks":[]}'
 	)
-
 
 def test_stage3_extract_response_text_ignores_empty_message_envelope_dump():
 	synthesizer = HTNMethodSynthesizer()
@@ -10157,7 +5943,6 @@ def test_stage3_extract_response_text_ignores_empty_message_envelope_dump():
 	with pytest.raises(RuntimeError, match="usable textual JSON content"):
 		synthesizer._extract_response_text(_Response())
 
-
 def test_stage3_consume_streaming_response_returns_first_complete_json_payload():
 	synthesizer = HTNMethodSynthesizer()
 	stream = [
@@ -10184,7 +5969,6 @@ def test_stage3_consume_streaming_response_returns_first_complete_json_payload()
 	assert response_text == '{"target_task_bindings":[],"tasks":[]}'
 	assert finish_reason == "stop"
 
-
 def test_stage3_call_llm_uses_direct_single_request_path():
 	synthesizer = HTNMethodSynthesizer(timeout=0.05)
 	captured = {"calls": 0}
@@ -10201,7 +5985,6 @@ def test_stage3_call_llm_uses_direct_single_request_path():
 	assert response_text == '{"target_task_bindings":[],"tasks":[]}'
 	assert finish_reason == "stop"
 
-
 def test_parse_llm_library_accepts_leading_json_object_with_trailing_junk():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -10210,7 +5993,6 @@ def test_parse_llm_library_accepts_leading_json_object_with_trailing_junk():
 
 	assert isinstance(library, HTNMethodLibrary)
 
-
 def test_parse_llm_library_accepts_singleton_json_array_wrapper():
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -10218,7 +6000,6 @@ def test_parse_llm_library_accepts_singleton_json_array_wrapper():
 	)
 
 	assert isinstance(library, HTNMethodLibrary)
-
 
 def test_parse_llm_library_salvages_single_missing_object_closer_at_tail():
 	synthesizer = HTNMethodSynthesizer()
@@ -10231,7 +6012,6 @@ def test_parse_llm_library_salvages_single_missing_object_closer_at_tail():
 	assert isinstance(library, HTNMethodLibrary)
 	assert [task.name for task in library.compound_tasks] == ["helper_full"]
 	assert len(library.methods) == 2
-
 
 def test_negative_target_binding_rejects_helper_call_with_hidden_support_role():
 	domain = _domain()

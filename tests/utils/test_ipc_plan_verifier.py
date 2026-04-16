@@ -215,6 +215,19 @@ def test_default_task_args_uses_leading_method_parameters_when_task_args_omitted
 	assert IPCPlanVerifier._default_task_args(method, task_lookup) == ("TARGET",)
 
 
+def test_default_task_args_keeps_zero_arity_task_distinct_from_aux_parameters():
+	method = HTNMethod(
+		method_name="m_helper_handempty_constructive",
+		task_name="helper_handempty",
+		parameters=("AUX_BLOCK1",),
+	)
+	task_lookup = {
+		"helper_handempty": HTNTask("helper_handempty", (), False, ("handempty",)),
+	}
+
+	assert IPCPlanVerifier._default_task_args(method, task_lookup) == ()
+
+
 def test_render_supported_hierarchical_plan_contains_root_and_decompositions(tmp_path):
 	verifier = IPCPlanVerifier()
 	domain_file = tmp_path / "domain.hddl"
@@ -550,3 +563,296 @@ def test_render_supported_hierarchical_plan_accepts_unordered_root_task_reorderi
 	assert plan_text.index("assemble c d -> m_assemble_direct") < plan_text.index(
 		"assemble a b -> m_assemble_direct",
 	)
+
+
+def test_render_supported_hierarchical_plan_relaxes_order_for_query_root_alias_tasks(tmp_path):
+	verifier = IPCPlanVerifier()
+	domain_file = tmp_path / "domain.hddl"
+	problem_file = tmp_path / "problem.hddl"
+	domain_file.write_text(
+		"""
+(define (domain TEST)
+  (:requirements :hierarchy :typing)
+  (:types block)
+  (:predicates (ready ?x - block) (linked ?x - block ?y - block))
+  (:task assemble
+    :parameters (?x - block ?y - block)
+  )
+  (:task prepare
+    :parameters (?x - block)
+  )
+  (:action polish
+    :parameters (?x - block)
+    :precondition (and)
+    :effect (and (ready ?x))
+  )
+  (:action attach
+    :parameters (?x - block ?y - block)
+    :precondition (and (ready ?x))
+    :effect (and (linked ?x ?y))
+  )
+)
+""".strip()
+		+ "\n",
+	)
+	problem_file.write_text(
+		"""
+(define (problem render-query-root-plan)
+  (:domain TEST)
+  (:objects a b c d - block)
+  (:htn
+    :tasks (and
+      (t1 (assemble a b))
+      (t2 (assemble c d))
+    )
+    :ordering (and
+      (< t1 t2)
+    )
+  )
+  (:init)
+  (:goal (and))
+)
+""".strip()
+		+ "\n",
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("query_root_1_assemble", ("X", "Y"), False, source_name="assemble"),
+			HTNTask("query_root_2_assemble", ("X", "Y"), False, source_name="assemble"),
+			HTNTask("prepare", ("X",), False),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_query_root_1_assemble_constructive_1",
+				task_name="query_root_1_assemble",
+				parameters=("X", "Y"),
+				subtasks=(
+					HTNMethodStep("s1", "prepare", ("X",), "compound"),
+					HTNMethodStep("s2", "attach", ("X", "Y"), "primitive", action_name="attach"),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_query_root_2_assemble_constructive_1",
+				task_name="query_root_2_assemble",
+				parameters=("X", "Y"),
+				subtasks=(
+					HTNMethodStep("s1", "prepare", ("X",), "compound"),
+					HTNMethodStep("s2", "attach", ("X", "Y"), "primitive", action_name="attach"),
+				),
+				ordering=(("s1", "s2"),),
+				origin="llm",
+			),
+			HTNMethod(
+				method_name="m_prepare_polish",
+				task_name="prepare",
+				parameters=("X",),
+				subtasks=(
+					HTNMethodStep("s1", "polish", ("X",), "primitive", action_name="polish"),
+				),
+				ordering=(),
+				origin="llm",
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_text = verifier._render_supported_hierarchical_plan(
+		domain_file=domain_file,
+		problem_file=problem_file,
+		action_path=[
+			"polish(c)",
+			"attach(c,d)",
+			"polish(a)",
+			"attach(a,b)",
+		],
+		method_library=method_library,
+		method_trace=[
+			{"method_name": "m_query_root_2_assemble_constructive_1", "task_args": ["c", "d"]},
+			{"method_name": "m_prepare_polish", "task_args": ["c"]},
+			{"method_name": "m_query_root_1_assemble_constructive_1", "task_args": ["a", "b"]},
+			{"method_name": "m_prepare_polish", "task_args": ["a"]},
+		],
+	)
+
+	assert plan_text is not None
+	assert "assemble c d -> m_query_root_2_assemble_constructive_1" in plan_text
+	assert "assemble a b -> m_query_root_1_assemble_constructive_1" in plan_text
+	assert plan_text.index("assemble c d -> m_query_root_2_assemble_constructive_1") < plan_text.index(
+		"assemble a b -> m_query_root_1_assemble_constructive_1",
+	)
+
+
+def test_render_supported_hierarchical_plan_accepts_reordered_leading_compound_prefix(tmp_path):
+	verifier = IPCPlanVerifier()
+	domain_file = tmp_path / "domain.hddl"
+	problem_file = tmp_path / "problem.hddl"
+	domain_file.write_text(
+		"""
+(define (domain TEST)
+  (:requirements :hierarchy :typing)
+  (:types rover waypoint store)
+  (:predicates (sampled ?r - rover ?w - waypoint))
+  (:task collect_sample
+    :parameters (?r - rover ?w - waypoint ?s - store)
+  )
+  (:task helper_at
+    :parameters (?r - rover ?w - waypoint)
+  )
+  (:task helper_empty
+    :parameters (?s - store)
+  )
+  (:action move
+    :parameters (?r - rover ?w - waypoint)
+    :precondition (and)
+    :effect (and)
+  )
+  (:action sample
+    :parameters (?r - rover ?s - store ?w - waypoint)
+    :precondition (and)
+    :effect (and (sampled ?r ?w))
+  )
+)
+""".strip()
+		+ "\n",
+	)
+	problem_file.write_text(
+		"""
+(define (problem render-reordered-compound-prefix)
+  (:domain TEST)
+  (:objects rover1 - rover waypoint1 - waypoint store1 - store)
+  (:htn
+    :tasks (and
+      (t1 (collect_sample rover1 waypoint1 store1))
+    )
+  )
+  (:init)
+  (:goal (and))
+)
+""".strip()
+		+ "\n",
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask("collect_sample", ("ROVER", "WAYPOINT", "STORE"), False),
+			HTNTask("helper_at", ("ROVER", "WAYPOINT"), False),
+			HTNTask("helper_empty", ("STORE",), False),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m_collect_sample",
+				task_name="collect_sample",
+				parameters=("ROVER", "WAYPOINT", "STORE"),
+				subtasks=(
+					HTNMethodStep("s1", "helper_at", ("ROVER", "WAYPOINT"), "compound"),
+					HTNMethodStep("s2", "helper_empty", ("STORE",), "compound"),
+					HTNMethodStep(
+						"s3",
+						"sample",
+						("ROVER", "STORE", "WAYPOINT"),
+						"primitive",
+						action_name="sample",
+					),
+				),
+				ordering=(("s1", "s3"), ("s2", "s3")),
+			),
+			HTNMethod(
+				method_name="m_helper_at_move",
+				task_name="helper_at",
+				parameters=("ROVER", "WAYPOINT"),
+				subtasks=(
+					HTNMethodStep(
+						"s1",
+						"move",
+						("ROVER", "WAYPOINT"),
+						"primitive",
+						action_name="move",
+					),
+				),
+				ordering=(),
+			),
+			HTNMethod(
+				method_name="m_helper_empty_noop",
+				task_name="helper_empty",
+				parameters=("STORE",),
+				subtasks=(),
+				ordering=(),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_text = verifier._render_supported_hierarchical_plan(
+		domain_file=domain_file,
+		problem_file=problem_file,
+		action_path=[
+			"move(rover1,waypoint1)",
+			"sample(rover1,store1,waypoint1)",
+		],
+		method_library=method_library,
+		method_trace=[
+			{
+				"method_name": "m_collect_sample",
+				"task_args": ["rover1", "waypoint1", "store1"],
+			},
+			{
+				"method_name": "m_helper_empty_noop",
+				"task_args": ["store1"],
+			},
+			{
+				"method_name": "m_helper_at_move",
+				"task_args": ["rover1", "waypoint1"],
+			},
+		],
+	)
+
+	assert plan_text is not None
+	assert "collect_sample rover1 waypoint1 store1 -> m_collect_sample" in plan_text
+	assert "helper_empty store1 -> m_helper_empty_noop" in plan_text
+	assert "helper_at rover1 waypoint1 -> m_helper_at_move" in plan_text
+	assert "0 move rover1 waypoint1" in plan_text
+	assert "1 sample rover1 store1 waypoint1" in plan_text
+	assert plan_text.index("helper_at rover1 waypoint1 -> m_helper_at_move") < plan_text.index(
+		"helper_empty store1 -> m_helper_empty_noop",
+	)
+
+
+def test_unify_arguments_allows_schematic_binding_to_refine_into_ground_object():
+	bindings = IPCPlanVerifier._unify_arguments(
+		("ARG1", "ARG2"),
+		("?direction1", "?mode1"),
+		{},
+		("ARG1", "ARG2"),
+	)
+
+	refined = IPCPlanVerifier._unify_arguments(
+		("ARG1", "ARG2"),
+		("star5", "image1"),
+		bindings,
+		("ARG1", "ARG2"),
+	)
+
+	assert refined == {"ARG1": "star5", "ARG2": "image1"}
+
+
+def test_refine_task_args_uses_method_bindings_for_schematic_trace_args():
+	method = HTNMethod(
+		method_name="m_observe",
+		task_name="do_observation",
+		parameters=("ARG1", "ARG2"),
+		task_args=("ARG1", "ARG2"),
+	)
+
+	refined = IPCPlanVerifier._refine_task_args_from_method_bindings(
+		task_args=("?direction1", "?mode1"),
+		method=method,
+		task_lookup={},
+		bindings={"ARG1": "star5", "ARG2": "image1"},
+	)
+
+	assert refined == ("star5", "image1")
