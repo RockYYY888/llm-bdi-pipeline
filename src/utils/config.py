@@ -70,10 +70,10 @@ class Config:
         """
         Get the Stage 3 model identifier.
 
-        Stage 3 is likewise benchmark-pinned. The transition-native one-shot
-        synthesis path is evaluated specifically on Minimax M2 with reasoning
-        enabled, so configuration overrides must not swap in another provider,
-        larger reasoning-heavy variant, or unrelated chat model.
+        Stage 3 is benchmark-pinned. The domain-complete one-shot synthesis
+        path is evaluated specifically on Minimax M2, so configuration
+        overrides must not silently swap in another provider or unrelated
+        chat model.
         """
         return DEFAULT_STAGE3_MODEL
 
@@ -87,10 +87,9 @@ class Config:
         """
         Get the Stage 3 request timeout in seconds.
 
-        Stage 3 synthesizes an entire transition-native method library in one
-        Minimax response. The compact AST prompt reduces output size, but the
-        model can still need materially longer wall-clock time than Stage 1 on
-        larger ordered task networks while reasoning remains enabled.
+        Stage 3 synthesizes one domain-complete method library in a single
+        model response. That whole-domain JSON can take materially longer than
+        Stage 1 on larger domains.
         """
         return int(os.getenv('OPENAI_STAGE3_TIMEOUT', '600'))
 
@@ -99,12 +98,9 @@ class Config:
         """
         Get the Stage 3 response token budget.
 
-        Stage 3 emits one complete method library in a single Minimax response.
-        The transition-native redesign keeps the JSON compact, but the one-shot
-        library can still be materially larger than Stage 1's symbolic output,
-        especially when reasoning remains enabled. Keep a larger one-shot budget
-        by default so the model can finish a full library on longer benchmark
-        queries without requiring retries or repairs.
+        Stage 3 emits one whole-domain method library in a single response.
+        Keep a large one-shot budget by default so the model can finish that
+        JSON library without retries or repairs.
         """
         return max(int(os.getenv('OPENAI_STAGE3_MAX_TOKENS', '48000')), 1)
 
@@ -118,6 +114,19 @@ class Config:
         can scale without changing Stage 1 or Stage 3 synthesis behavior.
         """
         return max(int(os.getenv('STAGE6_JASON_TIMEOUT', '600')), 1)
+
+    @property
+    def stage5_planning_timeout(self) -> int:
+        """
+        Get the Stage 5 Hierarchical Task Network planner timeout in seconds.
+
+        The planner is now the primary benchmark-time solver. Large grounded
+        request networks must fail closed within a bounded runtime so masked and
+        live sweeps can finish and report per-query failure causes instead of
+        hanging indefinitely on one hard instance. The default should be large
+        enough for full official baselines, not just short smoke runs.
+        """
+        return max(int(os.getenv('STAGE5_PLANNING_TIMEOUT', '600')), 1)
 
     @property
     def openai_stage1_max_tokens(self) -> int:

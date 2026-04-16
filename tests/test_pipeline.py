@@ -1112,6 +1112,284 @@ def assert_problem_builder_renders_ordering_constraints_for_temporally_extended_
 	assert "(< t1 t2)" in problem_hddl
 
 
+def assert_problem_builder_renders_htn_parameters_for_problem_root_tasks():
+	builder = PANDAProblemBuilder()
+	domain = HDDLParser.parse_domain(OFFICIAL_BLOCKSWORLD_DOMAIN_FILE)
+
+	problem_hddl = builder.build_problem_hddl(
+		domain=domain,
+		domain_name="blocks_problem_root",
+		objects=("b1", "b2"),
+		typed_objects=(("b1", "block"), ("b2", "block")),
+		htn_parameters=(("?x", "block"), ("?y", "block")),
+		task_name="do_put_on",
+		task_args=("?x", "?y"),
+		task_network=(("do_put_on", ("?x", "?y")),),
+		task_network_ordered=False,
+		ordering_edges=(),
+		initial_facts=("(clear b1)", "(clear b2)"),
+	)
+
+	assert ":parameters (?x - block ?y - block)" in problem_hddl
+	assert "(:objects b1 b2 - block)" in problem_hddl
+	assert "(t1 (do_put_on ?x ?y))" in problem_hddl
+
+
+def assert_stage5_hierarchical_planning_passes_configured_timeout(tmp_path, monkeypatch):
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = tmp_path / "planner_timeout_probe"
+	pipeline.output_dir.mkdir(parents=True, exist_ok=True)
+	method_library = _official_domain_method_library("blocksworld")
+	planning_request = PlanningRequestContext(
+		query_text=BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+		temporally_extended_goal=TemporallyExtendedGoal(
+			query_text=BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+			nodes=(
+				TemporallyExtendedGoalNode(
+					node_id="t1",
+					task_name="do_put_on",
+					args=("b4", "b2"),
+					argument_types=("block", "block"),
+				),
+			),
+			typed_objects={"b4": "block", "b2": "block"},
+		),
+		problem_objects=("b1", "b2", "b3", "b4"),
+		typed_objects={"b1": "block", "b2": "block", "b3": "block", "b4": "block"},
+		task_network=(("do_put_on", ("b4", "b2")),),
+		task_network_ordered=True,
+		ordering_edges=(),
+	)
+	captured: Dict[str, Any] = {}
+	work_dir = tmp_path / "planner_work"
+	work_dir.mkdir(parents=True, exist_ok=True)
+
+	class DummyPlanner:
+		def __init__(self, workspace=None):
+			self.workspace = workspace
+
+		def toolchain_available(self):
+			return True
+
+		def plan(self, **kwargs):
+			captured.update(kwargs)
+			return PANDAPlanResult(
+				task_name="do_put_on",
+				task_args=("b4", "b2"),
+				target_literal=None,
+				steps=[
+					PANDAPlanStep(
+						task_name="do_put_on",
+						action_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				raw_plan="==>\n0 stack b4 b2\n",
+				actual_plan="==>\n0 stack b4 b2\n",
+				work_dir=str(work_dir),
+				timing_profile={"planner_seconds": 0.01},
+			)
+
+		def extract_method_trace(self, plan_text: str):
+			assert "stack b4 b2" in plan_text
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch.setenv("STAGE5_PLANNING_TIMEOUT", "7")
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+
+	stage5 = pipeline._stage5_hierarchical_planning(method_library, planning_request)
+
+	assert stage5 is not None
+	assert captured["timeout_seconds"] == 7.0
+	assert stage5["summary"]["status"] == "success"
+	assert stage5["artifacts"]["action_path"] == ["stack(b4, b2)"]
+
+
+def assert_stage5_problem_root_planning_passes_configured_timeout(tmp_path, monkeypatch):
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = tmp_path / "problem_root_timeout_probe"
+	pipeline.output_dir.mkdir(parents=True, exist_ok=True)
+	method_library = _official_domain_method_library("blocksworld")
+	method_library.target_literals = []
+	method_library.target_task_bindings = []
+	captured: Dict[str, Any] = {}
+	work_dir = tmp_path / "problem_root_work"
+	work_dir.mkdir(parents=True, exist_ok=True)
+
+	class DummyPlanner:
+		def __init__(self, workspace=None):
+			self.workspace = workspace
+
+		def toolchain_available(self):
+			return True
+
+		def plan(self, **kwargs):
+			captured.update(kwargs)
+			return PANDAPlanResult(
+				task_name="do_put_on",
+				task_args=("b4", "b2"),
+				target_literal=None,
+				steps=[
+					PANDAPlanStep(
+						task_name="do_put_on",
+						action_name="stack",
+						args=("b4", "b2"),
+					),
+				],
+				raw_plan="==>\n0 stack b4 b2\n",
+				actual_plan="==>\n0 stack b4 b2\n",
+				work_dir=str(work_dir),
+				timing_profile={"planner_seconds": 0.01},
+			)
+
+		def extract_method_trace(self, plan_text: str):
+			assert "stack b4 b2" in plan_text
+			return [{"method_name": "m_do_put_on", "task_args": ["b4", "b2"]}]
+
+	monkeypatch.setenv("STAGE5_PLANNING_TIMEOUT", "11")
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+
+	stage5 = pipeline._stage5_problem_root_planning(method_library)
+
+	assert stage5 is not None
+	assert captured["timeout_seconds"] == 11.0
+	assert stage5["summary"]["status"] == "success"
+	assert stage5["summary"]["planning_mode"] == "official_problem_root"
+	assert stage5["artifacts"]["action_path"] == ["stack(b4, b2)"]
+
+
+def assert_stage5_hierarchical_planning_sequences_linear_ordered_temporally_extended_goal(
+	tmp_path,
+	monkeypatch,
+):
+	problem_path = BLOCKSWORLD_PROBLEM_DIR / "p01.hddl"
+	if not problem_path.exists():
+		pytest.skip(f"Missing blocksworld problem file: {problem_path}")
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=OFFICIAL_BLOCKSWORLD_DOMAIN_FILE,
+		problem_file=str(problem_path.resolve()),
+	)
+	pipeline.output_dir = tmp_path / "planner_sequence_probe"
+	pipeline.output_dir.mkdir(parents=True, exist_ok=True)
+	method_library = _official_domain_method_library("blocksworld")
+	planning_request = PlanningRequestContext(
+		query_text=BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+		temporally_extended_goal=TemporallyExtendedGoal(
+			query_text=BLOCKSWORLD_QUERY_CASES["query_1"]["instruction"],
+			nodes=(
+				TemporallyExtendedGoalNode(
+					node_id="t1",
+					task_name="do_put_on",
+					args=("b4", "b2"),
+					argument_types=("block", "block"),
+				),
+				TemporallyExtendedGoalNode(
+					node_id="t2",
+					task_name="do_put_on",
+					args=("b1", "b4"),
+					argument_types=("block", "block"),
+				),
+			),
+			precedence_edges=(("t1", "t2"),),
+			typed_objects={"b1": "block", "b2": "block", "b4": "block"},
+		),
+		problem_objects=("b1", "b2", "b3", "b4"),
+		typed_objects={"b1": "block", "b2": "block", "b3": "block", "b4": "block"},
+		task_network=(
+			("do_put_on", ("b4", "b2")),
+			("do_put_on", ("b1", "b4")),
+		),
+		task_network_ordered=False,
+		ordering_edges=(("t1", "t2"),),
+	)
+	captured_calls: List[Dict[str, Any]] = []
+	work_dir = tmp_path / "planner_sequence_work"
+	work_dir.mkdir(parents=True, exist_ok=True)
+
+	class DummyPlanner:
+		def __init__(self, workspace=None):
+			self.workspace = workspace
+
+		def toolchain_available(self):
+			return True
+
+		def plan(self, **kwargs):
+			captured_calls.append(
+				{
+					"task_name": kwargs["task_name"],
+					"task_args": tuple(kwargs["task_args"]),
+					"task_network": tuple(kwargs["task_network"]),
+					"ordering_edges": tuple(kwargs.get("ordering_edges") or ()),
+				},
+			)
+			task_args = tuple(kwargs["task_args"])
+			return PANDAPlanResult(
+				task_name=str(kwargs["task_name"]),
+				task_args=task_args,
+				target_literal=None,
+				steps=[
+					PANDAPlanStep(
+						task_name=str(kwargs["task_name"]),
+						action_name="stack",
+						args=task_args,
+					),
+				],
+				raw_plan="==>\n0 stack\n",
+				actual_plan="==>\n0 stack\n",
+				work_dir=str(work_dir),
+				timing_profile={"planner_seconds": 0.01},
+			)
+
+		def extract_method_trace(self, plan_text: str):
+			return [{"method_name": "m_do_put_on", "task_args": ["x", "y"]}]
+
+	monkeypatch.setattr(pipeline_module, "PANDAPlanner", DummyPlanner)
+	monkeypatch.setattr(
+		pipeline,
+		"_planner_action_schemas",
+		lambda: (
+			{
+				"functor": "stack",
+				"source_name": "stack",
+				"parameters": ["?x", "?y"],
+				"preconditions": [],
+				"precondition_clauses": [[]],
+				"effects": [{"predicate": "on", "args": ["?x", "?y"], "is_positive": True}],
+			},
+		),
+	)
+	monkeypatch.setattr(
+		pipeline,
+		"_stage5_render_supported_hierarchical_plan",
+		lambda **kwargs: "==>\nroot 1 2\n",
+	)
+
+	stage5 = pipeline._stage5_hierarchical_planning(method_library, planning_request)
+
+	assert stage5 is not None
+	assert stage5["summary"]["planning_mode"] == "ordered_sequential_node_planning"
+	assert stage5["artifacts"]["action_path"] == ["stack(b4, b2)", "stack(b1, b4)"]
+	assert len(captured_calls) == 2
+	assert captured_calls[0]["task_network"] == (("do_put_on", ("b4", "b2")),)
+	assert captured_calls[0]["ordering_edges"] == ()
+	assert captured_calls[1]["task_network"] == (("do_put_on", ("b1", "b4")),)
+
+
 def _official_stage3_mask_synthesizer_class(domain_key: str):
 	class OfficialStage3MaskSynthesizer:
 		def __init__(self, *args, **kwargs):
@@ -1511,6 +1789,161 @@ def _run_domain_query_case_with_live_stage3(
 		query_cases=query_cases,
 		expect_domain_build_used_llm=True,
 	)
+
+
+def _run_domain_problem_root_case_with_official_methods(
+	domain_key: str,
+	query_id: str,
+	*,
+	query_cases: Dict[str, Dict[str, Any]] | None = None,
+) -> Dict[str, Any]:
+	domain_config = OFFICIAL_STAGE3_MASK_DOMAIN_CONFIGS[domain_key]
+	case_map = query_cases or domain_config["query_cases"]
+	case = case_map[query_id]
+
+	pipeline = LTL_BDI_Pipeline(
+		domain_file=domain_config["domain_file"],
+		problem_file=case.get("problem_file"),
+	)
+	pipeline.logger = PipelineLogger(logs_dir=str(TESTS_GENERATED_LOGS_DIR), run_origin="tests")
+	pipeline.logger.start_pipeline(
+		case["instruction"],
+		mode="official_problem_root_htn",
+		domain_file=pipeline.domain_file,
+		problem_file=case.get("problem_file"),
+		domain_name=pipeline.domain.name,
+		problem_name=pipeline.problem.name if pipeline.problem else None,
+		output_dir=str(TESTS_GENERATED_LOGS_DIR),
+	)
+	pipeline.output_dir = pipeline.logger.current_log_dir
+	if pipeline.logger.current_record is not None and pipeline.output_dir is not None:
+		pipeline.logger.current_record.output_dir = str(pipeline.output_dir)
+		pipeline.logger._save_current_state()
+
+	method_library = _official_domain_method_library(domain_key)
+	method_library.target_literals = []
+	method_library.target_task_bindings = []
+	stage5_data = pipeline._stage5_problem_root_planning(method_library)
+	stage7_data = (
+		pipeline._stage7_official_verification(None, method_library, stage5_data)
+		if stage5_data is not None
+		else None
+	)
+	result = {
+		"success": stage5_data is not None and stage7_data is not None,
+		"stage5": stage5_data,
+		"stage7": stage7_data,
+	}
+	log_path = pipeline.logger.end_pipeline(success=result["success"])
+	log_dir = Path(log_path).parent
+	execution = json.loads((log_dir / "execution.json").read_text())
+	execution_txt = (log_dir / "execution.txt").read_text()
+	stage5_artifacts = _load_stage5_planner_artifacts(execution, log_dir)
+	stage7_artifacts = _load_stage7_artifacts(execution, log_dir)
+	problem = HDDLParser.parse_problem(str(case["problem_file"]))
+	expected_identity = _expected_execution_identity(
+		domain_config["domain_file"],
+		case.get("problem_file"),
+	)
+	domain_action_names = set(HDDLParser.parse_domain(domain_config["domain_file"]).get_action_names())
+	expected_task_network = [
+		{
+			"task_name": str(task.task_name),
+			"args": list(task.args or ()),
+		}
+		for task in (problem.htn_tasks or ())
+	]
+	expected_ordering_edges = [
+		{"before": before, "after": after}
+		for before, after in pipeline._problem_root_task_network_ordering_edges()
+	]
+
+	bug_messages: List[str] = []
+	if not result["success"]:
+		bug_messages.append("official problem-root baseline returned success=False")
+	if execution.get("mode") != "official_problem_root_htn":
+		bug_messages.append("execution.json mode is not official_problem_root_htn")
+	if execution.get("natural_language") != case["instruction"]:
+		bug_messages.append("execution.json natural_language does not match paired benchmark query")
+	if execution.get("run_origin") != "tests":
+		bug_messages.append("execution.json run_origin is not tests")
+	for stage_key in ("stage1_status", "stage2_status", "stage3_status", "stage4_status", "stage6_status"):
+		if execution.get(stage_key) not in (None, "", "pending"):
+			bug_messages.append(f"{stage_key} should remain pending in official problem-root baseline")
+	for stage_key in ("stage5_status", "stage7_status"):
+		if execution.get(stage_key) != "success":
+			bug_messages.append(f"{stage_key} is not success")
+	for key, expected_value in expected_identity.items():
+		if execution.get(key) != expected_value:
+			bug_messages.append(
+				f"execution.json {key} mismatch: expected {expected_value}, got {execution.get(key)}",
+			)
+	if "STAGE 5: Hierarchical Task Network Solve" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 5 section")
+	if "STAGE 7: Official IPC HTN Plan Verification" not in execution_txt:
+		bug_messages.append("execution.txt is missing Stage 7 section")
+	if stage5_artifacts.get("status") != "success":
+		bug_messages.append("Stage 5 planner artifact status is not success")
+	if stage5_artifacts.get("planning_mode") != "official_problem_root":
+		bug_messages.append("Stage 5 planning_mode is not official_problem_root")
+	if stage5_artifacts.get("task_network") != expected_task_network:
+		bug_messages.append("Stage 5 task_network does not match official problem root task network")
+	if stage5_artifacts.get("ordering_edges") != expected_ordering_edges:
+		bug_messages.append("Stage 5 ordering_edges do not match the official problem root ordering")
+	if stage5_artifacts.get("task_network_ordered") != (bool(problem.htn_ordered) and not expected_ordering_edges):
+		bug_messages.append("Stage 5 task_network_ordered does not match the official problem root semantics")
+	if not stage5_artifacts.get("actual_plan_text"):
+		bug_messages.append("Stage 5 is missing the converted hierarchical plan text")
+	action_path = stage5_artifacts.get("action_path") or []
+	for action_step in action_path:
+		match = re.match(r"^([^\s(]+)(?:\((.*)\))?$", action_step)
+		if match is None:
+			bug_messages.append(f"Stage 5 action_path step has invalid format: {action_step}")
+			continue
+		action_name = str(match.group(1) or "").strip()
+		if action_name not in domain_action_names:
+			bug_messages.append(f"Stage 5 action_path step is not a domain action: {action_step}")
+	if stage7_artifacts.get("tool_available") is not True:
+		bug_messages.append("official IPC verifier is not available on PATH")
+	if stage7_artifacts.get("plan_kind") != "hierarchical":
+		bug_messages.append("official IPC verifier did not validate a hierarchical plan")
+	if stage7_artifacts.get("verification_result") is not True:
+		bug_messages.append("official IPC verifier did not accept the baseline plan")
+	if stage7_artifacts.get("primitive_plan_executable") is not True:
+		bug_messages.append("official IPC verifier did not mark the baseline primitive plan as executable")
+	if stage7_artifacts.get("reached_goal_state") is not True:
+		bug_messages.append("official IPC verifier did not report goal-state achievement")
+	for path in _required_query_execution_artifact_paths(log_dir):
+		if not path.exists():
+			bug_messages.append(f"missing official problem-root artifact: {path.name}")
+
+	return {
+		"query_id": query_id,
+		"case": case,
+		"result": result,
+		"log_dir": log_dir,
+		"execution": execution,
+		"planner_artifacts": stage5_artifacts or None,
+		"official_verifier": stage7_artifacts or None,
+		"bug_messages": bug_messages,
+		"has_bug": bool(bug_messages),
+	}
+
+
+def _run_problem_root_case_with_official_methods(query_id: str) -> Dict[str, Any]:
+	return _run_domain_problem_root_case_with_official_methods("blocksworld", query_id)
+
+
+def _run_marsrover_problem_root_case_with_official_methods(query_id: str) -> Dict[str, Any]:
+	return _run_domain_problem_root_case_with_official_methods("marsrover", query_id)
+
+
+def _run_satellite_problem_root_case_with_official_methods(query_id: str) -> Dict[str, Any]:
+	return _run_domain_problem_root_case_with_official_methods("satellite", query_id)
+
+
+def _run_transport_problem_root_case_with_official_methods(query_id: str) -> Dict[str, Any]:
+	return _run_domain_problem_root_case_with_official_methods("transport", query_id)
 
 def _run_query_case_with_official_stage3_mask(query_id: str, monkeypatch) -> Dict[str, Any]:
 	return _run_domain_query_case_with_official_stage3_mask("blocksworld", query_id, monkeypatch)
@@ -5225,6 +5658,35 @@ def test_domain_build_with_live_stage3(domain_key: str):
 	report = _build_live_domain_artifact(domain_key)
 	bug_messages = _domain_build_bug_messages(report, expect_used_llm=True)
 	assert bug_messages == [], "\n".join(bug_messages)
+
+
+@pytest.mark.parametrize("query_id", sorted(BLOCKSWORLD_QUERY_CASES, key=_benchmark_query_id_sort_key))
+def test_blocksworld_official_problem_root_baseline(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_problem_root_case_with_official_methods(query_id)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", sorted(MARSROVER_QUERY_CASES, key=_benchmark_query_id_sort_key))
+def test_marsrover_official_problem_root_baseline(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_marsrover_problem_root_case_with_official_methods(query_id)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", sorted(SATELLITE_QUERY_CASES, key=_benchmark_query_id_sort_key))
+def test_satellite_official_problem_root_baseline(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_satellite_problem_root_case_with_official_methods(query_id)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
+
+@pytest.mark.parametrize("query_id", sorted(TRANSPORT_QUERY_CASES, key=_benchmark_query_id_sort_key))
+def test_transport_official_problem_root_baseline(query_id: str):
+	_ensure_live_dependencies()
+	report = _run_transport_problem_root_case_with_official_methods(query_id)
+	assert report["has_bug"] is False, "\n".join(report["bug_messages"])
+
 
 @pytest.mark.parametrize("query_id", sorted(BLOCKSWORLD_QUERY_CASES, key=_benchmark_query_id_sort_key))
 def test_blocksworld_pipeline_query_case_with_official_stage3_mask(query_id: str, monkeypatch):

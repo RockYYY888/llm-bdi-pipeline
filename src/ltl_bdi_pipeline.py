@@ -715,44 +715,70 @@ class LTL_BDI_Pipeline:
                 if self.problem is not None
                 else ()
             )
-
-            primary_task_name, primary_task_args = planning_request.task_network[0]
-            plan = planner.plan(
-                domain=self.domain,
-                method_library=method_library,
-                objects=problem_objects,
-                target_literal=None,
-                task_name=str(primary_task_name),
-                transition_name="teg_request",
-                typed_objects=typed_objects,
-                task_args=tuple(primary_task_args),
-                task_network=planning_request.task_network,
-                task_network_ordered=planning_request.task_network_ordered,
-                ordering_edges=planning_request.ordering_edges,
-                allow_empty_plan=False,
-                initial_facts=initial_facts,
-            )
-
-            action_path = [
-                (
-                    f"{step.action_name}({', '.join(step.args)})"
-                    if step.args
-                    else str(step.action_name)
+            planning_mode = "single_request"
+            combined_plan_text: Optional[str] = None
+            if self._stage5_should_sequence_temporally_extended_goal(planning_request):
+                sequential_result = self._stage5_sequential_ordered_planning(
+                    planner=planner,
+                    method_library=method_library,
+                    planning_request=planning_request,
+                    problem_objects=problem_objects,
+                    typed_objects=typed_objects,
+                    initial_facts=initial_facts,
                 )
-                for step in plan.steps
-            ]
-            method_trace = planner.extract_method_trace(plan.actual_plan)
+                action_path = list(sequential_result["action_path"])
+                method_trace = list(sequential_result["method_trace"])
+                timing_profile = dict(sequential_result["timing_profile"])
+                combined_plan_text = sequential_result.get("hierarchical_plan_text")
+                planning_mode = str(sequential_result.get("planning_mode") or planning_mode)
+                work_dir = None
+            else:
+                primary_task_name, primary_task_args = planning_request.task_network[0]
+                plan = planner.plan(
+                    domain=self.domain,
+                    method_library=method_library,
+                    objects=problem_objects,
+                    target_literal=None,
+                    task_name=str(primary_task_name),
+                    transition_name="teg_request",
+                    typed_objects=typed_objects,
+                    task_args=tuple(primary_task_args),
+                    task_network=planning_request.task_network,
+                    task_network_ordered=planning_request.task_network_ordered,
+                    ordering_edges=planning_request.ordering_edges,
+                    allow_empty_plan=False,
+                    initial_facts=initial_facts,
+                    timeout_seconds=float(self.config.stage5_planning_timeout),
+                )
+
+                action_path = [
+                    (
+                        f"{step.action_name}({', '.join(step.args)})"
+                        if step.args
+                        else str(step.action_name)
+                    )
+                    for step in plan.steps
+                ]
+                method_trace = planner.extract_method_trace(plan.actual_plan)
+                timing_profile = dict(plan.timing_profile or {})
+                combined_plan_text = plan.actual_plan or ""
+                work_dir = Path(str(plan.work_dir)).resolve() if plan.work_dir else None
+
             action_path_file = self.output_dir / "stage5_action_path.txt"
             action_path_file.write_text(
                 "".join(f"{step}\n" for step in action_path),
             )
             method_trace_file = self.output_dir / "stage5_method_trace.json"
             method_trace_file.write_text(json.dumps(method_trace, indent=2))
+            combined_plan_file = None
+            if combined_plan_text:
+                combined_plan_file = self.output_dir / "stage5_hierarchical_plan.txt"
+                combined_plan_file.write_text(str(combined_plan_text))
 
-            work_dir = Path(str(plan.work_dir)).resolve() if plan.work_dir else None
             artifacts = {
                 "backend": "pandaPI",
                 "status": "success",
+                "planning_mode": planning_mode,
                 "task_network": [
                     {
                         "task_name": task_name,
@@ -765,19 +791,23 @@ class LTL_BDI_Pipeline:
                     {"before": before, "after": after}
                     for before, after in planning_request.ordering_edges
                 ],
-                "step_count": len(plan.steps),
+                "step_count": len(action_path),
                 "action_path": action_path,
                 "method_trace": method_trace,
-                "guided_hierarchical_plan_text": plan.actual_plan,
-                "guided_hierarchical_plan_source": "panda_plan",
-                "timing_profile": dict(plan.timing_profile),
+                "guided_hierarchical_plan_text": combined_plan_text,
+                "guided_hierarchical_plan_source": (
+                    "planner_reconstructed_hierarchical_plan"
+                    if planning_mode != "single_request"
+                    else "panda_plan"
+                ),
+                "timing_profile": timing_profile,
                 "artifacts": {
                     "domain_hddl": str(work_dir / "domain.hddl") if work_dir else None,
                     "problem_hddl": str(work_dir / "problem.hddl") if work_dir else None,
                     "parsed_problem": str(work_dir / "problem.psas") if work_dir else None,
                     "grounded_problem": str(work_dir / "problem.psas.grounded") if work_dir else None,
                     "raw_plan": str(work_dir / "plan.original") if work_dir else None,
-                    "actual_plan": str(work_dir / "plan.actual") if work_dir else None,
+                    "actual_plan": str(combined_plan_file) if combined_plan_file else None,
                     "action_path": str(action_path_file),
                     "method_trace": str(method_trace_file),
                 },
@@ -785,9 +815,10 @@ class LTL_BDI_Pipeline:
             summary = {
                 "backend": "pandaPI",
                 "status": "success",
+                "planning_mode": planning_mode,
                 "task_count": len(planning_request.task_network),
                 "precedence_edge_count": len(planning_request.ordering_edges),
-                "step_count": len(plan.steps),
+                "step_count": len(action_path),
             }
             self.logger.log_stage5_hierarchical_planning(
                 artifacts,
@@ -799,15 +830,16 @@ class LTL_BDI_Pipeline:
                 stage_start,
                 breakdown={
                     key: value
-                    for key, value in dict(plan.timing_profile or {}).items()
+                    for key, value in timing_profile.items()
                     if key != "total_seconds"
                 },
                 metadata={
                     "task_count": len(planning_request.task_network),
-                    "step_count": len(plan.steps),
+                    "step_count": len(action_path),
+                    "planning_mode": planning_mode,
                 },
             )
-            print(f"✓ Planner returned {len(plan.steps)} primitive steps")
+            print(f"✓ Planner returned {len(action_path)} primitive steps")
             print(f"  Task network size: {len(planning_request.task_network)}")
             return {
                 "summary": summary,
@@ -843,6 +875,534 @@ class LTL_BDI_Pipeline:
             self._record_stage_timing("stage5", stage_start)
             print(f"✗ Stage 5 Failed: {exc}")
             return None
+
+    def _problem_root_task_network_ordering_edges(self) -> Tuple[Tuple[str, str], ...]:
+        if self.problem is None:
+            return ()
+        ordering_edges = tuple(getattr(self.problem, "htn_ordering", ()) or ())
+        if not ordering_edges:
+            return ()
+
+        label_to_runtime_id: Dict[str, str] = {}
+        for index, task in enumerate(self.problem.htn_tasks or (), start=1):
+            label = str(getattr(task, "label", None) or f"t{index}").strip()
+            if label:
+                label_to_runtime_id[label] = f"t{index}"
+
+        resolved_edges: List[Tuple[str, str]] = []
+        for before, after in ordering_edges:
+            before_id = label_to_runtime_id.get(str(before).strip())
+            after_id = label_to_runtime_id.get(str(after).strip())
+            if before_id and after_id:
+                resolved_edges.append((before_id, after_id))
+        return tuple(resolved_edges)
+
+    def _stage5_problem_root_planning(
+        self,
+        method_library: HTNMethodLibrary,
+    ) -> Optional[Dict[str, Any]]:
+        """Stage 5 baseline: solve the official problem root task network directly."""
+        print("\n[STAGE 5] Hierarchical Task Network Solve")
+        print("-"*80)
+        stage_start = time.perf_counter()
+        planner = PANDAPlanner(workspace=str(self.output_dir))
+
+        try:
+            if self.problem is None:
+                raise ValueError("Problem root planning requires a loaded problem file.")
+            if not self.problem.htn_tasks:
+                raise ValueError("Problem file contains no root HTN tasks.")
+            if not planner.toolchain_available():
+                raise ValueError(
+                    "PANDA planning toolchain is unavailable on PATH.",
+                )
+
+            problem_objects = tuple(self.problem.objects or ())
+            if not problem_objects:
+                raise ValueError("Problem file contains no declared objects.")
+            typed_objects = self._typed_object_entries(
+                problem_objects,
+                dict(self.problem.object_types or {}),
+            )
+            initial_facts = tuple(
+                self._render_problem_fact(fact)
+                for fact in (self.problem.init_facts or ())
+                if getattr(fact, "is_positive", True)
+            )
+            task_network = tuple(
+                (str(task.task_name), tuple(str(arg) for arg in (task.args or ())))
+                for task in (self.problem.htn_tasks or ())
+            )
+            ordering_edges = self._problem_root_task_network_ordering_edges()
+            task_network_ordered = bool(self.problem.htn_ordered) and not ordering_edges
+            primary_task_name, primary_task_args = task_network[0]
+            plan = planner.plan(
+                domain=self.domain,
+                method_library=method_library,
+                objects=problem_objects,
+                target_literal=None,
+                task_name=str(primary_task_name),
+                transition_name="official_problem_root",
+                typed_objects=typed_objects,
+                htn_parameters=tuple(
+                    (str(name), str(type_name))
+                    for name, type_name in dict(self.problem.htn_parameter_types or {}).items()
+                ),
+                task_args=tuple(primary_task_args),
+                task_network=task_network,
+                task_network_ordered=task_network_ordered,
+                ordering_edges=ordering_edges,
+                allow_empty_plan=False,
+                initial_facts=initial_facts,
+                timeout_seconds=float(self.config.stage5_planning_timeout),
+            )
+
+            action_path = [
+                (
+                    f"{step.action_name}({', '.join(step.args)})"
+                    if step.args
+                    else str(step.action_name)
+                )
+                for step in plan.steps
+            ]
+            method_trace = planner.extract_method_trace(plan.actual_plan)
+            timing_profile = dict(plan.timing_profile or {})
+            work_dir = Path(str(plan.work_dir)).resolve() if plan.work_dir else None
+
+            action_path_file = self.output_dir / "stage5_action_path.txt"
+            action_path_file.write_text("".join(f"{step}\n" for step in action_path))
+            method_trace_file = self.output_dir / "stage5_method_trace.json"
+            method_trace_file.write_text(json.dumps(method_trace, indent=2))
+            combined_plan_file = self.output_dir / "stage5_hierarchical_plan.txt"
+            combined_plan_file.write_text(str(plan.actual_plan or ""))
+
+            artifacts = {
+                "backend": "pandaPI",
+                "status": "success",
+                "planning_mode": "official_problem_root",
+                "task_network": [
+                    {
+                        "task_name": task_name,
+                        "args": list(task_args),
+                    }
+                    for task_name, task_args in task_network
+                ],
+                "task_network_ordered": task_network_ordered,
+                "ordering_edges": [
+                    {"before": before, "after": after}
+                    for before, after in ordering_edges
+                ],
+                "step_count": len(action_path),
+                "action_path": action_path,
+                "method_trace": method_trace,
+                "guided_hierarchical_plan_text": plan.actual_plan or "",
+                "guided_hierarchical_plan_source": "panda_plan",
+                "timing_profile": timing_profile,
+                "artifacts": {
+                    "domain_hddl": str(work_dir / "domain.hddl") if work_dir else None,
+                    "problem_hddl": str(work_dir / "problem.hddl") if work_dir else None,
+                    "parsed_problem": str(work_dir / "problem.psas") if work_dir else None,
+                    "grounded_problem": str(work_dir / "problem.psas.grounded") if work_dir else None,
+                    "raw_plan": str(work_dir / "plan.original") if work_dir else None,
+                    "actual_plan": str(combined_plan_file),
+                    "action_path": str(action_path_file),
+                    "method_trace": str(method_trace_file),
+                },
+            }
+            summary = {
+                "backend": "pandaPI",
+                "status": "success",
+                "planning_mode": "official_problem_root",
+                "task_count": len(task_network),
+                "precedence_edge_count": len(ordering_edges),
+                "step_count": len(action_path),
+            }
+            self.logger.log_stage5_hierarchical_planning(
+                artifacts,
+                "Success",
+                metadata=summary,
+            )
+            self._record_stage_timing(
+                "stage5",
+                stage_start,
+                breakdown={
+                    key: value
+                    for key, value in timing_profile.items()
+                    if key != "total_seconds"
+                },
+                metadata={
+                    "task_count": len(task_network),
+                    "step_count": len(action_path),
+                    "planning_mode": "official_problem_root",
+                },
+            )
+            print(f"✓ Planner returned {len(action_path)} primitive steps")
+            print(f"  Problem root task count: {len(task_network)}")
+            return {
+                "summary": summary,
+                "artifacts": artifacts,
+            }
+        except Exception as exc:
+            failure_artifacts = {
+                "backend": "pandaPI",
+                "status": "failed",
+                "task_network": [
+                    {
+                        "task_name": str(task.task_name),
+                        "args": list(task.args or ()),
+                    }
+                    for task in (self.problem.htn_tasks or ())
+                ] if self.problem is not None else [],
+                "task_network_ordered": bool(getattr(self.problem, "htn_ordered", False)),
+                "ordering_edges": [
+                    {"before": before, "after": after}
+                    for before, after in self._problem_root_task_network_ordering_edges()
+                ] if self.problem is not None else [],
+                "step_count": 0,
+            }
+            self.logger.log_stage5_hierarchical_planning(
+                failure_artifacts,
+                "Failed",
+                error=str(exc),
+                metadata={
+                    "backend": "pandaPI",
+                    "status": "failed",
+                    "planning_mode": "official_problem_root",
+                },
+            )
+            self._record_stage_timing("stage5", stage_start)
+            print(f"✗ Stage 5 Failed: {exc}")
+            return None
+
+    def _stage5_should_sequence_temporally_extended_goal(
+        self,
+        planning_request: PlanningRequestContext,
+    ) -> bool:
+        nodes = tuple(planning_request.temporally_extended_goal.nodes or ())
+        if len(nodes) <= 1 or len(planning_request.task_network) <= 1:
+            return False
+        if len(nodes) != len(planning_request.task_network):
+            return False
+        node_ids = tuple(str(node.node_id or "").strip() for node in nodes)
+        if any(not node_id for node_id in node_ids):
+            return False
+        expected_edges = tuple(
+            (node_ids[index], node_ids[index + 1])
+            for index in range(len(node_ids) - 1)
+        )
+        return tuple(planning_request.ordering_edges or ()) == expected_edges
+
+    def _stage5_sequential_ordered_planning(
+        self,
+        *,
+        planner: PANDAPlanner,
+        method_library: HTNMethodLibrary,
+        planning_request: PlanningRequestContext,
+        problem_objects: Sequence[str],
+        typed_objects: Sequence[Tuple[str, str]],
+        initial_facts: Sequence[str],
+    ) -> Dict[str, Any]:
+        action_schemas = self._planner_action_schemas()
+        current_facts = tuple(str(fact).strip() for fact in (initial_facts or ()) if str(fact).strip())
+        aggregated_action_path: List[str] = []
+        aggregated_method_trace: List[Dict[str, Any]] = []
+        timing_profile: Dict[str, float] = {}
+
+        for index, (task_name, task_args) in enumerate(planning_request.task_network, start=1):
+            transition_name = (
+                f"teg_request_step_{index:03d}_{sanitize_identifier(str(task_name))}"
+            )
+            plan = planner.plan(
+                domain=self.domain,
+                method_library=method_library,
+                objects=problem_objects,
+                target_literal=None,
+                task_name=str(task_name),
+                transition_name=transition_name,
+                typed_objects=typed_objects,
+                task_args=tuple(task_args),
+                task_network=((str(task_name), tuple(task_args)),),
+                task_network_ordered=True,
+                ordering_edges=(),
+                allow_empty_plan=False,
+                initial_facts=current_facts,
+                timeout_seconds=float(self.config.stage5_planning_timeout),
+            )
+            step_action_path = [
+                (
+                    f"{step.action_name}({', '.join(step.args)})"
+                    if step.args
+                    else str(step.action_name)
+                )
+                for step in plan.steps
+            ]
+            replay = self._planner_replay_action_path(
+                action_path=step_action_path,
+                action_schemas=action_schemas,
+                seed_facts=current_facts,
+            )
+            if replay.get("passed") is not True:
+                raise ValueError(
+                    "Sequential Stage 5 world replay failed after "
+                    f"{task_name}{tuple(task_args)}: {replay.get('message')}",
+                )
+            current_facts = tuple(replay.get("world_facts_hddl") or ())
+            aggregated_action_path.extend(step_action_path)
+            aggregated_method_trace.extend(planner.extract_method_trace(plan.actual_plan))
+            for key, value in dict(plan.timing_profile or {}).items():
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                timing_profile[key] = timing_profile.get(key, 0.0) + numeric_value
+
+        hierarchical_plan_text = self._stage5_render_supported_hierarchical_plan(
+            action_path=aggregated_action_path,
+            method_library=method_library,
+            method_trace=aggregated_method_trace,
+        )
+        return {
+            "planning_mode": "ordered_sequential_node_planning",
+            "action_path": aggregated_action_path,
+            "method_trace": aggregated_method_trace,
+            "hierarchical_plan_text": hierarchical_plan_text,
+            "timing_profile": timing_profile,
+        }
+
+    def _stage5_render_supported_hierarchical_plan(
+        self,
+        *,
+        action_path: Sequence[str],
+        method_library: HTNMethodLibrary,
+        method_trace: Sequence[Dict[str, Any]],
+    ) -> Optional[str]:
+        if self.problem_file is None:
+            return None
+        verifier = IPCPlanVerifier()
+        try:
+            return verifier._render_supported_hierarchical_plan(
+                domain_file=self.domain_file,
+                problem_file=self.problem_file,
+                action_path=action_path,
+                method_library=method_library,
+                method_trace=method_trace,
+            )
+        except Exception:
+            return None
+
+    def _planner_action_schemas(self) -> Sequence[Dict[str, Any]]:
+        return tuple(self._stage6_action_schemas())
+
+    def _planner_action_schema_lookup(
+        self,
+        action_schemas: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        lookup: Dict[str, Dict[str, Any]] = {}
+        for schema in action_schemas or ():
+            source_name = str(schema.get("source_name") or "").strip()
+            functor = str(schema.get("functor") or "").strip()
+            for key in (
+                functor,
+                source_name,
+                self._sanitize_name(source_name),
+            ):
+                if key:
+                    lookup.setdefault(key, schema)
+        return lookup
+
+    @staticmethod
+    def _planner_parse_action_step(step: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+        text = str(step or "").strip()
+        match = re.fullmatch(r"([A-Za-z0-9_-]+)(?:\((.*)\))?", text)
+        if match is None:
+            return None
+        action_name = str(match.group(1) or "").strip()
+        args_text = str(match.group(2) or "").strip()
+        if not args_text:
+            return action_name, ()
+        return action_name, tuple(
+            part.strip()
+            for part in args_text.split(",")
+            if part.strip()
+        )
+
+    @staticmethod
+    def _planner_runtime_token(token: str) -> str:
+        value = str(token or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            return value[1:-1]
+        return value
+
+    def _planner_resolve_runtime_token(
+        self,
+        token: str,
+        bindings: Dict[str, str],
+    ) -> str:
+        canonical = self._planner_runtime_token(token)
+        if canonical in bindings:
+            return bindings[canonical]
+        if canonical.startswith("?") and canonical[1:] in bindings:
+            return bindings[canonical[1:]]
+        return canonical
+
+    def _planner_ground_pattern(
+        self,
+        predicate: str,
+        args: Sequence[str],
+        bindings: Dict[str, str],
+    ) -> str:
+        functor = str(predicate or "").strip()
+        if not args:
+            return functor
+        grounded_args = [
+            self._planner_runtime_token(self._planner_resolve_runtime_token(arg, bindings))
+            for arg in args
+        ]
+        return f"{functor}({','.join(grounded_args)})"
+
+    def _planner_replay_precondition_clause_holds(
+        self,
+        clause: Sequence[Dict[str, Any]],
+        bindings: Dict[str, str],
+        world: Set[str],
+    ) -> bool:
+        for pattern in clause:
+            predicate = str(pattern.get("predicate") or "").strip()
+            args = [str(item) for item in (pattern.get("args") or ())]
+            is_positive = bool(pattern.get("is_positive", True))
+            if predicate == "=" and len(args) == 2:
+                left = self._planner_resolve_runtime_token(args[0], bindings)
+                right = self._planner_resolve_runtime_token(args[1], bindings)
+                if (left == right) != is_positive:
+                    return False
+                continue
+            grounded = self._planner_ground_pattern(predicate, args, bindings)
+            holds = grounded in world if is_positive else grounded not in world
+            if not holds:
+                return False
+        return True
+
+    def _planner_hddl_fact_to_atom(self, fact: str) -> Optional[str]:
+        parsed = self._parse_positive_hddl_fact(str(fact or ""))
+        if parsed is None:
+            return None
+        predicate, args = parsed
+        if not args:
+            return predicate
+        return f"{predicate}({','.join(args)})"
+
+    def _planner_atom_to_hddl_fact(self, atom: str) -> str:
+        text = str(atom or "").strip()
+        if not text:
+            return "()"
+        if "(" not in text:
+            return f"({text})"
+        functor, remainder = text.split("(", 1)
+        functor = functor.strip()
+        args_text = remainder[:-1].strip()
+        if not args_text:
+            return f"({functor})"
+        args = [
+            self._planner_runtime_token(part.strip())
+            for part in args_text.split(",")
+            if part.strip()
+        ]
+        return f"({functor} {' '.join(args)})"
+
+    def _planner_runtime_world_to_hddl_facts(
+        self,
+        world: Sequence[str],
+    ) -> Tuple[str, ...]:
+        return tuple(
+            self._planner_atom_to_hddl_fact(atom)
+            for atom in sorted(str(atom).strip() for atom in (world or ()) if str(atom).strip())
+        )
+
+    def _planner_replay_action_path(
+        self,
+        *,
+        action_path: Sequence[str],
+        action_schemas: Sequence[Dict[str, Any]],
+        seed_facts: Sequence[str],
+    ) -> Dict[str, Any]:
+        world = {
+            atom
+            for atom in (self._planner_hddl_fact_to_atom(fact) for fact in seed_facts)
+            if atom is not None
+        }
+        schema_lookup = self._planner_action_schema_lookup(action_schemas)
+
+        for index, step in enumerate(action_path):
+            parsed_step = self._planner_parse_action_step(step)
+            if parsed_step is None:
+                return {
+                    "passed": False,
+                    "message": f"planner action step #{index + 1} is malformed: {step}",
+                }
+            action_name, action_args = parsed_step
+            schema = (
+                schema_lookup.get(action_name)
+                or schema_lookup.get(self._sanitize_name(action_name))
+            )
+            if schema is None:
+                return {
+                    "passed": False,
+                    "message": (
+                        f"planner action step #{index + 1} references unknown action "
+                        f"'{action_name}'"
+                    ),
+                }
+            parameters = [str(item) for item in (schema.get("parameters") or ())]
+            if len(parameters) != len(action_args):
+                return {
+                    "passed": False,
+                    "message": (
+                        f"planner action step #{index + 1} has arity {len(action_args)} for "
+                        f"'{action_name}', expected {len(parameters)}"
+                    ),
+                }
+
+            bindings: Dict[str, str] = {}
+            for parameter, value in zip(parameters, action_args):
+                token = self._planner_runtime_token(parameter)
+                bindings[token] = value
+                if token.startswith("?"):
+                    bindings[token[1:]] = value
+
+            precondition_clauses = list(schema.get("precondition_clauses") or ())
+            if not precondition_clauses:
+                precondition_clauses = [list(schema.get("preconditions") or ())]
+            if not any(
+                self._planner_replay_precondition_clause_holds(clause, bindings, world)
+                for clause in precondition_clauses
+            ):
+                return {
+                    "passed": False,
+                    "message": (
+                        f"planner action step #{index + 1} violates schema preconditions "
+                        f"for '{action_name}'"
+                    ),
+                }
+
+            for effect in schema.get("effects") or ():
+                predicate = str(effect.get("predicate") or "").strip()
+                if not predicate or predicate == "=":
+                    continue
+                grounded = self._planner_ground_pattern(
+                    predicate,
+                    effect.get("args") or (),
+                    bindings,
+                )
+                if effect.get("is_positive", True):
+                    world.add(grounded)
+                else:
+                    world.discard(grounded)
+
+        return {
+            "passed": True,
+            "message": None,
+            "world_facts_hddl": self._planner_runtime_world_to_hddl_facts(world),
+        }
 
     def _stage1_parse_nl(self, nl_instruction: str):
         """Stage 1: Natural Language -> LTLf Specification"""

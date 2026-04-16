@@ -121,6 +121,7 @@ class HDDLTaskInvocation:
 
     task_name: str
     args: List[str]
+    label: Optional[str] = None
 
     def to_signature(self) -> str:
         if not self.args:
@@ -174,9 +175,11 @@ class HDDLProblem:
     domain_name: str
     objects: List[str]
     object_types: Dict[str, str]
+    htn_parameter_types: Dict[str, str]
     init_facts: List[HDDLFact]
     htn_tasks: List[HDDLTaskInvocation]
     htn_ordered: bool
+    htn_ordering: List[Tuple[str, str]]
     goal_facts: List[HDDLFact]
 
 
@@ -237,9 +240,11 @@ class HDDLParser:
         domain_name = domain_name_match.group(1) if domain_name_match else "unknown_domain"
 
         objects, object_types = HDDLParser._extract_problem_objects(content)
+        htn_parameter_types = HDDLParser._extract_problem_htn_parameters(content)
         init_facts = HDDLParser._extract_problem_init_facts(content)
         htn_tasks = HDDLParser._extract_problem_htn_tasks(content)
         htn_ordered = HDDLParser._problem_htn_tasks_are_ordered(content)
+        htn_ordering = HDDLParser._extract_problem_htn_ordering(content)
         goal_facts = HDDLParser._extract_problem_goal_facts(content)
 
         return HDDLProblem(
@@ -247,9 +252,11 @@ class HDDLParser:
             domain_name=domain_name,
             objects=objects,
             object_types=object_types,
+            htn_parameter_types=htn_parameter_types,
             init_facts=init_facts,
             htn_tasks=htn_tasks,
             htn_ordered=htn_ordered,
+            htn_ordering=htn_ordering,
             goal_facts=goal_facts,
         )
 
@@ -288,6 +295,30 @@ class HDDLParser:
             objects.append(object_name)
             object_types[object_name] = type_name
         return objects, object_types
+
+    @staticmethod
+    def _extract_problem_htn_parameters(content: str) -> Dict[str, str]:
+        block = HDDLParser._extract_single_block(content, "htn")
+        if block is None:
+            return {}
+        params_expr = HDDLParser._extract_expression_after_keyword(block, ":parameters")
+        if params_expr is None:
+            return {}
+        params_str = params_expr[1:-1].strip() if params_expr.startswith("(") and params_expr.endswith(")") else params_expr
+        raw_params = HDDLParser._parse_parameters(params_str)
+        htn_parameter_types: Dict[str, str] = {}
+        for item in raw_params:
+            if " - " in item:
+                parameter_name, type_name = item.split(" - ", 1)
+                parameter_name = parameter_name.strip()
+                type_name = type_name.strip() or "object"
+            else:
+                parameter_name = item.strip()
+                type_name = "object"
+            if not parameter_name:
+                continue
+            htn_parameter_types[parameter_name] = type_name
+        return htn_parameter_types
 
     @staticmethod
     def _extract_problem_init_facts(content: str) -> List[HDDLFact]:
@@ -343,12 +374,14 @@ class HDDLParser:
         for item in items:
             if not isinstance(item, list) or not item:
                 continue
+            task_label: Optional[str] = None
             if (
                 len(item) == 2
                 and isinstance(item[0], str)
                 and isinstance(item[1], list)
                 and item[1]
             ):
+                task_label = str(item[0])
                 task_name = str(item[1][0])
                 task_args = [str(value) for value in item[1][1:]]
             else:
@@ -358,6 +391,7 @@ class HDDLParser:
                 HDDLTaskInvocation(
                     task_name=task_name,
                     args=task_args,
+                    label=task_label,
                 )
             )
         return task_invocations
@@ -368,6 +402,14 @@ class HDDLParser:
         if block is None:
             return False
         return ":ordered-subtasks" in block
+
+    @staticmethod
+    def _extract_problem_htn_ordering(content: str) -> List[Tuple[str, str]]:
+        block = HDDLParser._extract_single_block(content, "htn")
+        if block is None:
+            return []
+        ordering_expr = HDDLParser._extract_expression_after_keyword(block, ":ordering")
+        return HDDLParser._parse_ordering(ordering_expr)
 
     @staticmethod
     def _sexpr_to_fact(item: object) -> Optional[HDDLFact]:

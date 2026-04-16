@@ -34,6 +34,7 @@ class PANDAProblemBuilder:
 		domain_name: str,
 		objects: Sequence[str],
 		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
+		htn_parameters: Optional[Sequence[Tuple[str, str]]] = None,
 		task_name: str,
 		task_args: Sequence[str],
 		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
@@ -61,7 +62,9 @@ class PANDAProblemBuilder:
 		if typed_object_list:
 			lines.append(f"  (:objects {self._render_typed_objects(typed_object_list)})")
 		lines.append("  (:htn")
-		lines.append("    :parameters ()")
+		lines.append(
+			f"    :parameters {self._render_htn_parameters(htn_parameters or ())}"
+		)
 		if task_network_entries:
 			task_lines = [
 				f"(t{index} ({network_task}{self._render_problem_args(network_args)}))"
@@ -96,9 +99,17 @@ class PANDAProblemBuilder:
 		*,
 		task_network: Sequence[Tuple[str, Sequence[str]]] = (),
 	) -> List[str]:
-		candidates = list(objects or task_args)
+		candidates = [
+			str(obj)
+			for obj in (objects or task_args)
+			if str(obj).strip() and not str(obj).strip().startswith("?")
+		]
 		for _, network_args in task_network:
-			candidates.extend(str(arg) for arg in network_args)
+			candidates.extend(
+				str(arg)
+				for arg in network_args
+				if str(arg).strip() and not str(arg).strip().startswith("?")
+			)
 		return list(dict.fromkeys(candidates))
 
 	def _select_typed_objects(
@@ -195,6 +206,15 @@ class PANDAProblemBuilder:
 		for type_name, names in grouped.items():
 			chunks.append(f"{' '.join(names)} - {type_name}")
 		return " ".join(chunks)
+
+	@staticmethod
+	def _render_htn_parameters(parameters: Sequence[Tuple[str, str]]) -> str:
+		if not parameters:
+			return "()"
+		parts = []
+		for name, type_name in parameters:
+			parts.append(f"{name} - {type_name}")
+		return f"({' '.join(parts)})"
 
 	@staticmethod
 	def _render_problem_args(args: Iterable[str]) -> str:

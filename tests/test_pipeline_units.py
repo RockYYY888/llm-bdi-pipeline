@@ -96,6 +96,34 @@ def test_problem_builder_renders_ordering_constraints_for_temporally_extended_go
 	pipeline_tests.assert_problem_builder_renders_ordering_constraints_for_temporally_extended_goal()
 
 
+def test_stage5_hierarchical_planning_passes_configured_timeout(tmp_path, monkeypatch):
+	pipeline_tests.assert_stage5_hierarchical_planning_passes_configured_timeout(
+		tmp_path,
+		monkeypatch,
+	)
+
+
+def test_stage5_hierarchical_planning_sequences_linear_ordered_temporally_extended_goal(
+	tmp_path,
+	monkeypatch,
+):
+	pipeline_tests.assert_stage5_hierarchical_planning_sequences_linear_ordered_temporally_extended_goal(
+		tmp_path,
+		monkeypatch,
+	)
+
+
+def test_stage5_problem_root_planning_passes_configured_timeout(tmp_path, monkeypatch):
+	pipeline_tests.assert_stage5_problem_root_planning_passes_configured_timeout(
+		tmp_path,
+		monkeypatch,
+	)
+
+
+def test_problem_builder_renders_htn_parameters_for_problem_root_tasks():
+	pipeline_tests.assert_problem_builder_renders_htn_parameters_for_problem_root_tasks()
+
+
 def test_ipc_plan_verifier_grounds_parameterised_root_tasks_from_trace():
 	pipeline_tests.assert_ipc_plan_verifier_grounds_parameterised_root_tasks_from_trace()
 

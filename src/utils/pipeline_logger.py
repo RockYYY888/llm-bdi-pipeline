@@ -516,6 +516,7 @@ class PipelineLogger:
 		sanitised = {
 			"backend": artifacts.get("backend"),
 			"status": artifacts.get("status"),
+			"planning_mode": artifacts.get("planning_mode"),
 			"task_network": artifacts.get("task_network"),
 			"task_network_ordered": artifacts.get("task_network_ordered"),
 			"ordering_edges": artifacts.get("ordering_edges"),

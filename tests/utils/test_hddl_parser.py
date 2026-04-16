@@ -102,6 +102,9 @@ def test_blocksworld_problem_parser_extracts_ordered_subtasks_as_htn_tasks():
         task.task_name == "do_put_on" and task.args == ["b1", "b4"]
         for task in problem.htn_tasks
     )
+    assert problem.htn_ordered is True
+    assert problem.htn_ordering == []
+    assert problem.htn_tasks[0].label == "task1"
 
 
 def test_satellite_hddl_domain_exposes_tasks_methods_and_actions():
@@ -142,6 +145,59 @@ def test_satellite_problem_parser_extracts_labelled_subtasks_as_htn_tasks():
         and task.args == ["Phenomenon4", "thermograph0"]
         for task in problem.htn_tasks
     )
+    assert problem.htn_parameter_types == {}
+
+
+def test_satellite_problem_parser_extracts_htn_parameters():
+    problem_path = (
+        Path(__file__).parent.parent.parent
+        / "src"
+        / "domains"
+        / "satellite"
+        / "problems"
+        / "1obs-2sat-1mod.hddl"
+    )
+
+    problem = HDDLParser.parse_problem(str(problem_path))
+
+    assert problem.htn_parameter_types == {
+        "?direction1": "image_direction",
+        "?mode1": "mode",
+    }
+    assert [(task.label, task.task_name, task.args) for task in problem.htn_tasks] == [
+        ("task0", "do_observation", ["?direction1", "?mode1"]),
+    ]
+
+
+def test_problem_parser_extracts_explicit_root_ordering_edges(tmp_path):
+    problem_path = tmp_path / "ordered_problem.hddl"
+    problem_path.write_text(
+        """
+(define (problem demo-problem)
+ (:domain demo-domain)
+ (:objects a b - object)
+ (:htn
+  :tasks (and
+   (t1 (deliver a))
+   (t2 (deliver b))
+  )
+  :ordering (and
+   (< t1 t2)
+  )
+ )
+ (:init)
+)
+        """.strip()
+    )
+
+    problem = HDDLParser.parse_problem(str(problem_path))
+
+    assert problem.htn_ordered is False
+    assert problem.htn_ordering == [("t1", "t2")]
+    assert [(task.label, task.task_name, task.args) for task in problem.htn_tasks] == [
+        ("t1", "deliver", ["a"]),
+        ("t2", "deliver", ["b"]),
+    ]
 
 
 def test_transport_hddl_domain_exposes_tasks_methods_and_actions():
