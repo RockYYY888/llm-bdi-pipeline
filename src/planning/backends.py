@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from planning.linearization import LiftedLinearPlanner
+from planning.official_benchmark import (
+	OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
+	OFFICIAL_PANDADEALER_SOLVER_ID,
+)
 from planning.panda_portfolio import PANDAPlanner
 from planning.plan_models import PANDAPlanResult
 from planning.representations import PlanningRepresentation
@@ -152,7 +156,7 @@ class PandaDealerBackend(HierarchicalPlanningBackend):
 		timeout_seconds: Optional[float],
 	) -> PANDAPlanResult:
 		solver_config = _solver_config_with_backend_budget(
-			self.planner._solver_config_by_id("pandadealer_agile_lama"),
+			self.planner._solver_config_by_id(OFFICIAL_PANDADEALER_SOLVER_ID),
 		)
 		return self.planner.plan_hddl_files(
 			domain=domain,
@@ -196,7 +200,7 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 	) -> PANDAPlanResult:
 		solver_config = _solver_config_with_backend_budget(
 			self.planner.panda_planner._solver_config_by_id(
-				LiftedLinearPlanner.INNER_SOLVER_ID,
+				OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
 			),
 		)
 		return self.planner.plan_linearized_hddl_files(
@@ -209,7 +213,7 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 			timeout_seconds=timeout_seconds,
 			solver_configs=(solver_config,),
 			reported_solver_id=self.backend_name,
-			reported_engine_mode=LiftedLinearPlanner.INNER_SOLVER_ID,
+			reported_engine_mode=OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
 			linearization_metadata=dict(representation.metadata),
 		)
 

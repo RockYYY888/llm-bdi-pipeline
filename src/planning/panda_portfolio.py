@@ -24,6 +24,12 @@ from domain_build.method_synthesis.schema import (
 	HTNMethod,
 	HTNMethodLibrary,
 )
+from planning.official_benchmark import (
+	OFFICIAL_PANDADEALER_ENGINE_ARGS,
+	OFFICIAL_PANDADEALER_SOLVER_ID,
+	OFFICIAL_PANDA_PI_SOLVER_IDS,
+	OFFICIAL_TRANSLATION_FAST_DOWNWARD_CONFIGURATION,
+)
 from planning.problem_encoding import PANDAProblemBuilder
 from planning.plan_models import PANDAPlanResult, PANDAPlanStep
 
@@ -44,16 +50,8 @@ class PANDAPlanningError(RuntimeError):
 class PANDAPlanner:
 	"""Invoke the PANDA PI toolchain on an exported HDDL planning problem."""
 
-	OFFICIAL_PANDA_PI_SOLVER_IDS: Tuple[str, ...] = (
-		"progression_rc2_ff",
-		"progression_rc2_add",
-		"progression_rc2_lmc",
-		"progression_suboptimal",
-		"sat",
-		"bdd",
-		"translation_fd",
-	)
-	OFFICIAL_DEALER_SOLVER_IDS: Tuple[str, ...] = ("pandadealer_agile_lama",)
+	OFFICIAL_PANDA_PI_SOLVER_IDS: Tuple[str, ...] = OFFICIAL_PANDA_PI_SOLVER_IDS
+	OFFICIAL_DEALER_SOLVER_IDS: Tuple[str, ...] = (OFFICIAL_PANDADEALER_SOLVER_ID,)
 
 	def __init__(
 		self,
@@ -542,16 +540,18 @@ class PANDAPlanner:
 			"translation_fd": {
 				"solver_id": "translation_fd",
 				"engine_mode": "translation",
-				"engine_args": ("-2", "--downwardConf", "lazy-cea()"),
+				"engine_args": (
+					"-2",
+					"--downwardConf",
+					OFFICIAL_TRANSLATION_FAST_DOWNWARD_CONFIGURATION,
+				),
 				"requires_binary": "fast_downward",
 				"timeout_seconds": 120.0,
 			},
-			"pandadealer_agile_lama": {
-				"solver_id": "pandadealer_agile_lama",
+			OFFICIAL_PANDADEALER_SOLVER_ID: {
+				"solver_id": OFFICIAL_PANDADEALER_SOLVER_ID,
 				"engine_mode": "progression",
-				"engine_args": (
-					"--heuristic=lama(lazy=false;ha=false;lm=lmc;useLMOrd=false;h=add;search=gbfs)",
-				),
+				"engine_args": OFFICIAL_PANDADEALER_ENGINE_ARGS,
 				"requires_binary": "panda_dealer_engine",
 				"timeout_seconds": 180.0,
 			},

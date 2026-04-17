@@ -19,6 +19,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from planning.official_benchmark import (
+	OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
+	OFFICIAL_LIFTED_LINEAR_SOLVER_ID,
+)
 from planning.panda_portfolio import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
 
@@ -26,8 +30,8 @@ from planning.plan_models import PANDAPlanResult
 class LiftedLinearPlanner:
 	"""Run the IPC 2023 Lifted Linear config-2 workflow locally."""
 
-	SOLVER_ID = "lifted_linear_config_2"
-	INNER_SOLVER_ID = "sat"
+	SOLVER_ID = OFFICIAL_LIFTED_LINEAR_SOLVER_ID
+	INNER_SOLVER_ID = OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID
 	_TOKEN_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
 		("LA_", "<"),
 		("RA_", ">"),

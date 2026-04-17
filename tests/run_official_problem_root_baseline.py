@@ -135,7 +135,10 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 	from tests.support.ground_truth_baseline_support import run_official_problem_root_baseline_for_domain
 
-	summary = run_official_problem_root_baseline_for_domain(domain_key)
+	summary = run_official_problem_root_baseline_for_domain(
+		domain_key,
+		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else None,
+	)
 	summary_path = run_dir / f"{domain_key}.summary.json"
 	summary_path.write_text(json.dumps(summary, indent=2))
 	print(json.dumps(summary, indent=2))
@@ -180,11 +183,17 @@ def _run_parallel_full_baseline() -> int:
 	return 0 if summary["complete"] else 1
 
 
+_RUN_QUERY_IDS: List[str] = []
+
+
 def main() -> int:
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--domain", choices=DOMAIN_KEYS)
 	parser.add_argument("--run-dir")
+	parser.add_argument("--query-id", action="append", default=[])
 	args = parser.parse_args()
+	global _RUN_QUERY_IDS
+	_RUN_QUERY_IDS = list(args.query_id or [])
 
 	if args.domain:
 		if not args.run_dir:

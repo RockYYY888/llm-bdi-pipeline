@@ -6,7 +6,9 @@
   - offline domain build
   - online query execution
 - Keep the official ground-truth baseline as the first acceptance gate.
-- Continue targeted analysis of the two remaining `transport` failures after the semantic cleanup lands on `main`.
+- Re-run the full official ground-truth sweep now that the official benchmark
+  profile is fixed in code and the previous `transport` tail cases have flipped
+  to verified success.
 
 ## Completed
 
@@ -29,6 +31,18 @@
   - `transport pfile39.hddl`
   - `transport pfile40.hddl`
 - [x] Cleaned the repository structure further by removing retired documentation, empty legacy folders, and unused compatibility utilities.
+- [x] Pushed the semantic cleanup and standalone backend timeout fix to `main`.
+- [x] Centralized the official benchmark profile in code:
+  - official planning time budget
+  - official backend identifiers
+  - official PandaDealer and Lifted Linear command profiles
+- [x] Re-ran `transport` `query_38`, `query_39`, and `query_40` through the
+  file-backed harness.
+- [x] Confirmed all three targeted `transport` cases now succeed under the
+  fixed official profile:
+  - `query_38` -> `lifted_panda_sat`
+  - `query_39` -> `lifted_panda_sat`
+  - `query_40` -> `lifted_panda_sat`
 
 ## Verified
 
@@ -43,10 +57,7 @@
 
 ## Remaining
 
-- [ ] Push the semantic cleanup commit to `main`.
-- [ ] Compare `transport` `pfile38` with `pfile39` and `pfile40` at the instance-structure level.
-- [ ] Decide whether the remaining failures are:
-  - solver coverage limits
-  - representation blow-up limits
-  - or true unsatisfiable benchmark instances
-- [ ] Use that comparison to choose the next solver ablation.
+- [x] Compare `transport` `pfile38` with `pfile39` and `pfile40` at the instance-structure level.
+- [x] Decide whether the previous remaining failures were structural benchmark failures.
+- [ ] Re-run the full `115` official problem-root sweep under the fixed official profile.
+- [ ] Confirm the semantic summary updates from `113/115` to the new full-sweep result.

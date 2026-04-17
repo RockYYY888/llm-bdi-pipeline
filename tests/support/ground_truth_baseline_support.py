@@ -4,7 +4,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -224,11 +224,25 @@ def run_domain_problem_root_case(domain_key: str, query_id: str) -> Dict[str, An
 	}
 
 
-def run_official_problem_root_baseline_for_domain(domain_key: str) -> Dict[str, Any]:
+def run_official_problem_root_baseline_for_domain(
+	domain_key: str,
+	*,
+	query_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
 	query_cases = load_domain_query_cases(domain_key)
+	selected_query_ids = (
+		tuple(sorted(query_ids, key=query_id_sort_key))
+		if query_ids
+		else tuple(sorted(query_cases, key=query_id_sort_key))
+	)
+	missing_query_ids = [query_id for query_id in selected_query_ids if query_id not in query_cases]
+	if missing_query_ids:
+		raise KeyError(
+			f"Unknown query ids for domain '{domain_key}': {', '.join(missing_query_ids)}",
+		)
 	query_reports = [
 		run_domain_problem_root_case(domain_key, query_id)
-		for query_id in sorted(query_cases, key=query_id_sort_key)
+		for query_id in selected_query_ids
 	]
 	counts = {
 		"hierarchical_plan_verified": 0,
@@ -253,6 +267,7 @@ def run_official_problem_root_baseline_for_domain(domain_key: str) -> Dict[str, 
 			),
 		},
 		"total_queries": len(query_reports),
+		"selected_query_ids": list(selected_query_ids),
 		"verified_successes": counts.get("hierarchical_plan_verified", 0),
 		"hierarchical_rejection_failures": counts.get(
 			"primitive_plan_valid_but_hierarchical_rejected",

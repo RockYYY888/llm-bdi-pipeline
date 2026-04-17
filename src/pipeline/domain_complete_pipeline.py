@@ -38,6 +38,10 @@ from domain_build.method_synthesis.schema import (
 )
 from domain_build.method_synthesis.naming import query_root_alias_task_name, sanitize_identifier
 from planning.problem_structure import ProblemStructure, ProblemStructureAnalyzer
+from planning.official_benchmark import (
+    OFFICIAL_BACKEND_SELECTION_RULE,
+    OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS,
+)
 from planning.panda_portfolio import PANDAPlanner
 from planning.representations import (
     PlanningRepresentationBuilder,
@@ -79,7 +83,7 @@ class _NullExecutionLogger:
         return None
 
 
-OFFICIAL_PARALLEL_SELECTION_RULE = "parallel_backend_any_success"
+OFFICIAL_PARALLEL_SELECTION_RULE = OFFICIAL_BACKEND_SELECTION_RULE
 BACKEND_RESULT_MESSAGE = "backend_attempt"
 
 
@@ -220,7 +224,9 @@ class DomainCompletePipeline:
 
     DOMAIN_GATE_COMPACT_TASK_ARG_THRESHOLD = 32
     DOMAIN_GATE_MAX_VALIDATION_COMPOUND_STEPS = 8
-    OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS = 1800.0
+    OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS = (
+        OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
+    )
 
     def __init__(self, domain_file: str, problem_file: str | None = None):
         """
