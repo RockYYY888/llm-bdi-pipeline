@@ -1,5 +1,5 @@
 """
-Minimal HDDL condition parser shared by Stage 3 synthesis and Stage 5 rendering.
+Minimal HDDL condition parser shared by method synthesis and plan rendering.
 
 The parser keeps symbolic literals, including equality and disequality constraints.
 """

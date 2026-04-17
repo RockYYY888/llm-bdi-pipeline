@@ -1,7 +1,5 @@
 """
-Utility modules for the LLM-BDI pipeline
-
-Contains shared utility functions and classes used across different stages.
+Shared utility modules for the domain-complete HTN pipeline.
 """
 
 from .symbol_normalizer import SymbolNormalizer

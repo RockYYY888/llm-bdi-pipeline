@@ -1,0 +1,3 @@
+"""
+Semantic pipeline test package.
+"""

@@ -13,8 +13,16 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from utils.symbol_normalizer import SymbolNormalizer
-from stage1_interpretation.grounding_map import create_propositional_symbol
-from stage2_dfa_generation.ltlf_to_dfa import PredicateToProposition
+from query_execution.goal_grounding.grounding_map import create_propositional_symbol
+
+
+def convert_formula_to_propositional_symbols(
+    formula: str,
+    normalizer: SymbolNormalizer,
+) -> str:
+    """Mirror the current goal-grounding symbol-normalization contract."""
+
+    return normalizer.normalize_formula_string(formula)
 
 
 def test_hyphen_encoding_decoding():
@@ -44,7 +52,7 @@ def test_hyphen_encoding_decoding():
             all_passed = False
 
     print()
-    return all_passed
+    assert all_passed
 
 
 def test_propositional_symbol_with_hyphens():
@@ -73,7 +81,7 @@ def test_propositional_symbol_with_hyphens():
             all_passed = False
 
     print()
-    return all_passed
+    assert all_passed
 
 
 def test_formula_normalization_with_hyphens():
@@ -106,7 +114,7 @@ def test_formula_normalization_with_hyphens():
             all_passed = False
 
     print()
-    return all_passed
+    assert all_passed
 
 
 def test_symbol_restoration():
@@ -136,18 +144,16 @@ def test_symbol_restoration():
             all_passed = False
 
     print()
-    return all_passed
+    assert all_passed
 
 
-def test_integration_with_predicate_to_proposition():
-    """Test integration with PredicateToProposition class"""
+def test_formula_conversion_contract():
+    """Test the formula-to-propositional conversion contract"""
     print("=" * 80)
     print("TEST 5: Integration with PredicateToProposition")
     print("=" * 80)
 
     normalizer = SymbolNormalizer()
-    converter = PredicateToProposition(normalizer)
-
     test_formulas = [
         ("F(on(block-1, block-2))", "F(on_blockhh1_blockhh2)"),
         ("G(clear(rover-a))", "G(clear_roverhha)"),
@@ -156,7 +162,7 @@ def test_integration_with_predicate_to_proposition():
 
     all_passed = True
     for original, expected in test_formulas:
-        result = converter.convert_formula(original)
+        result = convert_formula_to_propositional_symbols(original, normalizer)
 
         if result == expected:
             print(f"✓ {original:50}")
@@ -168,7 +174,7 @@ def test_integration_with_predicate_to_proposition():
             all_passed = False
 
     print()
-    return all_passed
+    assert all_passed
 
 
 def test_grounding_map_integration():
@@ -198,7 +204,15 @@ def test_grounding_map_integration():
             all_passed = False
 
     print()
-    return all_passed
+    assert all_passed
+
+
+def _run_manual_test(test_function):
+    try:
+        test_function()
+        return True
+    except AssertionError:
+        return False
 
 
 def main():
@@ -210,12 +224,12 @@ def main():
     print()
 
     results = {
-        "Hyphen Encoding/Decoding": test_hyphen_encoding_decoding(),
-        "Propositional Symbol with Hyphens": test_propositional_symbol_with_hyphens(),
-        "Formula Normalization with Hyphens": test_formula_normalization_with_hyphens(),
-        "Symbol Restoration": test_symbol_restoration(),
-        "PredicateToProposition Integration": test_integration_with_predicate_to_proposition(),
-        "Grounding Map Integration": test_grounding_map_integration(),
+        "Hyphen Encoding/Decoding": _run_manual_test(test_hyphen_encoding_decoding),
+        "Propositional Symbol with Hyphens": _run_manual_test(test_propositional_symbol_with_hyphens),
+        "Formula Normalization with Hyphens": _run_manual_test(test_formula_normalization_with_hyphens),
+        "Symbol Restoration": _run_manual_test(test_symbol_restoration),
+        "Formula Conversion Contract": _run_manual_test(test_formula_conversion_contract),
+        "Grounding Map Integration": _run_manual_test(test_grounding_map_integration),
     }
 
     print("=" * 80)

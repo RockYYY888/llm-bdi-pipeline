@@ -1,5 +1,5 @@
 """
-Resolve negative literal semantics for Stage 3-6.
+Resolve negative literal semantics across method synthesis and planning.
 
 Current policy is intentionally strict and simple: all negative literals are treated
 as NAF (`not p(...)`) across the whole pipeline.
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
-	from stage3_method_synthesis.htn_schema import HTNLiteral
+	from domain_build.method_synthesis.schema import HTNLiteral
 
 
 NegationMode = Literal["naf"]
@@ -54,7 +54,7 @@ class NegationResolution:
 			return literal
 		if literal.negation_mode == "naf":
 			return literal
-		from stage3_method_synthesis.htn_schema import HTNLiteral
+		from domain_build.method_synthesis.schema import HTNLiteral
 
 		return HTNLiteral(
 			predicate=literal.predicate,
@@ -89,11 +89,11 @@ def resolve_negation_modes(
 	target_literals: Sequence["HTNLiteral"],
 	*,
 	query_text: Optional[str] = None,
-	stage1_hints: Optional[Dict[str, Any]] = None,
+	goal_grounding_hints: Optional[Dict[str, Any]] = None,
 ) -> NegationResolution:
 	"""Resolve all negative target predicates to NAF."""
 
-	_ = (domain, query_text, stage1_hints)
+	_ = (domain, query_text, goal_grounding_hints)
 	entries: list[NegationResolutionEntry] = []
 	seen: set[tuple[str, int]] = set()
 	for literal in target_literals:

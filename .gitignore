@@ -73,12 +73,11 @@ dmypy.json
 *.sublime-project
 *.sublime-workspace
 external/
+.external/
 AGENTS.md
 dissertation/
 latex_code/
+tests/logs/
 
-# Test outputs (stage3 backward planning)
-src/stage3_code_generation/test_*.asl
-src/stage3_code_generation/test_*.dot
-tests/stage1_interpretation/test_results_nl_to_ltlf_*.csv
 fast-downward/
+archive/

@@ -1,0 +1,1562 @@
+"""
+PANDA-backed Hierarchical Task Network planner.
+
+This module exports the HTN method library into temporary HDDL files, invokes
+the PANDA toolchain, and captures solver-portfolio artifacts for verifier-aware
+selection.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from domain_build.method_synthesis.schema import (
+	HTNLiteral,
+	HTNMethod,
+	HTNMethodLibrary,
+)
+from planning.problem_encoding import PANDAProblemBuilder
+from planning.plan_models import PANDAPlanResult, PANDAPlanStep
+
+
+class PANDAPlanningError(RuntimeError):
+	"""Raised when the PANDA planning backend fails."""
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		super().__init__(message)
+		self.metadata = dict(metadata or {})
+
+
+class PANDAPlanner:
+	"""Invoke the PANDA PI toolchain on an exported HDDL planning problem."""
+
+	OFFICIAL_PANDA_PI_SOLVER_IDS: Tuple[str, ...] = (
+		"progression_rc2_ff",
+		"progression_rc2_add",
+		"progression_rc2_lmc",
+		"progression_suboptimal",
+		"sat",
+		"bdd",
+		"translation_fd",
+	)
+	OFFICIAL_DEALER_SOLVER_IDS: Tuple[str, ...] = ("pandadealer_agile_lama",)
+
+	def __init__(
+		self,
+		workspace: Optional[str | Path] = None,
+		parser_cmd: str = "pandaPIparser",
+		grounder_cmd: str = "pandaPIgrounder",
+		engine_cmd: str = "pandaPIengine",
+		problem_builder: Optional[PANDAProblemBuilder] = None,
+	) -> None:
+		self.workspace = Path(workspace).resolve() if workspace else None
+		self.parser_cmd = parser_cmd
+		self.grounder_cmd = grounder_cmd
+		self.engine_cmd = engine_cmd
+		self.problem_builder = problem_builder or PANDAProblemBuilder()
+
+	def toolchain_available(self) -> bool:
+		return all(
+			self._resolve_command_head(command) is not None
+			for command in (self.parser_cmd, self.grounder_cmd, self.engine_cmd)
+		)
+
+	def plan(
+		self,
+		domain: Any,
+		method_library: HTNMethodLibrary,
+		objects: Sequence[str],
+		target_literal: Optional[HTNLiteral],
+		task_name: str,
+		transition_name: str,
+		*,
+		typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
+		htn_parameters: Optional[Sequence[Tuple[str, str]]] = None,
+		task_args: Optional[Sequence[str]] = None,
+		task_network: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
+		task_network_ordered: bool = True,
+		ordering_edges: Optional[Sequence[Tuple[str, str]]] = None,
+		allow_empty_plan: bool = False,
+		initial_facts: Optional[Sequence[str]] = None,
+		goal_facts: Optional[Sequence[str]] = None,
+		timeout_seconds: Optional[float] = None,
+		solver_configs: Optional[Sequence[Dict[str, Any]]] = None,
+		collect_all_candidates: bool = False,
+	) -> PANDAPlanResult:
+		self._require_toolchain()
+		total_start = time.perf_counter()
+		timing_profile: Dict[str, Any] = {}
+
+		task_args_tuple = tuple(
+			task_args if task_args is not None else (target_literal.args if target_literal else ())
+		)
+		task_network_entries = tuple(
+			(str(network_task), tuple(str(arg) for arg in network_args))
+			for network_task, network_args in (task_network or ())
+		)
+		domain_name = f"{domain.name}_{transition_name}"
+		work_dir = self._resolve_work_dir(transition_name)
+		work_dir.mkdir(parents=True, exist_ok=True)
+
+		export_start = time.perf_counter()
+		domain_hddl = self._build_domain_hddl(
+			domain,
+			method_library,
+			domain_name,
+			export_source_names=False,
+		)
+		problem_hddl = self.problem_builder.build_problem_hddl(
+			domain=domain,
+			domain_name=domain_name,
+			objects=objects,
+			typed_objects=typed_objects,
+			htn_parameters=htn_parameters,
+			task_name=task_name,
+			task_args=task_args_tuple,
+			task_network=task_network_entries,
+			task_network_ordered=task_network_ordered,
+			ordering_edges=ordering_edges,
+			initial_facts=initial_facts,
+			goal_facts=goal_facts,
+		)
+		timing_profile["hddl_export_seconds"] = time.perf_counter() - export_start
+
+		return self._plan_from_hddl_texts(
+			domain=domain,
+			domain_hddl=domain_hddl,
+			problem_hddl=problem_hddl,
+			task_name=task_name,
+			task_args_tuple=task_args_tuple,
+			target_literal=target_literal,
+			transition_name=transition_name,
+			allow_empty_plan=allow_empty_plan,
+			timeout_seconds=timeout_seconds,
+			total_start=total_start,
+			timing_profile=timing_profile,
+			solver_configs=solver_configs,
+			collect_all_candidates=collect_all_candidates,
+		)
+
+	def plan_hddl_files(
+		self,
+		*,
+		domain: Any,
+		domain_file: str | Path,
+		problem_file: str | Path,
+		task_name: str,
+		transition_name: str,
+		task_args: Optional[Sequence[str]] = None,
+		target_literal: Optional[HTNLiteral] = None,
+		allow_empty_plan: bool = False,
+		timeout_seconds: Optional[float] = None,
+		solver_configs: Optional[Sequence[Dict[str, Any]]] = None,
+		collect_all_candidates: bool = False,
+	) -> PANDAPlanResult:
+		self._require_toolchain()
+		total_start = time.perf_counter()
+		timing_profile: Dict[str, Any] = {}
+		domain_path = Path(domain_file).resolve()
+		problem_path = Path(problem_file).resolve()
+		read_start = time.perf_counter()
+		domain_hddl = domain_path.read_text()
+		problem_hddl = problem_path.read_text()
+		timing_profile["read_input_files_seconds"] = time.perf_counter() - read_start
+		task_args_tuple = tuple(task_args or ())
+		return self._plan_from_hddl_texts(
+			domain=domain,
+			domain_hddl=domain_hddl,
+			problem_hddl=problem_hddl,
+			task_name=task_name,
+			task_args_tuple=task_args_tuple,
+			target_literal=target_literal,
+			transition_name=transition_name,
+			allow_empty_plan=allow_empty_plan,
+			timeout_seconds=timeout_seconds,
+			total_start=total_start,
+			timing_profile=timing_profile,
+			solver_configs=solver_configs,
+			collect_all_candidates=collect_all_candidates,
+		)
+
+	def _plan_from_hddl_texts(
+		self,
+		*,
+		domain: Any,
+		domain_hddl: str,
+		problem_hddl: str,
+		task_name: str,
+		task_args_tuple: Tuple[str, ...],
+		target_literal: Optional[HTNLiteral],
+		transition_name: str,
+		allow_empty_plan: bool,
+		timeout_seconds: Optional[float],
+		total_start: float,
+		timing_profile: Dict[str, Any],
+		solver_configs: Optional[Sequence[Dict[str, Any]]],
+		collect_all_candidates: bool,
+	) -> PANDAPlanResult:
+		work_dir = self._resolve_work_dir(transition_name)
+		work_dir.mkdir(parents=True, exist_ok=True)
+
+		domain_path = work_dir / "domain.hddl"
+		problem_path = work_dir / "problem.hddl"
+		parsed_path = work_dir / "problem.psas"
+		grounded_path = work_dir / "problem.psas.grounded"
+		raw_plan_path = work_dir / "plan.original"
+		actual_plan_path = work_dir / "plan.actual"
+
+		write_files_start = time.perf_counter()
+		domain_path.write_text(domain_hddl)
+		problem_path.write_text(problem_hddl)
+		timing_profile["write_input_files_seconds"] = time.perf_counter() - write_files_start
+
+		parser_start = time.perf_counter()
+		parser_run = self._run_command(
+			self._build_command(self.parser_cmd, str(domain_path), str(problem_path), str(parsed_path)),
+			"parser",
+			work_dir,
+			timeout_seconds=timeout_seconds,
+		)
+		timing_profile["parser_seconds"] = time.perf_counter() - parser_start
+		grounder_start = time.perf_counter()
+		grounder_run = self._run_command(
+			self._build_command(self.grounder_cmd, str(parsed_path), str(grounded_path)),
+			"grounder",
+			work_dir,
+			timeout_seconds=timeout_seconds,
+		)
+		timing_profile["grounder_seconds"] = time.perf_counter() - grounder_start
+		engine_start = time.perf_counter()
+		engine_attempts: List[Dict[str, Any]] = []
+		conversion_total_seconds = 0.0
+		parse_total_seconds = 0.0
+		selected_engine_mode: Optional[str] = None
+		selected_solver_id: Optional[str] = None
+		engine_run: Optional[Dict[str, str]] = None
+		raw_plan_text = ""
+		actual_plan_text = ""
+		conversion_stdout = ""
+		conversion_stderr = ""
+		steps: List[PANDAPlanStep] = []
+		configured_solvers = tuple(
+			dict(config)
+			for config in (solver_configs or self.default_solver_portfolio())
+		)
+		for solver_config in configured_solvers:
+			solver_id = str(solver_config.get("solver_id") or "").strip()
+			engine_mode = str(solver_config.get("engine_mode") or "").strip() or None
+			if not solver_id:
+				raise ValueError("Each PANDA solver configuration requires a non-empty solver_id")
+			attempt_start = time.perf_counter()
+			attempt_timeout = self._effective_timeout_seconds(
+				total_start=total_start,
+				total_timeout_seconds=timeout_seconds,
+				attempt_start=attempt_start,
+				attempt_timeout_seconds=self._coerce_timeout_seconds(
+					solver_config.get("timeout_seconds"),
+				),
+			)
+			if attempt_timeout is not None and attempt_timeout <= 0:
+				engine_attempts.append(
+					{
+						"solver_id": solver_id,
+						"mode": engine_mode,
+						"status": "skipped",
+						"reason": "no_time_remaining",
+					},
+				)
+				continue
+			prepared_solver = self._prepare_solver_config(solver_config)
+			if prepared_solver.get("status") == "skipped":
+				engine_attempts.append(
+					{
+						"solver_id": solver_id,
+						"mode": engine_mode,
+						"status": "skipped",
+						"reason": prepared_solver.get("reason"),
+						"required_binary": prepared_solver.get("required_binary"),
+					},
+				)
+				continue
+
+			try:
+				engine_command = self._build_engine_command(
+					str(grounded_path),
+					prepared_solver,
+				)
+				candidate_engine_run = self._run_command(
+					engine_command,
+					"engine",
+					work_dir,
+					timeout_seconds=attempt_timeout,
+				)
+			except PANDAPlanningError as exc:
+				engine_attempts.append(
+					{
+						"solver_id": solver_id,
+						"mode": engine_mode,
+						"status": "failed",
+						"seconds": time.perf_counter() - attempt_start,
+						"error": str(exc),
+						"command": engine_command,
+						"metadata": dict(exc.metadata or {}),
+					},
+				)
+				continue
+
+			candidate_raw_plan_text = candidate_engine_run["stdout"]
+			candidate_raw_plan_path = work_dir / f"plan.{solver_id}.raw.txt"
+			candidate_actual_plan_path = work_dir / f"plan.{solver_id}.actual.txt"
+			candidate_raw_plan_path.write_text(candidate_raw_plan_text)
+			try:
+				candidate_actual_plan_text, candidate_conversion_stdout, candidate_conversion_stderr = (
+					self._convert_plan_output(
+						raw_plan_path=candidate_raw_plan_path,
+						actual_plan_path=candidate_actual_plan_path,
+						work_dir=work_dir,
+						timeout_seconds=self._effective_timeout_seconds(
+							total_start=total_start,
+							total_timeout_seconds=timeout_seconds,
+							attempt_start=attempt_start,
+							attempt_timeout_seconds=self._coerce_timeout_seconds(
+								solver_config.get("timeout_seconds"),
+							),
+						),
+					)
+				)
+			except PANDAPlanningError as exc:
+				engine_attempts.append(
+					{
+						"solver_id": solver_id,
+						"mode": engine_mode,
+						"status": "failed",
+						"seconds": time.perf_counter() - attempt_start,
+						"error": str(exc),
+						"command": engine_command,
+						"metadata": dict(exc.metadata or {}),
+						"raw_plan_path": str(candidate_raw_plan_path),
+					},
+				)
+				continue
+
+			candidate_conversion_seconds = time.perf_counter() - attempt_start
+			conversion_total_seconds += candidate_conversion_seconds
+			parse_plan_start = time.perf_counter()
+			candidate_steps = self._parse_plan_steps(
+				candidate_actual_plan_text or candidate_raw_plan_text,
+				domain,
+			)
+			parse_seconds = time.perf_counter() - parse_plan_start
+			parse_total_seconds += parse_seconds
+			candidate_has_hierarchical_trace = "->" in candidate_actual_plan_text
+			has_executable_plan = bool(candidate_steps) or allow_empty_plan or candidate_has_hierarchical_trace
+			candidate_action_path = [
+				(
+					f"{step.action_name}({', '.join(step.args)})"
+					if step.args
+					else str(step.action_name)
+				)
+				for step in candidate_steps
+			]
+			candidate_record = {
+				"solver_id": solver_id,
+				"mode": engine_mode,
+				"status": "success" if has_executable_plan else "no_plan",
+				"seconds": time.perf_counter() - attempt_start,
+				"step_count": len(candidate_steps),
+				"has_hierarchical_trace": candidate_has_hierarchical_trace,
+				"stdout_head": "\n".join(candidate_engine_run["stdout"].splitlines()[:12]),
+				"stderr_head": "\n".join(candidate_engine_run["stderr"].splitlines()[:12]),
+				"command": engine_command,
+				"raw_plan_path": str(candidate_raw_plan_path),
+				"actual_plan_path": str(candidate_actual_plan_path),
+				"action_path": candidate_action_path,
+				"steps": [step.to_dict() for step in candidate_steps],
+				"engine_stdout": candidate_engine_run["stdout"],
+				"engine_stderr": candidate_engine_run["stderr"],
+			}
+			engine_attempts.append(candidate_record)
+			if not has_executable_plan:
+				continue
+
+			if selected_engine_mode is None:
+				selected_engine_mode = engine_mode
+				selected_solver_id = solver_id
+				engine_run = candidate_engine_run
+				raw_plan_text = candidate_raw_plan_text
+				actual_plan_text = candidate_actual_plan_text or candidate_raw_plan_text
+				conversion_stdout = candidate_conversion_stdout
+				conversion_stderr = candidate_conversion_stderr
+				steps = candidate_steps
+			if not collect_all_candidates:
+				break
+
+		timing_profile["engine_seconds"] = time.perf_counter() - engine_start
+		timing_profile["conversion_seconds"] = conversion_total_seconds
+		timing_profile["parse_plan_seconds"] = parse_total_seconds
+		timing_profile["engine_mode_attempts"] = [
+			{
+				"solver_id": attempt.get("solver_id"),
+				"mode": attempt.get("mode"),
+				"status": attempt.get("status"),
+				"seconds": attempt.get("seconds"),
+				"step_count": attempt.get("step_count"),
+				"reason": attempt.get("reason"),
+			}
+			for attempt in engine_attempts
+		]
+		timing_profile["engine_mode"] = selected_engine_mode
+		timing_profile["solver_id"] = selected_solver_id
+
+		if selected_engine_mode is None or engine_run is None:
+			raise PANDAPlanningError(
+				f"PANDA returned no executable primitive plan for {task_name}({', '.join(task_args_tuple)})",
+				metadata={
+					"backend": "pandaPI",
+					"transition_name": transition_name,
+					"task_name": task_name,
+					"task_args": list(task_args_tuple),
+					"work_dir": str(work_dir),
+					"domain_hddl": domain_hddl,
+					"problem_hddl": problem_hddl,
+					"parser_stdout": parser_run["stdout"],
+					"parser_stderr": parser_run["stderr"],
+					"grounder_stdout": grounder_run["stdout"],
+					"grounder_stderr": grounder_run["stderr"],
+					"engine_attempts": list(engine_attempts),
+				},
+			)
+		raw_plan_path.write_text(raw_plan_text)
+		actual_plan_path.write_text(actual_plan_text or raw_plan_text)
+
+		timing_profile["total_seconds"] = time.perf_counter() - total_start
+		return PANDAPlanResult(
+			task_name=task_name,
+			task_args=task_args_tuple,
+			target_literal=target_literal,
+			engine_mode=selected_engine_mode,
+			solver_id=selected_solver_id,
+			steps=steps,
+			domain_hddl=domain_hddl,
+			problem_hddl=problem_hddl,
+			parser_stdout=parser_run["stdout"] + conversion_stdout,
+			parser_stderr=parser_run["stderr"] + conversion_stderr,
+			grounder_stdout=grounder_run["stdout"],
+			grounder_stderr=grounder_run["stderr"],
+			engine_stdout=engine_run["stdout"],
+			engine_stderr=engine_run["stderr"],
+			raw_plan=raw_plan_text,
+			actual_plan=actual_plan_text or raw_plan_text,
+			work_dir=str(work_dir),
+			timing_profile=timing_profile,
+			solver_candidates=list(engine_attempts),
+		)
+
+	def default_solver_portfolio(self) -> Tuple[Dict[str, Any], ...]:
+		raw_value = os.getenv("PANDA_PI_ENGINE_MODES", "sat,default,bdd")
+		canonical_modes = {
+			"default": ("progression_rc2_ff",),
+			"engine": ("progression_rc2_ff",),
+			"sat": ("sat",),
+			"bdd": ("bdd",),
+			"translate": ("translation_fd",),
+			"translation": ("translation_fd",),
+		}
+		selected: List[str] = []
+		for token in raw_value.split(","):
+			for solver_id in canonical_modes.get(token.strip().lower(), ()):
+				if solver_id not in selected:
+					selected.append(solver_id)
+		if not selected:
+			selected = ["sat", "progression_rc2_ff", "bdd"]
+		return tuple(self._solver_config_by_id(solver_id) for solver_id in selected)
+
+	def official_solver_portfolio(self) -> Tuple[Dict[str, Any], ...]:
+		return self.official_solver_portfolio_for_backend("panda_pi_portfolio")
+
+	def official_solver_portfolio_for_backend(
+		self,
+		backend_name: str,
+	) -> Tuple[Dict[str, Any], ...]:
+		backend = str(backend_name or "").strip().lower()
+		if backend in {"pandadealer", "pandadealer_agile_lama", "dealer", "dealer_only"}:
+			solver_ids = self.OFFICIAL_DEALER_SOLVER_IDS
+		elif backend in {"panda_pi_portfolio", "panda_pi", "pandapi"}:
+			solver_ids = self.OFFICIAL_PANDA_PI_SOLVER_IDS
+		else:
+			raise ValueError(f"Unknown official solver backend '{backend_name}'")
+		return tuple(self._solver_config_by_id(solver_id) for solver_id in solver_ids)
+
+	def _solver_config_by_id(self, solver_id: str) -> Dict[str, Any]:
+		configs = {
+			"progression_rc2_ff": {
+				"solver_id": "progression_rc2_ff",
+				"engine_mode": "progression",
+				"engine_args": ("-p", "-H", "rc2(ff)"),
+				"timeout_seconds": 75.0,
+			},
+			"progression_rc2_add": {
+				"solver_id": "progression_rc2_add",
+				"engine_mode": "progression",
+				"engine_args": ("-p", "-H", "rc2(add)"),
+				"timeout_seconds": 75.0,
+			},
+			"progression_rc2_lmc": {
+				"solver_id": "progression_rc2_lmc",
+				"engine_mode": "progression",
+				"engine_args": ("-p", "-H", "rc2(lmc)"),
+				"timeout_seconds": 75.0,
+			},
+			"progression_suboptimal": {
+				"solver_id": "progression_suboptimal",
+				"engine_mode": "progression",
+				"engine_args": ("-p", "-H", "rc2(ff)", "--suboptimal"),
+				"timeout_seconds": 75.0,
+			},
+			"sat": {
+				"solver_id": "sat",
+				"engine_mode": "sat",
+				"engine_args": ("-s",),
+				"timeout_seconds": 90.0,
+			},
+			"bdd": {
+				"solver_id": "bdd",
+				"engine_mode": "bdd",
+				"engine_args": ("-b",),
+				"timeout_seconds": 90.0,
+			},
+			"translation_fd": {
+				"solver_id": "translation_fd",
+				"engine_mode": "translation",
+				"engine_args": ("-2", "--downwardConf", "lazy-cea()"),
+				"requires_binary": "fast_downward",
+				"timeout_seconds": 120.0,
+			},
+			"pandadealer_agile_lama": {
+				"solver_id": "pandadealer_agile_lama",
+				"engine_mode": "progression",
+				"engine_args": (
+					"--heuristic=lama(lazy=false;ha=false;lm=lmc;useLMOrd=false;h=add;search=gbfs)",
+				),
+				"requires_binary": "panda_dealer_engine",
+				"timeout_seconds": 180.0,
+			},
+		}
+		try:
+			return dict(configs[solver_id])
+		except KeyError as exc:
+			raise ValueError(f"Unknown PANDA solver configuration '{solver_id}'") from exc
+
+	def _prepare_solver_config(self, solver_config: Dict[str, Any]) -> Dict[str, Any]:
+		prepared = dict(solver_config)
+		engine_args = tuple(str(value) for value in (prepared.get("engine_args") or ()))
+		engine_cmd = str(prepared.get("engine_cmd") or self.engine_cmd)
+		if prepared.get("requires_binary") == "fast_downward":
+			downward = self._resolve_fast_downward()
+			if downward is None:
+				return {
+					"solver_id": prepared.get("solver_id"),
+					"engine_mode": prepared.get("engine_mode"),
+					"status": "skipped",
+					"reason": "fast_downward_unavailable",
+					"required_binary": "fast-downward.py",
+				}
+			engine_args = (*engine_args, "--downward", downward)
+		elif prepared.get("requires_binary") == "panda_dealer_engine":
+			dealer_engine = self._resolve_panda_dealer_engine()
+			if dealer_engine is None:
+				return {
+					"solver_id": prepared.get("solver_id"),
+					"engine_mode": prepared.get("engine_mode"),
+					"status": "skipped",
+					"reason": "panda_dealer_unavailable",
+					"required_binary": "PandaDealer pandaPIengine",
+				}
+			engine_cmd = dealer_engine
+		prepared["engine_args"] = engine_args
+		prepared["engine_cmd"] = engine_cmd
+		prepared["command"] = self._build_command(
+			engine_cmd,
+			*engine_args,
+			"{grounded_path}",
+		)
+		return prepared
+
+	def _build_engine_command(
+		self,
+		grounded_path: str,
+		solver_config: Dict[str, Any],
+	) -> List[str]:
+		engine_args = tuple(str(value) for value in (solver_config.get("engine_args") or ()))
+		engine_cmd = str(solver_config.get("engine_cmd") or self.engine_cmd)
+		return self._build_command(
+			engine_cmd,
+			*engine_args,
+			grounded_path,
+		)
+
+	@staticmethod
+	def _resolve_fast_downward() -> Optional[str]:
+		wrapper_path = Path(__file__).with_name("fast_downward_compat.py").resolve()
+		if not wrapper_path.exists():
+			return None
+		if PANDAPlanner._discover_fast_downward_binary(wrapper_path) is None:
+			return None
+		return str(wrapper_path)
+
+	@staticmethod
+	def _discover_fast_downward_binary(wrapper_path: Optional[Path] = None) -> Optional[Path]:
+		candidates: List[Optional[str | Path]] = [
+			os.getenv("PANDA_PI_FAST_DOWNWARD_REAL"),
+			os.getenv("FAST_DOWNWARD_REAL"),
+			os.getenv("PANDA_PI_FAST_DOWNWARD"),
+			os.getenv("FAST_DOWNWARD"),
+			shutil.which("fast-downward.py"),
+			shutil.which("downward"),
+			shutil.which("fast-downward"),
+		]
+		downloads_dir = Path.home() / "Downloads"
+		if downloads_dir.exists():
+			candidates.extend(downloads_dir.rglob("fast-downward.py"))
+		for candidate in candidates:
+			if not candidate:
+				continue
+			resolved = Path(candidate).expanduser().resolve()
+			if wrapper_path is not None and resolved == wrapper_path:
+				continue
+			if resolved.exists():
+				return resolved
+		return None
+
+	@staticmethod
+	def _resolve_panda_dealer_engine() -> Optional[str]:
+		resolved = PANDAPlanner._discover_panda_dealer_engine()
+		return str(resolved) if resolved is not None else None
+
+	@staticmethod
+	def _discover_panda_dealer_engine() -> Optional[Path]:
+		repo_root = Path(__file__).resolve().parents[2]
+		dealer_home = os.getenv("PANDA_DEALER_HOME")
+		candidates: List[Optional[str | Path]] = [
+			os.getenv("PANDA_DEALER_ENGINE"),
+			(
+				Path(dealer_home).expanduser()
+				/ "03-lama-planner"
+				/ "src"
+				/ "bin"
+				/ "pandaPIengine"
+			)
+			if dealer_home
+			else None,
+			repo_root / ".external" / "PandaDealer" / "03-lama-planner" / "src" / "bin" / "pandaPIengine",
+			Path("/tmp/PandaDealer_probe/03-lama-planner/src/bin/pandaPIengine"),
+			Path.home() / "Downloads" / "PandaDealer" / "03-lama-planner" / "src" / "bin" / "pandaPIengine",
+			Path.home() / "Downloads" / "PandaDealer_probe" / "03-lama-planner" / "src" / "bin" / "pandaPIengine",
+		]
+		for candidate in candidates:
+			if not candidate:
+				continue
+			resolved = Path(candidate).expanduser().resolve()
+			if resolved.exists():
+				return resolved
+		return None
+
+	@staticmethod
+	def _remaining_timeout_seconds(
+		total_start: float,
+		timeout_seconds: Optional[float],
+	) -> Optional[float]:
+		if timeout_seconds is None:
+			return None
+		elapsed = time.perf_counter() - total_start
+		return max(timeout_seconds - elapsed, 0.0)
+
+	@staticmethod
+	def _coerce_timeout_seconds(value: Any) -> Optional[float]:
+		if value in (None, ""):
+			return None
+		return max(float(value), 0.0)
+
+	@classmethod
+	def _effective_timeout_seconds(
+		cls,
+		*,
+		total_start: float,
+		total_timeout_seconds: Optional[float],
+		attempt_start: float,
+		attempt_timeout_seconds: Optional[float],
+	) -> Optional[float]:
+		total_remaining = cls._remaining_timeout_seconds(total_start, total_timeout_seconds)
+		attempt_remaining = cls._remaining_timeout_seconds(attempt_start, attempt_timeout_seconds)
+		if total_remaining is None:
+			return attempt_remaining
+		if attempt_remaining is None:
+			return total_remaining
+		return min(total_remaining, attempt_remaining)
+
+	def _convert_plan_output(
+		self,
+		*,
+		raw_plan_path: Path,
+		actual_plan_path: Path,
+		work_dir: Path,
+		timeout_seconds: Optional[float],
+	) -> Tuple[str, str, str]:
+		actual_plan_text = ""
+		conversion_stdout = ""
+		conversion_stderr = ""
+		conversion_command = self._build_command(
+			self.parser_cmd,
+			"-c",
+			str(raw_plan_path),
+			str(actual_plan_path),
+		)
+		try:
+			conversion_result = self._run_subprocess(
+				conversion_command,
+				work_dir,
+				timeout_seconds=timeout_seconds,
+			)
+			conversion_stdout = conversion_result["stdout"]
+			conversion_stderr = conversion_result["stderr"]
+		except PANDAPlanningError as exc:
+			if exc.metadata.get("stage") != "subprocess_timeout":
+				raise
+			raise PANDAPlanningError(
+				"PANDA plan conversion timed out",
+				metadata={
+					"backend": "pandaPI",
+					"stage": "conversion",
+					"command": list(conversion_command),
+					"stdout": exc.metadata.get("stdout", ""),
+					"stderr": exc.metadata.get("stderr", ""),
+					"work_dir": str(work_dir),
+					"timeout_seconds": timeout_seconds,
+				},
+			) from exc
+		if conversion_result["returncode"] == 0 and actual_plan_path.exists():
+			actual_plan_text = actual_plan_path.read_text()
+		elif raw_plan_path.exists():
+			actual_plan_text = raw_plan_path.read_text()
+		return actual_plan_text, conversion_stdout, conversion_stderr
+
+	def extract_method_trace(self, plan_text: str) -> List[Dict[str, Any]]:
+		lines = [
+			line.strip()
+			for line in str(plan_text or "").splitlines()
+			if line.strip() and line.strip() != "==>"
+		]
+		if not lines:
+			return []
+
+		method_nodes: Dict[int, Dict[str, Any]] = {}
+		primitive_node_ids: set[int] = set()
+		root_ids: List[int] = []
+		for line in lines:
+			if line.startswith("root "):
+				root_ids.extend(self._parse_plan_node_ids(line.split()[1:]))
+				continue
+			parts = line.split()
+			if not parts:
+				continue
+			try:
+				node_id = int(parts[0])
+			except ValueError:
+				continue
+			if "->" not in parts:
+				primitive_node_ids.add(node_id)
+				continue
+			arrow_index = parts.index("->")
+			if arrow_index < 2 or arrow_index + 1 >= len(parts):
+				continue
+			method_nodes[node_id] = {
+				"method_name": parts[arrow_index + 1],
+				"task_args": parts[2:arrow_index],
+				"children": self._parse_plan_node_ids(parts[arrow_index + 2:]),
+			}
+
+		trace: List[Dict[str, Any]] = []
+		visited: set[int] = set()
+		first_primitive_cache: Dict[int, int] = {}
+
+		def first_primitive_id(node_id: int) -> int:
+			if node_id in first_primitive_cache:
+				return first_primitive_cache[node_id]
+			if node_id in primitive_node_ids:
+				first_primitive_cache[node_id] = node_id
+				return node_id
+			node = method_nodes.get(node_id)
+			if node is None:
+				first_primitive_cache[node_id] = node_id
+				return node_id
+			child_order = [
+				first_primitive_id(child_id)
+				for child_id in node["children"]
+			]
+			first_primitive_cache[node_id] = min(child_order) if child_order else node_id
+			return first_primitive_cache[node_id]
+
+		def visit(node_id: int) -> None:
+			if node_id in visited:
+				return
+			node = method_nodes.get(node_id)
+			if node is None:
+				return
+			visited.add(node_id)
+			trace.append(
+				{
+					"method_name": node["method_name"],
+					"task_args": list(node["task_args"]),
+				},
+			)
+			for child_id in sorted(
+				node["children"],
+				key=lambda child_id: (first_primitive_id(child_id), child_id),
+			):
+				visit(child_id)
+
+		for node_id in sorted(root_ids, key=lambda node_id: (first_primitive_id(node_id), node_id)):
+			visit(node_id)
+		for node_id in sorted(method_nodes, key=lambda node_id: (first_primitive_id(node_id), node_id)):
+			visit(node_id)
+		return trace
+
+	def _resolve_work_dir(self, transition_name: str) -> Path:
+		if self.workspace is None:
+			return Path(tempfile.mkdtemp(prefix="panda_method_synthesis_")) / transition_name
+		return self.workspace / "panda" / transition_name
+
+	def _require_toolchain(self) -> None:
+		missing = [
+			command
+			for command in (self.parser_cmd, self.grounder_cmd, self.engine_cmd)
+			if self._resolve_command_head(command) is None
+		]
+		if not missing:
+			return
+
+		raise PANDAPlanningError(
+			"PANDA toolchain is not available on PATH. Missing commands: "
+			+ ", ".join(missing),
+			metadata={
+				"backend": "pandaPI",
+				"missing_commands": missing,
+			},
+		)
+
+	def _build_domain_hddl(
+		self,
+		domain: Any,
+		method_library: HTNMethodLibrary,
+		domain_name: str,
+		*,
+		export_source_names: bool = False,
+	) -> str:
+		task_type_map = self._infer_task_type_map(domain, method_library)
+		requirements = list(domain.requirements or [])
+		if ":hierarchy" not in requirements:
+			requirements.append(":hierarchy")
+
+		lines = [f"(define (domain {domain_name})"]
+		if requirements:
+			lines.append(f"  (:requirements {' '.join(requirements)})")
+		if domain.types:
+			lines.append(f"  (:types {' '.join(domain.types)})")
+		lines.append("")
+		lines.append("  (:predicates")
+		for predicate in domain.predicates:
+			lines.append(f"    ({predicate.name}{self._render_signature_parameters(predicate.parameters)})")
+		lines.append("  )")
+		lines.append("")
+
+		rendered_task_names: set[tuple[str, tuple[str, ...]]] = set()
+		for task in method_library.compound_tasks:
+			exported_task_name = self._export_task_name(task, export_source_names)
+			task_signature = task_type_map.get(task.name) or task_type_map.get(task.source_name or "")
+			rendered_key = (exported_task_name, tuple(task_signature or ()))
+			if rendered_key in rendered_task_names:
+				continue
+			rendered_task_names.add(rendered_key)
+			lines.append(f"  (:task {exported_task_name}")
+			lines.append(
+				f"    :parameters ({self._render_typed_variables(task.parameters, domain.types, task_signature)})"
+			)
+			lines.append("  )")
+			lines.append("")
+
+		task_lookup = {task.name: task for task in method_library.compound_tasks}
+		for method in method_library.methods:
+			lines.extend(
+				self._render_method(
+					method,
+					task_lookup,
+					domain.types,
+					task_type_map,
+					self._predicate_type_map(domain),
+					self._action_type_map(domain),
+					export_source_names=export_source_names,
+				)
+			)
+			lines.append("")
+
+		for action in domain.actions:
+			lines.append(f"  (:action {action.name}")
+			lines.append(f"    :parameters ({self._render_signature_parameters(action.parameters).strip()})")
+			lines.append(f"    :precondition {action.preconditions}")
+			lines.append(f"    :effect {action.effects}")
+			lines.append("  )")
+			lines.append("")
+
+		if lines[-1] == "":
+			lines.pop()
+		lines.append(")")
+		return "\n".join(lines) + "\n"
+
+	def _render_method(
+		self,
+		method: HTNMethod,
+		task_lookup: Dict[str, Any],
+		domain_types: Sequence[str],
+		task_type_map: Dict[str, Tuple[str, ...]],
+		predicate_types: Dict[str, Tuple[str, ...]],
+		action_types: Dict[str, Tuple[str, ...]],
+		*,
+		export_source_names: bool = False,
+	) -> List[str]:
+		method_parameters = self._method_parameter_order(method, task_lookup.get(method.task_name))
+		task_signature = task_type_map.get(method.task_name, ())
+		method_parameter_types = self._infer_method_parameter_types(
+			method,
+			method_parameters,
+			task_signature,
+			predicate_types,
+			action_types,
+			task_type_map,
+			self._default_parameter_type(domain_types),
+		)
+		variable_map = {
+			name: self._render_variable(name)
+			for name in method_parameters
+		}
+		task_schema = task_lookup.get(method.task_name)
+		task_args = method.task_args or self._default_method_task_args(method, task_schema)
+
+		lines = [f"  (:method {method.method_name}"]
+		lines.append(
+			f"    :parameters ({self._render_typed_variables(method_parameters, domain_types, method_parameter_types)})"
+		)
+		lines.append(
+			f"    :task ({self._export_task_name(task_schema, export_source_names, fallback=method.task_name)}"
+			f"{self._render_invocation_tokens(task_args, variable_map)})"
+		)
+		lines.append(
+			f"    :precondition {self._render_literal_conjunction(method.context, variable_map)}"
+		)
+		subtasks_keyword = ":subtasks" if method.ordering else ":ordered-subtasks"
+		lines.append(f"    {subtasks_keyword} (and")
+		for step in method.subtasks:
+			step_name = self._render_method_step_name(step, task_lookup)
+			if step.kind == "compound":
+				step_name = self._render_method_step_name(
+					step,
+					task_lookup,
+					export_source_names=export_source_names,
+				)
+			else:
+				step_name = self._render_method_step_name(step, task_lookup)
+			lines.append(
+				f"      ({step.step_id} ({step_name}"
+				f"{self._render_invocation_tokens(step.args, variable_map)}))"
+			)
+		lines.append("    )")
+		if method.ordering:
+			lines.append("    :ordering (and")
+			for before, after in method.ordering:
+				lines.append(f"      (< {before} {after})")
+			lines.append("    )")
+		lines.append("  )")
+		return lines
+
+	@staticmethod
+	def _default_method_task_args(
+		method: HTNMethod,
+		task_schema: Any,
+	) -> Tuple[str, ...]:
+		if method.task_args:
+			return tuple(method.task_args)
+		if task_schema is None:
+			return tuple(method.parameters)
+		declared_parameters = tuple(getattr(task_schema, "parameters", ()) or ())
+		if not declared_parameters:
+			return ()
+		leading_parameters = tuple(method.parameters[: len(declared_parameters)])
+		if len(leading_parameters) == len(declared_parameters):
+			return leading_parameters
+		return declared_parameters
+
+	def _render_method_step_name(
+		self,
+		step: Any,
+		task_lookup: Dict[str, Any],
+		*,
+		export_source_names: bool = False,
+	) -> str:
+		if getattr(step, "kind", None) == "primitive":
+			if getattr(step, "action_name", None):
+				return step.action_name
+			return step.task_name.replace("_", "-")
+		task_schema = task_lookup.get(step.task_name)
+		return self._export_task_name(task_schema, export_source_names, fallback=step.task_name)
+
+	@staticmethod
+	def _export_task_name(task_schema: Any, export_source_names: bool, *, fallback: str = "") -> str:
+		if task_schema is None:
+			return fallback
+		if export_source_names and getattr(task_schema, "source_name", None):
+			return getattr(task_schema, "source_name")
+		return getattr(task_schema, "name", None) or fallback
+
+	def _parse_plan_steps(self, plan_text: str, domain: Any) -> List[PANDAPlanStep]:
+		action_names = {action.name for action in domain.actions}
+		steps: List[PANDAPlanStep] = []
+
+		for line in plan_text.splitlines():
+			plain_match = re.fullmatch(
+				r"\s*\d+\s+([a-zA-Z][a-zA-Z0-9_-]*)(?:\s+(.*?))?\s*",
+				line,
+			)
+			if plain_match and "->" not in line:
+				action_name = plain_match.group(1)
+				if action_name not in action_names:
+					continue
+				args_blob = plain_match.group(2) or ""
+				args = tuple(token for token in args_blob.strip().split() if token)
+				steps.append(
+					PANDAPlanStep(
+						task_name=self._sanitize_name(action_name),
+						action_name=action_name,
+						args=args,
+						source_line=line.strip(),
+					)
+				)
+				continue
+
+			matches = re.findall(r"\(([a-zA-Z][a-zA-Z0-9_-]*)([^)]*)\)", line)
+			for action_name, args_blob in matches:
+				if action_name not in action_names:
+					continue
+				args = tuple(token for token in args_blob.strip().split() if token)
+				steps.append(
+					PANDAPlanStep(
+						task_name=self._sanitize_name(action_name),
+						action_name=action_name,
+						args=args,
+						source_line=line.strip(),
+					)
+				)
+				break
+
+		return steps
+
+	def _run_command(
+		self,
+		command: Sequence[str],
+		stage: str,
+		work_dir: Path,
+		*,
+		timeout_seconds: Optional[float] = None,
+	) -> Dict[str, str]:
+		try:
+			result = self._run_subprocess(
+				command,
+				work_dir,
+				timeout_seconds=timeout_seconds,
+			)
+		except PANDAPlanningError as exc:
+			if exc.metadata.get("stage") != "subprocess_timeout":
+				raise
+			raise PANDAPlanningError(
+				f"PANDA {stage} step timed out",
+				metadata={
+					"backend": "pandaPI",
+					"stage": stage,
+					"command": list(command),
+					"stdout": exc.metadata.get("stdout", ""),
+					"stderr": exc.metadata.get("stderr", ""),
+					"work_dir": str(work_dir),
+					"timeout_seconds": timeout_seconds,
+				},
+			) from exc
+		if result["returncode"] == 0:
+			return {
+				"stdout": result["stdout"],
+				"stderr": result["stderr"],
+			}
+
+		raise PANDAPlanningError(
+			f"PANDA {stage} step failed with exit code {result['returncode']}",
+			metadata={
+				"backend": "pandaPI",
+				"stage": stage,
+				"command": list(command),
+				"stdout": result["stdout"],
+				"stderr": result["stderr"],
+				"work_dir": str(work_dir),
+			},
+		)
+
+	def _run_subprocess(
+		self,
+		command: Sequence[str],
+		work_dir: Path,
+		*,
+		timeout_seconds: Optional[float] = None,
+	) -> Dict[str, Any]:
+		process = subprocess.Popen(
+			command,
+			cwd=work_dir,
+			text=True,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			start_new_session=True,
+		)
+		try:
+			stdout, stderr = process.communicate(timeout=timeout_seconds)
+		except subprocess.TimeoutExpired as exc:
+			self._terminate_process_group(process)
+			stdout, stderr = process.communicate()
+			raise PANDAPlanningError(
+				"PANDA subprocess timed out",
+				metadata={
+					"stage": "subprocess_timeout",
+					"command": list(command),
+					"stdout": exc.stdout or stdout or "",
+					"stderr": exc.stderr or stderr or "",
+					"work_dir": str(work_dir),
+					"timeout_seconds": timeout_seconds,
+				},
+			) from exc
+		return {
+			"returncode": process.returncode,
+			"stdout": stdout or "",
+			"stderr": stderr or "",
+		}
+
+	@staticmethod
+	def _terminate_process_group(process: subprocess.Popen) -> None:
+		try:
+			os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+		except Exception:
+			try:
+				process.kill()
+			except Exception:
+				return
+
+	@staticmethod
+	def _parse_plan_node_ids(tokens: Sequence[str]) -> List[int]:
+		node_ids: List[int] = []
+		for token in tokens:
+			try:
+				node_ids.append(int(str(token)))
+			except ValueError:
+				continue
+		return node_ids
+
+	@staticmethod
+	def _sanitize_name(name: str) -> str:
+		return name.replace("-", "_")
+
+	@staticmethod
+	def _command_head(command: str) -> str:
+		return shlex.split(command)[0]
+
+	def _build_command(self, command: str, *args: str) -> List[str]:
+		parts = shlex.split(command)
+		resolved = self._resolve_command_head(command)
+		if resolved:
+			parts[0] = resolved
+		return [*parts, *args]
+
+	def _resolve_command_head(self, command: str) -> Optional[str]:
+		head = self._command_head(command)
+		if os.path.sep in head:
+			if Path(head).is_file() and os.access(head, os.X_OK):
+				return head
+			return None
+
+		for directory in self._default_command_dirs():
+			candidate = directory / head
+			if candidate.is_file() and os.access(candidate, os.X_OK):
+				return str(candidate)
+
+		resolved = shutil.which(head)
+		if resolved:
+			return resolved
+
+		return None
+
+	def _default_command_dirs(self) -> Tuple[Path, ...]:
+		directories: List[Path] = []
+		panda_home = os.getenv("PANDA_PI_HOME")
+		if panda_home:
+			directories.append(Path(panda_home) / "bin")
+		panda_bin = os.getenv("PANDA_PI_BIN")
+		if panda_bin:
+			directories.append(Path(panda_bin))
+		directories.append(Path.home() / ".local" / "pandaPI-full" / "bin")
+		directories.append(Path.home() / ".local" / "pandaPI" / "bin")
+
+		unique: List[Path] = []
+		for directory in directories:
+			if directory not in unique:
+				unique.append(directory)
+		return tuple(unique)
+
+	@staticmethod
+	def _render_signature_parameters(parameters: Iterable[str]) -> str:
+		text = " ".join(str(item) for item in parameters if str(item).strip())
+		return f" {text}" if text else ""
+
+	def _method_parameter_order(
+		self,
+		method: HTNMethod,
+		task_schema: Any,
+	) -> Tuple[str, ...]:
+		ordered: List[str] = []
+		seen: set[str] = set()
+
+		def add(token: str) -> None:
+			if not self._is_variable_token(token):
+				return
+			canonical = token.lstrip("?")
+			if canonical in seen:
+				return
+			seen.add(canonical)
+			ordered.append(canonical)
+
+		def add_schema_token(token: str) -> None:
+			if not token:
+				return
+			canonical = token.lstrip("?")
+			if canonical in seen:
+				return
+			seen.add(canonical)
+			ordered.append(canonical)
+
+		task_binding_tokens: Sequence[str] = ()
+		if task_schema is not None:
+			task_binding_tokens = self._task_binding_parameters(
+				method,
+				len(tuple(getattr(task_schema, "parameters", ()) or ())),
+			)
+		for token in task_binding_tokens:
+			add_schema_token(token)
+		for token in method.parameters:
+			add_schema_token(token)
+		for literal in method.context:
+			for token in literal.args:
+				add(token)
+		for step in method.subtasks:
+			for token in step.args:
+				add(token)
+			if step.literal:
+				for token in step.literal.args:
+					add(token)
+			for literal in step.preconditions:
+				for token in literal.args:
+					add(token)
+			for literal in step.effects:
+				for token in literal.args:
+					add(token)
+
+		return tuple(ordered)
+
+	def _render_typed_variables(
+		self,
+		parameters: Sequence[str],
+		domain_types: Sequence[str],
+		type_signature: Optional[Sequence[Optional[str]]] = None,
+	) -> str:
+		default_type = self._default_parameter_type(domain_types)
+		return " ".join(
+			f"{self._render_variable(parameter)} - "
+			f"{self._signature_type_at(type_signature, index, default_type)}"
+			for index, parameter in enumerate(parameters)
+		)
+
+	def _infer_task_type_map(
+		self,
+		domain: Any,
+		method_library: HTNMethodLibrary,
+	) -> Dict[str, Tuple[str, ...]]:
+		predicate_types = self._predicate_type_map(domain)
+		action_types = self._action_type_map(domain)
+		declared_task_types = self._declared_task_type_map(domain)
+		default_type = self._default_parameter_type(getattr(domain, "types", ()))
+		methods_by_task: Dict[str, List[HTNMethod]] = {}
+		task_aliases: Dict[str, str] = {}
+		inferred: Dict[str, List[Optional[str]]] = {}
+
+		for task in method_library.compound_tasks:
+			task_aliases[task.name] = task.name
+			if task.source_name:
+				task_aliases[task.source_name] = task.name
+			inferred[task.name] = [None] * len(task.parameters)
+			declared_signature = declared_task_types.get(task.source_name or task.name)
+			if declared_signature and len(declared_signature) == len(task.parameters):
+				inferred[task.name] = list(declared_signature)
+				continue
+			if len(task.source_predicates) == 1:
+				predicate_signature = predicate_types.get(task.source_predicates[0])
+				if predicate_signature and len(predicate_signature) == len(task.parameters):
+					inferred[task.name] = list(predicate_signature)
+
+		for method in method_library.methods:
+			methods_by_task.setdefault(method.task_name, []).append(method)
+
+		changed = True
+		while changed:
+			changed = False
+			for task in method_library.compound_tasks:
+				task_signature = inferred.get(task.name, [])
+				for method in methods_by_task.get(task.name, ()):
+					for index, parameter in enumerate(
+						self._task_binding_parameters(method, len(task.parameters))
+					):
+						if index >= len(task_signature) or task_signature[index] is not None:
+							continue
+						candidates = self._variable_type_candidates(
+							method,
+							parameter,
+							predicate_types,
+							action_types,
+							inferred,
+							task_aliases,
+						)
+						if not candidates:
+							continue
+						task_signature[index] = candidates[0]
+						changed = True
+
+		resolved: Dict[str, Tuple[str, ...]] = {}
+		for task in method_library.compound_tasks:
+			signature = tuple(type_name or default_type for type_name in inferred.get(task.name, ()))
+			resolved[task.name] = signature
+			if task.source_name:
+				resolved[task.source_name] = signature
+		return resolved
+
+	def _infer_method_parameter_types(
+		self,
+		method: HTNMethod,
+		ordered_parameters: Sequence[str],
+		task_signature: Sequence[str],
+		predicate_types: Dict[str, Tuple[str, ...]],
+		action_types: Dict[str, Tuple[str, ...]],
+		task_type_map: Dict[str, Tuple[str, ...]],
+		default_type: str,
+	) -> Tuple[str, ...]:
+		variable_types: Dict[str, str] = {}
+		for index, parameter in enumerate(self._task_binding_parameters(method, len(task_signature))):
+			if index >= len(task_signature):
+				continue
+			variable_types[self._canonical_symbol(parameter)] = task_signature[index]
+
+		for parameter in ordered_parameters:
+			canonical = self._canonical_symbol(parameter)
+			if canonical in variable_types:
+				continue
+			candidates = self._variable_type_candidates(
+				method,
+				parameter,
+				predicate_types,
+				action_types,
+				task_type_map,
+				{},
+			)
+			variable_types[canonical] = candidates[0] if candidates else default_type
+
+		return tuple(variable_types.get(self._canonical_symbol(parameter), default_type) for parameter in ordered_parameters)
+
+	def _variable_type_candidates(
+		self,
+		method: HTNMethod,
+		variable: str,
+		predicate_types: Dict[str, Tuple[str, ...]],
+		action_types: Dict[str, Tuple[str, ...]],
+		task_type_map: Dict[str, Sequence[Optional[str]]],
+		task_aliases: Dict[str, str],
+	) -> List[str]:
+		canonical_variable = self._canonical_symbol(variable)
+		candidates: List[str] = []
+
+		def add_candidate(candidate: Optional[str]) -> None:
+			if candidate and candidate not in candidates:
+				candidates.append(candidate)
+
+		def collect_from_literal(literal: HTNLiteral) -> None:
+			signature = predicate_types.get(literal.predicate)
+			if not signature:
+				return
+			for index, arg in enumerate(literal.args):
+				if self._canonical_symbol(arg) == canonical_variable and index < len(signature):
+					add_candidate(signature[index])
+
+		for literal in method.context:
+			collect_from_literal(literal)
+
+		for step in method.subtasks:
+			if step.kind == "primitive":
+				step_signature = action_types.get(step.action_name or "") or action_types.get(step.task_name)
+			else:
+				internal_name = task_aliases.get(step.task_name, step.task_name)
+				step_signature = task_type_map.get(internal_name) or task_type_map.get(step.task_name)
+			if step_signature:
+				for index, arg in enumerate(step.args):
+					if self._canonical_symbol(arg) == canonical_variable and index < len(step_signature):
+						add_candidate(step_signature[index])
+			for literal in (step.literal, *step.preconditions, *step.effects):
+				if literal is not None:
+					collect_from_literal(literal)
+
+		return candidates
+
+	def _predicate_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		mapping: Dict[str, Tuple[str, ...]] = {}
+		for predicate in getattr(domain, "predicates", []) or ():
+			mapping[predicate.name] = tuple(
+				self._parameter_type(parameter)
+				for parameter in getattr(predicate, "parameters", ()) or ()
+			)
+		return mapping
+
+	def _action_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		mapping: Dict[str, Tuple[str, ...]] = {}
+		for action in getattr(domain, "actions", []) or ():
+			type_signature = tuple(
+				self._parameter_type(parameter)
+				for parameter in getattr(action, "parameters", ()) or ()
+			)
+			mapping[action.name] = type_signature
+			mapping[self._sanitize_name(action.name)] = type_signature
+		return mapping
+
+	def _declared_task_type_map(self, domain: Any) -> Dict[str, Tuple[str, ...]]:
+		mapping: Dict[str, Tuple[str, ...]] = {}
+		for task in getattr(domain, "tasks", []) or ():
+			mapping[str(task.name)] = tuple(
+				self._parameter_type(parameter)
+				for parameter in getattr(task, "parameters", ()) or ()
+			)
+		return mapping
+
+	@staticmethod
+	def _task_binding_parameters(
+		method: HTNMethod,
+		task_arity: int,
+	) -> Tuple[str, ...]:
+		task_binding_parameters = tuple(method.task_args or ())
+		if len(task_binding_parameters) == task_arity:
+			return task_binding_parameters
+		leading_parameters = tuple(method.parameters[:task_arity])
+		if len(leading_parameters) == task_arity:
+			return leading_parameters
+		return task_binding_parameters
+
+	@staticmethod
+	def _parameter_type(parameter: Any) -> str:
+		text = str(parameter or "").strip()
+		if "-" not in text:
+			return "object"
+		_, type_name = text.split("-", 1)
+		resolved = type_name.strip()
+		return resolved or "object"
+
+	@staticmethod
+	def _canonical_symbol(token: str) -> str:
+		return str(token or "").strip().lstrip("?")
+
+	@staticmethod
+	def _default_parameter_type(domain_types: Sequence[str]) -> str:
+		if "object" in domain_types:
+			return "object"
+		return domain_types[0] if domain_types else "object"
+
+	@staticmethod
+	def _signature_type_at(
+		type_signature: Optional[Sequence[Optional[str]]],
+		index: int,
+		default_type: str,
+	) -> str:
+		if type_signature is None or index >= len(type_signature):
+			return default_type
+		return type_signature[index] or default_type
+
+	def _render_literal_conjunction(
+		self,
+		literals: Sequence[HTNLiteral],
+		variable_map: Dict[str, str],
+	) -> str:
+		if not literals:
+			return "(and)"
+
+		rendered = []
+		for literal in literals:
+			if literal.is_equality and len(literal.args) == 2:
+				left = self._render_symbol_token(literal.args[0], variable_map)
+				right = self._render_symbol_token(literal.args[1], variable_map)
+				base = f"(= {left} {right})"
+			else:
+				base = f"({literal.predicate}{self._render_invocation_tokens(literal.args, variable_map)})"
+			if literal.is_positive:
+				rendered.append(base)
+			else:
+				rendered.append(f"(not {base})")
+		return f"(and {' '.join(rendered)})"
+
+	def _render_invocation_tokens(
+		self,
+		args: Sequence[str],
+		variable_map: Dict[str, str],
+	) -> str:
+		if not args:
+			return ""
+		rendered = " ".join(self._render_symbol_token(arg, variable_map) for arg in args)
+		return f" {rendered}"
+
+	@staticmethod
+	def _render_variable(name: str) -> str:
+		canonical = name.lstrip("?")
+		return f"?{canonical.lower()}"
+
+	@staticmethod
+	def _is_variable_token(token: str) -> bool:
+		if not token:
+			return False
+		return token.startswith("?") or token[0].isupper()
+
+	def _render_symbol_token(
+		self,
+		token: str,
+		variable_map: Dict[str, str],
+	) -> str:
+		canonical = token.lstrip("?")
+		if canonical in variable_map:
+			return variable_map[canonical]
+		if self._is_variable_token(token):
+			return self._render_variable(token)
+		return token

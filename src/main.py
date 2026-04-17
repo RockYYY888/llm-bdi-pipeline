@@ -1,82 +1,75 @@
 """
-Main entry point for the domain-complete Hierarchical Task Network planning pipeline.
+Command-line entry point for the domain-complete HTN pipeline.
 """
 
-import sys
+from __future__ import annotations
+
 import argparse
+import sys
 from pathlib import Path
 
-# Add src to path (only once)
 _src_dir = str(Path(__file__).parent)
 if _src_dir not in sys.path:
-    sys.path.insert(0, _src_dir)
+	sys.path.insert(0, _src_dir)
 
+from pipeline.domain_complete_pipeline import DomainCompletePipeline
 from utils.config import get_config
-from ltl_bdi_pipeline import LTL_BDI_Pipeline
 
 
-def main():
-	"""Main entry point"""
-	# Parse command line arguments
-	parser = argparse.ArgumentParser(
-		description='Domain-complete HTN pipeline - domain build and query execution entrypoints',
+def _absolute_path(path_text: str | None) -> str | None:
+	if not path_text:
+		return None
+	return str(Path(path_text).expanduser().resolve())
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+	return argparse.ArgumentParser(
+		description="Domain-complete HTN pipeline for domain build and query execution",
 		formatter_class=argparse.RawDescriptionHelpFormatter,
-		epilog='''
+		epilog="""
 Examples:
-  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl
   python src/main.py --build-domain-library --domain-file ./src/domains/blocksworld/domain.hddl
-  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --library-artifact ./artifacts/domain_builds/blocks
+  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --problem-file ./src/domains/blocksworld/problems/p01.hddl
+  python src/main.py "Stack block C on block B" --domain-file ./src/domains/blocksworld/domain.hddl --problem-file ./src/domains/blocksworld/problems/p01.hddl --library-artifact ./artifacts/domain_builds/blocksworld
+		""",
+	)
 
-Note:
-  The primary mode is 'htn_planner'.
-  Domain file is mandatory and must be provided with --domain-file.
-  The public flow separates domain build from query execution.
-		''',
+
+def main() -> None:
+	parser = build_argument_parser()
+	parser.add_argument(
+		"instruction",
+		nargs="?",
+		help="Natural-language query to execute against a cached or freshly built domain library",
 	)
 	parser.add_argument(
-		'instruction',
-		nargs='?',
-		help='Natural language instruction used by the compatibility wrapper or query execution path',
-	)
-	parser.add_argument(
-		'--domain-file',
+		"--domain-file",
 		required=True,
-		help='Path to HDDL domain file (required)',
+		help="Path to the HDDL domain file",
 	)
 	parser.add_argument(
-		'--problem-file',
-		help='Optional path to HDDL problem file used for runtime initialisation',
+		"--problem-file",
+		help="Optional path to the HDDL problem file",
 	)
 	parser.add_argument(
-		'--mode',
-		choices=['htn_planner', 'dfa_agentspeak'],
-		default='htn_planner',
-		help='Execution mode (default: htn_planner)',
+		"--build-domain-library",
+		action="store_true",
+		help="Run only the offline domain-build pipeline and persist a cached domain library",
 	)
 	parser.add_argument(
-		'--build-domain-library',
-		action='store_true',
-		help='Run only the domain build pipeline and persist a cached domain library artifact',
+		"--library-artifact",
+		help="Path to a cached domain library directory or method_library.json file",
 	)
 	parser.add_argument(
-		'--library-artifact',
-		help='Path to a cached domain library artifact directory or method_library.json file',
-	)
-	parser.add_argument(
-		'--artifact-output-root',
-		help='Optional explicit output root for persisted domain build artifacts',
+		"--artifact-output-root",
+		help="Optional explicit output root for persisted domain-build artifacts",
 	)
 
 	args = parser.parse_args()
-	mode = args.mode
-	domain_file = str(Path(args.domain_file).expanduser().resolve())
-	problem_file = (
-		str(Path(args.problem_file).expanduser().resolve())
-		if args.problem_file
-		else None
-	)
+	domain_file = _absolute_path(args.domain_file)
+	problem_file = _absolute_path(args.problem_file)
 
-	if not Path(domain_file).exists():
+	if not domain_file or not Path(domain_file).exists():
 		print("=" * 80)
 		print("ERROR: Domain File Not Found")
 		print("=" * 80)
@@ -89,26 +82,30 @@ Note:
 		print(f"\nProvided --problem-file path does not exist:\n{problem_file}")
 		sys.exit(1)
 
-	# Validate configuration
 	config = get_config()
 	if not config.validate():
 		print("=" * 80)
 		print("ERROR: OpenAI API Key Not Configured")
 		print("=" * 80)
-		print("\nThe LTL-BDI pipeline requires an OpenAI API key to function.")
+		print("\nThe domain-complete HTN pipeline requires an OpenAI API key.")
 		print("\nPlease follow these steps:")
 		print("1. Copy .env.example to .env:")
 		print("   cp .env.example .env")
 		print("\n2. Edit .env and add your API key:")
 		print("   OPENAI_API_KEY=sk-proj-your-actual-key-here")
-		print("   OPENAI_STAGE1_MODEL=deepseek/deepseek-chat-v3-0324  # Stage 1 pinned default")
-		print("   OPENAI_MODEL=deepseek-chat  # Shared fallback for other stages")
+		print(
+			f"   GOAL_GROUNDING_MODEL={config.goal_grounding_model}  "
+			"# goal grounding pinned default",
+		)
+		print(
+			f"   METHOD_SYNTHESIS_MODEL={config.method_synthesis_model}  "
+			"# method synthesis pinned default",
+		)
 		print("\n3. Run the pipeline again")
 		print("\n" + "=" * 80)
 		sys.exit(1)
 
-	# Execute pipeline
-	pipeline = LTL_BDI_Pipeline(domain_file=domain_file, problem_file=problem_file)
+	pipeline = DomainCompletePipeline(domain_file=domain_file, problem_file=problem_file)
 	if args.build_domain_library:
 		results = pipeline.build_domain_library(output_root=args.artifact_output_root)
 	else:
@@ -118,14 +115,12 @@ Note:
 			results = pipeline.execute_query_with_library(
 				args.instruction,
 				library_artifact=args.library_artifact,
-				mode=mode,
 			)
 		else:
-			results = pipeline.execute(args.instruction, mode=mode)
+			results = pipeline.run_query(args.instruction)
 
-	# Exit with appropriate code
 	sys.exit(0 if results.get("success", False) else 1)
 
 
 if __name__ == "__main__":
-    main()
+	main()

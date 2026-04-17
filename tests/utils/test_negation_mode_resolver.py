@@ -10,7 +10,7 @@ _src_dir = str(Path(__file__).parent.parent.parent / "src")
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
-from stage3_method_synthesis.htn_schema import HTNLiteral
+from domain_build.method_synthesis.schema import HTNLiteral
 from utils.negation_mode_resolver import resolve_negation_modes
 
 

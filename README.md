@@ -1,398 +1,148 @@
-# LTLf-HTN-PANDA-AgentSpeak-Jason Pipeline
+# Domain-Complete Hierarchical Task Network Pipeline
 
-This repository generates AgentSpeak plan libraries from natural-language goals.
-The default runtime mainline is **Stage 1 -> Stage 7** in
-`src/main.py` -> `LTL_BDI_Pipeline.execute(mode="dfa_agentspeak")`.
-The repository now carries four benchmark-aligned planning domains:
+This repository now exposes one semantic mainline with two pipelines:
 
-- `blocksworld` (official IPC HTN total-order `Blocksworld-GTOHP`)
-- `marsrover` (official IPC HTN partial-order `Rover`)
-- `satellite` (official IPC HTN partial-order `Satellite`)
-- `transport` (official IPC HTN partial-order `Transport`)
+- offline domain build:
+  `domain.hddl -> method synthesis -> domain gate -> cached domain library`
+- online query execution:
+  `natural language query + problem.hddl + cached domain library -> goal grounding -> plan solve -> official verification`
 
-## Current Architecture
+The first acceptance target is the official ground-truth baseline:
 
-1. **Stage 1: Natural Language -> LTLf**
-   - `src/stage1_interpretation/`
-   - Input: natural-language instruction + HDDL domain signatures
-   - Does: uses an LLM to convert the instruction into an `LTLSpecification`
-   - Output: `LTLSpecification` + `GroundingMap` that links propositional symbols back to domain predicates
+- one domain preflight per benchmark domain
+- one official problem-root execution per benchmark problem
+- success decided only by the official hierarchical verifier
 
-2. **Stage 2: LTLf -> DFA**
-   - `src/stage2_dfa_generation/`
-   - Input: `LTLSpecification`
-   - Does: uses `ltlf2dfa` and simplifies DFA labels into atomic literals
-   - Output: simplified DFA metadata + DOT artifacts
+The active benchmark domains are:
 
-3. **Stage 3: DFA -> HTN Method Synthesis**
-   - `src/stage3_method_synthesis/`
-   - Input: simplified DFA + `GroundingMap` + HDDL domain signatures
-   - Does: uses an LLM to synthesize the HTN method library for the current DFA targets
-   - Output: `HTNMethodLibrary`
-
-4. **Stage 4: HTN Method Library -> PANDA Validation**
-   - `src/stage4_panda_planning/`
-   - Input: `HTNMethodLibrary` + Stage 3 transition specs + concrete object set
-   - Does: builds temporary HDDL domain/problem files from the generated library and uses
-     PANDA PI to produce existence witnesses for the current transition-bound query structure.
-     Stage 4 validates only the real generated library and does not inject synthetic wrappers,
-     guards, or bridge methods.
-   - Output: PANDA validation records (`PANDAPlanResult`) + temporary HDDL / plan artifacts
-
-5. **Stage 5: HTN Methods + DFA Wrappers -> AgentSpeak Rendering**
-   - `src/stage5_agentspeak_rendering/`
-   - Input: `HTNMethodLibrary` + validated transition records + HDDL domain
-   - Does: emits primitive action wrappers, the full HTN method library as AgentSpeak plans,
-     and DFA state-aware transition wrappers
-   - Output: `agentspeak_generated.asl`
-
-6. **Stage 6: AgentSpeak -> Jason Runtime Validation**
-   - `src/stage6_jason_validation/`
-   - Input: Stage 5 `agentspeak_generated.asl` + Stage 3 target literals
-   - Does: rewrites `agentspeak_generated.asl` into the Jason runtime form, launches Jason via
-     `jason.infra.local.RunLocalMAS`, and validates runtime markers
-   - Output: `agentspeak_generated.asl`, `jason_runner.mas2j`, runtime stdout/stderr,
-     `action_path.txt`, and `jason_validation.json`
-
-7. **Stage 7: Official IPC HTN Plan Verification**
-   - `src/utils/ipc_plan_verifier.py`
-   - Input: Stage 6 `action_path` + `method_trace` + benchmark `domain.hddl` + `problem.hddl`
-   - Does: exports an IPC-style hierarchical plan and verifies it with `pandaPIparser -V`
-   - Output: `ipc_official_plan.txt`, `ipc_official_verifier.txt`, and
-     `ipc_official_verification.json`
-
-## Important Design Choices
-
-- Stage 3 is **LLM-only**, runs as a single synthesis call, and rejects missing or malformed
-  live model output.
-- No stage projects domain methods, performs runtime-guided repair, or code-authors
-  replacement methods after Stage 3.
-- Stage 4 uses the PANDA PI toolchain on temporary HDDL domain/problem files.
-- Stage 4 keeps the problem-instance builder separate from the planner entrypoint. The default
-  builder is explicit and configurable instead of hard-coding initial-state facts inside the planner.
-- Stage 4 is an existence-witness validation step for the current query structure, not a global
-  completeness proof over the entire domain state space.
-- `problem.hddl` is excluded from Stage 1 and Stage 3 semantic input. It is used only for
-  Stage 6 runtime initialisation and Stage 7 official verification.
-- Stage 5 renders static, domain-specific AgentSpeak from the HTN method library, while Stage 4
-  PANDA outputs remain validation artifacts plus DFA-edge witnesses.
-- Stage 6 is enabled by default and is a hard gate: if Jason validation fails, the full pipeline
-  run fails.
-- Stage 7 is enabled whenever `--problem-file` is provided and is a hard gate for official
-  benchmark-backed runs.
-- The generated AgentSpeak is static, domain-specific, and specialised to the current goal set.
-- The full end-to-end pipeline requires an API key because Stage 1 and Stage 3 are LLM-backed.
-- The full Stage 4 path requires the PANDA PI toolchain (`pandaPIparser`, `pandaPIgrounder`,
-  `pandaPIengine`). The runtime auto-detects a local install under `$HOME/.local/pandaPI/bin`,
-  or you can expose it through `PATH`, `PANDA_PI_HOME`, or `PANDA_PI_BIN`.
-- Stage 6 requires Java 17-23 and a Jason CLI build from
-  `src/stage6_jason_validation/jason_src`.
-
-## Assumptions and Validation Boundary
-
-The Stage 1-7 pipeline is general under an explicit set of runtime, HDDL
-subset, typing, and semantic assumptions. The full, code-faithful assumption
-list is maintained in:
-
-- `PIPELINE_ASSUMPTIONS.md`
-
-Read this before claiming domain-level generality or interpreting validation
-results as global proofs.
+- `blocksworld`
+- `marsrover`
+- `satellite`
+- `transport`
 
 ## Repository Layout
 
 ```text
 .
 ├── src/
+│   ├── domain_build/
+│   │   ├── method_synthesis/
+│   │   └── domain_gate/
+│   ├── query_execution/
+│   │   └── goal_grounding/
+│   ├── planning/
+│   ├── pipeline/
+│   ├── verification/
 │   ├── domains/
-│   ├── external/
-│   ├── stage1_interpretation/
-│   ├── stage2_dfa_generation/
-│   ├── stage3_method_synthesis/
-│   │   ├── htn_method_synthesis.py
-│   │   ├── htn_prompts.py
-│   │   └── htn_schema.py
-│   ├── stage4_panda_planning/
-│   │   ├── panda_planner.py
-│   │   ├── problem_builder.py
-│   │   └── panda_schema.py
-│   ├── stage5_agentspeak_rendering/
-│   │   └── agentspeak_renderer.py
-│   ├── stage6_jason_validation/
+│   ├── benchmark_data/
 │   └── utils/
 ├── tests/
-│   ├── stage1_interpretation/
-│   ├── stage2_dfa_generation/
-│   ├── stage3_method_synthesis/
-│   │   └── test_stage3_method_synthesis.py
-│   ├── stage4_panda_planning/
-│   │   ├── test_panda_planner.py
-│   │   └── test_stage4_panda_planning.py
-│   ├── stage5_agentspeak_rendering/
-│   │   └── test_agentspeak_renderer.py
-│   └── test_pipeline.py
+│   ├── pipeline/
+│   ├── support/
+│   └── utils/
 └── TO-DO-LIST.md
 ```
 
+## Main Entry Points
+
+- command-line entry point:
+  [`src/main.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/main.py)
+- orchestrator:
+  [`src/pipeline/domain_complete_pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/pipeline/domain_complete_pipeline.py)
+- official verifier wrapper:
+  [`src/verification/official_plan_verifier.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/verification/official_plan_verifier.py)
+- official baseline harness:
+  [`tests/run_official_problem_root_baseline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/tests/run_official_problem_root_baseline.py)
+
+## Planning Design
+
+The planning subsystem is organized in three semantic layers:
+
+1. problem structure analysis
+   - classify whether the official instance is total-order or partial-order
+2. representation construction
+   - keep the original representation
+   - build one linearized representation when the instance is partial-order
+3. backend race with official verification
+   - total-order instances run original-representation backends
+   - partial-order instances run both original and linearized backends
+   - the first backend that reaches official hierarchical verification success wins
+
+The currently active backends are:
+
+- `PandaDealer`
+- `PANDA` solver portfolio
+- `Lifted-PANDA` on the linearized representation
+
+## Ground-Truth Baseline Status
+
+The current semantic sweep result is:
+
+- `4/4` official domain preflights passed
+- `115/115` official problem-root runs completed
+- `113/115` verified successes
+- `2/115` solver no-plan failures
+- `0` primitive-invalid failures
+- `0` hierarchical-rejection failures
+
+The latest summary is in:
+
+- [`tests/generated/official_ground_truth_full/20260418_000457/summary.json`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/tests/generated/official_ground_truth_full/20260418_000457/summary.json)
+
 ## Quick Start
 
-From a fresh clone to a full pipeline run:
-
-1. Clone the repository and enter it:
-
-```bash
-git clone https://github.com/RockYYY888/llm-bdi-pipeline.git
-cd llm-bdi-pipeline
-```
-
-2. Create the Python environment and install dependencies:
+Create the project environment with `uv`:
 
 ```bash
 uv venv
 uv sync
 ```
 
-3. Prepare your API configuration:
+Prepare `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` so it follows this format:
+The minimum configuration is:
 
 ```bash
-# OpenAI API Configuration
-OPENAI_API_KEY=
-
-# Optional: Model selection
-OPENAI_MODEL=deepseek-chat
-OPENAI_STAGE1_MODEL=deepseek/deepseek-chat-v3-0324
-
-# Optional: Base URL (for DeepSeek or other custom endpoints)
-OPENAI_BASE_URL=https://api.deepseek.com
-
-# Optional: API timeout (seconds)
-OPENAI_TIMEOUT=120
+OPENAI_API_KEY=...
+GOAL_GROUNDING_MODEL=deepseek/deepseek-chat-v3-0324
+METHOD_SYNTHESIS_MODEL=minimax/minimax-m2
 ```
 
-4. Ensure MONA is available for `ltlf2dfa`:
-
-The repository already includes a local MONA build under `src/external/mona-1.4/`.
-If it is missing or needs to be rebuilt, run:
+Run an offline domain build:
 
 ```bash
-cd src/external/mona-1.4
-./configure --prefix=$(pwd)/mona-install --disable-shared --enable-static
-make
-make install-strip
-cd ../../..
-```
-
-5. Install the PANDA PI toolchain:
-
-The repository does not ship a bundled PANDA binary. The setup below is the
-tested path used for this project on macOS.
-
-```bash
-brew install gengetopt bison flex pkgconf
-
-git clone https://github.com/panda-planner-dev/pandaPIparser.git ~/.local/src/pandaPIparser
-git clone https://github.com/panda-planner-dev/pandaPIgrounder.git ~/.local/src/pandaPIgrounder
-git clone https://github.com/panda-planner-dev/pandaPIengine.git ~/.local/src/pandaPIengine
-
-# parser
-cd ~/.local/src/pandaPIparser
-make -j4 BISON=/opt/homebrew/opt/bison/bin/bison FLEX=/opt/homebrew/opt/flex/bin/flex
-
-# grounder
-cd ~/.local/src/pandaPIgrounder
-git submodule update --init --recursive
-git -C cpddl/third-party/boruvka apply 0001-Removed-non-macos-call-in-unused-function.patch || true
-git -C cpddl/third-party/boruvka apply 0001-boruvka-endian.patch || true
-make boruvka opts bliss lpsolve
-make
-cd src
-make -j4 CXX=g++ CC=gcc
-
-# engine
-cd ~/.local/src/pandaPIengine
-mkdir -p build
-cd build
-cmake ../src
-make -j4
-
-# install binaries to the default auto-detected location
-install -d ~/.local/pandaPI/bin
-install ~/.local/src/pandaPIparser/pandaPIparser ~/.local/pandaPI/bin/pandaPIparser
-install ~/.local/src/pandaPIgrounder/pandaPIgrounder ~/.local/pandaPI/bin/pandaPIgrounder
-install ~/.local/src/pandaPIengine/build/pandaPIengine ~/.local/pandaPI/bin/pandaPIengine
-```
-
-Optional shell setup:
-
-```bash
-export PATH="$HOME/.local/pandaPI/bin:$PATH"
-```
-
-If you do not add that `PATH` export, the Stage 4 runtime still auto-discovers
-the default install directory above.
-
-6. Ensure Java 17-23 is available and build Jason CLI:
-
-```bash
-# Example (macOS Corretto 23)
-export STAGE6_JAVA_HOME=/Users/lyw/Library/Java/JavaVirtualMachines/corretto-23.0.2/Contents/Home
-export JAVA_HOME="$STAGE6_JAVA_HOME"
-
-cd src/stage6_jason_validation/jason_src
-./gradlew config
-cd ../../..
-```
-
-7. Run the canonical development acceptance test (single query):
-
-```bash
-./.venv/bin/python tests/test_pipeline.py query_1
-```
-
-This test requires:
-- a valid `OPENAI_API_KEY` in `.env`
-- a working PANDA PI toolchain
-- Stage 6 Java 17-23 + Jason runtime toolchain
-- the default local PANDA install path (`$HOME/.local/pandaPI/bin`) or an equivalent
-  `PATH` / `PANDA_PI_*` configuration
-
-8. Run the full pipeline acceptance sweep only at final validation:
-
-```bash
-PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
-```
-
-9. Run the full pipeline on a query in the current recommended task-anchored style:
-
-```bash
-./.venv/bin/python src/main.py \
-  "Using blocks a and b, complete the tasks do_put_on(a, b)." \
+uv run python src/main.py \
+  --build-domain-library \
   --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
-10. Inspect the generated artifacts:
-
-- The pipeline writes a timestamped directory under `logs/`
-- Each successful run contains:
-  - `execution.json`
-  - `execution.txt`
-  - `grounding_map.json`
-  - `dfa.dot`
-  - `dfa.json`
-  - `agentspeak_generated.asl`
-  - `htn_method_library.json`
-  - `panda_transitions.json`
-  - `jason_runner.mas2j`
-  - `jason_stdout.txt`
-  - `jason_stderr.txt`
-  - `action_path.txt`
-  - `jason_validation.json`
-
-## Running the Pipeline
-
-The default entry point is:
+Run an online query against a cached library:
 
 ```bash
-python src/main.py \
-  "Using blocks a and b, complete the tasks do_put_on(a, b)." \
-  --domain-file ./src/domains/blocksworld/domain.hddl
+uv run python src/main.py \
+  "Stack block C on block B" \
+  --domain-file ./src/domains/blocksworld/domain.hddl \
+  --problem-file ./src/domains/blocksworld/problems/p01.hddl \
+  --library-artifact ./artifacts/domain_builds/blocksworld
 ```
 
-Notes:
-
-- Stage 1 requires an LLM API key.
-- Stage 1 uses `OPENAI_STAGE1_MODEL` and defaults to the DeepSeek V3.2 chat model.
-- Stage 3 may use `OPENAI_STAGE3_MODEL`; otherwise it falls back to `OPENAI_MODEL`.
-- `--domain-file` is required. The pipeline does not use an implicit default domain.
-- For benchmark-backed or Stage 3-sensitive runs, prefer the single-sentence task-anchored query
-  format documented in `docs/query_protocol.md`.
-- `--problem-file` is optional and, when provided, Stage 6 seeds runtime facts from the
-  official HDDL problem `:init` and Stage 7 verifies the generated hierarchical plan against
-  the same benchmark problem.
-- Stage 4 looks for `pandaPIparser`, `pandaPIgrounder`, and `pandaPIengine` in this order:
-  `PATH`, `PANDA_PI_HOME/bin`, `PANDA_PI_BIN`, `$HOME/.local/pandaPI/bin`.
-- Stage 6 looks for a supported Java runtime (17-23) in this order:
-  `STAGE6_JAVA_BIN`, `STAGE6_JAVA_HOME/bin/java`, `JAVA_HOME/bin/java`, `PATH`, and
-  macOS JVM directories.
-- Benchmark domains live under `src/domains/`.
-- Generated outputs are written to `logs/<timestamp>_<domain>_<problem>/` when a problem is
-  provided, or `logs/<timestamp>_<domain>/` otherwise.
-
-## Running Tests
-
-Run the focused stage tests:
+Run the official ground-truth sweep:
 
 ```bash
-./.venv/bin/pytest -q tests/stage3_method_synthesis/test_stage3_method_synthesis.py
-./.venv/bin/pytest -q tests/stage4_panda_planning/test_panda_planner.py
-./.venv/bin/pytest -q tests/stage4_panda_planning/test_stage4_panda_planning.py
-./.venv/bin/pytest -q tests/stage5_agentspeak_rendering/test_agentspeak_renderer.py
-./.venv/bin/pytest -q tests/stage6_jason_validation/test_jason_runner.py
-./.venv/bin/pytest -q tests/stage6_jason_validation/test_stage6_integration.py
+uv run python tests/run_official_problem_root_baseline.py
 ```
 
-The canonical development acceptance check is a single live query:
+## Toolchains
 
-```bash
-./.venv/bin/python tests/test_pipeline.py query_1
-```
+The active planning path expects:
 
-For final full acceptance, run the full live sweep explicitly:
+- `pandaPIparser`
+- `pandaPIgrounder`
+- `pandaPIengine`
 
-```bash
-PIPELINE_TEST_ALL=1 ./.venv/bin/pytest -q tests/test_pipeline.py
-```
-
-`tests/test_pipeline.py` defaults to one query in pytest mode and only runs all queries when
-`PIPELINE_TEST_ALL=1` is provided. You can also select a specific query with
-`PIPELINE_TEST_QUERY=query_3`.
-
-Run the Stage 2 DFA tests:
-
-```bash
-./.venv/bin/pytest -q tests/stage2_dfa_generation/test_ltlf2dfa.py
-```
-
-The pipeline-level integration test and the Stage 1 tests depend on external LLM access, so they
-are not part of the default fast regression loop in environments without API access.
-
-## Pipeline Outputs
-
-A successful Stage 1-7 benchmark-backed run writes:
-
-- `execution.json`
-- `execution.txt`
-- `grounding_map.json`
-- `dfa.dot`
-- `dfa.json`
-- `agentspeak_generated.asl`
-- `htn_method_library.json`
-- `panda_transitions.json`
-- `jason_runner.mas2j`
-- `jason_stdout.txt`
-- `jason_stderr.txt`
-- `action_path.txt`
-- `jason_validation.json`
-- `ipc_official_plan.txt`
-- `ipc_official_verifier.txt`
-- `ipc_official_verification.json`
-
-The logger also records the Stage 3 synthesis metadata, Stage 4 PANDA metadata,
-and Stage 5 rendering metadata inside the run log.
-
-## Current Benchmarks
-
-The active benchmark surface is:
-
-- the blocksworld HDDL domain in `src/domains/blocksworld/`
-- the Stage 2 formula regression cases in `tests/stage2_dfa_generation/test_ltlf2dfa.py`
-- the Stage 3 synthesis regression cases in `tests/stage3_method_synthesis/test_stage3_method_synthesis.py`
-- the Stage 4 PANDA regression cases in `tests/stage4_panda_planning/test_stage4_panda_planning.py`
-- the Stage 5 rendering regression cases in `tests/stage5_agentspeak_rendering/test_agentspeak_renderer.py`
-- the pipeline-level integration check in `tests/test_pipeline.py`
+Optional local toolchains used by the current backend race can live under
+`.external/`. That directory is treated as local-only and is ignored by git.
