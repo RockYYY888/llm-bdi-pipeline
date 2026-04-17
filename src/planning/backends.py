@@ -18,6 +18,19 @@ from planning.plan_models import PANDAPlanResult
 from planning.representations import PlanningRepresentation
 
 
+def _solver_config_with_backend_budget(solver_config: Dict[str, Any]) -> Dict[str, Any]:
+	"""
+	Standalone backends should inherit the full backend budget.
+
+	Per-attempt caps are useful inside the sequential PANDA portfolio, but they
+	artificially truncate standalone official backends such as PandaDealer and the
+	linearized Lifted-PANDA solver.
+	"""
+	prepared = dict(solver_config)
+	prepared.pop("timeout_seconds", None)
+	return prepared
+
+
 @dataclass(frozen=True)
 class PlanningBackendTask:
 	"""One backend invocation over one compiled representation."""
@@ -138,6 +151,9 @@ class PandaDealerBackend(HierarchicalPlanningBackend):
 		task_args: Sequence[str],
 		timeout_seconds: Optional[float],
 	) -> PANDAPlanResult:
+		solver_config = _solver_config_with_backend_budget(
+			self.planner._solver_config_by_id("pandadealer_agile_lama"),
+		)
 		return self.planner.plan_hddl_files(
 			domain=domain,
 			domain_file=representation.domain_file,
@@ -148,7 +164,7 @@ class PandaDealerBackend(HierarchicalPlanningBackend):
 			target_literal=None,
 			allow_empty_plan=False,
 			timeout_seconds=timeout_seconds,
-			solver_configs=self.planner.official_solver_portfolio_for_backend(self.backend_name),
+			solver_configs=(solver_config,),
 			collect_all_candidates=True,
 		)
 
@@ -178,6 +194,11 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 		task_args: Sequence[str],
 		timeout_seconds: Optional[float],
 	) -> PANDAPlanResult:
+		solver_config = _solver_config_with_backend_budget(
+			self.planner.panda_planner._solver_config_by_id(
+				LiftedLinearPlanner.INNER_SOLVER_ID,
+			),
+		)
 		return self.planner.plan_linearized_hddl_files(
 			domain=domain,
 			linearized_domain_file=representation.domain_file,
@@ -186,11 +207,7 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 			transition_name=representation.representation_id,
 			task_args=tuple(task_args),
 			timeout_seconds=timeout_seconds,
-			solver_configs=(
-				self.planner.panda_planner._solver_config_by_id(
-					LiftedLinearPlanner.INNER_SOLVER_ID,
-				),
-			),
+			solver_configs=(solver_config,),
 			reported_solver_id=self.backend_name,
 			reported_engine_mode=LiftedLinearPlanner.INNER_SOLVER_ID,
 			linearization_metadata=dict(representation.metadata),

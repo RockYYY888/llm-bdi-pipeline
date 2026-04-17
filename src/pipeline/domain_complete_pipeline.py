@@ -232,9 +232,8 @@ class DomainCompletePipeline:
         """
         self.config = get_config()
 
-        # Use absolute path for logs directory (project root/logs)
-        # This ensures logs go to same location regardless of where tests are run from
-        project_root = Path(__file__).parent.parent  # src/ -> project root
+        # Resolve the repository root so generated artifacts do not leak back into src/.
+        project_root = Path(__file__).resolve().parents[2]
         self.project_root = project_root
         self.logger = ExecutionLogger(logs_dir=str(project_root / "artifacts" / "runs"))
 
