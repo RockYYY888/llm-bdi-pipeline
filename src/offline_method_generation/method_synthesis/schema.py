@@ -284,6 +284,42 @@ def _load_literal(item: Optional[Dict[str, Any]]) -> Optional["HTNLiteral"]:
     )
 
 
+def _expand_literal_payload(item: Any) -> List[Any]:
+    if item in (None, [], ""):
+        return []
+    if not isinstance(item, str):
+        return [item]
+    stripped = item.strip()
+    if not stripped:
+        return []
+    parts: List[str] = []
+    for conjunction_part in re.split(r"\s*&\s*", stripped):
+        conjunction_text = conjunction_part.strip()
+        if not conjunction_text:
+            continue
+        if conjunction_text.startswith("!="):
+            parts.append(conjunction_text)
+            continue
+        invocation_parts = _split_top_level_invocation_sequence(conjunction_text)
+        if (
+            len(invocation_parts) > 1
+            and all(_parse_signature_literal(part) is not None for part in invocation_parts)
+        ):
+            parts.extend(part.strip() for part in invocation_parts if part.strip())
+            continue
+        parts.append(conjunction_text)
+    return parts or [stripped]
+
+
+def _load_literal_values(item: Any) -> List["HTNLiteral"]:
+    literals: List[HTNLiteral] = []
+    for value in _expand_literal_payload(item):
+        literal = _load_literal(value)
+        if literal is not None:
+            literals.append(literal)
+    return literals
+
+
 @dataclass(frozen=True)
 class HTNLiteral:
     """A symbolic literal used by HTN methods and downstream planning artifacts."""
@@ -532,17 +568,13 @@ class HTNMethodLibrary:
                 literal=_load_literal(item.get("literal")),
                 preconditions=tuple(
                     literal
-                    for literal in (
-                        _load_literal(value) for value in item.get("preconditions", [])
-                    )
-                    if literal is not None
+                    for value in item.get("preconditions", [])
+                    for literal in _load_literal_values(value)
                 ),
                 effects=tuple(
                     literal
-                    for literal in (
-                        _load_literal(value) for value in item.get("effects", [])
-                    )
-                    if literal is not None
+                    for value in item.get("effects", [])
+                    for literal in _load_literal_values(value)
                 ),
             )
 
@@ -561,11 +593,29 @@ class HTNMethodLibrary:
                 if isinstance(edge, dict):
                     before_value = edge.get(
                         "pre",
-                        edge.get("before", edge.get("parent", edge.get("from"))),
+                        edge.get(
+                            "before",
+                            edge.get(
+                                "parent",
+                                edge.get(
+                                    "from",
+                                    edge.get("first", edge.get("precedent")),
+                                ),
+                            ),
+                        ),
                     )
                     after_value = edge.get(
                         "post",
-                        edge.get("after", edge.get("child", edge.get("to"))),
+                        edge.get(
+                            "after",
+                            edge.get(
+                                "child",
+                                edge.get(
+                                    "to",
+                                    edge.get("second", edge.get("subsequent")),
+                                ),
+                            ),
+                        ),
                     )
                     if before_value is None or after_value is None:
                         raise ValueError(
@@ -591,10 +641,8 @@ class HTNMethodLibrary:
                 task_args=tuple(item.get("task_args", [])),
                 context=tuple(
                     literal
-                    for literal in (
-                        _load_literal(value) for value in item.get("context", [])
-                    )
-                    if literal is not None
+                    for value in item.get("context", [])
+                    for literal in _load_literal_values(value)
                 ),
                 subtasks=tuple(load_method_step(value) for value in item.get("subtasks", [])),
                 ordering=tuple(ordering),
@@ -624,10 +672,8 @@ class HTNMethodLibrary:
             methods=[load_method(item) for item in payload.get("methods", [])],
             target_literals=[
                 literal
-                for literal in (
-                    _load_literal(item) for item in payload.get("target_literals", [])
-                )
-                if literal is not None
+                for item in payload.get("target_literals", [])
+                for literal in _load_literal_values(item)
             ],
             target_task_bindings=[
                 load_binding(item) for item in payload.get("target_task_bindings", [])

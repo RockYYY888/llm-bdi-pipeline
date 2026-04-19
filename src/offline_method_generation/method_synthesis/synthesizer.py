@@ -165,7 +165,7 @@ class HTNMethodSynthesizer(
 		metadata["llm_prompt"] = prompt
 		metadata["llm_request_count"] = 1
 		if str(self.model or "").strip().lower().startswith("minimax/"):
-			request_max_tokens = int(self.max_tokens)
+			request_max_tokens = None
 		else:
 			request_max_tokens = self._estimate_method_synthesis_response_token_budget(
 				prompt_analysis=prompt_analysis,
@@ -449,13 +449,17 @@ class HTNMethodSynthesizer(
 		for attempt_index in range(1, max_attempts + 1):
 			attempt_start = time.monotonic()
 			attempt_max_tokens = self._method_synthesis_attempt_max_tokens(
-				max_tokens or self.max_tokens,
+				max_tokens,
 				attempt_index=attempt_index,
+			)
+			self._emit_method_synthesis_progress(
+				f"attempt={attempt_index}/{max_attempts} start model={self.model} max_tokens={attempt_max_tokens}",
 			)
 			try:
 				response_text, finish_reason, transport_metadata = self._call_llm(
 					prompt,
 					max_tokens=attempt_max_tokens,
+					attempt_index=attempt_index,
 				)
 				llm_roundtrip_seconds = time.monotonic() - attempt_start
 				attempt_durations.append(round(llm_roundtrip_seconds, 3))
@@ -470,6 +474,9 @@ class HTNMethodSynthesizer(
 					),
 				)
 				metadata["llm_request_max_tokens"] = attempt_max_tokens
+				self._emit_method_synthesis_progress(
+					f"attempt={attempt_index} finish_reason={finish_reason!r} duration_seconds={round(llm_roundtrip_seconds, 3)}",
+				)
 				break
 			except Exception as exc:
 				last_exc = exc
@@ -487,6 +494,9 @@ class HTNMethodSynthesizer(
 						finish_reason=partial_finish_reason,
 						error=str(exc),
 					),
+				)
+				self._emit_method_synthesis_progress(
+					f"attempt={attempt_index} error={exc} duration_seconds={round(llm_roundtrip_seconds, 3)}",
 				)
 				if partial_response:
 					metadata["llm_response"] = str(partial_response)
@@ -589,10 +599,12 @@ class HTNMethodSynthesizer(
 
 	def _method_synthesis_attempt_max_tokens(
 		self,
-		base_max_tokens: int,
+		base_max_tokens: Optional[int],
 		*,
 		attempt_index: int,
-	) -> int:
+	) -> Optional[int]:
+		if base_max_tokens is None:
+			return None
 		requested = max(int(base_max_tokens or 0), 1)
 		return requested
 
@@ -630,7 +642,7 @@ class HTNMethodSynthesizer(
 		*,
 		attempt_index: int,
 		duration_seconds: float,
-		request_max_tokens: int,
+		request_max_tokens: Optional[int],
 		transport_metadata: Dict[str, Any],
 		finish_reason: Optional[str],
 		error: Optional[str],
@@ -638,7 +650,16 @@ class HTNMethodSynthesizer(
 		return {
 			"attempt": attempt_index,
 			"duration_seconds": round(duration_seconds, 6),
-			"request_max_tokens": int(request_max_tokens),
+			"request_max_tokens": (
+				int(request_max_tokens)
+				if request_max_tokens is not None
+				else None
+			),
+			"request_profile": transport_metadata.get("llm_request_profile"),
+			"reasoning_budget": transport_metadata.get("llm_reasoning_budget"),
+			"first_chunk_timeout_seconds": transport_metadata.get(
+				"llm_first_chunk_timeout_seconds",
+			),
 			"request_id": transport_metadata.get("llm_request_id"),
 			"response_mode": transport_metadata.get("llm_response_mode"),
 			"first_chunk_seconds": transport_metadata.get("llm_first_chunk_seconds"),

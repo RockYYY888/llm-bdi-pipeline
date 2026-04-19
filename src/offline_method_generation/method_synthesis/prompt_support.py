@@ -8,7 +8,9 @@ contract builders are no longer part of the mainline.
 
 from __future__ import annotations
 
+import json
 import re
+from itertools import combinations
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 from utils.hddl_condition_parser import HDDLConditionParser
@@ -181,11 +183,26 @@ def _task_schema_can_align_to_predicate(
 		for parameter in (getattr(task_schema, "parameters", ()) or ())
 	)
 	predicate_parameter_types = tuple(predicate_type_signatures.get(predicate_name, ()))
-	return _signature_types_can_biject(
+	if not predicate_parameter_types:
+		return False
+	if len(predicate_parameter_types) > len(task_parameter_types):
+		return False
+	if _signature_types_can_biject(
 		task_parameter_types,
 		predicate_parameter_types,
 		type_parent_map,
-	)
+	):
+		return True
+	task_positions = range(len(task_parameter_types))
+	for indices in combinations(task_positions, len(predicate_parameter_types)):
+		candidate_types = tuple(task_parameter_types[index] for index in indices)
+		if _signature_types_can_biject(
+			candidate_types,
+			predicate_parameter_types,
+			type_parent_map,
+		):
+			return True
+	return False
 
 
 def _aligned_task_parameter_labels_for_predicate(
@@ -209,7 +226,7 @@ def _aligned_task_parameter_labels_for_predicate(
 		if not isinstance(pattern, dict):
 			continue
 		effect_args = list(pattern.get("effect_args") or ())
-		if len(effect_args) != len(labels):
+		if not effect_args or len(effect_args) > len(labels):
 			continue
 		action_parameters = list(pattern.get("action_parameters") or ())
 		action_parameter_types = list(pattern.get("action_parameter_types") or ())
@@ -240,12 +257,156 @@ def _aligned_task_parameter_labels_for_predicate(
 						chosen_index = fallback_index
 						break
 			if chosen_index is None:
-				return labels
+				return None
 			used_indices.add(chosen_index)
 			aligned_labels.append(labels[chosen_index])
-		if len(aligned_labels) == len(labels):
-			return tuple(aligned_labels)
-	return labels
+		return tuple(aligned_labels)
+	return None
+
+
+def _iter_unique_action_patterns(action_analysis: Dict[str, Any]) -> tuple[Dict[str, Any], ...]:
+	seen: set[str] = set()
+	patterns: list[Dict[str, Any]] = []
+	for bucket_name in ("producer_patterns_by_predicate", "consumer_patterns_by_predicate"):
+		for bucket in (action_analysis.get(bucket_name, {}) or {}).values():
+			for pattern in bucket or ():
+				if not isinstance(pattern, dict):
+					continue
+				action_name = str(pattern.get("action_name") or "").strip()
+				if not action_name:
+					continue
+				serialized = json.dumps(
+					{
+						"action_name": action_name,
+						"action_parameters": list(pattern.get("action_parameters") or ()),
+						"action_parameter_types": list(pattern.get("action_parameter_types") or ()),
+						"dynamic_preconditions": list(
+							pattern.get("dynamic_precondition_signatures") or (),
+						),
+						"positive_effects": list(pattern.get("positive_effect_signatures") or ()),
+					},
+					sort_keys=True,
+				)
+				if serialized in seen:
+					continue
+				seen.add(serialized)
+				patterns.append(dict(pattern))
+	return tuple(patterns)
+
+
+def _fallback_action_template_summaries_for_task(
+	task_name: str,
+	task_parameters: Sequence[str],
+	task_parameter_types: Sequence[str],
+	action_analysis: Dict[str, Any],
+	*,
+	limit: int = 3,
+) -> list[str]:
+	task_tokens = _name_tokens(task_name)
+	type_parent_map = _normalised_type_parent_map(action_analysis)
+	best_patterns_by_action_name: Dict[str, tuple[float, str]] = {}
+	task_positions = range(len(task_parameters))
+	for pattern in _iter_unique_action_patterns(action_analysis):
+		action_name = str(pattern.get("action_name") or "").strip()
+		action_parameters = list(pattern.get("action_parameters") or ())
+		action_parameter_types = [
+			_normalise_type_name(parameter_type)
+			for parameter_type in (pattern.get("action_parameter_types") or ())
+		]
+		if not action_name or len(task_parameters) > len(action_parameters):
+			continue
+		best_rendered_action_args: Optional[tuple[str, ...]] = None
+		best_alignment_score = float("-inf")
+		for indices in combinations(task_positions, len(task_parameters)):
+			candidate_parameter_types = tuple(
+				action_parameter_types[index]
+				for index in indices
+			)
+			if not _signature_types_can_biject(
+				tuple(_normalise_type_name(task_type) for task_type in task_parameter_types),
+				candidate_parameter_types,
+				type_parent_map,
+			):
+				continue
+			used_task_indices: set[int] = set()
+			token_mapping: Dict[str, str] = {}
+			for action_index in indices:
+				action_type = _normalise_type_name(action_parameter_types[action_index])
+				chosen_task_index: Optional[int] = None
+				for task_index, task_type in enumerate(task_parameter_types):
+					if task_index in used_task_indices:
+						continue
+					if _signature_types_can_biject(
+						(_normalise_type_name(task_type),),
+						(action_type,),
+						type_parent_map,
+					):
+						chosen_task_index = task_index
+						break
+				if chosen_task_index is None:
+					token_mapping = {}
+					break
+				used_task_indices.add(chosen_task_index)
+				token_mapping[str(action_parameters[action_index])] = str(
+					task_parameters[chosen_task_index]
+				)
+			if not token_mapping:
+				continue
+			rendered_action_args = tuple(
+				_extend_mapping_with_action_parameters(
+					token_mapping,
+					action_parameters,
+					action_parameter_types=action_parameter_types,
+				)
+			)
+			extra_parameter_count = len(action_parameters) - len(task_parameters)
+			alignment_score = (
+				_weighted_token_overlap_score(
+					task_tokens,
+					_name_tokens(action_name),
+					token_frequencies=_domain_name_token_frequencies(action_analysis),
+				)
+				- 0.25 * extra_parameter_count
+			)
+			if alignment_score > best_alignment_score:
+				best_alignment_score = alignment_score
+				best_rendered_action_args = rendered_action_args
+		if best_rendered_action_args is None:
+			continue
+		rendered_requirements = _render_positive_dynamic_requirements(pattern, {
+			parameter: value
+			for parameter, value in zip(action_parameters, best_rendered_action_args)
+		})
+		rendered_effects = [
+			_render_signature_with_mapping(signature, {
+				parameter: value
+				for parameter, value in zip(action_parameters, best_rendered_action_args)
+			})
+			for signature in (pattern.get("positive_effect_signatures") or ())
+			if str(signature).strip()
+		]
+		involved_task_parameters = {
+			arg
+			for signature in (*rendered_requirements, *rendered_effects)
+			for arg in (_parse_literal_signature(signature) or (None, (), False))[1]
+			if arg in task_parameters
+		}
+		suffix = (
+			f" [needs {', '.join(rendered_requirements)}]"
+			if rendered_requirements
+			else ""
+		)
+		final_score = best_alignment_score + 0.5 * len(involved_task_parameters)
+		rendered_pattern = (
+			final_score,
+			f"{_task_invocation_signature(action_name, best_rendered_action_args)}{suffix}",
+		)
+		existing_pattern = best_patterns_by_action_name.get(action_name)
+		if existing_pattern is None or rendered_pattern[0] > existing_pattern[0]:
+			best_patterns_by_action_name[action_name] = rendered_pattern
+	rendered_patterns = list(best_patterns_by_action_name.values())
+	rendered_patterns.sort(key=lambda item: (-item[0], item[1]))
+	return _limited_unique((pattern for _, pattern in rendered_patterns), limit=limit)
 
 
 def _placeholder_stem(type_name: Optional[str]) -> str:
@@ -307,9 +468,20 @@ def _normalise_action_analysis(
 			"type_parent_map": dict(action_analysis.get("type_parent_map", {})),
 		}
 	parser = HDDLConditionParser()
+
+	def literal_signature(pattern: Any) -> str:
+		atom = (
+			pattern.predicate
+			if not pattern.args
+			else f"{pattern.predicate}({', '.join(pattern.args)})"
+		)
+		return atom if pattern.is_positive else f"not {atom}"
+
 	dynamic_predicates: set[str] = set()
 	producer_actions_by_predicate: Dict[str, list[str]] = {}
+	producer_patterns_by_predicate: Dict[str, list[Dict[str, Any]]] = {}
 	consumer_actions_by_predicate: Dict[str, list[str]] = {}
+	consumer_patterns_by_predicate: Dict[str, list[Dict[str, Any]]] = {}
 	parsed_actions: list[Any] = []
 	for action in getattr(domain, "actions", []):
 		try:
@@ -322,21 +494,98 @@ def _normalise_action_analysis(
 				dynamic_predicates.add(effect.predicate)
 	for parsed_action in parsed_actions:
 		action_name = _sanitize_name(parsed_action.name)
+		action_parameter_types = [
+			_parameter_type(parameter)
+			for parameter in (parsed_action.parameters or ())
+		]
+		precondition_signatures = [
+			literal_signature(pattern)
+			for pattern in parsed_action.preconditions
+			if pattern.predicate != "="
+		]
+		positive_effect_signatures = [
+			literal_signature(pattern)
+			for pattern in parsed_action.effects
+			if pattern.predicate != "=" and pattern.is_positive
+		]
+		negative_effect_signatures = [
+			literal_signature(pattern)
+			for pattern in parsed_action.effects
+			if pattern.predicate != "=" and not pattern.is_positive
+		]
+		dynamic_precondition_signatures = [
+			literal_signature(pattern)
+			for pattern in parsed_action.preconditions
+			if pattern.predicate != "=" and pattern.predicate in dynamic_predicates
+		]
 		for effect in parsed_action.effects:
 			if effect.predicate == "=" or not effect.is_positive:
 				continue
 			producer_actions_by_predicate.setdefault(effect.predicate, []).append(action_name)
+			producer_patterns_by_predicate.setdefault(effect.predicate, []).append(
+				{
+					"action_name": action_name,
+					"source_action_name": parsed_action.name,
+					"action_parameters": list(parsed_action.parameters),
+					"action_parameter_types": list(action_parameter_types),
+					"effect_args": list(effect.args),
+					"effect_signature": literal_signature(effect),
+					"precondition_signatures": list(precondition_signatures),
+					"dynamic_precondition_signatures": list(dynamic_precondition_signatures),
+					"positive_effect_signatures": list(positive_effect_signatures),
+					"negative_effect_signatures": list(negative_effect_signatures),
+				},
+			)
 		for precondition in parsed_action.preconditions:
 			if precondition.predicate == "=" or not precondition.is_positive:
 				continue
 			if precondition.predicate not in dynamic_predicates:
 				continue
 			consumer_actions_by_predicate.setdefault(precondition.predicate, []).append(action_name)
+			other_dynamic_precondition_signatures = [
+				literal_signature(pattern)
+				for pattern in parsed_action.preconditions
+				if pattern.predicate != "="
+				and pattern.predicate in dynamic_predicates
+				and pattern.is_positive
+				and pattern != precondition
+			]
+			consumer_patterns_by_predicate.setdefault(precondition.predicate, []).append(
+				{
+					"action_name": action_name,
+					"source_action_name": parsed_action.name,
+					"action_parameters": list(parsed_action.parameters),
+					"action_parameter_types": list(action_parameter_types),
+					"precondition_args": list(precondition.args),
+					"precondition_signature": literal_signature(precondition),
+					"other_dynamic_precondition_signatures": list(
+						other_dynamic_precondition_signatures,
+					),
+					"positive_effect_signatures": list(positive_effect_signatures),
+					"negative_effect_signatures": list(negative_effect_signatures),
+				},
+			)
 	all_predicates = {
 		str(predicate.name).strip()
 		for predicate in getattr(domain, "predicates", [])
 		if str(getattr(predicate, "name", "")).strip()
 	}
+	for predicate_name, patterns in list(producer_patterns_by_predicate.items()):
+		producer_patterns_by_predicate[predicate_name] = sorted(
+			patterns,
+			key=lambda item: (
+				item["action_name"],
+				item["effect_signature"],
+			),
+		)
+	for predicate_name, patterns in list(consumer_patterns_by_predicate.items()):
+		consumer_patterns_by_predicate[predicate_name] = sorted(
+			patterns,
+			key=lambda item: (
+				item["action_name"],
+				item["precondition_signature"],
+			),
+		)
 	return {
 		"dynamic_predicates": sorted(dynamic_predicates),
 		"static_predicates": sorted(all_predicates - dynamic_predicates),
@@ -345,9 +594,7 @@ def _normalise_action_analysis(
 			for predicate_name in sorted(dynamic_predicates)
 		},
 		"producer_patterns_by_predicate": {
-			predicate_name: list(action_analysis or {}).copy().get("producer_patterns_by_predicate", {}).get(predicate_name, [])
-			if action_analysis
-			else []
+			predicate_name: producer_patterns_by_predicate.get(predicate_name, [])
 			for predicate_name in sorted(dynamic_predicates)
 		},
 		"consumer_actions_by_predicate": {
@@ -355,9 +602,7 @@ def _normalise_action_analysis(
 			for predicate_name in sorted(dynamic_predicates)
 		},
 		"consumer_patterns_by_predicate": {
-			predicate_name: list(action_analysis or {}).copy().get("consumer_patterns_by_predicate", {}).get(predicate_name, [])
-			if action_analysis
-			else []
+			predicate_name: consumer_patterns_by_predicate.get(predicate_name, [])
 			for predicate_name in sorted(dynamic_predicates)
 		},
 		"type_parent_map": {},
@@ -695,7 +940,7 @@ def _constructive_template_summary_for_task(
 	rendered_patterns: list[str] = []
 	for pattern in patterns:
 		effect_args = list(pattern.get("effect_args") or ())
-		if len(effect_args) != len(task_parameters):
+		if not effect_args or len(effect_args) > len(task_parameters):
 			continue
 		aligned_task_parameters = (
 			_aligned_task_parameter_labels_for_predicate(

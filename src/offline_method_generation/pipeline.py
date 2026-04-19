@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
+from ..pipeline.domain_complete_pipeline import DomainCompletePipeline
 
 
 class OfflineMethodGenerationPipeline:

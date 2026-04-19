@@ -3,17 +3,108 @@
 from __future__ import annotations
 
 import json
-import queue
+import os
 import re
+import signal
+import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
 from .errors import LLMStreamingResponseError
 
 
+def _namespace_from_json_like(value: object) -> object:
+	if isinstance(value, dict):
+		return SimpleNamespace(
+			**{
+				key: _namespace_from_json_like(item)
+				for key, item in value.items()
+			},
+		)
+	if isinstance(value, list):
+		return [_namespace_from_json_like(item) for item in value]
+	return value
+
+
+class _RawOpenRouterStreamingResponse:
+	def __init__(self, *, client: Any, response: Any) -> None:
+		self._client = client
+		self._response = response
+		self.id = (
+			response.headers.get("x-request-id")
+			or response.headers.get("request-id")
+			or None
+		)
+
+	def __iter__(self):
+		for raw_line in self._response.iter_lines():
+			if raw_line is None:
+				continue
+			line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+			text = line.strip()
+			if not text.startswith("data:"):
+				continue
+			payload = text[5:].strip()
+			if not payload:
+				continue
+			if payload == "[DONE]":
+				break
+			try:
+				chunk = json.loads(payload)
+			except json.JSONDecodeError:
+				continue
+			namespace_chunk = _namespace_from_json_like(chunk)
+			if getattr(namespace_chunk, "id", None) is None and self.id:
+				setattr(namespace_chunk, "id", self.id)
+			yield namespace_chunk
+
+	def close(self) -> None:
+		try:
+			self._response.close()
+		finally:
+			self._client.close()
+
+
 class MethodSynthesisLLMTransportMixin:
+	@staticmethod
+	def _run_with_wall_clock_timeout(
+		timeout_seconds: Optional[float],
+		callback,
+	):
+		effective_timeout_seconds = float(timeout_seconds or 0.0)
+		if effective_timeout_seconds <= 0.0:
+			return callback()
+		if threading.current_thread() is not threading.main_thread():
+			return callback()
+		if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGALRM"):
+			return callback()
+
+		def _timeout_handler(signum, frame):  # type: ignore[no-untyped-def]
+			_ = (signum, frame)
+			raise TimeoutError(
+				"Method-synthesis LLM request exceeded the configured wall-clock "
+				"timeout before a response object was created.",
+			)
+
+		previous_handler = signal.getsignal(signal.SIGALRM)
+		try:
+			signal.signal(signal.SIGALRM, _timeout_handler)
+			signal.setitimer(signal.ITIMER_REAL, effective_timeout_seconds)
+			return callback()
+		finally:
+			signal.setitimer(signal.ITIMER_REAL, 0.0)
+			signal.signal(signal.SIGALRM, previous_handler)
+
+	@staticmethod
+	def _emit_method_synthesis_progress(message: str) -> None:
+		if not str(os.getenv("METHOD_SYNTHESIS_PROGRESS", "")).strip():
+			return
+		sys.stderr.write(f"[METHOD SYNTHESIS PROGRESS] {message}\n")
+		sys.stderr.flush()
+
 	@staticmethod
 	def _estimate_method_synthesis_response_token_budget(
 		*,
@@ -75,14 +166,21 @@ class MethodSynthesisLLMTransportMixin:
 		minimum_budget = 3000
 		return min(max_tokens, max(minimum_budget, estimated))
 
-	def _apply_method_synthesis_provider_token_ceiling(self, requested_max_tokens: int) -> int:
+	def _apply_method_synthesis_provider_token_ceiling(
+		self,
+		requested_max_tokens: int | None,
+	) -> int | None:
 		"""
 		Keep provider-specific handling explicit even when no extra cap is applied.
 
 		For MiniMax method synthesis, the more reliable setting is currently to avoid
-		an extra application-side completion ceiling and let the configured request
-		budget flow through unchanged.
+		an application-side completion ceiling entirely and constrain only reasoning.
 		"""
+		model_name = str(self.model or "").strip().lower()
+		if model_name.startswith("minimax/"):
+			# Keep completion uncapped for MiniMax method synthesis; reasoning and
+			# first-chunk deadlines are the control knobs that matter here.
+			return None
 		requested = max(int(requested_max_tokens or 0), 1)
 		return requested
 
@@ -91,59 +189,100 @@ class MethodSynthesisLLMTransportMixin:
 		prompt: Dict[str, str],
 		*,
 		max_tokens: Optional[int] = None,
+		attempt_index: int = 1,
 	) -> Tuple[str, Optional[str], Dict[str, Any]]:
 		timeout_seconds = float(self.timeout or 0.0)
-		transport_metadata: Dict[str, Any] = {}
+		request_profile = self._method_synthesis_request_profile(attempt_index=attempt_index)
+		transport_metadata: Dict[str, Any] = {
+			"llm_request_profile": request_profile["name"],
+			"llm_reasoning_budget": request_profile.get("reasoning_max_tokens"),
+			"llm_first_chunk_timeout_seconds": request_profile.get("first_chunk_timeout_seconds"),
+		}
+		request_timeout_seconds = self._method_synthesis_request_timeout_seconds(
+			timeout_seconds=timeout_seconds,
+			request_profile=request_profile,
+		)
+		if request_timeout_seconds > 0.0:
+			transport_metadata["llm_request_timeout_seconds"] = request_timeout_seconds
+		call_start = time.monotonic()
 		if timeout_seconds <= 0:
 			return self._call_llm_direct(
 				prompt,
 				max_tokens=max_tokens,
 				transport_metadata=transport_metadata,
+				request_profile=request_profile,
+				request_timeout_seconds=request_timeout_seconds or None,
 			)
-		result_queue: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
-
-		def _worker() -> None:
-			try:
-				result_queue.put(
-					(
-						True,
-						self._call_llm_direct(
-							prompt,
-							max_tokens=max_tokens,
-							transport_metadata=transport_metadata,
-						),
-					),
+		try:
+			response_text, finish_reason, response_metadata = self._call_llm_direct(
+				prompt,
+				max_tokens=max_tokens,
+				transport_metadata=transport_metadata,
+				request_profile=request_profile,
+				request_timeout_seconds=request_timeout_seconds or None,
+			)
+			elapsed_seconds = time.monotonic() - call_start
+			if timeout_seconds > 0.0 and elapsed_seconds >= timeout_seconds:
+				timeout_error = TimeoutError(
+					"Method-synthesis LLM call exceeded the configured timeout before "
+					"returning a usable response.",
 				)
-			except BaseException as exc:  # pragma: no cover - relayed to parent thread
 				try:
-					setattr(exc, "transport_metadata", dict(transport_metadata))
+					setattr(timeout_error, "transport_metadata", dict(response_metadata))
 				except Exception:
 					pass
-				result_queue.put((False, exc))
-
-		worker = threading.Thread(
-			target=_worker,
-			name="method-synthesis-llm",
-			daemon=True,
-		)
-		worker.start()
-		worker.join(timeout=timeout_seconds)
-		if worker.is_alive():
-			timeout_error = TimeoutError(
-				"Method-synthesis LLM call exceeded the configured timeout before "
-				"returning a usable response.",
-			)
+				raise timeout_error
+			return response_text, finish_reason, response_metadata
+		except Exception as exc:
+			merged_metadata = dict(transport_metadata)
+			merged_metadata.update(dict(getattr(exc, "transport_metadata", None) or {}))
+			if self._looks_like_transport_timeout(exc):
+				if (
+					float(request_profile.get("first_chunk_timeout_seconds") or 0.0) > 0.0
+					and merged_metadata.get("llm_first_chunk_seconds") is None
+				):
+					timeout_error = TimeoutError(
+						"Method-synthesis LLM call exceeded the configured first-chunk "
+						"deadline before any streaming content arrived.",
+					)
+				else:
+					timeout_error = TimeoutError(
+						"Method-synthesis LLM call exceeded the configured timeout before "
+						"returning a usable response.",
+					)
+				try:
+					setattr(timeout_error, "transport_metadata", merged_metadata)
+				except Exception:
+					pass
+				raise timeout_error from exc
 			try:
-				setattr(timeout_error, "transport_metadata", dict(transport_metadata))
+				setattr(exc, "transport_metadata", merged_metadata)
 			except Exception:
 				pass
-			raise timeout_error
-		if result_queue.empty():
-			raise RuntimeError("Method-synthesis LLM call exited without returning a result.")
-		success, payload = result_queue.get_nowait()
-		if success:
-			return payload  # type: ignore[return-value]
-		raise payload  # type: ignore[misc]
+			raise
+
+	@staticmethod
+	def _method_synthesis_request_timeout_seconds(
+		*,
+		timeout_seconds: float,
+		request_profile: Dict[str, Any],
+	) -> float:
+		effective_timeout_seconds = float(timeout_seconds or 0.0)
+		first_chunk_timeout_seconds = float(
+			request_profile.get("first_chunk_timeout_seconds") or 0.0,
+		)
+		if first_chunk_timeout_seconds <= 0.0:
+			return effective_timeout_seconds
+		if effective_timeout_seconds <= 0.0:
+			return first_chunk_timeout_seconds
+		return min(effective_timeout_seconds, first_chunk_timeout_seconds)
+
+	@staticmethod
+	def _looks_like_transport_timeout(exc: BaseException) -> bool:
+		exc_type_name = exc.__class__.__name__.lower()
+		if "timeout" in exc_type_name:
+			return True
+		return "timeout" in str(exc).lower()
 
 	def _call_llm_direct(
 		self,
@@ -151,12 +290,20 @@ class MethodSynthesisLLMTransportMixin:
 		*,
 		max_tokens: Optional[int] = None,
 		transport_metadata: Optional[Dict[str, Any]] = None,
+		request_profile: Optional[Dict[str, Any]] = None,
+		request_timeout_seconds: Optional[float] = None,
 	) -> Tuple[str, Optional[str], Dict[str, Any]]:
 		metadata = transport_metadata if transport_metadata is not None else {}
-		response = self._create_chat_completion(prompt, max_tokens=max_tokens)
+		response = self._create_chat_completion(
+			prompt,
+			max_tokens=max_tokens,
+			request_profile=request_profile,
+			request_timeout_seconds=request_timeout_seconds,
+		)
 		return self._consume_llm_response(
 			response,
 			transport_metadata=metadata,
+			total_timeout_seconds=float(self.timeout or 0.0),
 		)
 
 	def _consume_llm_response(
@@ -164,6 +311,7 @@ class MethodSynthesisLLMTransportMixin:
 		response: object,
 		*,
 		transport_metadata: Optional[Dict[str, Any]] = None,
+		total_timeout_seconds: float = 0.0,
 	) -> Tuple[str, Optional[str], Dict[str, Any]]:
 		metadata = transport_metadata if transport_metadata is not None else {}
 		if hasattr(response, "choices"):
@@ -178,6 +326,7 @@ class MethodSynthesisLLMTransportMixin:
 		return self._consume_streaming_llm_response(
 			response,
 			transport_metadata=metadata,
+			total_timeout_seconds=total_timeout_seconds,
 		)
 
 	def _create_chat_completion(
@@ -185,8 +334,15 @@ class MethodSynthesisLLMTransportMixin:
 		prompt: Dict[str, str],
 		*,
 		max_tokens: Optional[int] = None,
+		request_profile: Optional[Dict[str, Any]] = None,
+		request_timeout_seconds: Optional[float] = None,
 	):
-		stream_response = self._should_stream_method_synthesis_response()
+		profile = dict(request_profile or {})
+		stream_response = bool(
+			profile.get("stream_response")
+			if "stream_response" in profile
+			else self._should_stream_method_synthesis_response()
+		)
 		request_kwargs: Dict[str, Any] = {
 			"model": self.model,
 			"messages": [
@@ -194,22 +350,84 @@ class MethodSynthesisLLMTransportMixin:
 				{"role": "user", "content": prompt["user"]},
 			],
 			"temperature": 0.0,
-			"max_tokens": max_tokens or self.max_tokens,
-			"timeout": self.timeout,
+			"timeout": request_timeout_seconds if request_timeout_seconds is not None else self.timeout,
 			"stream": stream_response,
 		}
+		if max_tokens is not None:
+			request_kwargs["max_tokens"] = max_tokens
 		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
 			request_kwargs["response_format"] = {"type": "json_object"}
-		extra_body = self._openrouter_provider_routing_body()
-		plugins = self._method_synthesis_request_plugins(stream_response)
+		extra_body = self._openrouter_provider_routing_body(request_profile=profile)
+		plugins = self._method_synthesis_request_plugins(
+			stream_response,
+			request_profile=profile,
+		)
 		if plugins is not None:
 			extra_body = dict(extra_body or {})
 			extra_body["plugins"] = plugins
 		if extra_body is not None:
 			request_kwargs["extra_body"] = extra_body
-		return self.client.chat.completions.create(
-			**request_kwargs,
+		if self._should_use_raw_openrouter_stream_transport(profile):
+			return self._create_raw_openrouter_stream_response(
+				request_kwargs,
+				request_timeout_seconds=request_timeout_seconds,
+			)
+		return self._run_with_wall_clock_timeout(
+			request_timeout_seconds,
+			lambda: self.client.chat.completions.create(
+				**request_kwargs,
+			),
 		)
+
+	def _should_use_raw_openrouter_stream_transport(
+		self,
+		request_profile: Dict[str, Any],
+	) -> bool:
+		base_url = str(self.base_url or "").strip().lower()
+		return bool(request_profile.get("stream_response")) and "openrouter.ai" in base_url
+
+	def _create_raw_openrouter_stream_response(
+		self,
+		request_kwargs: Dict[str, Any],
+		*,
+		request_timeout_seconds: Optional[float],
+	):
+		import httpx
+
+		if not self.api_key:
+			raise RuntimeError("OpenRouter streaming transport requires an API key.")
+		base_url = str(self.base_url or "").rstrip("/")
+		url = f"{base_url}/chat/completions"
+		payload = {
+			key: value
+			for key, value in request_kwargs.items()
+			if key not in {"timeout", "response_format", "extra_body"}
+		}
+		extra_body = dict(request_kwargs.get("extra_body") or {})
+		payload.update(extra_body)
+		timeout_value = request_timeout_seconds if request_timeout_seconds is not None else self.timeout
+		client = httpx.Client(
+			timeout=httpx.Timeout(timeout_value),
+		)
+		try:
+			request = client.build_request(
+				"POST",
+				url,
+				headers={
+					"Authorization": f"Bearer {self.api_key}",
+					"Content-Type": "application/json",
+				},
+				json=payload,
+			)
+			response = self._run_with_wall_clock_timeout(
+				request_timeout_seconds,
+				lambda: client.send(request, stream=True),
+			)
+			response.raise_for_status()
+		except Exception:
+			client.close()
+			raise
+		return _RawOpenRouterStreamingResponse(client=client, response=response)
 
 	def _should_stream_method_synthesis_response(self) -> bool:
 		base_url = str(self.base_url or "").strip().lower()
@@ -218,13 +436,21 @@ class MethodSynthesisLLMTransportMixin:
 	def _method_synthesis_request_plugins(
 		self,
 		stream_response: bool,
+		*,
+		request_profile: Optional[Dict[str, Any]] = None,
 	) -> Optional[List[Dict[str, Any]]]:
 		base_url = str(self.base_url or "").strip().lower()
 		if stream_response or "openrouter.ai" not in base_url:
 			return None
+		if not bool((request_profile or {}).get("response_healing_plugin")):
+			return None
 		return [{"id": "response-healing"}]
 
-	def _openrouter_provider_routing_body(self) -> Dict[str, Any] | None:
+	def _openrouter_provider_routing_body(
+		self,
+		*,
+		request_profile: Optional[Dict[str, Any]] = None,
+	) -> Dict[str, Any] | None:
 		base_url = str(self.base_url or "").strip().lower()
 		if "openrouter.ai" not in base_url:
 			return None
@@ -241,21 +467,56 @@ class MethodSynthesisLLMTransportMixin:
 			},
 		}
 		if provider_name == "minimax":
-			# MiniMax requires reasoning on this endpoint, but method synthesis only needs
-			# a tiny hidden budget before emitting compact executable JSON. Larger hidden
-			# budgets have repeatedly ended in finish_reason='length' before the first
-			# textual JSON chunk arrived.
-			extra_body["reasoning"] = {
-				"max_tokens": 16,
-				"exclude": True,
-			}
+			reasoning_max_tokens = int(
+				(request_profile or {}).get("reasoning_max_tokens") or 0,
+			)
+			if reasoning_max_tokens > 0:
+				extra_body["reasoning"] = {
+					"max_tokens": reasoning_max_tokens,
+					"exclude": True,
+				}
 		return extra_body
+
+	def _method_synthesis_request_profile(self, *, attempt_index: int) -> Dict[str, Any]:
+		model_name = str(self.model or "").strip().lower()
+		if model_name.startswith("minimax/"):
+			if attempt_index <= 1:
+				return {
+					"name": "minimax_stream_reasoning1",
+					"stream_response": True,
+					"reasoning_max_tokens": 1,
+					"first_chunk_timeout_seconds": 180.0,
+					"response_healing_plugin": False,
+				}
+			if attempt_index == 2:
+				return {
+					"name": "minimax_stream_no_reasoning",
+					"stream_response": True,
+					"reasoning_max_tokens": 0,
+					"first_chunk_timeout_seconds": 180.0,
+					"response_healing_plugin": False,
+				}
+			return {
+				"name": "minimax_stream_no_reasoning_relaxed",
+				"stream_response": True,
+				"reasoning_max_tokens": 0,
+				"first_chunk_timeout_seconds": 240.0,
+				"response_healing_plugin": False,
+			}
+		return {
+			"name": "default_profile",
+			"stream_response": self._should_stream_method_synthesis_response(),
+			"reasoning_max_tokens": None,
+			"first_chunk_timeout_seconds": 0.0,
+			"response_healing_plugin": False,
+		}
 
 	def _consume_streaming_llm_response(
 		self,
 		response: object,
 		*,
 		transport_metadata: Optional[Dict[str, Any]] = None,
+		total_timeout_seconds: float = 0.0,
 	) -> Tuple[str, Optional[str], Dict[str, Any]]:
 		metadata = transport_metadata if transport_metadata is not None else {}
 		metadata["llm_response_mode"] = "streaming"
@@ -268,7 +529,64 @@ class MethodSynthesisLLMTransportMixin:
 		close_stream = getattr(response, "close", None)
 		stream_start = time.monotonic()
 		first_chunk_recorded = False
-		for chunk in response:
+		first_chunk_timeout_seconds = float(
+			metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
+		)
+		response_iterator = iter(response)
+		while True:
+			elapsed_seconds = time.monotonic() - stream_start
+			remaining_total_timeout_seconds = (
+				total_timeout_seconds - elapsed_seconds
+				if total_timeout_seconds > 0.0
+				else 0.0
+			)
+			next_chunk_timeout_seconds: Optional[float] = None
+			if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0:
+				next_chunk_timeout_seconds = first_chunk_timeout_seconds - elapsed_seconds
+				if total_timeout_seconds > 0.0:
+					next_chunk_timeout_seconds = min(
+						next_chunk_timeout_seconds,
+						remaining_total_timeout_seconds,
+					)
+			elif total_timeout_seconds > 0.0:
+				next_chunk_timeout_seconds = remaining_total_timeout_seconds
+			if next_chunk_timeout_seconds is not None and next_chunk_timeout_seconds <= 0.0:
+				timeout_error = TimeoutError(
+					"Method-synthesis LLM call exceeded the configured first-chunk "
+					"deadline before any streaming content arrived."
+					if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
+					else "Method-synthesis LLM call exceeded the configured timeout "
+					"before returning a usable response.",
+				)
+				try:
+					setattr(timeout_error, "transport_metadata", dict(metadata))
+				except Exception:
+					pass
+				if callable(close_stream):
+					close_stream()
+				raise timeout_error
+			try:
+				chunk = self._run_with_wall_clock_timeout(
+					next_chunk_timeout_seconds,
+					lambda: next(response_iterator),
+				)
+			except StopIteration:
+				break
+			except TimeoutError as exc:
+				timeout_error = TimeoutError(
+					"Method-synthesis LLM call exceeded the configured first-chunk "
+					"deadline before any streaming content arrived."
+					if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
+					else "Method-synthesis LLM call exceeded the configured timeout "
+					"before returning a usable response.",
+				)
+				try:
+					setattr(timeout_error, "transport_metadata", dict(metadata))
+				except Exception:
+					pass
+				if callable(close_stream):
+					close_stream()
+				raise timeout_error from exc
 			request_id = self._extract_transport_request_id(chunk)
 			if request_id:
 				metadata["llm_request_id"] = request_id
@@ -291,6 +609,9 @@ class MethodSynthesisLLMTransportMixin:
 							6,
 						)
 						first_chunk_recorded = True
+						self._emit_method_synthesis_progress(
+							f"first_chunk_seconds={metadata['llm_first_chunk_seconds']}",
+						)
 					parts.append(extracted)
 			for reasoning_candidate in (
 				getattr(delta, "reasoning", None) if delta is not None else None,
@@ -308,9 +629,24 @@ class MethodSynthesisLLMTransportMixin:
 					time.monotonic() - stream_start,
 					6,
 				)
+				self._emit_method_synthesis_progress(
+					f"complete_json_seconds={metadata['llm_complete_json_seconds']}",
+				)
 				if callable(close_stream):
 					close_stream()
 				return complete_payload, finish_reason or "stop", dict(metadata)
+			if total_timeout_seconds > 0.0 and (time.monotonic() - stream_start) >= total_timeout_seconds:
+				timeout_error = TimeoutError(
+					"Method-synthesis LLM call exceeded the configured timeout before "
+					"returning a usable response.",
+				)
+				try:
+					setattr(timeout_error, "transport_metadata", dict(metadata))
+				except Exception:
+					pass
+				if callable(close_stream):
+					close_stream()
+				raise timeout_error
 
 		text = "".join(parts).strip()
 		complete_payload = self._extract_complete_json_payload_text(text)
@@ -319,9 +655,16 @@ class MethodSynthesisLLMTransportMixin:
 				time.monotonic() - stream_start,
 				6,
 			)
+			self._emit_method_synthesis_progress(
+				f"complete_json_seconds={metadata['llm_complete_json_seconds']}",
+			)
 			if callable(close_stream):
 				close_stream()
 			return complete_payload, finish_reason or "stop", dict(metadata)
+		if text and any(token in text for token in ("{", "[")):
+			if callable(close_stream):
+				close_stream()
+			return text, finish_reason, dict(metadata)
 		if text:
 			error = LLMStreamingResponseError(
 				"LLM response did not contain usable textual JSON content. "

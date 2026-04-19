@@ -17,6 +17,16 @@ from .errors import HTNSynthesisError
 
 
 class MethodSynthesisLibraryPostprocessMixin:
+	@staticmethod
+	def _drop_trivial_boolean_literals(
+		literals: Sequence[HTNLiteral],
+	) -> Tuple[HTNLiteral, ...]:
+		return tuple(
+			literal
+			for literal in literals
+			if str(getattr(literal, "predicate", "")).strip().lower() != "true"
+		)
+
 	def _normalise_llm_library(
 		self,
 		library: HTNMethodLibrary,
@@ -171,7 +181,7 @@ class MethodSynthesisLibraryPostprocessMixin:
 					task_name=normalised_method_task_name,
 					parameters=normalised_parameters,
 					task_args=task_args,
-					context=method.context,
+					context=self._drop_trivial_boolean_literals(method.context),
 					subtasks=tuple(normalised_steps),
 					ordering=normalised_ordering,
 					origin=method.origin,

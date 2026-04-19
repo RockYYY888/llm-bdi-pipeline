@@ -135,8 +135,8 @@ Minimum configuration:
 ```bash
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=...
-METHOD_SYNTHESIS_MODEL=minimax/minimax-m2.7
-GOAL_GROUNDING_MODEL=deepseek/deepseek-chat-v3-0324
+OPENAI_MODEL=minimax/minimax-m2.7
+GOAL_GROUNDING_MODEL=minimax/minimax-m2.7
 ONLINE_DOMAIN_SOURCE=benchmark
 ```
 

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Sequence
 
 from utils.hddl_condition_parser import HDDLConditionParser
 
+from .method_family_taxonomy import infer_blueprint_family_archetypes
 from .prompt_support import (
 	_aligned_task_parameter_labels_for_predicate,
 	_constructive_template_summary_for_task,
@@ -18,6 +19,7 @@ from .prompt_support import (
 	_dynamic_support_candidate_map,
 	_dynamic_support_hint_lines,
 	_extend_mapping_with_action_parameters,
+	_fallback_action_template_summaries_for_task,
 	_format_tagged_block,
 	_limited_unique,
 	_literal_pattern_signature,
@@ -74,6 +76,7 @@ def build_domain_prompt_analysis_payload(
 		)
 		shared_requirements: list[str] = []
 		template_summaries: list[str] = []
+		used_action_fallback_templates = False
 		for predicate_name in headline_candidates:
 			for requirement in _shared_dynamic_requirements_for_predicate(
 				predicate_name,
@@ -90,8 +93,25 @@ def build_domain_prompt_analysis_payload(
 				analysis,
 				task_parameter_types=task_parameter_types,
 			)
-			if constructive_template and constructive_template not in template_summaries:
+			if constructive_template and not (
+				not shared_requirements and "; " in constructive_template
+			) and constructive_template not in template_summaries:
 				template_summaries.append(constructive_template)
+		if not template_summaries:
+			template_summaries = _fallback_action_template_summaries_for_task(
+				task_name,
+				task_parameters,
+				task_parameter_types,
+				analysis,
+			)
+			used_action_fallback_templates = bool(template_summaries)
+		if used_action_fallback_templates:
+			# When we only recover a task through action-level fallback, the
+			# inferred predicate headline is too weak to be treated as a real
+			# task headline. Keep the prompt helper-oriented instead of forcing
+			# a misleading predicate such as at(...).
+			headline_candidates = ()
+			shared_requirements = []
 		shared_requirements = _limited_unique(shared_requirements, limit=4)
 		template_summaries = _limited_unique(template_summaries, limit=2)
 		shared_dynamic_prerequisites_by_task[sanitized_task_name] = shared_requirements
@@ -109,6 +129,7 @@ def build_domain_prompt_analysis_payload(
 				"headline_candidates": list(headline_candidates),
 				"shared_dynamic_prerequisites": list(shared_requirements),
 				"producer_consumer_templates": list(template_summaries),
+				"used_action_fallback_templates": used_action_fallback_templates,
 				"composition_support_tasks": [],
 				"recursive_support_predicates": [],
 				"prerequisite_acquisition_templates": [],
@@ -152,6 +173,11 @@ def build_domain_prompt_analysis_payload(
 	for contract in domain_task_contracts:
 		task_name = str(contract.get("task_name") or "").strip()
 		task_signature = str(contract.get("task_signature") or "").strip()
+		task_schema = task_schemas.get(task_name)
+		task_parameter_types = tuple(
+			_parameter_type(parameter)
+			for parameter in (getattr(task_schema, "parameters", ()) or ())
+		)
 		relevant_predicates = {
 			str(predicate_name).strip()
 			for predicate_name in list(contract.get("headline_candidates") or ())
@@ -171,6 +197,27 @@ def build_domain_prompt_analysis_payload(
 		recursive_support_predicates: list[str] = []
 		for candidate_name, candidate_signature, candidate_headlines in support_task_palette:
 			if not candidate_signature or not candidate_headlines:
+				continue
+			candidate_schema = task_schemas.get(candidate_name)
+			candidate_parameter_types = tuple(
+				_parameter_type(parameter)
+				for parameter in (getattr(candidate_schema, "parameters", ()) or ())
+			)
+			if (
+				len(task_parameter_types) == len(candidate_parameter_types)
+				and task_parameter_types
+				and candidate_parameter_types
+				and not _signature_types_can_biject(
+					task_parameter_types,
+					candidate_parameter_types,
+					analysis.get("type_parent_map", {}) or {},
+				)
+				and not _signature_types_can_biject(
+					candidate_parameter_types,
+					task_parameter_types,
+					analysis.get("type_parent_map", {}) or {},
+				)
+			):
 				continue
 			headline_overlap = [
 				headline
@@ -196,9 +243,30 @@ def build_domain_prompt_analysis_payload(
 			for candidate_name in support_candidates_by_predicate.get(predicate_name, []):
 				candidate_signature = task_signature_by_name.get(candidate_name)
 				candidate_headlines = task_headlines_by_name.get(candidate_name) or []
+				candidate_schema = task_schemas.get(candidate_name)
+				candidate_parameter_types = tuple(
+					_parameter_type(parameter)
+					for parameter in (getattr(candidate_schema, "parameters", ()) or ())
+				)
 				if not candidate_signature:
 					continue
 				if predicate_name not in candidate_headlines:
+					continue
+				if (
+					len(task_parameter_types) == len(candidate_parameter_types)
+					and task_parameter_types
+					and candidate_parameter_types
+					and not _signature_types_can_biject(
+						task_parameter_types,
+						candidate_parameter_types,
+						analysis.get("type_parent_map", {}) or {},
+					)
+					and not _signature_types_can_biject(
+						candidate_parameter_types,
+						task_parameter_types,
+						analysis.get("type_parent_map", {}) or {},
+					)
+				):
 					continue
 				if candidate_signature == task_signature:
 					entry = (
@@ -379,10 +447,6 @@ def _build_method_blueprints(
 				}
 				if predicate_name not in candidate_headlines:
 					continue
-				candidate_tokens = set(_name_tokens(candidate_name))
-				predicate_tokens = set(_name_tokens(predicate_name))
-				if predicate_tokens and not (candidate_tokens & predicate_tokens):
-					continue
 				candidate_schema = task_schemas.get(candidate_name)
 				if candidate_schema is None:
 					continue
@@ -417,6 +481,8 @@ def _build_method_blueprints(
 			task_parameters=task_parameters,
 			task_parameter_types=task_parameter_types,
 		)
+		if bool(contract.get("used_action_fallback_templates")):
+			method_family_schemas = []
 		method_family_schemas = _prune_method_family_schemas(
 			method_family_schemas,
 			task_parameters=task_parameters,
@@ -432,6 +498,41 @@ def _build_method_blueprints(
 			)
 		):
 			producer_templates = []
+		support_task_hints = [
+			str(item).strip()
+			for item in (contract.get("composition_support_tasks") or ())
+			if str(item).strip()
+			and str(item).strip() != "none"
+			and not str(item).strip().startswith(f"{contract.get('task_signature')} ")
+		]
+		task_name_tokens = set(_name_tokens(task_name))
+		headline_named_task = any(
+			set(_name_tokens(headline)).issubset(task_name_tokens)
+			for headline in headline_candidates
+			if str(headline).strip()
+		)
+		headline_support_tasks = [
+			entry
+			for entry in support_task_hints
+			if any(
+				f" stabilizes {headline}" in entry
+				for headline in headline_candidates
+			)
+		] if headline_named_task else []
+		if not headline_candidates:
+			support_task_hints = []
+			headline_support_tasks = []
+		preferred_family_shape = _classify_preferred_family_shape(
+			support_call_palette=support_call_palette,
+			support_task_hints=support_task_hints,
+			uncovered_prerequisite_families=uncovered_prerequisite_families,
+			direct_primitive_achievers=producer_templates,
+			method_family_schemas=method_family_schemas,
+		)
+		witness_binding_required = _payload_contains_auxiliary_witnesses(
+			producer_templates,
+			method_family_schemas,
+		)
 
 		blueprints.append(
 			{
@@ -439,7 +540,11 @@ def _build_method_blueprints(
 				"task_signature": str(contract.get("task_signature") or "").strip(),
 				"typed_task_signature": str(contract.get("typed_task_signature") or "").strip(),
 				"headline_candidates": headline_candidates or ["helper_only"],
+				"preferred_family_shape": preferred_family_shape,
+				"witness_binding_required": witness_binding_required,
+				"headline_support_tasks": _limited_unique(headline_support_tasks, limit=4) or ["none"],
 				"support_call_palette": _limited_unique(support_call_palette, limit=6) or ["none"],
+				"support_task_hints": _limited_unique(support_task_hints, limit=4) or ["none"],
 				"direct_primitive_achievers": producer_templates or ["none"],
 				"uncovered_prerequisite_families": _limited_unique(
 					uncovered_prerequisite_families,
@@ -448,7 +553,50 @@ def _build_method_blueprints(
 				"method_family_schemas": method_family_schemas or ["none"],
 			},
 		)
+		blueprints[-1]["family_archetypes"] = list(
+			infer_blueprint_family_archetypes(blueprints[-1]),
+		) or [preferred_family_shape]
 	return blueprints
+
+
+def _payload_contains_auxiliary_witnesses(*payloads: object) -> bool:
+	def _contains_aux(value: object) -> bool:
+		if isinstance(value, dict):
+			return any(_contains_aux(item) for item in value.values())
+		if isinstance(value, (list, tuple, set)):
+			return any(_contains_aux(item) for item in value)
+		return "AUX_" in str(value or "")
+
+	return any(_contains_aux(payload) for payload in payloads)
+
+
+def _classify_preferred_family_shape(
+	*,
+	support_call_palette: Sequence[str],
+	support_task_hints: Sequence[str],
+	uncovered_prerequisite_families: Sequence[str],
+	direct_primitive_achievers: Sequence[str],
+	method_family_schemas: Sequence[object],
+) -> str:
+	recursive_families = [
+		family
+		for family in method_family_schemas
+		if isinstance(family, dict)
+		and str(family.get("family_role") or "") == "recursive_blocker_removal"
+	]
+	if recursive_families and len(recursive_families) == len(
+		[item for item in method_family_schemas if isinstance(item, dict)],
+	):
+		return "recursive_blocker_removal"
+	has_support_calls = any(str(item).strip() and str(item).strip() != "none" for item in support_call_palette)
+	has_support_hints = any(str(item).strip() and str(item).strip() != "none" for item in support_task_hints)
+	has_uncovered_families = any(
+		str(item).strip() and str(item).strip() != "none"
+		for item in uncovered_prerequisite_families
+	)
+	if has_support_calls or has_support_hints or has_uncovered_families:
+		return "support_then_final"
+	return "direct_leaf"
 
 
 def _prune_method_family_schemas(
@@ -493,12 +641,25 @@ def _render_method_blueprint_blocks(method_blueprints: Sequence[Dict[str, Any]])
 		headline_candidates = list(payload["headline_candidates"])
 		serializable: Dict[str, Any] = {
 			"task": payload["typed_task_signature"] or payload["task_signature"],
+			"preferred_family_shape": str(payload.get("preferred_family_shape") or "direct_leaf"),
 		}
-		if len(headline_candidates) == 1:
+		if bool(payload.get("witness_binding_required")):
+			serializable["witness_binding_required"] = True
+		archetypes = [
+			str(item).strip()
+			for item in (payload.get("family_archetypes") or ())
+			if str(item).strip()
+		]
+		if archetypes:
+			serializable["family_archetypes"] = archetypes
+		if headline_candidates == ["helper_only"]:
+			pass
+		elif len(headline_candidates) == 1:
 			serializable["headline"] = headline_candidates[0]
 		else:
 			serializable["headlines"] = headline_candidates
 		for key in (
+			"headline_support_tasks",
 			"support_call_palette",
 			"uncovered_prerequisite_families",
 		):
@@ -625,7 +786,7 @@ def _render_method_family_schemas(
 	for predicate_name in headline_candidates:
 		for pattern in (action_analysis.get("producer_patterns_by_predicate", {}).get(predicate_name, ())):
 			effect_args = list(pattern.get("effect_args") or ())
-			if len(effect_args) != len(task_parameters):
+			if not effect_args or len(effect_args) > len(task_parameters):
 				continue
 			aligned_task_parameters = _aligned_task_parameter_labels_for_predicate(
 				predicate_name,
@@ -718,7 +879,7 @@ def _render_method_family_schemas(
 				task_parameter_set=task_parameter_set,
 				token_mapping=dict(token_mapping),
 			)
-			if cleanup_steps:
+			if recursive_support_calls and cleanup_steps:
 				family_payload["cleanup_steps"] = cleanup_steps
 			serialized = json.dumps(family_payload, sort_keys=True)
 			if serialized in seen_payloads:
@@ -882,19 +1043,13 @@ def build_domain_htn_user_prompt(
 			"1. Emit a minimal HDDL-aligned method library, not task-level branch shorthand.",
 			"2. Define exactly the declared compound tasks in compound_tasks.",
 			"3. Read method_blueprints as the canonical task-support tree for each task.",
-			"4. Treat method_family_schemas as the minimal real decomposition families induced by the domain mechanics.",
-			"5. Prefer support_call_palette over local primitive repair whenever a declared task already stabilizes the needed literal.",
-			"6. Use direct_primitive_achievers and uncovered_prerequisite_families only to fill real support gaps left by method_family_schemas.",
-			"7. If redundant_if_noop_holds=true, do not emit that constructive method.",
-			"8. If recursive_support_calls are listed, place them before final_step.",
-			"9. If cleanup_steps are listed, append them after final_step when needed to restore shared resources.",
-			"10. Keep tasks with the same headline predicate semantically distinct by task name.",
-			"11. Every constructive method must end with a real final achiever child or primitive.",
-			"12. task_args must match exactly the declared task signature slots and never include auxiliary witness variables.",
-			"13. Auxiliary witness variables belong only in method parameters, context, subtasks, and ordering.",
-			"14. Use explicit step objects with pairwise ordering edges.",
-			"15. Omit optional fields when they add no information.",
-			"16. Never invent undeclared compound helpers, hidden predicates, or extra schema fields.",
+			"4. Use a two-step procedure: first choose the decomposition program from family_archetypes, then emit only the smallest method set that realizes it.",
+			"5. Family meanings are fixed: direct_leaf = primitive wrapper; support_then_leaf = prerequisite support then final primitive; recursive_refinement = noop plus witness-changing recursion; hierarchical_orchestration = compound delegation or mission composition.",
+			"6. Treat method_family_schemas as concrete evidence and use direct_primitive_achievers plus uncovered_prerequisite_families only to fill real support gaps.",
+			"7. If headline_support_tasks is non-empty for a supported state-goal task, route at least one method through that declared support task instead of exposing only the terminal primitive.",
+			"8. If witness_binding_required=true, bind auxiliary witnesses explicitly in method parameters, context, subtasks, and ordering; never place them in task_args.",
+			"9. If redundant_if_noop_holds=true, omit that constructive method; if recursive_support_calls are listed, place them before final_step; if cleanup_steps are listed, place them after final_step.",
+			"10. Use explicit step objects with pairwise ordering edges and never invent undeclared compound helpers, predicates, or schema fields.",
 		]
 	)
 	sections = [

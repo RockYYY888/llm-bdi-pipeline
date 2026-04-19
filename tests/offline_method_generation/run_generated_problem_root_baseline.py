@@ -188,13 +188,101 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 	from tests.support.ground_truth_baseline_support import (
+		load_domain_query_cases,
+		query_id_sort_key,
+		run_generated_problem_root_case,
 		run_generated_problem_root_baseline_for_domain,
 	)
 
-	summary = run_generated_problem_root_baseline_for_domain(
-		domain_key,
-		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else None,
-	)
+	if _RUN_GENERATED_DOMAIN_FILE:
+		query_cases = load_domain_query_cases(domain_key)
+		selected_query_ids = (
+			tuple(sorted(_RUN_QUERY_IDS, key=query_id_sort_key))
+			if _RUN_QUERY_IDS
+			else tuple(sorted(query_cases, key=query_id_sort_key))
+		)
+		query_reports = [
+			run_generated_problem_root_case(
+				domain_key,
+				query_id,
+				generated_domain_file=_RUN_GENERATED_DOMAIN_FILE,
+			)
+			for query_id in selected_query_ids
+		]
+		counts = {
+			"hierarchical_plan_verified": 0,
+			"primitive_plan_valid_but_hierarchical_rejected": 0,
+			"primitive_plan_invalid": 0,
+			"no_plan_from_solver": 0,
+			"unknown_failure": 0,
+		}
+		for report in query_reports:
+			bucket = str(report.get("outcome_bucket") or "unknown_failure")
+			counts[bucket] = counts.get(bucket, 0) + 1
+		summary = {
+			"domain_key": domain_key,
+			"domain_build": {
+				"success": True,
+				"log_dir": None,
+				"artifact_root": None,
+				"source_domain_kind": "generated",
+				"masked_domain_file": None,
+				"generated_domain_file": _RUN_GENERATED_DOMAIN_FILE,
+				"domain_build_invocations": 0,
+				"reused_generated_domain": True,
+				"llm_attempted": False,
+				"llm_generation_attempts": 0,
+				"llm_attempts": 0,
+				"llm_request_id": "",
+				"llm_response_mode": "",
+				"llm_first_chunk_seconds": None,
+				"llm_complete_json_seconds": None,
+				"method_synthesis_model": "",
+				"generated_method_count": 0,
+			},
+			"domain_gate_preflight": {
+				"success": True,
+				"log_dir": None,
+				"artifact_root": None,
+				"validated_task_count": None,
+				"reused_generated_domain": True,
+			},
+			"total_queries": len(query_reports),
+			"selected_query_ids": list(selected_query_ids),
+			"llm_generation_attempts_total": 0,
+			"verified_successes": counts.get("hierarchical_plan_verified", 0),
+			"hierarchical_rejection_failures": counts.get(
+				"primitive_plan_valid_but_hierarchical_rejected",
+				0,
+			),
+			"primitive_invalid_failures": counts.get("primitive_plan_invalid", 0),
+			"solver_no_plan_failures": counts.get("no_plan_from_solver", 0),
+			"unknown_failures": counts.get("unknown_failure", 0),
+			"query_results": [
+				{
+					"query_id": report["query_id"],
+					"problem_file": str(report["case"]["problem_file"]),
+					"log_dir": str(report["log_dir"]),
+					"success": bool(report["success"]),
+					"outcome_bucket": report["outcome_bucket"],
+					"plan_solve_status": (
+						(report.get("plan_solve", {}).get("summary", {}) or {}).get("status")
+					),
+					"plan_verification_status": (
+						(report.get("plan_verification", {}).get("summary", {}) or {}).get("status")
+					),
+					"selected_solver_id": (
+						(report.get("plan_verification", {}).get("artifacts", {}) or {}).get("selected_solver_id")
+					),
+				}
+				for report in query_reports
+			],
+		}
+	else:
+		summary = run_generated_problem_root_baseline_for_domain(
+			domain_key,
+			query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else None,
+		)
 	summary_path = run_dir / f"{domain_key}.summary.json"
 	summary_path.write_text(json.dumps(summary, indent=2))
 	print(json.dumps(summary, indent=2))
@@ -234,6 +322,7 @@ def _run_full_baseline(*, max_concurrent_domains: int = len(DOMAIN_KEYS)) -> int
 
 
 _RUN_QUERY_IDS: List[str] = []
+_RUN_GENERATED_DOMAIN_FILE: str = ""
 
 
 def main() -> int:
@@ -241,10 +330,12 @@ def main() -> int:
 	parser.add_argument("--domain", choices=DOMAIN_KEYS)
 	parser.add_argument("--run-dir")
 	parser.add_argument("--query-id", action="append", default=[])
+	parser.add_argument("--generated-domain-file")
 	parser.add_argument("--max-concurrent-domains", type=int, default=len(DOMAIN_KEYS))
 	args = parser.parse_args()
-	global _RUN_QUERY_IDS
+	global _RUN_QUERY_IDS, _RUN_GENERATED_DOMAIN_FILE
 	_RUN_QUERY_IDS = list(args.query_id or [])
+	_RUN_GENERATED_DOMAIN_FILE = str(args.generated_domain_file or "").strip()
 
 	if args.domain:
 		if not args.run_dir:

@@ -21,7 +21,7 @@ from offline_method_generation.method_synthesis.prompts import (
 	build_domain_htn_user_prompt,
 )
 from offline_method_generation.method_synthesis.domain_prompts import _render_method_blueprint_blocks
-from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
+from offline_method_generation.method_synthesis.schema import HTNLiteral, HTNMethodLibrary, HTNMethodStep
 from offline_method_generation.method_synthesis.synthesizer import HTNMethodSynthesizer
 from offline_method_generation.artifacts import DomainLibraryArtifact, load_domain_library_artifact, persist_domain_library_artifact
 from pipeline.domain_complete_pipeline import DomainCompletePipeline
@@ -81,14 +81,17 @@ def test_domain_prompt_is_query_independent_and_does_not_leak_official_methods(t
 	assert "primitive_action_schemas:" in user_prompt
 	assert "method_blueprints" in user_prompt
 	assert '"method_family_schemas"' in user_prompt
-	assert '"support_call_palette"' in user_prompt
+	assert '"uncovered_prerequisite_families"' in user_prompt
 	assert "primitive_actions:" not in user_prompt
 	assert "<silent_self_check>" not in user_prompt
 	assert "Emit one JSON object with keys compound_tasks and methods." in user_prompt
 
 
-def test_domain_prompt_analysis_exposes_composition_and_acquisition_families() -> None:
-	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
+def test_domain_prompt_analysis_exposes_composition_and_acquisition_families(tmp_path: Path) -> None:
+	domain = write_masked_domain_file(
+		official_domain_file=DOMAIN_FILES["blocksworld"],
+		output_path=tmp_path / "masked_blocksworld.hddl",
+	)["masked_domain"]
 	analysis = HTNMethodSynthesizer()._analyse_domain_actions(domain)
 	payload = build_domain_prompt_analysis_payload(domain, action_analysis=analysis)
 	contracts = {
@@ -121,33 +124,29 @@ def test_domain_prompt_analysis_exposes_composition_and_acquisition_families() -
 
 	assert do_put_on_blueprint["headline_candidates"] == ["on"]
 	assert any(
-		call.startswith("do_clear(")
-		for call in do_put_on_blueprint["support_call_palette"]
+		"do_move(?x, ?y) stabilizes on" in line
+		for line in do_put_on_blueprint["headline_support_tasks"]
 	)
 	assert any(
 		family.get("final_step") == "stack(?x, ?y)"
 		for family in do_move_blueprint["method_family_schemas"]
 		if isinstance(family, dict)
 	)
-	assert do_clear_blueprint["direct_primitive_achievers"] == ["none"]
-	assert len(
-		[
-			family
-			for family in do_clear_blueprint["method_family_schemas"]
-			if isinstance(family, dict)
-		]
-	) == 1
 	assert any(
-		family.get("recursive_support_calls") == ["do_clear(AUX_BLOCK1)"]
-		and "put_down(AUX_BLOCK1)" in list(family.get("cleanup_steps") or ())
-		and family.get("final_step") == "unstack(AUX_BLOCK1, ?x)"
-		for family in do_clear_blueprint["method_family_schemas"]
-		if isinstance(family, dict)
+		"pick_up(?x)" in line
+		for line in do_clear_blueprint["direct_primitive_achievers"]
+	)
+	assert any(
+		"put_down(?x)" in line
+		for line in do_clear_blueprint["direct_primitive_achievers"]
 	)
 
 
-def test_domain_prompt_analysis_keeps_transport_blueprints_type_aligned() -> None:
-	domain = HDDLParser.parse_domain(DOMAIN_FILES["transport"])
+def test_domain_prompt_analysis_keeps_transport_blueprints_type_aligned(tmp_path: Path) -> None:
+	domain = write_masked_domain_file(
+		official_domain_file=DOMAIN_FILES["transport"],
+		output_path=tmp_path / "masked_transport.hddl",
+	)["masked_domain"]
 	analysis = HTNMethodSynthesizer()._analyse_domain_actions(domain)
 	payload = build_domain_prompt_analysis_payload(domain, action_analysis=analysis)
 	blueprints = {
@@ -156,6 +155,8 @@ def test_domain_prompt_analysis_keeps_transport_blueprints_type_aligned() -> Non
 	}
 	deliver_blueprint = blueprints["deliver"]
 	get_to_blueprint = blueprints["get-to"]
+	load_blueprint = blueprints["load"]
+	unload_blueprint = blueprints["unload"]
 
 	assert not any(
 		"drive(?p" in line
@@ -169,6 +170,44 @@ def test_domain_prompt_analysis_keeps_transport_blueprints_type_aligned() -> Non
 	assert any(
 		"drive(?v" in line
 		for line in get_to_blueprint["direct_primitive_achievers"]
+	)
+	assert load_blueprint["headline_candidates"] == ["helper_only"]
+	assert unload_blueprint["headline_candidates"] == ["helper_only"]
+	assert load_blueprint["preferred_family_shape"] == "direct_leaf"
+	assert unload_blueprint["preferred_family_shape"] == "direct_leaf"
+	assert load_blueprint["method_family_schemas"] == ["none"]
+	assert unload_blueprint["method_family_schemas"] == ["none"]
+	assert any(
+		"pick_up(?v, ?l, ?p" in line
+		for line in load_blueprint["direct_primitive_achievers"]
+	)
+	assert any(
+		"drop(?v, ?l, ?p" in line
+		for line in unload_blueprint["direct_primitive_achievers"]
+	)
+
+
+def test_domain_prompt_analysis_recovers_satellite_helper_task_families(tmp_path: Path) -> None:
+	domain = write_masked_domain_file(
+		official_domain_file=DOMAIN_FILES["satellite"],
+		output_path=tmp_path / "masked_satellite.hddl",
+	)["masked_domain"]
+	analysis = HTNMethodSynthesizer()._analyse_domain_actions(domain)
+	payload = build_domain_prompt_analysis_payload(domain, action_analysis=analysis)
+	blueprints = {
+		str(blueprint["task_name"]): blueprint
+		for blueprint in payload["method_blueprints"]
+	}
+	activate_instrument_blueprint = blueprints["activate_instrument"]
+	auto_calibrate_blueprint = blueprints["auto_calibrate"]
+
+	assert any(
+		"switch_on(?ai_i, ?ai_s)" in line
+		for line in activate_instrument_blueprint["direct_primitive_achievers"]
+	)
+	assert any(
+		"calibrate(?ac_s, ?ac_i, AUX_CALIB_DIRECTION1)" in line
+		for line in auto_calibrate_blueprint["direct_primitive_achievers"]
 	)
 
 
@@ -201,6 +240,29 @@ def test_rendered_method_blueprints_use_compact_prompt_shape() -> None:
 	assert isinstance(rendered["uncovered_prerequisite_families"][0], dict)
 	assert "need" in rendered["uncovered_prerequisite_families"][0]
 	assert "acquire" in rendered["uncovered_prerequisite_families"][0]
+
+
+def test_rendered_helper_only_transport_leaf_tasks_omit_fake_headlines(tmp_path: Path) -> None:
+	domain = write_masked_domain_file(
+		official_domain_file=DOMAIN_FILES["transport"],
+		output_path=tmp_path / "masked_transport.hddl",
+	)["masked_domain"]
+	analysis = HTNMethodSynthesizer()._analyse_domain_actions(domain)
+	payload = build_domain_prompt_analysis_payload(domain, action_analysis=analysis)
+	blueprints = {
+		str(blueprint["task_name"]): blueprint
+		for blueprint in payload["method_blueprints"]
+	}
+
+	rendered = json.loads(
+		_render_method_blueprint_blocks([blueprints["load"], blueprints["unload"]]),
+	)
+
+	for entry in rendered:
+		assert "headline" not in entry
+		assert "headlines" not in entry
+		assert entry["preferred_family_shape"] == "direct_leaf"
+		assert "direct_primitive_achievers" in entry
 
 
 def test_library_postprocess_bound_helpers_are_callable_via_synthesizer_instance() -> None:
@@ -249,13 +311,54 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 	assert "response_format" not in captured_kwargs
 
 
-def test_method_synthesis_transport_keeps_minimax_completion_headroom() -> None:
+def test_method_synthesis_transport_omits_minimax_completion_ceiling() -> None:
 	synthesizer = HTNMethodSynthesizer(model="minimax/minimax-m2.7")
 
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(48000) == 48000
-	assert synthesizer._method_synthesis_attempt_max_tokens(48000, attempt_index=1) == 48000
-	assert synthesizer._method_synthesis_attempt_max_tokens(48000, attempt_index=2) == 48000
-	assert synthesizer._method_synthesis_attempt_max_tokens(48000, attempt_index=3) == 48000
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(48000) is None
+	assert synthesizer._method_synthesis_attempt_max_tokens(None, attempt_index=1) is None
+	assert synthesizer._method_synthesis_attempt_max_tokens(None, attempt_index=2) is None
+	assert synthesizer._method_synthesis_attempt_max_tokens(None, attempt_index=3) is None
+
+
+def test_method_synthesis_request_profiles_reduce_reasoning_budget_across_attempts() -> None:
+	synthesizer = HTNMethodSynthesizer(model="minimax/minimax-m2.7")
+
+	attempt_1 = synthesizer._method_synthesis_request_profile(attempt_index=1)
+	attempt_2 = synthesizer._method_synthesis_request_profile(attempt_index=2)
+	attempt_3 = synthesizer._method_synthesis_request_profile(attempt_index=3)
+
+	assert attempt_1["name"] == "minimax_stream_reasoning1"
+	assert attempt_1["reasoning_max_tokens"] == 1
+	assert attempt_1["first_chunk_timeout_seconds"] == 180.0
+	assert attempt_2["name"] == "minimax_stream_no_reasoning"
+	assert attempt_2["reasoning_max_tokens"] == 0
+	assert attempt_2["first_chunk_timeout_seconds"] == 180.0
+	assert attempt_3["name"] == "minimax_stream_no_reasoning_relaxed"
+	assert attempt_3["reasoning_max_tokens"] == 0
+	assert attempt_3["first_chunk_timeout_seconds"] == 240.0
+
+
+def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() -> None:
+	synthesizer = HTNMethodSynthesizer(
+		model="minimax/minimax-m2.7",
+		base_url="https://openrouter.ai/api/v1",
+	)
+
+	extra_body = synthesizer._openrouter_provider_routing_body(
+		request_profile={
+			"name": "minimax_stream_no_reasoning",
+			"stream_response": True,
+			"reasoning_max_tokens": 0,
+			"first_chunk_timeout_seconds": 180.0,
+		},
+	)
+
+	assert extra_body == {
+		"provider": {
+			"only": ["minimax"],
+			"allow_fallbacks": False,
+		},
+	}
 
 
 def test_method_synthesis_transport_keeps_response_format_off_openrouter_streaming_path() -> None:
@@ -283,23 +386,147 @@ def test_method_synthesis_transport_keeps_response_format_off_openrouter_streami
 	assert captured_kwargs["response_format"] == {"type": "json_object"}
 
 
+def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None:
+	captured_request = {}
+
+	class FakeSynthesizer(HTNMethodSynthesizer):
+		def _create_raw_openrouter_stream_response(
+			self,
+			request_kwargs,
+			*,
+			request_timeout_seconds=None,
+		):
+			captured_request["request_kwargs"] = dict(request_kwargs)
+			captured_request["request_timeout_seconds"] = request_timeout_seconds
+			return object()
+
+	synthesizer = FakeSynthesizer(
+		model="minimax/minimax-m2.7",
+		base_url="https://openrouter.ai/api/v1",
+		api_key="sk-test",
+		timeout=60,
+	)
+
+	response = synthesizer._create_chat_completion(
+		{"system": "x", "user": "y"},
+		max_tokens=16,
+		request_profile={
+			"name": "minimax_stream_reasoning8",
+			"stream_response": True,
+			"reasoning_max_tokens": 8,
+			"first_chunk_timeout_seconds": 90.0,
+		},
+		request_timeout_seconds=90.0,
+	)
+
+	assert response is not None
+	assert captured_request["request_kwargs"]["stream"] is True
+	assert "response_format" not in captured_request["request_kwargs"]
+	assert captured_request["request_timeout_seconds"] == 90.0
+
+
+def test_method_synthesis_transport_omits_max_tokens_for_minimax_requests() -> None:
+	captured_request = {}
+
+	class FakeSynthesizer(HTNMethodSynthesizer):
+		def _create_raw_openrouter_stream_response(
+			self,
+			request_kwargs,
+			*,
+			request_timeout_seconds=None,
+		):
+			captured_request["request_kwargs"] = dict(request_kwargs)
+			captured_request["request_timeout_seconds"] = request_timeout_seconds
+			return object()
+
+	synthesizer = FakeSynthesizer(
+		model="minimax/minimax-m2.7",
+		base_url="https://openrouter.ai/api/v1",
+		api_key="sk-test",
+		timeout=60,
+	)
+
+	synthesizer._create_chat_completion(
+		{"system": "x", "user": "y"},
+		max_tokens=None,
+		request_profile={
+			"name": "minimax_stream_no_reasoning",
+			"stream_response": True,
+			"reasoning_max_tokens": 0,
+			"first_chunk_timeout_seconds": 180.0,
+		},
+		request_timeout_seconds=180.0,
+	)
+
+	assert "max_tokens" not in captured_request["request_kwargs"]
+
+
+def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
+	class SlowCompletions:
+		def create(self, **kwargs):
+			_ = kwargs
+			time.sleep(0.05)
+			return object()
+
+	class FakeChat:
+		def __init__(self):
+			self.completions = SlowCompletions()
+
+	class FakeClient:
+		def __init__(self):
+			self.chat = FakeChat()
+
+	synthesizer = HTNMethodSynthesizer(
+		model="other/model",
+		base_url="https://api.example.com/v1",
+		timeout=0.05,
+	)
+	synthesizer.client = FakeClient()
+
+	with pytest.raises(TimeoutError, match="wall-clock timeout"):
+		synthesizer._create_chat_completion(
+			{"system": "x", "user": "y"},
+			max_tokens=16,
+			request_profile={
+				"name": "minimax_stream_reasoning8",
+				"stream_response": True,
+				"reasoning_max_tokens": 8,
+				"first_chunk_timeout_seconds": 0.01,
+			},
+			request_timeout_seconds=0.01,
+		)
+
+
 def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 	class SlowSynthesizer(HTNMethodSynthesizer):
-		def _call_llm_direct(self, prompt, *, max_tokens=None, transport_metadata=None):
+		def _call_llm_direct(
+			self,
+			prompt,
+			*,
+			max_tokens=None,
+			transport_metadata=None,
+			request_profile=None,
+			request_timeout_seconds=None,
+		):
 			if transport_metadata is not None:
 				transport_metadata["llm_request_id"] = "req_timeout"
 				transport_metadata["llm_response_mode"] = "streaming"
+				transport_metadata["llm_request_profile"] = dict(request_profile or {}).get("name")
 			time.sleep(0.05)
 			return "{}", "stop", dict(transport_metadata or {})
 
 	synthesizer = SlowSynthesizer(timeout=0.01)
 
-	with pytest.raises(TimeoutError, match="configured timeout") as exc_info:
+	with pytest.raises(TimeoutError, match="first-chunk deadline|configured timeout") as exc_info:
 		synthesizer._call_llm({"system": "x", "user": "y"}, max_tokens=16)
 
 	assert getattr(exc_info.value, "transport_metadata", {}) == {
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "streaming",
+		"llm_request_profile": "minimax_stream_reasoning1",
+		"llm_reasoning_budget": 1,
+		"llm_first_chunk_timeout_seconds": 180.0,
+		"llm_request_timeout_seconds": 0.01,
 	}
 
 
@@ -340,6 +567,35 @@ def test_method_synthesis_transport_streaming_captures_request_id_and_timings() 
 	assert finish_reason == "stop"
 	assert transport_metadata["llm_request_id"] == "req_stream_123"
 	assert transport_metadata["llm_response_mode"] == "streaming"
+	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_complete_json_seconds"] >= 0.0
+
+
+def test_method_synthesis_transport_enforces_first_chunk_deadline_during_stream_consumption() -> None:
+	class BlockingStream:
+		def __iter__(self):
+			return self
+
+		def __next__(self):
+			time.sleep(0.05)
+			raise AssertionError("stream iteration should have timed out before yielding")
+
+		def close(self):
+			return None
+
+	synthesizer = HTNMethodSynthesizer()
+
+	with pytest.raises(TimeoutError, match="first-chunk deadline") as exc_info:
+		synthesizer._consume_streaming_llm_response(
+			BlockingStream(),
+			transport_metadata={"llm_first_chunk_timeout_seconds": 0.01},
+			total_timeout_seconds=0.1,
+		)
+
+	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
+	assert transport_metadata["llm_response_mode"] == "streaming"
+	assert transport_metadata["llm_first_chunk_timeout_seconds"] == 0.01
+	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
 
 def test_method_synthesis_retries_no_content_stream_failures_for_minimax() -> None:
@@ -348,7 +604,7 @@ def test_method_synthesis_retries_no_content_stream_failures_for_minimax() -> No
 			super().__init__(model="minimax/minimax-m2.7")
 			self.call_count = 0
 
-		def _call_llm(self, prompt, *, max_tokens=None):
+		def _call_llm(self, prompt, *, max_tokens=None, attempt_index=1):
 			self.call_count += 1
 			if self.call_count == 1:
 				error = LLMStreamingResponseError(
@@ -358,6 +614,7 @@ def test_method_synthesis_retries_no_content_stream_failures_for_minimax() -> No
 				error.transport_metadata = {
 					"llm_request_id": "req_retry_1",
 					"llm_response_mode": "streaming",
+					"llm_request_profile": "minimax_stream_reasoning8",
 				}
 				raise error
 			return (
@@ -366,6 +623,7 @@ def test_method_synthesis_retries_no_content_stream_failures_for_minimax() -> No
 				{
 					"llm_request_id": "req_retry_2",
 					"llm_response_mode": "streaming",
+					"llm_request_profile": "minimax_stream_reasoning4",
 					"llm_first_chunk_seconds": 1.0,
 					"llm_complete_json_seconds": 2.0,
 				},
@@ -396,7 +654,9 @@ def test_method_synthesis_retries_no_content_stream_failures_for_minimax() -> No
 	assert metadata["llm_attempt_trace"][0]["request_max_tokens"] == 256
 	assert metadata["llm_attempt_trace"][1]["request_max_tokens"] == 256
 	assert metadata["llm_attempt_trace"][0]["request_id"] == "req_retry_1"
+	assert metadata["llm_attempt_trace"][0]["request_profile"] == "minimax_stream_reasoning8"
 	assert metadata["llm_attempt_trace"][1]["request_id"] == "req_retry_2"
+	assert metadata["llm_attempt_trace"][1]["request_profile"] == "minimax_stream_reasoning4"
 
 
 def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arrives() -> None:
@@ -441,6 +701,41 @@ def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arr
 	assert transport_metadata["llm_response_mode"] == "streaming"
 	assert transport_metadata["llm_reasoning_characters"] > 0
 	assert "top-level keys compound_tasks and methods" in transport_metadata["llm_reasoning_preview"]
+
+
+def test_method_synthesis_transport_returns_raw_json_like_text_for_downstream_salvage() -> None:
+	class FakeDelta:
+		def __init__(self, content):
+			self.content = content
+
+	class FakeChoice:
+		def __init__(self, content, finish_reason=None):
+			self.delta = FakeDelta(content)
+			self.finish_reason = finish_reason
+
+	class FakeChunk:
+		def __init__(self, chunk_id, content, finish_reason=None):
+			self.id = chunk_id
+			self.choices = [FakeChoice(content, finish_reason=finish_reason)]
+
+	class FakeStream:
+		def __iter__(self):
+			yield FakeChunk("req_salvage_123", '{"compound_tasks":[],"methods":[{"method_name":"m1"}]} trailing')
+			yield FakeChunk("req_salvage_123", "", finish_reason="stop")
+
+		def close(self):
+			return None
+
+	synthesizer = HTNMethodSynthesizer()
+
+	response_text, finish_reason, transport_metadata = synthesizer._consume_streaming_llm_response(
+		FakeStream(),
+		transport_metadata={},
+	)
+
+	assert response_text.startswith('{"compound_tasks":[],"methods":')
+	assert finish_reason == "stop"
+	assert transport_metadata["llm_request_id"] == "req_salvage_123"
 
 
 def test_library_postprocess_normalises_typed_method_parameter_surfaces() -> None:
@@ -491,6 +786,46 @@ def test_library_postprocess_drops_self_ordering_edges() -> None:
 	assert normalised.methods[0].ordering == ()
 
 
+def test_library_postprocess_collects_missing_variables_from_context_and_steps() -> None:
+	synthesizer = HTNMethodSynthesizer()
+
+	parameters = synthesizer._normalise_method_parameters(
+		("?x",),
+		context=(HTNLiteral(predicate="on", args=("?y", "?x")),),
+		steps=(
+			HTNMethodStep(
+				step_id="s1",
+				task_name="stack",
+				args=("?y", "?z"),
+				kind="primitive",
+				preconditions=(),
+				effects=(),
+				literal=None,
+				action_name=None,
+			),
+		),
+	)
+
+	assert parameters == ("?x", "?y", "?z")
+
+
+def test_library_postprocess_drops_true_literals_from_method_context() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"do_move","parameters":["?x:block","?y:block"]}],'
+		'"methods":[{"method_name":"m_do_move","task_name":"do_move",'
+		'"parameters":["?x:block","?y:block"],"task_args":["?x","?y"],'
+		'"context":["true","holding(?x)"],'
+		'"subtasks":[{"step_id":"s1","task_name":"stack","args":["?x","?y"],"kind":"primitive"}],'
+		'"ordering":[]}]}'
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+
+	assert [literal.predicate for literal in normalised.methods[0].context] == ["holding"]
+
+
 def test_parse_llm_library_accepts_object_pair_ordering_edges() -> None:
 	synthesizer = HTNMethodSynthesizer()
 	library = synthesizer._parse_llm_library(
@@ -504,6 +839,54 @@ def test_parse_llm_library_accepts_object_pair_ordering_edges() -> None:
 	)
 
 	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_accepts_first_second_ordering_edges() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"auto_calibrate","parameters":["?s:satellite","?i:instrument"]}],'
+		'"methods":[{"method_name":"m_auto_calibrate","task_name":"auto_calibrate",'
+		'"parameters":["?s:satellite","?i:instrument"],"task_args":["?s","?i"],'
+		'"context":["on_board(?i, ?s)"],'
+		'"subtasks":[{"step_id":"s1","task_name":"switch_on","args":["?i","?s"],"kind":"primitive"},'
+		'{"step_id":"s2","task_name":"calibrate","args":["?s","?i","?d"],"kind":"primitive"}],'
+		'"ordering":[{"first":"s1","second":"s2"}]}]}'
+	)
+
+	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_accepts_precedent_subsequent_ordering_edges() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"do_on_table","parameters":["?x:block"]}],'
+		'"methods":[{"method_name":"m_do_on_table_chain","task_name":"do_on_table",'
+		'"parameters":["?x:block","?z:block"],"task_args":["?x"],'
+		'"context":[],"subtasks":['
+		'{"step_id":"s1","task_name":"unstack","args":["?x","?z"],"kind":"primitive"},'
+		'{"step_id":"s2","task_name":"put-down","args":["?x"],"kind":"primitive"}],'
+		'"ordering":[{"precedent":"s1","subsequent":"s2"}]}]}'
+	)
+
+	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_splits_top_level_conjunction_context_strings() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"do_move","parameters":["?x:block","?y:block"]}],'
+		'"methods":[{"method_name":"m_do_move_direct","task_name":"do_move",'
+		'"parameters":["?x:block","?y:block"],"task_args":["?x","?y"],'
+		'"context":["clear(?x), ontable(?x), handempty"],'
+		'"subtasks":[{"step_id":"s1","task_name":"pick-up","args":["?x"],"kind":"primitive"}],'
+		'"ordering":[]}]}'
+	)
+
+	assert [literal.to_signature() for literal in library.methods[0].context] == [
+		"clear(?x)",
+		"ontable(?x)",
+		"handempty",
+	]
 
 
 def test_parse_llm_library_salvages_domain_task_payload_with_extra_closers() -> None:
