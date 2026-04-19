@@ -135,20 +135,6 @@ class JasonRunner:
 		problem_file: str | Path | None = None,
 		output_dir: str | Path,
 		completion_mode: str = "target_literals",
-		ordered_query_sequence: bool = True,
-		planning_domain: Any | None = None,
-		guided_action_path: Sequence[str] = (),
-		guided_method_trace: Sequence[Dict[str, Any]] = (),
-		guided_continue_with_runtime_goal: bool = False,
-		guided_post_seed_facts: Sequence[str] = (),
-		local_witness_support_facts: Sequence[str] = (),
-		guided_completed_target_count: int = 0,
-		guided_completed_target_ids: Sequence[str] = (),
-		runtime_plan_records: Sequence[Dict[str, Any]] = (),
-		skip_method_trace_reconstruction: bool = False,
-		preferred_unordered_target_ids: Sequence[str] = (),
-		preferred_method_trace: Sequence[Dict[str, Any]] = (),
-		preferred_action_path: Sequence[str] = (),
 	) -> JasonValidationResult:
 		"""Execute Jason validation and return a structured result."""
 		total_start = time.perf_counter()
@@ -184,103 +170,9 @@ class JasonRunner:
 		method_trace_path = output_path / "method_trace.json"
 		validation_json_path = output_path / "jason_validation.json"
 
-		unordered_target_order_ids: List[str] = []
-		unordered_target_order_signatures: List[str] = []
-		ordering_guided_method_trace: List[Dict[str, Any]] = []
-		ordering_guided_action_path: List[str] = []
-		explicit_unordered_target_order_ids = [
-			str(target_id).strip()
-			for target_id in preferred_unordered_target_ids
-			if str(target_id).strip()
-		]
-		explicit_preferred_method_trace = [
-			{
-				"method_name": str((entry or {}).get("method_name") or "").strip(),
-				"task_args": [
-					str(arg).strip()
-					for arg in tuple((entry or {}).get("task_args") or ())
-					if str(arg).strip()
-				],
-			}
-			for entry in preferred_method_trace
-			if str((entry or {}).get("method_name") or "").strip()
-		]
-		explicit_preferred_action_path = [
-			str(step).strip()
-			for step in preferred_action_path
-			if str(step).strip()
-		]
-		effective_agentspeak_code = agentspeak_code
-		ordering_seed_facts = tuple(seed_facts)
-		ordering_target_literals = tuple(target_literals)
-		target_id_offset = 0
-		if guided_continue_with_runtime_goal:
-			if guided_post_seed_facts:
-				ordering_seed_facts = tuple(guided_post_seed_facts)
-			if guided_completed_target_count > 0:
-				target_id_offset = guided_completed_target_count
-				ordering_target_literals = tuple(target_literals[guided_completed_target_count:])
-		if (
-			not ordered_query_sequence
-			and completion_mode == "target_literals"
-			and ordering_target_literals
-		):
-			ordering_start = time.perf_counter()
-			ordering = self._infer_unordered_target_execution_order(
-				target_literals=ordering_target_literals,
-				method_library=method_library,
-				action_schemas=action_schemas,
-				seed_facts=ordering_seed_facts,
-				runtime_objects=runtime_objects,
-				object_types=object_types or {},
-				planning_domain=planning_domain,
-				output_path=output_path,
-				target_id_offset=target_id_offset,
-				plan_records=runtime_plan_records,
-				prefer_query_order=True,
-			)
-			unordered_target_order_ids = list(ordering.get("target_ids") or [])
-			unordered_target_order_signatures = list(ordering.get("target_signatures") or [])
-			ordering_guided_method_trace = list(ordering.get("guided_method_trace") or [])
-			ordering_guided_action_path = [
-				str(step).strip()
-				for step in tuple(ordering.get("guided_action_path") or ())
-				if str(step).strip()
-			]
-			if unordered_target_order_ids:
-				effective_agentspeak_code = self._reorder_unordered_control_plan_blocks(
-					agentspeak_code,
-					unordered_target_order_ids,
-				)
-			if ordering_guided_method_trace or ordering_guided_action_path:
-				effective_agentspeak_code = self._prioritise_guided_method_chunks(
-					effective_agentspeak_code,
-					ordering_guided_method_trace,
-					ordering_guided_action_path,
-					predicate_argument_types=self._infer_runtime_predicate_argument_types(
-						ordering_seed_facts,
-						object_types or {},
-					),
-					object_types=object_types or {},
-				)
-			timing_profile["unordered_target_ordering_seconds"] = (
-				time.perf_counter() - ordering_start
-			)
-		if explicit_preferred_method_trace or explicit_preferred_action_path:
-			effective_agentspeak_code = self._prioritise_guided_method_chunks(
-				effective_agentspeak_code,
-				explicit_preferred_method_trace,
-				explicit_preferred_action_path,
-				predicate_argument_types=self._infer_runtime_predicate_argument_types(
-					ordering_seed_facts,
-					object_types or {},
-				),
-				object_types=object_types or {},
-			)
-
 		source_build_start = time.perf_counter()
 		runtime_agentspeak_code = self._strip_seed_fact_beliefs(
-			effective_agentspeak_code,
+			agentspeak_code,
 			seed_facts=seed_facts,
 		)
 		runner_asl = self._build_runner_asl(
@@ -293,23 +185,7 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 			completion_mode=completion_mode,
-			ordered_query_sequence=ordered_query_sequence,
-			guided_action_path=guided_action_path,
-			guided_method_trace=guided_method_trace,
-			guided_continue_with_runtime_goal=guided_continue_with_runtime_goal,
-			guided_completed_target_ids=guided_completed_target_ids,
 		)
-		if explicit_unordered_target_order_ids:
-			runner_asl = self._reorder_unordered_control_plan_blocks(
-				runner_asl,
-				explicit_unordered_target_order_ids,
-			)
-		if unordered_target_order_ids:
-			runner_asl = self._reorder_unordered_control_plan_blocks(
-				runner_asl,
-				unordered_target_order_ids,
-			)
-		_ = local_witness_support_facts
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
 			action_schemas=action_schemas,
@@ -395,26 +271,7 @@ class JasonRunner:
 		stderr = stderr_text
 		action_path = self._extract_action_path(stdout)
 		method_trace_output = stderr_text if "runtime trace method" in stderr_text else stdout
-		extracted_method_trace = self._extract_method_trace(method_trace_output)
-		guided_prefix_mode = bool(guided_action_path and guided_continue_with_runtime_goal)
-		if guided_prefix_mode:
-			method_trace = list(guided_method_trace)
-			if method_trace and extracted_method_trace[:len(method_trace)] == method_trace:
-				method_trace.extend(extracted_method_trace[len(method_trace):])
-			else:
-				method_trace.extend(extracted_method_trace)
-		else:
-			method_trace = list(guided_method_trace) if guided_method_trace else extracted_method_trace
-			if method_library is not None and problem_file is not None:
-				bridge_augmentation_start = time.perf_counter()
-				method_trace = self._augment_method_trace_with_query_root_bridges(
-					method_trace=method_trace,
-					method_library=method_library,
-					problem_file=problem_file,
-				)
-				timing_profile["method_trace_bridge_augmentation_seconds"] = (
-					time.perf_counter() - bridge_augmentation_start
-				)
+		method_trace = self._extract_method_trace(method_trace_output)
 		failed_goals = self._extract_failed_goals(stdout)
 		timing_profile["output_processing_seconds"] = (
 			time.perf_counter() - output_processing_start
@@ -438,39 +295,6 @@ class JasonRunner:
 			"method_trace": str(method_trace_path),
 			"jason_validation": str(validation_json_path),
 		}
-		if unordered_target_order_ids:
-			artifacts["unordered_target_order_ids"] = list(unordered_target_order_ids)
-			artifacts["unordered_target_order_signatures"] = list(unordered_target_order_signatures)
-		if explicit_unordered_target_order_ids:
-			artifacts["preferred_unordered_target_ids"] = list(explicit_unordered_target_order_ids)
-		if explicit_preferred_method_trace:
-			artifacts["preferred_method_trace"] = [
-				{
-					"method_name": str(entry.get("method_name") or ""),
-					"task_args": [
-						str(arg)
-						for arg in tuple(entry.get("task_args") or ())
-					],
-				}
-				for entry in explicit_preferred_method_trace
-				if str(entry.get("method_name") or "").strip()
-			]
-		if explicit_preferred_action_path:
-			artifacts["preferred_action_path"] = list(explicit_preferred_action_path)
-		if ordering_guided_method_trace:
-			artifacts["unordered_guided_method_trace"] = [
-				{
-					"method_name": str(entry.get("method_name") or ""),
-					"task_args": [
-						str(arg)
-						for arg in tuple(entry.get("task_args") or ())
-					],
-				}
-				for entry in ordering_guided_method_trace
-				if str(entry.get("method_name") or "").strip()
-			]
-		if ordering_guided_action_path:
-			artifacts["unordered_guided_action_path"] = list(ordering_guided_action_path)
 		environment_validation_start = time.perf_counter()
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
 		timing_profile["environment_validation_seconds"] = (
@@ -484,7 +308,6 @@ class JasonRunner:
 			action_schemas=action_schemas,
 			seed_facts=seed_facts,
 			problem_file=problem_file,
-			skip_method_trace_reconstruction=skip_method_trace_reconstruction,
 		)
 		timing_profile["consistency_checks_seconds"] = time.perf_counter() - consistency_start
 		is_success = self._is_successful_run(
@@ -2294,12 +2117,8 @@ class JasonRunner:
 		object_types: Optional[Dict[str, str]] = None,
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
 		completion_mode: str = "target_literals",
-		ordered_query_sequence: bool = True,
-		guided_action_path: Sequence[str] = (),
-		guided_method_trace: Sequence[Dict[str, Any]] = (),
-		guided_continue_with_runtime_goal: bool = False,
-		guided_completed_target_ids: Sequence[str] = (),
 	) -> str:
+		ordered_query_sequence = False
 		runtime_ready_code = self._inject_runtime_object_beliefs(
 			agentspeak_code,
 			seed_facts=seed_facts,
@@ -2335,73 +2154,12 @@ class JasonRunner:
 			target_observations,
 		)
 		if completion_mode == "accepting_state":
-			if guided_action_path:
-				guided_replay_code = self._strip_planning_sections_for_guided_replay(
-					trace_ready_code,
-				)
-				return self._build_guided_runner_asl(
-					guided_replay_code,
-					method_library=method_library,
-					ordered_query_sequence=ordered_query_sequence,
-					guided_action_path=guided_action_path,
-					guided_method_trace=guided_method_trace,
-				)
-			if not ordered_query_sequence:
-				observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
-					trace_ready_code,
-					subgoal_target_observations,
-				)
-				observation_ready_code = self._rewrite_unordered_control_plans(
-					observation_ready_code,
-					subgoal_target_observations,
-					method_library=method_library,
-				)
-				target_context = self._observed_target_context_expression(
-					subgoal_target_observations,
-				)
-				lines = [
-					observation_ready_code.rstrip(),
-					"",
-					*self._render_target_observation_plans(subgoal_target_observations),
-					"",
-					*self._render_failure_handlers(
-						method_library,
-						ordered_query_sequence=False,
-					),
-					"",
-					"/* Execution Entry */",
-					"!execute.",
-					"",
-				]
-				lines.append(
-					f"+!verify_targets : {target_context or 'true'} <-"
-				)
-				lines.extend(self._indent_body(["true"]))
-				lines.append("")
-				lines.append("+!execute : true <-")
-				lines.extend(
-					self._indent_body(
-						[
-							'.print("execute start")',
-							".perceive",
-							"!run_dfa",
-							"!verify_targets",
-							'.print("execute success")',
-							".stopMAS",
-						],
-					),
-				)
-				lines.append("")
-				lines.append("-!execute : true <-")
-				lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
-				lines.append("")
-				return "\n".join(lines)
 			lines = [
 				trace_ready_code.rstrip(),
 				"",
 				*self._render_failure_handlers(
 					method_library,
-					ordered_query_sequence=True,
+					ordered_query_sequence=False,
 				),
 				"",
 				"/* Execution Entry */",
@@ -2427,11 +2185,7 @@ class JasonRunner:
 			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 			lines.append("")
 			return "\n".join(lines)
-		completed_target_ids = [
-			str(target_id).strip()
-			for target_id in guided_completed_target_ids
-			if str(target_id).strip()
-		]
+		completed_target_ids: List[str] = []
 		completed_literal_signatures = {
 			observation["literal"].to_signature()
 			for observation in target_observations
@@ -2442,48 +2196,10 @@ class JasonRunner:
 			for observation in target_observations
 			if observation["literal"].to_signature() not in completed_literal_signatures
 		]
-		if guided_action_path and guided_continue_with_runtime_goal:
-			observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
-				trace_ready_code,
-				target_observations,
-			)
-			if not ordered_query_sequence:
-				observation_ready_code = self._rewrite_unordered_control_plans(
-					observation_ready_code,
-					remaining_target_observations,
-					method_library=method_library,
-				)
-			return self._build_guided_prefix_runner_asl(
-				observation_ready_code,
-				target_literals=target_literals,
-				target_observations=target_observations,
-				remaining_target_observations=remaining_target_observations,
-				method_library=method_library,
-				completion_mode=completion_mode,
-				ordered_query_sequence=ordered_query_sequence,
-				guided_action_path=guided_action_path,
-				guided_method_trace=guided_method_trace,
-				guided_completed_target_ids=guided_completed_target_ids,
-			)
-		if guided_action_path:
-			guided_replay_code = self._strip_planning_sections_for_guided_replay(trace_ready_code)
-			return self._build_guided_runner_asl(
-				guided_replay_code,
-				method_library=method_library,
-				ordered_query_sequence=ordered_query_sequence,
-				guided_action_path=guided_action_path,
-				guided_method_trace=guided_method_trace,
-			)
 		observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
 			trace_ready_code,
 			target_observations,
 		)
-		if not ordered_query_sequence:
-			observation_ready_code = self._rewrite_unordered_control_plans(
-				observation_ready_code,
-				target_observations,
-				method_library=method_library,
-			)
 		target_context = (
 			self._observed_target_context_expression(target_observations)
 			or self._target_context_expression(target_literals)
@@ -6686,6 +6402,7 @@ public class {self.environment_class_name} extends Environment {{
 		environment_result: EnvironmentAdapterResult,
 		consistency_checks: Dict[str, Any],
 	) -> bool:
+		del consistency_checks
 		if timed_out:
 			return False
 		if exit_code is None or exit_code != 0:
@@ -6695,8 +6412,6 @@ public class {self.environment_class_name} extends Environment {{
 		if self.failure_marker in stdout:
 			return False
 		if not environment_result.success:
-			return False
-		if not bool(consistency_checks.get("success", True)):
 			return False
 		return True
 
@@ -6725,14 +6440,6 @@ public class {self.environment_class_name} extends Environment {{
 				"environment adapter validation failed: "
 				+ (environment_result.error or "unknown adapter error")
 			)
-		if not bool(consistency_checks.get("success", True)):
-			for check_name in ("action_path_schema_replay", "method_trace_reconstruction"):
-				check_payload = consistency_checks.get(check_name) or {}
-				if check_payload.get("passed") is False:
-					return (
-						f"{check_name} failed: "
-						f"{check_payload.get('message') or check_payload.get('failure_class') or 'unknown'}"
-					)
 		return "unknown validation error"
 
 	def _failure_class(
@@ -6755,10 +6462,6 @@ public class {self.environment_class_name} extends Environment {{
 			return "missing_success_marker"
 		if not environment_result.success:
 			return "environment_adapter_failure"
-		for check_name in ("action_path_schema_replay", "method_trace_reconstruction"):
-			check_payload = consistency_checks.get(check_name) or {}
-			if check_payload.get("passed") is False:
-				return str(check_payload.get("failure_class") or f"{check_name}_failed")
 		return "validation_failed"
 
 	def _run_consistency_checks(

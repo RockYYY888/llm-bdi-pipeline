@@ -68,14 +68,24 @@ def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
     assert config.planning_timeout == 600
 
 
-def test_goal_grounding_model_defaults_to_pinned_deepseek_chat(monkeypatch):
+def test_goal_grounding_model_inherits_shared_model_when_no_explicit_override(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_MODEL", "minimax/minimax-m2.7")
     monkeypatch.delenv("GOAL_GROUNDING_MODEL", raising=False)
 
     config = Config()
 
-    assert config.goal_grounding_model == "deepseek/deepseek-chat-v3-0324"
+    assert config.goal_grounding_model == "minimax/minimax-m2.7"
+
+
+def test_goal_grounding_model_defaults_to_pinned_minimax_when_no_env_is_set(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("GOAL_GROUNDING_MODEL", raising=False)
+
+    config = Config()
+
+    assert config.goal_grounding_model == "minimax/minimax-m2.7"
 
 
 def test_method_synthesis_model_defaults_to_pinned_minimax_chat(monkeypatch):

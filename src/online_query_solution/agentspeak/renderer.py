@@ -64,6 +64,7 @@ class AgentSpeakRenderer:
                 raw_dfa_mode=raw_dfa_mode,
                 transition_specs=transition_specs,
                 subgoals=subgoals,
+                ordered_query_sequence=ordered_query_sequence,
             ),
         )
         lines.extend(self._render_primitive_wrappers(domain))
@@ -81,6 +82,7 @@ class AgentSpeakRenderer:
                     transition_specs,
                     subgoals=subgoals,
                     subgoal_task_name_map=subgoal_task_name_map,
+                    ordered_query_sequence=ordered_query_sequence,
                 ),
             )
         else:
@@ -97,6 +99,7 @@ class AgentSpeakRenderer:
         raw_dfa_mode: bool = False,
         transition_specs: Sequence[Dict[str, Any]] = (),
         subgoals: Sequence[Dict[str, Any]] = (),
+        ordered_query_sequence: bool = True,
     ) -> List[str]:
         lines = [
             "/* Initial Beliefs */",
@@ -126,31 +129,14 @@ class AgentSpeakRenderer:
             for state in accepting_states:
                 lines.append(f"accepting_state({state}).")
 
-        literal_label_by_subgoal = {
-            index: literal_signature
-            for index, subgoal in enumerate(subgoals, start=1)
-            if (literal_signature := str(subgoal.get("literal_signature") or "").strip())
-        }
         for record in dfa_records:
             transition_name = str(record.get("transition_name") or "").strip()
             if not transition_name:
                 continue
-            subgoal_index = record.get("subgoal_index")
-            label = (
-                literal_label_by_subgoal.get(subgoal_index)
-                if raw_dfa_mode and isinstance(subgoal_index, int)
-                else None
-            ) or (
-                record.get("label")
-                or record.get("raw_label")
-                or record.get("guard_context")
-                or ""
-            )
+            label = record.get("label") or record.get("raw_label") or ""
             lines.append(
                 f"dfa_edge_label({transition_name}, \"{label}\")."
             )
-        if subgoals:
-            lines.append("subgoal_cursor(1).")
 
         lines.append("")
         return lines
@@ -1112,67 +1098,38 @@ class AgentSpeakRenderer:
         subgoals: Sequence[Dict[str, Any]],
         subgoal_task_name_map: Dict[str, str],
     ) -> List[str]:
+        del subgoals
+        del subgoal_task_name_map
         lines = ["/* DFA Transition Wrappers */"]
-        anchors_by_index = {
-            index: anchor
-            for index, anchor in enumerate(subgoals, start=1)
-        }
 
         for spec in transition_specs:
             source_state = str(spec.get("source_state") or "").strip()
             target_state = str(spec.get("target_state") or "").strip()
-            guard_context = str(spec.get("guard_context") or "true").strip() or "true"
             transition_name = str(spec.get("transition_name") or "").strip()
-            stateless_subgoal = bool(spec.get("stateless_subgoal"))
             if not transition_name or not source_state or not target_state:
                 continue
-            subgoal_index = spec.get("subgoal_index")
-            anchor = (
-                anchors_by_index.get(int(subgoal_index))
-                if isinstance(subgoal_index, int)
-                else None
+            task_name = str(spec.get("task_name") or "").strip()
+            task_args = tuple(
+                str(arg).strip()
+                for arg in (spec.get("task_args") or ())
+                if str(arg).strip()
             )
-            if anchor is not None:
-                anchor_task_name = str(anchor.get("task_name") or "").strip()
-                task_name = subgoal_task_name_map.get(anchor_task_name, anchor_task_name)
-                task_args = tuple(
-                    str(arg).strip()
-                    for arg in (anchor.get("args") or ())
-                    if str(arg).strip()
-                )
-                if stateless_subgoal:
-                    lines.append(f"+!{transition_name} : true <-")
-                    body = [f"!{self._task_call(task_name, task_args)}"] if task_name else ["true"]
-                    lines.extend(self._indent_body(body))
-                    lines.append("")
-                    continue
-                lines.append(
-                    f"+!{transition_name} : {self._call('dfa_state', (source_state,))} <-"
-                )
-                body = []
-                if task_name:
-                    body.append(f"!{self._task_call(task_name, task_args)}")
-                body.extend(
-                    [
-                        f"-{self._call('dfa_state', (source_state,))}",
-                        f"+{self._call('dfa_state', (target_state,))}",
-                    ],
-                )
-                lines.extend(self._indent_body(body))
-                lines.append("")
+            is_epsilon_transition = bool(spec.get("is_epsilon_transition"))
+            if not task_name and not is_epsilon_transition:
                 continue
             lines.append(
-                f"+!{transition_name} : {self._call('dfa_state', (source_state,))} & "
-                f"{guard_context} <-"
+                f"+!{transition_name} : {self._call('dfa_state', (source_state,))} <-"
             )
-            lines.extend(
-                self._indent_body(
-                    [
-                        f"-{self._call('dfa_state', (source_state,))}",
-                        f"+{self._call('dfa_state', (target_state,))}",
-                    ],
-                ),
+            body = []
+            if task_name:
+                body.append(f"!{self._task_call(task_name, task_args)}")
+            body.extend(
+                [
+                    f"-{self._call('dfa_state', (source_state,))}",
+                    f"+{self._call('dfa_state', (target_state,))}",
+                ],
             )
+            lines.extend(self._indent_body(body))
             lines.append("")
 
         return lines
@@ -1233,12 +1190,12 @@ class AgentSpeakRenderer:
         *,
         subgoals: Sequence[Dict[str, Any]],
         subgoal_task_name_map: Dict[str, str],
+        ordered_query_sequence: bool,
     ) -> List[str]:
+        del subgoals
+        del subgoal_task_name_map
+        del ordered_query_sequence
         lines = ["/* DFA Control Plans */"]
-        subgoal_mode = any(
-            isinstance(record.get("subgoal_index"), int)
-            for record in transition_specs
-        )
         transitions_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         accepting_states = {
             str(state).strip()
@@ -1268,110 +1225,33 @@ class AgentSpeakRenderer:
             if source_state in accepting_states:
                 continue
             state_records = sorted(
-                transitions_by_source[source_state],
+                [
+                    record
+                    for record in transitions_by_source[source_state]
+                    if str(record.get("task_name") or "").strip()
+                    or bool(record.get("is_epsilon_transition"))
+                ],
                 key=lambda record: self._transition_priority_key(
                     record,
                     transition_distances=transition_distances,
                 ),
             )
-            if subgoal_mode:
-                if all(bool(record.get("stateless_subgoal")) for record in state_records):
-                    continue
-                for record in state_records:
-                    transition_name = str(record.get("transition_name") or "").strip()
-                    if not transition_name:
-                        continue
-                    lines.append(
-                        f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
-                    )
-                    lines.extend(
-                        self._indent_body(
-                            [
-                                f"!{transition_name}",
-                                "!run_dfa",
-                            ],
-                        ),
-                    )
-                    lines.append("")
-                continue
             for record in state_records:
-                guard_context = str(record.get("guard_context") or "true").strip() or "true"
                 transition_name = str(record.get("transition_name") or "").strip()
                 if not transition_name:
                     continue
                 lines.append(
-                    f"+!advance_dfa : {self._call('dfa_state', (source_state,))} & "
-                    f"{guard_context} <-"
+                    f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
                 )
                 lines.extend(
                     self._indent_body(
                         [
                             f"!{transition_name}",
-                            "!advance_dfa",
+                            "!run_dfa",
                         ],
                     ),
                 )
                 lines.append("")
-
-        if subgoal_mode:
-            if all(bool(record.get("stateless_subgoal")) for record in transition_specs):
-                for record in transition_specs:
-                    transition_name = str(record.get("transition_name") or "").strip()
-                    if not transition_name:
-                        continue
-                    lines.append("+!run_dfa : true <-")
-                    lines.extend(
-                        self._indent_body(
-                            [
-                                f"!{transition_name}",
-                                "!run_dfa",
-                            ],
-                        ),
-                    )
-                    lines.append("")
-                lines.append("+!run_dfa : true <-")
-                lines.extend(self._indent_body(["true"]))
-                lines.append("")
-            return lines
-
-        lines.append("+!advance_dfa : true <-")
-        lines.extend(self._indent_body(["true"]))
-        lines.append("")
-
-        if not subgoals:
-            lines.append("+!run_dfa : true <-")
-            lines.extend(self._indent_body(["!advance_dfa"]))
-            lines.append("")
-            return lines
-
-        for index, anchor in enumerate(subgoals, start=1):
-            anchor_task_name = str(anchor.get("task_name") or "").strip()
-            task_name = subgoal_task_name_map.get(anchor_task_name, anchor_task_name)
-            task_args = tuple(
-                str(arg).strip()
-                for arg in (anchor.get("args") or ())
-                if str(arg).strip()
-            )
-            if not task_name:
-                continue
-            lines.append(f"+!run_dfa : subgoal_cursor({index}) <-")
-            lines.extend(
-                self._indent_body(
-                    [
-                        "!advance_dfa",
-                        f"!{self._task_call(task_name, task_args)}",
-                        f"-subgoal_cursor({index})",
-                        f"+subgoal_cursor({index + 1})",
-                        "!run_dfa",
-                    ],
-                ),
-            )
-            lines.append("")
-
-        terminal_index = len(subgoals) + 1
-        lines.append(f"+!run_dfa : subgoal_cursor({terminal_index}) <-")
-        lines.extend(self._indent_body(["!advance_dfa"]))
-        lines.append("")
 
         return lines
 
@@ -1439,10 +1319,14 @@ class AgentSpeakRenderer:
         record: Dict[str, Any],
         *,
         transition_distances: Dict[str, int],
-    ) -> Tuple[float, str]:
+    ) -> Tuple[float, int, str]:
         target_state = str(record.get("target_state") or "").strip()
         transition_name = str(record.get("transition_name") or "").strip()
-        return (float(transition_distances.get(target_state, 10 ** 9)), transition_name)
+        return (
+            float(transition_distances.get(target_state, 10 ** 9)),
+            0 if str(record.get("task_name") or "").strip() else 1,
+            transition_name,
+        )
 
     def _ordered_method_steps(self, method: HTNMethod) -> List[Any]:
         if len(method.subtasks) <= 1 or not method.ordering:

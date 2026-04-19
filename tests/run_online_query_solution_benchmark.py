@@ -231,7 +231,7 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1) -> int:
 
 
 _RUN_QUERY_IDS: List[str] = []
-_RUN_LIBRARY_SOURCE = "official"
+_RUN_LIBRARY_SOURCE = "benchmark"
 
 
 def main() -> int:
@@ -240,7 +240,11 @@ def main() -> int:
 	parser.add_argument("--run-dir")
 	parser.add_argument("--query-id", action="append", default=[])
 	parser.add_argument("--max-concurrent-domains", type=int, default=1)
-	parser.add_argument("--library-source", choices=("official", "generated"), default="official")
+	parser.add_argument(
+		"--library-source",
+		choices=("benchmark", "official", "generated"),
+		default="benchmark",
+	)
 	args = parser.parse_args()
 	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE
 	_RUN_QUERY_IDS = list(args.query_id or [])

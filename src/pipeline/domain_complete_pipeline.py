@@ -33,6 +33,7 @@ from online_query_solution.domain_selection import (
     OnlineDomainContext,
     normalize_online_domain_source,
 )
+from online_query_solution.goal_grounding.grounding_map import GroundingMap
 from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
 from online_query_solution.temporal_compilation import build_dfa_from_ltlf
 from online_query_solution.agentspeak import (
@@ -83,6 +84,7 @@ from pipeline.artifacts import (
     query_bound_method_library,
 )
 from utils.hddl_condition_parser import HDDLConditionParser
+from utils.symbol_normalizer import SymbolNormalizer
 from verification.official_plan_verifier import IPCPlanVerifier
 from pipeline.execution_logger import ExecutionLogger
 
@@ -317,6 +319,13 @@ class DomainCompletePipeline:
         )
 
     @staticmethod
+    def _emit_domain_gate_progress(message: str) -> None:
+        if not str(os.getenv("DOMAIN_GATE_PROGRESS", "")).strip():
+            return
+        sys.stderr.write(f"[DOMAIN GATE PROGRESS] {message}\n")
+        sys.stderr.flush()
+
+    @staticmethod
     def _timing_breakdown_without_total(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not profile:
             return {}
@@ -410,19 +419,32 @@ class DomainCompletePipeline:
         transition_specs: Sequence[Dict[str, Any]],
         *,
         expected_subgoal_count: int,
+        expected_symbols: Sequence[str] = (),
     ) -> bool:
         indexed_specs = [
             spec
             for spec in transition_specs
             if isinstance(spec.get("subgoal_index"), int)
         ]
-        if expected_subgoal_count <= 0 or len(indexed_specs) < expected_subgoal_count:
+        expected_symbol_sequence = tuple(
+            str(symbol).strip()
+            for symbol in expected_symbols
+            if str(symbol).strip()
+        )
+        if expected_subgoal_count <= 0:
+            return False
+        if indexed_specs and len(indexed_specs) < expected_subgoal_count:
+            return False
+        if expected_symbol_sequence and len(expected_symbol_sequence) != expected_subgoal_count:
             return False
 
-        initial_state = str(indexed_specs[0].get("initial_state") or "").strip()
+        base_specs = indexed_specs or list(transition_specs)
+        if len(base_specs) < expected_subgoal_count:
+            return False
+        initial_state = str(base_specs[0].get("initial_state") or "").strip()
         accepting_states = {
             str(state).strip()
-            for spec in indexed_specs
+            for spec in base_specs
             for state in (spec.get("accepting_states") or ())
             if str(state).strip()
         }
@@ -433,22 +455,36 @@ class DomainCompletePipeline:
         for expected_index in range(1, expected_subgoal_count + 1):
             available_specs = [
                 spec
-                for spec in indexed_specs
+                for spec in base_specs
                 if str(spec.get("source_state") or "").strip() == current_state
             ]
-            available_indices = {
-                int(spec["subgoal_index"])
-                for spec in available_specs
-                if isinstance(spec.get("subgoal_index"), int)
-            }
-            if available_indices != {expected_index}:
-                return False
-
-            expected_specs = [
-                spec
-                for spec in available_specs
-                if int(spec["subgoal_index"]) == expected_index
-            ]
+            if indexed_specs:
+                available_indices = {
+                    int(spec["subgoal_index"])
+                    for spec in available_specs
+                    if isinstance(spec.get("subgoal_index"), int)
+                }
+                if available_indices != {expected_index}:
+                    return False
+                expected_specs = [
+                    spec
+                    for spec in available_specs
+                    if int(spec["subgoal_index"]) == expected_index
+                ]
+            else:
+                expected_label = expected_symbol_sequence[expected_index - 1]
+                available_labels = {
+                    str(spec.get("raw_label") or "").strip()
+                    for spec in available_specs
+                    if str(spec.get("raw_label") or "").strip()
+                }
+                if available_labels != {expected_label}:
+                    return False
+                expected_specs = [
+                    spec
+                    for spec in available_specs
+                    if str(spec.get("raw_label") or "").strip() == expected_label
+                ]
             if len(expected_specs) != 1:
                 return False
 
@@ -458,6 +494,136 @@ class DomainCompletePipeline:
             current_state = next_state
 
         return current_state in accepting_states
+
+    @staticmethod
+    def _task_event_grounding_map(
+        grounding_result: TemporalGroundingResult,
+    ) -> GroundingMap:
+        grounding_map = GroundingMap()
+        for task_event in grounding_result.subgoals:
+            grounding_map.add_atom(
+                symbol=str(task_event.subgoal_id),
+                predicate=str(task_event.task_name),
+                args=[str(arg) for arg in task_event.args],
+            )
+        return grounding_map
+
+    @staticmethod
+    def _annotate_transition_specs_with_task_event_indices(
+        transition_specs: Sequence[Dict[str, Any]],
+        task_events: Sequence[GroundedSubgoal],
+    ) -> Tuple[Dict[str, Any], ...]:
+        index_by_symbol = {
+            str(task_event.subgoal_id).strip(): index
+            for index, task_event in enumerate(task_events, start=1)
+            if str(task_event.subgoal_id).strip()
+        }
+        return tuple(
+            {
+                **dict(spec),
+                "subgoal_index": index_by_symbol.get(str(spec.get("raw_label") or "").strip()),
+            }
+            for spec in transition_specs
+        )
+
+    @staticmethod
+    def _normalise_formula_to_task_event_symbols(ltlf_formula: str) -> str:
+        return SymbolNormalizer().normalize_formula_string(str(ltlf_formula or "").strip())
+
+    @classmethod
+    def _parse_total_ordered_task_event_sequence(
+        cls,
+        ltlf_formula: str,
+    ) -> Tuple[str, ...]:
+        token_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[()&]")
+        tokens = token_pattern.findall(str(ltlf_formula or "").strip())
+        if not tokens:
+            return ()
+
+        def is_atom(token: str) -> bool:
+            return token not in {"F", "&", "(", ")"}
+
+        position = 0
+        ordered_symbols: List[str] = []
+        pending_closure_counts: List[int] = []
+
+        while True:
+            if position >= len(tokens) or tokens[position] != "F":
+                return ()
+            position += 1
+
+            open_parentheses = 0
+            while position < len(tokens) and tokens[position] == "(":
+                open_parentheses += 1
+                position += 1
+            if open_parentheses <= 0:
+                return ()
+
+            redundant_parentheses = 0
+            while position < len(tokens) and tokens[position] == "(":
+                redundant_parentheses += 1
+                position += 1
+
+            if position >= len(tokens) or not is_atom(tokens[position]):
+                return ()
+            ordered_symbols.append(tokens[position])
+            position += 1
+
+            for _ in range(redundant_parentheses):
+                if position >= len(tokens) or tokens[position] != ")":
+                    return ()
+                position += 1
+
+            if position < len(tokens) and tokens[position] == "&":
+                position += 1
+                if position < len(tokens) and tokens[position] == "F":
+                    pending_closure_counts.append(open_parentheses)
+                    continue
+                if position < len(tokens) and is_atom(tokens[position]):
+                    ordered_symbols.append(tokens[position])
+                    position += 1
+                    position = cls._consume_ordered_task_event_closures(
+                        tokens,
+                        position,
+                        open_parentheses,
+                    )
+                    while pending_closure_counts:
+                        position = cls._consume_ordered_task_event_closures(
+                            tokens,
+                            position,
+                            pending_closure_counts.pop(),
+                        )
+                    break
+                return ()
+
+            position = cls._consume_ordered_task_event_closures(
+                tokens,
+                position,
+                open_parentheses,
+            )
+            while pending_closure_counts:
+                position = cls._consume_ordered_task_event_closures(
+                    tokens,
+                    position,
+                    pending_closure_counts.pop(),
+                )
+            break
+
+        if position != len(tokens):
+            return ()
+        return tuple(ordered_symbols)
+
+    @staticmethod
+    def _consume_ordered_task_event_closures(
+        tokens: Sequence[str],
+        position: int,
+        closure_count: int,
+    ) -> int:
+        for _ in range(closure_count):
+            if position >= len(tokens) or tokens[position] != ")":
+                return len(tokens) + 1
+            position += 1
+        return position
 
     def run_query(self, nl_instruction: str) -> Dict[str, Any]:
         """
@@ -912,11 +1078,11 @@ class DomainCompletePipeline:
                 "goal_grounding",
                 stage_start,
                 metadata={
-                    "subgoal_count": len(grounding_result.subgoals),
+                    "task_event_count": len(grounding_result.subgoals),
                     "online_domain_source": online_domain.source,
                 },
             )
-            print(f"✓ Grounded subgoals: {len(grounding_result.subgoals)}")
+            print(f"✓ Grounded task events: {len(grounding_result.subgoals)}")
             print(f"  LTLf: {grounding_result.ltlf_formula}")
             return grounding_result, llm_prompt, llm_response
         except Exception as exc:
@@ -951,21 +1117,11 @@ class DomainCompletePipeline:
             dfa_dot = str(dfa_payload.get("dfa_dot") or "")
             dfa_dot_path = self.output_dir / "query_dfa.dot"
             dfa_dot_path.write_text(dfa_dot)
-
-            ordered_probe_specs = build_agentspeak_transition_specs(
-                dfa_result=dfa_payload,
-                grounding_map=None,
-                ordered_query_sequence=True,
-            )
-            ordered_subgoal_sequence = self._is_total_ordered_subgoal_chain(
-                ordered_probe_specs,
-                expected_subgoal_count=len(grounding_result.subgoals),
-            )
-
+            grounding_map = self._task_event_grounding_map(grounding_result)
             transition_specs = build_agentspeak_transition_specs(
                 dfa_result=dfa_payload,
-                grounding_map=None,
-                ordered_query_sequence=ordered_subgoal_sequence,
+                grounding_map=grounding_map,
+                ordered_query_sequence=False,
             )
             result = DFACompilationResult(
                 query_text=grounding_result.query_text,
@@ -980,7 +1136,7 @@ class DomainCompletePipeline:
                 construction=str(dfa_payload.get("construction") or "generic_ltlf2dfa"),
                 num_states=int(dfa_payload.get("num_states") or 0) or None,
                 num_transitions=int(dfa_payload.get("num_transitions") or 0) or None,
-                ordered_subgoal_sequence=ordered_subgoal_sequence,
+                ordered_subgoal_sequence=False,
                 subgoals=tuple(grounding_result.subgoals),
                 timing_profile=dict(dfa_payload.get("timing_profile") or {}),
             )
@@ -993,7 +1149,7 @@ class DomainCompletePipeline:
                 metadata={
                     "num_states": result.num_states,
                     "num_transitions": result.num_transitions,
-                    "ordered_subgoal_sequence": result.ordered_subgoal_sequence,
+                    "task_event_count": len(grounding_result.subgoals),
                 },
             )
             self._record_step_timing(
@@ -1003,11 +1159,11 @@ class DomainCompletePipeline:
                 metadata={
                     "num_states": result.num_states,
                     "num_transitions": result.num_transitions,
-                    "ordered_subgoal_sequence": result.ordered_subgoal_sequence,
+                    "task_event_count": len(grounding_result.subgoals),
                 },
             )
             print(f"✓ DFA states: {result.num_states or 0}")
-            print(f"  Ordered subgoal sequence: {result.ordered_subgoal_sequence}")
+            print(f"  Task-event alphabet size: {len(result.alphabet)}")
             return result
         except Exception as exc:
             self.logger.log_temporal_compilation(
@@ -1050,7 +1206,7 @@ class DomainCompletePipeline:
                 method_library=method_library,
                 plan_records=(),
                 typed_objects=typed_object_entries,
-                ordered_query_sequence=dfa_result.ordered_subgoal_sequence,
+                ordered_query_sequence=False,
                 prompt_analysis=None,
                 transition_specs=dfa_result.transition_specs,
                 subgoals=[subgoal.to_dict() for subgoal in grounding_result.subgoals],
@@ -1108,7 +1264,11 @@ class DomainCompletePipeline:
         stage_start = time.perf_counter()
 
         try:
-            runner = JasonRunner()
+            runner = JasonRunner(
+                timeout_seconds=self._jason_runtime_timeout_seconds(
+                    subgoal_count=len(grounding_result.subgoals),
+                ),
+            )
             action_schemas = self._planner_action_schemas_for_domain(online_domain.domain)
             seed_facts = tuple(
                 self._render_problem_fact(fact)
@@ -1121,123 +1281,37 @@ class DomainCompletePipeline:
                 )
                 if str(object_name).strip()
             )
-            unordered_execution_guidance = self._infer_unordered_execution_guidance(
-                dfa_result=dfa_result,
+            validation = runner.validate(
+                agentspeak_code=agentspeak_code,
+                target_literals=(),
+                protected_target_literals=(),
                 method_library=method_library,
-                online_domain=online_domain,
+                action_schemas=action_schemas,
+                seed_facts=seed_facts,
+                runtime_objects=runtime_objects,
+                object_types=dict(grounding_result.typed_objects),
+                type_parent_map=dict(online_domain.type_parent_map),
+                domain_name=online_domain.domain.name,
+                problem_file=str(Path(verification_problem_file).resolve()),
+                output_dir=self.output_dir,
+                completion_mode="accepting_state",
             )
-            preferred_unordered_target_ids = tuple(
-                str(target_id).strip()
-                for target_id in (
-                    unordered_execution_guidance.get("preferred_unordered_target_ids") or ()
-                )
-                if str(target_id).strip()
-            )
-            preferred_method_trace = tuple(
-                {
-                    "method_name": str((entry or {}).get("method_name") or "").strip(),
-                    "task_args": [
-                        str(arg).strip()
-                        for arg in tuple((entry or {}).get("task_args") or ())
-                        if str(arg).strip()
-                    ],
-                }
-                for entry in (
-                    unordered_execution_guidance.get("preferred_method_trace") or ()
-                )
-                if str((entry or {}).get("method_name") or "").strip()
-            )
-            preferred_action_path = tuple(
-                str(step).strip()
-                for step in (
-                    unordered_execution_guidance.get("preferred_action_path") or ()
-                )
-                if str(step).strip()
-            )
-            preferred_hierarchical_plan_text = str(
-                unordered_execution_guidance.get("preferred_hierarchical_plan_text") or ""
-            ).strip()
-            validation_kwargs = {
-                "agentspeak_code": agentspeak_code,
-                "target_literals": (),
-                "protected_target_literals": (),
-                "method_library": method_library,
-                "action_schemas": action_schemas,
-                "seed_facts": seed_facts,
-                "runtime_objects": runtime_objects,
-                "object_types": dict(grounding_result.typed_objects),
-                "type_parent_map": dict(online_domain.type_parent_map),
-                "domain_name": online_domain.domain.name,
-                "problem_file": str(Path(verification_problem_file).resolve()),
-                "output_dir": self.output_dir,
-                "completion_mode": "accepting_state",
-                "ordered_query_sequence": dfa_result.ordered_subgoal_sequence,
-                "planning_domain": online_domain.domain,
-                "skip_method_trace_reconstruction": False,
-                "preferred_unordered_target_ids": preferred_unordered_target_ids,
-                "preferred_method_trace": preferred_method_trace,
-                "preferred_action_path": preferred_action_path,
-            }
-            runtime_execution_mode = "jason_runtime"
-            primary_runtime_error = ""
-            prefer_guided_replay = bool(
-                preferred_action_path
-                and verification_mode == "original_problem"
-                and online_domain.source == ONLINE_DOMAIN_SOURCE_BENCHMARK
-                and not dfa_result.ordered_subgoal_sequence
-            )
-            if prefer_guided_replay:
-                runtime_execution_mode = "planner_guided_jason_replay"
-                validation = runner.validate(
-                    **{
-                        **validation_kwargs,
-                        "preferred_method_trace": (),
-                        "preferred_action_path": (),
-                        "guided_action_path": preferred_action_path,
-                        "guided_method_trace": preferred_method_trace,
-                        "skip_method_trace_reconstruction": True,
-                    },
-                )
-            else:
-                try:
-                    validation = runner.validate(**validation_kwargs)
-                except Exception as exc:
-                    primary_runtime_error = str(exc)
-                    if not preferred_action_path:
-                        raise
-                    runtime_execution_mode = "planner_guided_jason_replay"
-                    validation = runner.validate(
-                        **{
-                            **validation_kwargs,
-                            "preferred_method_trace": (),
-                            "preferred_action_path": (),
-                            "guided_action_path": preferred_action_path,
-                            "guided_method_trace": preferred_method_trace,
-                            "skip_method_trace_reconstruction": True,
-                        },
-                    )
             if validation.status != "success":
                 raise ValueError(validation.stderr or validation.stdout or "Jason runtime returned failure")
 
-            guided_plan_text = self._render_supported_hierarchical_plan(
+            hierarchical_plan_text = self._render_supported_hierarchical_plan(
                 action_path=validation.action_path,
                 method_library=method_library,
                 method_trace=validation.method_trace,
                 problem_file=str(Path(verification_problem_file).resolve()),
                 domain_file=online_domain.domain_file,
             )
-            if (
-                guided_plan_text is None
-                and runtime_execution_mode == "planner_guided_jason_replay"
-                and preferred_hierarchical_plan_text
-            ):
-                guided_plan_text = preferred_hierarchical_plan_text
             result = JasonExecutionResult(
                 query_text=grounding_result.query_text,
                 ltlf_formula=grounding_result.ltlf_formula,
                 action_path=tuple(validation.action_path),
                 method_trace=tuple(dict(item) for item in validation.method_trace),
-                guided_hierarchical_plan_text=guided_plan_text,
+                guided_hierarchical_plan_text=hierarchical_plan_text,
                 verification_problem_file=str(Path(verification_problem_file).resolve()),
                 verification_mode=verification_mode,
                 artifacts={
@@ -1258,14 +1332,7 @@ class DomainCompletePipeline:
                     "method_trace_count": len(result.method_trace),
                     "verification_mode": verification_mode,
                     "online_domain_source": online_domain.source,
-                    "preferred_unordered_target_ids": list(preferred_unordered_target_ids),
-                    "preferred_method_trace_count": len(preferred_method_trace),
-                    "preferred_action_path_count": len(preferred_action_path),
-                    "runtime_execution_mode": runtime_execution_mode,
-                    "primary_runtime_error": primary_runtime_error or None,
-                    "planner_guidance_active": bool(
-                        preferred_unordered_target_ids or preferred_method_trace or preferred_action_path
-                    ),
+                    "runtime_execution_mode": "jason_runtime",
                 },
             )
             self._record_step_timing(
@@ -1277,14 +1344,7 @@ class DomainCompletePipeline:
                     "method_trace_count": len(result.method_trace),
                     "verification_mode": verification_mode,
                     "online_domain_source": online_domain.source,
-                    "preferred_unordered_target_ids": list(preferred_unordered_target_ids),
-                    "preferred_method_trace_count": len(preferred_method_trace),
-                    "preferred_action_path_count": len(preferred_action_path),
-                    "runtime_execution_mode": runtime_execution_mode,
-                    "primary_runtime_error": primary_runtime_error or None,
-                    "planner_guidance_active": bool(
-                        preferred_unordered_target_ids or preferred_method_trace or preferred_action_path
-                    ),
+                    "runtime_execution_mode": "jason_runtime",
                 },
             )
             print(f"✓ Jason action steps: {len(result.action_path)}")
@@ -1303,6 +1363,108 @@ class DomainCompletePipeline:
             self._record_step_timing("runtime_execution", stage_start)
             print(f"✗ Runtime execution failed: {exc}")
             return None
+
+    @staticmethod
+    def _jason_runtime_timeout_seconds(*, subgoal_count: int) -> int:
+        if subgoal_count >= 1000:
+            return 480
+        if subgoal_count >= 800:
+            return 360
+        if subgoal_count >= 600:
+            return 240
+        if subgoal_count >= 400:
+            return 180
+        return 120
+
+    def _infer_ordered_execution_guidance(
+        self,
+        *,
+        verification_problem_file: str | Path,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        online_domain: OnlineDomainContext,
+    ) -> Dict[str, Any]:
+        empty_guidance = {
+            "preferred_unordered_target_ids": (),
+            "preferred_method_trace": (),
+            "preferred_action_path": (),
+        }
+        if not dfa_result.ordered_subgoal_sequence:
+            return empty_guidance
+
+        try:
+            planner = PANDAPlanner(workspace=str(self.output_dir))
+            if not planner.toolchain_available():
+                return empty_guidance
+
+            from utils.hddl_parser import HDDLParser
+
+            verification_problem_path = Path(verification_problem_file).resolve()
+            verification_problem = HDDLParser.parse_problem(str(verification_problem_path))
+            root_tasks = tuple(getattr(verification_problem, "htn_tasks", ()) or ())
+            if not root_tasks:
+                return empty_guidance
+            root_task = root_tasks[0]
+            transition_name = f"ordered_guidance_{sanitize_identifier(verification_problem.name)}"
+            plan = planner.plan_hddl_files(
+                domain=online_domain.domain,
+                domain_file=online_domain.domain_file,
+                problem_file=str(verification_problem_path),
+                task_name=str(root_task.task_name),
+                task_args=tuple(str(arg).strip() for arg in (root_task.args or ())),
+                transition_name=transition_name,
+                timeout_seconds=float(self.OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS),
+            )
+            method_trace = tuple(
+                {
+                    "method_name": str((entry or {}).get("method_name") or "").strip(),
+                    "task_args": tuple(
+                        str(arg).strip()
+                        for arg in tuple((entry or {}).get("task_args") or ())
+                        if str(arg).strip()
+                    ),
+                }
+                for entry in planner.extract_method_trace(plan.actual_plan)
+                if str((entry or {}).get("method_name") or "").strip()
+            )
+            planner_steps = tuple(getattr(plan, "steps", ()) or ())
+            action_path = tuple(
+                str(step).strip()
+                for step in tuple(getattr(plan, "action_path", ()) or ())
+                if str(step).strip()
+            )
+            if not action_path and planner_steps:
+                action_path = tuple(
+                    (
+                        f"{step.action_name}({', '.join(step.args)})"
+                        if tuple(getattr(step, "args", ()) or ())
+                        else str(getattr(step, "action_name", "") or "").strip()
+                    )
+                    for step in planner_steps
+                    if str(getattr(step, "action_name", "") or "").strip()
+                )
+            if not action_path:
+                for candidate in tuple(getattr(plan, "solver_candidates", ()) or ()):
+                    if str((candidate or {}).get("status") or "").strip() != "success":
+                        continue
+                    candidate_action_path = tuple(
+                        str(step).strip()
+                        for step in tuple((candidate or {}).get("action_path") or ())
+                        if str(step).strip()
+                    )
+                    if candidate_action_path:
+                        action_path = candidate_action_path
+                        break
+            if not action_path:
+                return empty_guidance
+            return {
+                "preferred_unordered_target_ids": (),
+                "preferred_method_trace": method_trace,
+                "preferred_action_path": action_path,
+                "preferred_hierarchical_plan_text": str(getattr(plan, "actual_plan", "") or ""),
+            }
+        except Exception:
+            return empty_guidance
 
     def _infer_unordered_execution_guidance(
         self,
@@ -1390,7 +1552,7 @@ class DomainCompletePipeline:
                 ),
                 "preferred_method_trace": method_trace,
                 "preferred_action_path": action_path,
-                "preferred_hierarchical_plan_text": str(getattr(plan, "actual_plan", "") or "").strip(),
+                "preferred_hierarchical_plan_text": str(getattr(plan, "actual_plan", "") or ""),
             }
         except Exception:
             return empty_guidance
@@ -1458,6 +1620,38 @@ class DomainCompletePipeline:
                 matched_ids.append(subgoal.subgoal_id)
         return tuple(matched_ids)
 
+    def _action_paths_match(
+        self,
+        left_action_path: Sequence[str],
+        right_action_path: Sequence[str],
+    ) -> bool:
+        left_steps = tuple(left_action_path or ())
+        right_steps = tuple(right_action_path or ())
+        if len(left_steps) != len(right_steps):
+            return False
+
+        def normalise(step: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+            parsed = self._planner_parse_action_step(step)
+            if parsed is None:
+                return None
+            action_name, action_args = parsed
+            return (
+                str(action_name).strip(),
+                tuple(
+                    str(arg).strip()
+                    for arg in tuple(action_args or ())
+                    if str(arg).strip()
+                ),
+            )
+
+        normalised_left = tuple(normalise(step) for step in left_steps)
+        normalised_right = tuple(normalise(step) for step in right_steps)
+        if any(step is None for step in normalised_left):
+            return False
+        if any(step is None for step in normalised_right):
+            return False
+        return normalised_left == normalised_right
+
     def _source_task_name_for_task(
         self,
         task_name: str,
@@ -1477,21 +1671,7 @@ class DomainCompletePipeline:
     ) -> Tuple[Optional[str], str]:
         if self.problem is None or not self.problem_file:
             return self.problem_file, "original_problem"
-        if self._query_matches_original_problem_root(
-            dfa_result=dfa_result,
-            method_library=method_library,
-        ):
-            return str(Path(self.problem_file).resolve()), "original_problem"
-        return (
-            str(
-                self._build_query_verification_problem(
-                    dfa_result,
-                    method_library,
-                    online_domain=online_domain,
-                ),
-            ),
-            "query_specific_problem",
-        )
+        return str(Path(self.problem_file).resolve()), "original_problem"
 
     def _query_matches_original_problem_root(
         self,
@@ -3149,8 +3329,12 @@ class DomainCompletePipeline:
                 "llm_attempted": synthesis_meta["llm_prompt"] is not None,
                 "llm_finish_reason": synthesis_meta.get("llm_finish_reason"),
                 "llm_request_id": synthesis_meta.get("llm_request_id"),
+                "llm_request_profile": synthesis_meta.get("llm_request_profile"),
                 "llm_response_mode": synthesis_meta.get("llm_response_mode"),
                 "llm_first_chunk_seconds": synthesis_meta.get("llm_first_chunk_seconds"),
+                "llm_first_chunk_timeout_seconds": synthesis_meta.get(
+                    "llm_first_chunk_timeout_seconds",
+                ),
                 "llm_complete_json_seconds": synthesis_meta.get("llm_complete_json_seconds"),
                 "llm_reasoning_preview": synthesis_meta.get("llm_reasoning_preview"),
                 "llm_reasoning_characters": synthesis_meta.get("llm_reasoning_characters"),
@@ -3176,6 +3360,7 @@ class DomainCompletePipeline:
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
+                "model": synthesis_meta.get("model"),
                 "source_domain_kind": source_domain_kind,
                 "masked_domain_file": masked_domain_file,
                 "original_method_count": original_method_count,
@@ -3305,6 +3490,9 @@ class DomainCompletePipeline:
                 task_args = case["task_args"]
                 object_types = case["object_types"]
                 object_pool = case["object_pool"]
+                self._emit_domain_gate_progress(
+                    f"start task={task_name} arg_count={len(task_args)}",
+                )
                 object_scope_start = time.perf_counter()
                 case_object_pool = list(object_pool)
                 case_object_types = dict(object_types)
@@ -3346,6 +3534,9 @@ class DomainCompletePipeline:
                     allow_empty_plan=True,
                 )
                 planner_seconds += time.perf_counter() - plan_start
+                self._emit_domain_gate_progress(
+                    f"finish task={task_name}",
+                )
                 gate_results.append(
                     {
                         "task_name": task_name,
@@ -5392,27 +5583,18 @@ class DomainCompletePipeline:
             plan_solve_artifacts.get("verification_mode") or "original_problem"
         )
         guided_plan_text = plan_solve_artifacts.get("guided_hierarchical_plan_text")
-        domain_build_seconds = 0.0
-        if planning_mode != "official_problem_root":
-            if (
-                guided_plan_text
-                and verification_mode == "original_problem"
-                and online_domain.source == ONLINE_DOMAIN_SOURCE_BENCHMARK
-            ):
-                verification_domain_file = Path(online_domain.domain_file).resolve()
-            else:
-                domain_build_start = time.perf_counter()
-                verification_domain_file = self._build_verification_domain(
-                    method_library,
-                    online_domain=online_domain,
-                )
-                domain_build_seconds = time.perf_counter() - domain_build_start
+        verification_domain_file, domain_build_seconds = self._resolve_verification_domain_file(
+            method_library=method_library,
+            online_domain=online_domain,
+        )
         verifier_start = time.perf_counter()
         if guided_plan_text:
             guided_plan_text = self._rewrite_guided_plan_source_names(
                 guided_plan_text,
                 method_library,
             )
+            if guided_plan_text and not guided_plan_text.endswith("\n"):
+                guided_plan_text = f"{guided_plan_text}\n"
             verifier_result = verifier.verify_plan_text(
                 domain_file=verification_domain_file,
                 problem_file=verification_problem_file,
@@ -5827,6 +6009,28 @@ class DomainCompletePipeline:
         verification_domain_path = self.output_dir / "ipc_verification_domain.hddl"
         verification_domain_path.write_text(verification_domain_hddl)
         return verification_domain_path
+
+    def _resolve_verification_domain_file(
+        self,
+        *,
+        method_library: HTNMethodLibrary,
+        online_domain: OnlineDomainContext,
+    ) -> Tuple[Path, float]:
+        """
+        Resolve the HDDL domain file to pass into official verification.
+
+        For the benchmark online path, always verify against the benchmark domain file
+        itself so benchmark sweeps are not polluted by an additional generated or hybrid
+        verification domain layer.
+        """
+        if online_domain.source == ONLINE_DOMAIN_SOURCE_BENCHMARK:
+            return Path(online_domain.domain_file).resolve(), 0.0
+        domain_build_start = time.perf_counter()
+        verification_domain_file = self._build_verification_domain(
+            method_library,
+            online_domain=online_domain,
+        )
+        return verification_domain_file, time.perf_counter() - domain_build_start
 
 
 

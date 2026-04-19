@@ -22,22 +22,10 @@ def build_agentspeak_transition_specs(
 ) -> List[Dict[str, Any]]:
 	"""Build renderer-facing transition specs directly from the raw ltlf2dfa graph."""
 
-	symbolic_monitor = dfa_result.get("symbolic_subgoal_monitor")
-	if isinstance(symbolic_monitor, dict) and not ordered_query_sequence:
-		return _build_symbolic_subgoal_transition_specs(symbolic_monitor)
-
+	del ordered_query_sequence
 	graph = _parse_dfa_graph(str(dfa_result.get("dfa_dot") or ""))
-	subgoal_mode = _graph_uses_subgoal_symbols(graph)
-	if subgoal_mode and not ordered_query_sequence:
-		return _build_compressed_subgoal_transition_specs(
-			graph,
-			grounding_map=grounding_map,
-		)
-	selected_edges = _select_relevant_edges(
-		graph,
-		unit_progress_only=subgoal_mode,
-	)
-	state_aliases = _build_state_aliases(graph, selected_edges)
+	expanded_edges = _expand_disjunctive_edges(graph.get("edges", ()))
+	state_aliases = _build_state_aliases(graph, expanded_edges)
 	accepting_states = sorted(
 		state_aliases[state]
 		for state in graph.get("accepting", set())
@@ -48,7 +36,7 @@ def build_agentspeak_transition_specs(
 
 	transition_specs: List[Dict[str, Any]] = []
 	seen_edges: set[Tuple[str, str, str]] = set()
-	for source, target, raw_label in selected_edges:
+	for source, target, raw_label in expanded_edges:
 		edge_key = (str(source), str(target), str(raw_label))
 		if edge_key in seen_edges:
 			continue
@@ -56,12 +44,22 @@ def build_agentspeak_transition_specs(
 		label = str(raw_label or "").strip()
 		if not label or label == "false":
 			continue
-		positive_subgoals = _positive_subgoal_indices(label)
-		subgoal_index = (
-			positive_subgoals[0]
-			if subgoal_mode and len(positive_subgoals) == 1
+		positive_task_events, negative_task_events = _task_event_polarity(
+			label,
+			grounding_map,
+		)
+		task_event_symbol = (
+			positive_task_events[0]
+			if len(positive_task_events) == 1
 			else None
 		)
+		task_name = ""
+		task_args: Tuple[str, ...] = ()
+		if task_event_symbol and grounding_map is not None:
+			grounded_atom = grounding_map.get_atom(task_event_symbol)
+			if grounded_atom is not None:
+				task_name = str(grounded_atom.predicate or "").strip()
+				task_args = tuple(str(arg).strip() for arg in grounded_atom.args if str(arg).strip())
 		transition_specs.append(
 			{
 				"source_state": state_aliases[source],
@@ -69,15 +67,12 @@ def build_agentspeak_transition_specs(
 				"raw_source_state": source,
 				"raw_target_state": target,
 				"raw_label": label,
-				"guard_context": (
-					"true"
-					if subgoal_index is not None
-					else _render_raw_label_as_agentspeak_context(
-						label,
-						grounding_map,
-					)
-				),
-				"subgoal_index": subgoal_index,
+				"positive_task_event_symbols": list(positive_task_events),
+				"negative_task_event_symbols": list(negative_task_events),
+				"task_event_symbol": task_event_symbol,
+				"task_name": task_name,
+				"task_args": list(task_args),
+				"is_epsilon_transition": label == "true" and source != target,
 				"initial_state": initial_alias,
 				"accepting_states": list(accepting_states),
 			},
@@ -86,82 +81,6 @@ def build_agentspeak_transition_specs(
 	for index, spec in enumerate(transition_specs, start=1):
 		spec["transition_name"] = f"dfa_t{index}"
 	return transition_specs
-
-
-def _build_compressed_subgoal_transition_specs(
-	graph: Dict[str, Any],
-	*,
-	grounding_map: GroundingMap | None,
-) -> List[Dict[str, Any]]:
-	del grounding_map
-	accepting = set(graph.get("accepting", set()))
-	initial_state = graph.get("init_state")
-	ordered_states = _build_state_aliases(graph)
-	initial_alias = ordered_states.get(initial_state) if initial_state else None
-	accepting_aliases = sorted(
-		ordered_states[state]
-		for state in accepting
-		if state in ordered_states
-	)
-
-	specs: List[Dict[str, Any]] = []
-	for subgoal_index in _sorted_subgoal_indices(graph.get("edges", ())):
-		specs.append(
-			{
-				"source_state": initial_alias or "q1",
-				"target_state": initial_alias or "q1",
-				"raw_source_state": initial_state or "init",
-				"raw_target_state": initial_state or "init",
-				"raw_label": f"subgoal_{subgoal_index}",
-				"guard_context": "true",
-				"subgoal_index": subgoal_index,
-				"initial_state": initial_alias,
-				"accepting_states": list(accepting_aliases),
-				"stateless_subgoal": True,
-			},
-		)
-
-	specs.sort(key=_transition_spec_sort_key)
-	for index, spec in enumerate(specs, start=1):
-		spec["transition_name"] = f"dfa_t{index}"
-	return specs
-
-
-def _build_symbolic_subgoal_transition_specs(
-	symbolic_monitor: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-	subgoal_indices = [
-		int(index)
-		for index in list(symbolic_monitor.get("subgoal_indices") or ())
-	]
-	initial_state = str(symbolic_monitor.get("initial_state") or "q0").strip() or "q0"
-	accepting_states = [
-		str(state).strip()
-		for state in list(symbolic_monitor.get("accepting_states") or ())
-		if str(state).strip()
-	]
-
-	specs: List[Dict[str, Any]] = []
-	for subgoal_index in sorted(subgoal_indices):
-		specs.append(
-			{
-				"source_state": initial_state,
-				"target_state": initial_state,
-				"raw_source_state": initial_state,
-				"raw_target_state": initial_state,
-				"raw_label": f"subgoal_{subgoal_index}",
-				"guard_context": "true",
-				"subgoal_index": subgoal_index,
-				"initial_state": initial_state,
-				"accepting_states": list(accepting_states),
-				"stateless_subgoal": True,
-			},
-		)
-
-	specs.sort(key=_transition_spec_sort_key)
-	for index, spec in enumerate(specs, start=1):
-		spec["transition_name"] = f"dfa_t{index}"
-	return specs
 
 
 def _parse_dfa_graph(dfa_dot: str) -> Dict[str, Any]:
@@ -209,68 +128,76 @@ def _parse_dfa_graph(dfa_dot: str) -> Dict[str, Any]:
 		"init_state": init_state,
 	}
 
-
-def _select_relevant_edges(
-	graph: Dict[str, Any],
-	*,
-	unit_progress_only: bool = False,
+def _expand_disjunctive_edges(
+	edges: Iterable[Tuple[str, str, str]],
 ) -> List[Tuple[str, str, str]]:
-	edges = list(graph.get("edges", []))
-	accepting = set(graph.get("accepting", set()))
-	if not edges:
+	expanded_edges: List[Tuple[str, str, str]] = []
+	for source, target, raw_label in edges:
+		disjuncts = _split_top_level_disjunctions(str(raw_label or "").strip())
+		if not disjuncts:
+			expanded_edges.append((source, target, str(raw_label or "").strip()))
+			continue
+		for disjunct in disjuncts:
+			expanded_edges.append((source, target, disjunct))
+	return expanded_edges
+
+
+def _split_top_level_disjunctions(raw_label: str) -> List[str]:
+	label = str(raw_label or "").strip()
+	if not label:
 		return []
-
-	progress_edges = _extract_progressing_edges(
-		edges,
-		accepting,
-		unit_progress_only=unit_progress_only,
-	)
-	if progress_edges:
-		return progress_edges
-
-	accepting_loops = _extract_accepting_loop_edges(edges, accepting)
-	if accepting_loops:
-		return accepting_loops
-
-	return edges
-
-
-def _extract_progressing_edges(
-	edges: Sequence[Tuple[str, str, str]],
-	accepting: set[str],
-	*,
-	unit_progress_only: bool = False,
-) -> List[Tuple[str, str, str]]:
-	if not edges or not accepting:
-		return []
-
-	distances = _distance_to_accepting(edges, accepting)
-	progress_edges: List[Tuple[str, str, str]] = []
-	for source, target, label in edges:
-		source_distance = distances.get(source)
-		target_distance = distances.get(target)
-		if source_distance is None or target_distance is None:
+	parts: List[str] = []
+	current: List[str] = []
+	depth = 0
+	index = 0
+	while index < len(label):
+		character = label[index]
+		if character == "(":
+			depth += 1
+		elif character == ")":
+			depth = max(0, depth - 1)
+		elif character == "|" and depth == 0:
+			part = "".join(current).strip()
+			if part:
+				parts.append(_strip_outer_parentheses(part))
+			current = []
+			index += 1
 			continue
-		if source == target:
-			continue
-		if unit_progress_only:
-			if len(_positive_subgoal_indices(str(label or ""))) == 1:
-				progress_edges.append((source, target, label))
-			continue
-		if target_distance <= source_distance:
-			progress_edges.append((source, target, label))
-	return progress_edges
+		current.append(character)
+		index += 1
+	part = "".join(current).strip()
+	if part:
+		parts.append(_strip_outer_parentheses(part))
+	return parts or [label]
 
 
-def _graph_uses_subgoal_symbols(graph: Dict[str, Any]) -> bool:
-	for _source, _target, label in graph.get("edges", ()):
-		if _positive_subgoal_indices(str(label or "")):
-			return True
-	return False
+def _strip_outer_parentheses(text: str) -> str:
+	candidate = str(text or "").strip()
+	while candidate.startswith("(") and candidate.endswith(")"):
+		depth = 0
+		wraps_entire_expression = True
+		for index, character in enumerate(candidate):
+			if character == "(":
+				depth += 1
+			elif character == ")":
+				depth -= 1
+				if depth == 0 and index != len(candidate) - 1:
+					wraps_entire_expression = False
+					break
+		if not wraps_entire_expression:
+			break
+		candidate = candidate[1:-1].strip()
+	return candidate
 
 
-def _positive_subgoal_indices(raw_label: str) -> List[int]:
-	indices: List[int] = []
+def _task_event_polarity(
+	raw_label: str,
+	grounding_map: GroundingMap | None,
+) -> Tuple[List[str], List[str]]:
+	if grounding_map is None:
+		return [], []
+	positive_symbols: List[str] = []
+	negative_symbols: List[str] = []
 	negated = False
 	for token in _tokenise_raw_label(raw_label):
 		if token == "~":
@@ -278,64 +205,23 @@ def _positive_subgoal_indices(raw_label: str) -> List[int]:
 			continue
 		if token in {"&", "|", "(", ")"}:
 			continue
-		match = re.fullmatch(r"subgoal_(\d+)", token)
-		if match and not negated:
-			indices.append(int(match.group(1)))
+		if grounding_map.get_atom(token) is None:
+			negated = False
+			continue
+		if negated:
+			if token not in negative_symbols:
+				negative_symbols.append(token)
+		else:
+			if token not in positive_symbols:
+				positive_symbols.append(token)
 		negated = False
-	return indices
-
-
-def _sorted_subgoal_indices(
-	edges: Iterable[Tuple[str, str, str]],
-) -> List[int]:
-	indices = {
-		index
-		for _source, _target, label in edges
-		for index in _positive_subgoal_indices(str(label or ""))
-	}
-	return sorted(indices)
-
-
-def _extract_accepting_loop_edges(
-	edges: Sequence[Tuple[str, str, str]],
-	accepting: set[str],
-) -> List[Tuple[str, str, str]]:
-	if not edges or not accepting:
-		return []
-
-	distances = _distance_to_accepting(edges, accepting)
-	return [
-		(source, target, label)
-		for source, target, label in edges
-		if distances.get(source) == 0 and distances.get(target) == 0
-	]
-
-
-def _distance_to_accepting(
-	edges: Sequence[Tuple[str, str, str]],
-	accepting: set[str],
-) -> Dict[str, int]:
-	reverse_graph: Dict[str, List[str]] = {}
-	for source, target, _ in edges:
-		reverse_graph.setdefault(target, []).append(source)
-
-	distances: Dict[str, int] = {state: 0 for state in accepting}
-	queue: deque[str] = deque(accepting)
-	while queue:
-		state = queue.popleft()
-		for predecessor in reverse_graph.get(state, []):
-			if predecessor in distances:
-				continue
-			distances[predecessor] = distances[state] + 1
-			queue.append(predecessor)
-	return distances
+	return positive_symbols, negative_symbols
 
 
 def _transition_spec_sort_key(spec: Dict[str, Any]) -> Tuple[int, int, int, str]:
-	subgoal_index = spec.get("subgoal_index")
 	return (
 		_numeric_state_sort_key(spec.get("raw_source_state")),
-		int(subgoal_index) if isinstance(subgoal_index, int) else 10**9,
+		0 if str(spec.get("task_event_symbol") or "").strip() else 1,
 		_numeric_state_sort_key(spec.get("raw_target_state")),
 		str(spec.get("raw_label") or ""),
 	)
@@ -373,33 +259,6 @@ def _build_state_aliases(
 		for index, state in enumerate(ordered_states, start=1)
 	}
 
-
-def _render_raw_label_as_agentspeak_context(
-	raw_label: str,
-	grounding_map: GroundingMap | None,
-) -> str:
-	label = str(raw_label or "").strip()
-	if not label:
-		return "__hddl_unsat_condition__"
-
-	output: List[str] = []
-	for token in _tokenise_raw_label(label):
-		if token == "~":
-			output.append("not")
-			continue
-		if token in {"&", "|", "(", ")"}:
-			output.append(token)
-			continue
-		if token == "true":
-			output.append("true")
-			continue
-		if token == "false":
-			output.append("__hddl_unsat_condition__")
-			continue
-		output.append(_render_grounded_atom(token, grounding_map))
-	return " ".join(output).strip() or "__hddl_unsat_condition__"
-
-
 def _tokenise_raw_label(raw_label: str) -> List[str]:
 	pattern = re.compile(r"\s*([()&|~]|[A-Za-z0-9_]+)\s*")
 	tokens = [
@@ -410,32 +269,3 @@ def _tokenise_raw_label(raw_label: str) -> List[str]:
 	if not tokens:
 		raise ValueError(f"Unsupported raw DFA label: {raw_label!r}")
 	return tokens
-
-
-def _render_grounded_atom(symbol: str, grounding_map: GroundingMap | None) -> str:
-	token = str(symbol or "").strip()
-	if not token:
-		return "__hddl_unsat_condition__"
-
-	if grounding_map is not None:
-		atom = grounding_map.get_atom(token)
-		if atom is not None:
-			return _render_call(str(atom.predicate), tuple(str(arg) for arg in atom.args))
-
-	return _render_call(token, ())
-
-
-def _render_call(name: str, args: Sequence[str]) -> str:
-	functor = str(name or "").strip().replace("-", "_")
-	if not args:
-		return functor
-	rendered_args = ", ".join(_render_term(str(arg)) for arg in args if str(arg).strip())
-	return f"{functor}({rendered_args})"
-
-
-def _render_term(value: str) -> str:
-	text = str(value or "").strip()
-	if re.fullmatch(r"[a-z][a-zA-Z0-9_]*", text):
-		return text
-	escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-	return f'"{escaped}"'

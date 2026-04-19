@@ -30,14 +30,37 @@ from tests.support.ground_truth_baseline_support import (
 
 ONLINE_BENCHMARK_RESULTS_DIR = PROJECT_ROOT / "tests" / "generated" / "online_query_solution"
 ONLINE_BENCHMARK_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+ONLINE_BENCHMARK_DOMAIN_SOURCE = "benchmark"
+ONLINE_BENCHMARK_LIBRARY_SOURCE = "benchmark"
 
 
 def apply_online_query_runtime_defaults(
 	env: Optional[MutableMapping[str, str]] = None,
 ) -> MutableMapping[str, str]:
 	target_env = apply_generated_runtime_defaults(env)
-	target_env["ONLINE_DOMAIN_SOURCE"] = "benchmark"
+	target_env["ONLINE_DOMAIN_SOURCE"] = ONLINE_BENCHMARK_DOMAIN_SOURCE
 	return target_env
+
+
+def _extract_reported_online_domain_source(execution: Dict[str, Any]) -> str:
+	candidate_paths = (
+		("goal_grounding", "metadata", "online_domain_source"),
+		("temporal_compilation", "metadata", "online_domain_source"),
+		("agentspeak_rendering", "metadata", "online_domain_source"),
+		("runtime_execution", "metadata", "online_domain_source"),
+		("plan_verification", "metadata", "online_domain_source"),
+	)
+	for step_name, metadata_key, source_key in candidate_paths:
+		step_payload = execution.get(step_name)
+		if not isinstance(step_payload, dict):
+			continue
+		metadata = step_payload.get(metadata_key)
+		if not isinstance(metadata, dict):
+			continue
+		source = str(metadata.get(source_key) or "").strip().lower()
+		if source:
+			return source
+	return ONLINE_BENCHMARK_DOMAIN_SOURCE
 
 
 def _classify_online_query_failure(result: Dict[str, Any], execution: Dict[str, Any]) -> str:
@@ -83,8 +106,8 @@ def resolve_online_method_library_input(
 	*,
 	library_source: str,
 ) -> str | Any:
-	source = str(library_source or "official").strip().lower()
-	if source == "official":
+	source = str(library_source or ONLINE_BENCHMARK_LIBRARY_SOURCE).strip().lower()
+	if source in {"benchmark", "official"}:
 		return build_official_method_library(DOMAIN_FILES[domain_key])
 	if source == "generated":
 		return str(ensure_online_domain_library_artifact(domain_key))
@@ -102,7 +125,7 @@ def run_online_query_case(
 	domain_key: str,
 	query_id: str,
 	*,
-	library_source: str = "official",
+	library_source: str = ONLINE_BENCHMARK_LIBRARY_SOURCE,
 ) -> Dict[str, Any]:
 	apply_online_query_runtime_defaults()
 	query_cases = load_domain_query_cases(domain_key)
@@ -116,7 +139,7 @@ def run_online_query_case(
 	pipeline = DomainCompletePipeline(
 		domain_file=domain_file,
 		problem_file=str(case["problem_file"]),
-		online_domain_source="benchmark",
+		online_domain_source=ONLINE_BENCHMARK_DOMAIN_SOURCE,
 	)
 	pipeline.logger = ExecutionLogger(logs_dir=str(GENERATED_LOGS_DIR), run_origin="tests")
 	result = pipeline.execute_query_with_library(
@@ -130,6 +153,12 @@ def run_online_query_case(
 		if log_dir is not None and (log_dir / "execution.json").exists()
 		else {}
 	)
+	reported_online_domain_source = _extract_reported_online_domain_source(execution)
+	if reported_online_domain_source != ONLINE_BENCHMARK_DOMAIN_SOURCE:
+		raise AssertionError(
+			"Online benchmark sweep must run against the benchmark domain source. "
+			f"Observed: {reported_online_domain_source}",
+		)
 	outcome_bucket = _classify_online_query_failure(result, execution)
 
 	return {
@@ -141,6 +170,7 @@ def run_online_query_case(
 		"outcome_bucket": outcome_bucket,
 		"log_dir": log_dir,
 		"execution": execution,
+		"online_domain_source": reported_online_domain_source,
 	}
 
 
@@ -148,9 +178,10 @@ def run_online_query_solution_benchmark_for_domain(
 	domain_key: str,
 	*,
 	query_ids: Optional[Sequence[str]] = None,
-	library_source: str = "official",
+	library_source: str = ONLINE_BENCHMARK_LIBRARY_SOURCE,
 ) -> Dict[str, Any]:
-	if str(library_source).strip().lower() == "generated":
+	normalized_library_source = str(library_source or ONLINE_BENCHMARK_LIBRARY_SOURCE).strip().lower()
+	if normalized_library_source == "generated":
 		library_artifact_ref: str | None = str(ensure_online_domain_library_artifact(domain_key))
 	else:
 		library_artifact_ref = None
@@ -170,7 +201,7 @@ def run_online_query_solution_benchmark_for_domain(
 		run_online_query_case(
 			domain_key,
 			query_id,
-			library_source=library_source,
+			library_source=normalized_library_source,
 		)
 		for query_id in selected_query_ids
 	]
@@ -190,8 +221,8 @@ def run_online_query_solution_benchmark_for_domain(
 
 	summary = {
 		"domain_key": domain_key,
-		"online_domain_source": "benchmark",
-		"library_source": library_source,
+		"online_domain_source": ONLINE_BENCHMARK_DOMAIN_SOURCE,
+		"library_source": normalized_library_source,
 		"domain_file": DOMAIN_FILES[domain_key],
 		"library_artifact_root": library_artifact_ref,
 		"total_queries": len(query_reports),
@@ -218,12 +249,7 @@ def run_online_query_solution_benchmark_for_domain(
 					)
 					or "",
 				),
-				"online_domain_source": str(
-					(((report.get("execution") or {}).get("runtime_execution") or {}).get("metadata") or {}).get(
-						"online_domain_source",
-					)
-					or "",
-				),
+				"online_domain_source": str(report.get("online_domain_source") or ""),
 				"library_source": str(report.get("library_source") or ""),
 			}
 			for report in query_reports
@@ -237,6 +263,8 @@ def run_online_query_solution_benchmark_for_domain(
 
 __all__ = [
 	"ONLINE_BENCHMARK_RESULTS_DIR",
+	"ONLINE_BENCHMARK_DOMAIN_SOURCE",
+	"ONLINE_BENCHMARK_LIBRARY_SOURCE",
 	"apply_online_query_runtime_defaults",
 	"ensure_online_domain_library_artifact",
 	"load_domain_query_cases",

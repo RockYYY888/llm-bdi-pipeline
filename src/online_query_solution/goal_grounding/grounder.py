@@ -7,22 +7,23 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
 from online_query_solution.artifacts import GroundedSubgoal, TemporalGroundingResult
 from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
+from utils.symbol_normalizer import SymbolNormalizer
 
 
 class NLToLTLfGenerator:
 	"""
-	Convert a natural-language query into one grounded LTLf formula plus grounded subgoals.
+	Convert a natural-language query into one grounded LTLf formula.
 	"""
 
-	_COMPACT_PROMPT_QUERY_LENGTH_THRESHOLD = 1200
-	_SUBGOAL_ID_PATTERN = re.compile(r"subgoal_\d+$")
-	_FORMULA_TOKEN_PATTERN = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 	_FORMULA_OPERATOR_SEQUENCE_PATTERN = re.compile(r"^(?:WX|[FGXURW])+$")
+	_TASK_EVENT_SUFFIX_PATTERN = re.compile(
+		r"^(?P<base>[a-z_][a-z0-9_]*?)__(?:e|event)(?P<index>[1-9][0-9]*)$",
+	)
 	_RESERVED_FORMULA_TOKENS = {
 		"true",
 		"false",
@@ -51,6 +52,7 @@ class NLToLTLfGenerator:
 		self.response_max_tokens = int(response_max_tokens or 12000)
 		self.client = None
 		self.last_generation_metadata: Dict[str, Any] = {}
+		self.symbol_normalizer = SymbolNormalizer()
 
 		self.domain = None
 		if domain_file:
@@ -96,69 +98,81 @@ class NLToLTLfGenerator:
 			typed_objects=typed_objects or {},
 			task_type_map=task_type_map or {},
 		)
+		current_attempt = dict(prompt_attempts[0])
 		last_error: Exception | None = None
 		last_response_text = ""
-		last_prompt: Dict[str, str] = {}
+		last_finish_reason = ""
+		last_prompt: Dict[str, str] = {
+			"system": str(current_attempt["system"]),
+			"user": str(current_attempt["user"]),
+		}
 		attempt_errors: list[Dict[str, str]] = []
 		result = None
-		for attempt in prompt_attempts:
-			system_prompt = str(attempt["system"])
-			user_prompt = str(attempt["user"])
-			last_prompt = {"system": system_prompt, "user": user_prompt}
+		attempt_count = 1
+		try:
 			response = self._create_chat_completion(
 				[
-					{"role": "system", "content": system_prompt},
-					{"role": "user", "content": user_prompt},
+					{"role": "system", "content": last_prompt["system"]},
+					{"role": "user", "content": last_prompt["user"]},
 				],
-				response_max_tokens=int(attempt["response_max_tokens"]),
+				response_max_tokens=int(current_attempt["response_max_tokens"]),
+				request_timeout=float(current_attempt["request_timeout"]),
 			)
+			finish_reason = self._extract_finish_reason(response)
+			last_finish_reason = finish_reason
+			last_response_text = self._serialise_raw_response(response)
 			response_text = self._extract_response_text(response)
 			last_response_text = response_text
-			try:
-				payload = self._parse_json_blob(response_text)
-				result = self._validate_payload(
-					query_text=query_text,
-					payload=payload,
-					method_library=method_library,
-					typed_objects=typed_objects or {},
-					task_type_map=task_type_map or {},
-					type_parent_map=type_parent_map or {},
-				)
-				self.last_generation_metadata = {
-					"attempt_mode": str(attempt["mode"]),
-					"attempt_count": int(attempt["index"]),
-					"attempt_errors": attempt_errors,
-					"subgoal_count": len(result.subgoals),
-					"formula_atom_count": len(self._extract_formula_atoms(result.ltlf_formula)),
-					"model": self.model,
-				}
-				return result, last_prompt, response_text
-			except Exception as exc:
-				last_error = exc
-				attempt_errors.append(
-					{
-						"mode": str(attempt["mode"]),
-						"error": str(exc),
-					},
-				)
-				self.last_generation_metadata = {
-					"attempt_mode": str(attempt["mode"]),
-					"attempt_count": int(attempt["index"]),
-					"attempt_errors": list(attempt_errors),
-					"model": self.model,
-					"last_prompt": dict(last_prompt),
-					"last_response": response_text,
-				}
-				continue
-
+			payload = self._parse_json_blob(response_text)
+			result = self._validate_payload(
+				query_text=query_text,
+				payload=payload,
+				method_library=method_library,
+				typed_objects=typed_objects or {},
+				task_type_map=task_type_map or {},
+				type_parent_map=type_parent_map or {},
+			)
+			self.last_generation_metadata = {
+				"attempt_mode": str(current_attempt["mode"]),
+				"attempt_count": attempt_count,
+				"attempt_errors": attempt_errors,
+				"task_event_count": len(result.subgoals),
+				"formula_atom_count": len(self._extract_formula_atoms(result.ltlf_formula)),
+				"model": self.model,
+				"last_prompt": dict(last_prompt),
+				"last_response": response_text,
+				"last_finish_reason": finish_reason,
+			}
+			return result, last_prompt, response_text
+		except Exception as exc:
+			last_error = exc
+			attempt_errors.append(
+				{
+					"mode": str(current_attempt["mode"]),
+					"error": str(exc),
+					"finish_reason": last_finish_reason,
+				},
+			)
+			self.last_generation_metadata = {
+				"attempt_mode": str(current_attempt["mode"]),
+				"attempt_count": attempt_count,
+				"attempt_errors": list(attempt_errors),
+				"model": self.model,
+				"last_prompt": dict(last_prompt),
+				"last_response": last_response_text,
+				"last_finish_reason": last_finish_reason,
+			}
 		if last_error is None:
 			raise RuntimeError("Goal grounding failed without a recorded exception.")
 		self.last_generation_metadata = {
-			"attempt_mode": str(prompt_attempts[-1]["mode"]),
-			"attempt_count": len(prompt_attempts),
+			"attempt_mode": str(current_attempt["mode"]),
+			"attempt_count": attempt_count,
 			"attempt_errors": attempt_errors,
 			"model": self.model,
+			"last_prompt": dict(last_prompt),
+			"last_response": last_response_text,
 			"last_response_preview": last_response_text[:500],
+			"last_finish_reason": last_finish_reason,
 		}
 		raise last_error
 
@@ -176,31 +190,6 @@ class NLToLTLfGenerator:
 			typed_objects=typed_objects,
 			task_type_map=task_type_map,
 		)
-		compact_system, compact_user = self._build_compact_prompts(
-			query_text=query_text,
-			method_library=method_library,
-			typed_objects=typed_objects,
-			task_type_map=task_type_map,
-		)
-		base_max_tokens = int(self.response_max_tokens)
-		compact_max_tokens = max(
-			base_max_tokens,
-			self._suggest_response_max_tokens(query_text),
-		)
-		long_query = len(query_text) >= self._COMPACT_PROMPT_QUERY_LENGTH_THRESHOLD
-		ordered_attempts = list(
-			(
-				[
-					("compact", compact_system, compact_user, compact_max_tokens),
-					("standard", standard_system, standard_user, base_max_tokens),
-				]
-				if long_query
-				else [
-					("standard", standard_system, standard_user, base_max_tokens),
-					("compact", compact_system, compact_user, compact_max_tokens),
-				]
-			)
-		)
 		return tuple(
 			{
 				"index": index,
@@ -208,9 +197,18 @@ class NLToLTLfGenerator:
 				"system": system_prompt,
 				"user": user_prompt,
 				"response_max_tokens": response_max_tokens,
+				"request_timeout": current_request_timeout,
 			}
-			for index, (mode, system_prompt, user_prompt, response_max_tokens) in enumerate(
-				ordered_attempts,
+			for index, (mode, system_prompt, user_prompt, response_max_tokens, current_request_timeout) in enumerate(
+				(
+					(
+						"few_shot_strict",
+						standard_system,
+						standard_user,
+						max(int(self.response_max_tokens), self._suggest_response_max_tokens(query_text)),
+						max(float(self.request_timeout), self._suggest_request_timeout(query_text)),
+					),
+				),
 				start=1,
 			)
 		)
@@ -232,7 +230,7 @@ class NLToLTLfGenerator:
 		system_prompt = "\n".join(
 			[
 				"You convert natural-language planning queries into one grounded LTLf formula.",
-				"You must not explain your reasoning. Return JSON only.",
+				"You must not explain your reasoning. Return minified JSON only.",
 				"Preserve temporal meaning exactly.",
 				"If the query states an explicit order such as first, then, before, after, next, or finally, the LTLf formula must encode that order explicitly.",
 				"Do not collapse an explicitly ordered task list into an unordered conjunction of independent eventualities.",
@@ -248,47 +246,56 @@ class NLToLTLfGenerator:
 				object_lines or "- none",
 				"",
 				"Output contract:",
-				'- Return exactly one JSON object with keys "ltlf_formula", "subgoals", and optional "diagnostics".',
+				'- Return exactly one JSON object with the single key "ltlf_formula".',
 				'- "ltlf_formula" must be a single LTLf formula string.',
-				'- "subgoals" must be a list of grounded task calls with schema {"id": "subgoal_N", "task_name": "...", "args": ["..."]}.',
-				'- Every atomic proposition appearing in ltlf_formula must be one of the declared subgoal ids.',
-				'- Do not use query_step ids. Use subgoal ids only.',
+				'- Output must be minified JSON with no markdown fences, no prose, and no extra keys.',
+				"- Every atomic proposition in ltlf_formula must itself be one grounded task-event call.",
+				"- Use atoms in task-call form such as do_put_on(b4, b2) or do_clear(b2).",
+				"- If the same grounded task call must occur multiple times, each repeated occurrence must use a distinct grounded task-event identity by appending an occurrence suffix to the task name, such as do_put_on__e1(b8, b9) and do_put_on__e2(b8, b9).",
+				"- Never reuse the exact same task-event atom twice in one formula.",
+				"- Do not use placeholder atoms such as subgoal_1, query_step_1, goal_1, or event_1.",
 				'- Do not output lifted variables such as ?x. All args must be grounded problem objects from the provided inventory.',
 				'- Do not invent tasks or objects.',
-				'- If the query is ambiguous, still return your best grounded interpretation and put the ambiguity note in diagnostics.',
+				"- If the query begins with an object inventory such as 'Using blocks ...' or any other setup inventory, treat that inventory as context only, not as task-event atoms.",
+				"- Create task-event atoms only from explicitly requested grounded task invocations in the query.",
+				"- Do not create task-event atoms from bare object names, setup inventories, or explanatory text.",
+				"- If the query literally lists grounded task calls after a phrase like 'complete the tasks', copy exactly those task calls into the formula and keep their order.",
+				"- If that listed task sequence repeats the same grounded task call multiple times, preserve the repeated order and count, but distinguish each repeated occurrence with a unique __eN suffix on the task name.",
+				"- Treat a comma-separated task list after 'complete the tasks' as ordered by default. Preserve the listed order in ltlf_formula unless the query explicitly states that order does not matter or may be arbitrary.",
+				"- If the query is ambiguous, still return your best grounded interpretation as one formula. Do not add extra fields.",
 				"",
 				"Formula syntax reminders:",
-				"- Atoms: subgoal_1, subgoal_2, ...",
+				"- Atoms: grounded task-event calls such as do_put_on(b4, b2)",
+				"- Repeated grounded task calls must use occurrence-tagged atoms such as do_put_on__e1(b8, b9) and do_put_on__e2(b8, b9).",
 				"- Unary operators: F, G, X, WX",
 				"- Binary operators: U, R",
 				"- Boolean operators: !, &, |, ->, <->",
 				"- Constants: true, false",
-				"- For an explicit ordered sequence 'A then B then C', prefer a right-nested eventuality such as F(subgoal_1 & F(subgoal_2 & F(subgoal_3))).",
+				"- For an explicit ordered sequence 'A then B then C', prefer a right-nested eventuality such as F(do_a(x) & F(do_b(y) & F(do_c(z)))).",
 				"- Use a plain conjunction of eventualities only when the query does not impose an order.",
 				"",
-				"Example output:",
+				"Few-shot examples:",
+				'Example 1 input: "Using blocks b1 and b2, complete the tasks do_clear(b2) and do_put_on(b1, b2) in any order."',
+				"Example 1 output:",
 				json.dumps(
 					{
-						"ltlf_formula": "F(subgoal_1) & F(subgoal_2)",
-						"subgoals": [
-							{"id": "subgoal_1", "task_name": "clear_block", "args": ["a"]},
-							{"id": "subgoal_2", "task_name": "stack", "args": ["b", "a"]},
-						],
-						"diagnostics": [],
+						"ltlf_formula": "F(do_clear(b2)) & F(do_put_on(b1, b2))",
 					},
 					ensure_ascii=False,
 				),
-				"",
-				"Ordered example:",
+				'Example 2 input: "Using blocks b4, b2, b1, and b3, complete the tasks do_put_on(b4, b2), then do_put_on(b1, b4), then do_put_on(b3, b1)."',
+				"Example 2 output:",
 				json.dumps(
 					{
-						"ltlf_formula": "F(subgoal_1 & F(subgoal_2 & F(subgoal_3)))",
-						"subgoals": [
-							{"id": "subgoal_1", "task_name": "do_put_on", "args": ["b4", "b2"]},
-							{"id": "subgoal_2", "task_name": "do_put_on", "args": ["b1", "b4"]},
-							{"id": "subgoal_3", "task_name": "do_put_on", "args": ["b3", "b1"]},
-						],
-						"diagnostics": [],
+						"ltlf_formula": "F(do_put_on(b4, b2) & F(do_put_on(b1, b4) & F(do_put_on(b3, b1))))",
+					},
+					ensure_ascii=False,
+				),
+				'Example 3 input: "Using blocks b8 and b9, complete the tasks do_put_on(b8, b9), then do_put_on(b8, b9)."',
+				"Example 3 output:",
+				json.dumps(
+					{
+						"ltlf_formula": "F(do_put_on__e1(b8, b9) & F(do_put_on__e2(b8, b9)))",
 					},
 					ensure_ascii=False,
 				),
@@ -296,45 +303,7 @@ class NLToLTLfGenerator:
 		)
 		user_prompt = "\n".join(
 			[
-				"Ground this query into one LTLf formula plus grounded subgoals.",
-				f'Query: "{query_text}"',
-			],
-		)
-		return system_prompt, user_prompt
-
-	def _build_compact_prompts(
-		self,
-		*,
-		query_text: str,
-		method_library: Optional[HTNMethodLibrary],
-		typed_objects: Dict[str, str],
-		task_type_map: Dict[str, Tuple[str, ...]],
-	) -> Tuple[str, str]:
-		task_lines = self._task_inventory_lines(method_library, task_type_map)
-		object_lines = self._object_inventory_lines(typed_objects)
-		system_prompt = "\n".join(
-			[
-				"Return minified JSON only.",
-				"Convert the query into one grounded LTLf formula and grounded subgoals.",
-				"Preserve temporal meaning exactly.",
-				"If the query already names grounded task calls, copy those task calls exactly and keep their surface order.",
-				'Use exactly the keys "ltlf_formula", "subgoals", and optional "diagnostics".',
-				'"subgoals" must be a non-empty list and must contain one grounded entry for every task mention in the query.',
-				'Use subgoal ids only: "subgoal_1", "subgoal_2", ...',
-				"All args must be grounded problem objects from the provided inventory.",
-				'For an ordered task list, use a right-nested formula like F(subgoal_1 & F(subgoal_2 & F(subgoal_3))).',
-				'For an unordered task set, use a conjunction like F(subgoal_1) & F(subgoal_2) & F(subgoal_3).',
-				"",
-				"Callable tasks:",
-				task_lines or "- none",
-				"",
-				"Available objects:",
-				object_lines or "- none",
-			],
-		)
-		user_prompt = "\n".join(
-			[
-				"Emit minified JSON with no markdown or commentary.",
+				"Ground this query into one LTLf formula only.",
 				f'Query: "{query_text}"',
 			],
 		)
@@ -382,53 +351,59 @@ class NLToLTLfGenerator:
 		ltlf_formula = self._normalise_ltlf_formula(str(payload.get("ltlf_formula") or ""))
 		if not ltlf_formula:
 			raise ValueError('Goal grounding response omitted required field "ltlf_formula".')
-
-		raw_subgoals = payload.get("subgoals")
-		if not isinstance(raw_subgoals, list) or not raw_subgoals:
-			raise ValueError('Goal grounding response must contain a non-empty "subgoals" list.')
+		unexpected_keys = sorted(
+			key
+			for key in payload.keys()
+			if str(key).strip() and str(key).strip() != "ltlf_formula"
+		)
+		if unexpected_keys:
+			raise ValueError(
+				"Goal grounding response may contain only the key ltlf_formula. "
+				"Unexpected keys: " + ", ".join(str(key) for key in unexpected_keys),
+			)
 
 		task_name_map = self._task_name_map(method_library)
-		seen_subgoal_ids: set[str] = set()
-		subgoals = []
-		for raw_item in raw_subgoals:
-			if not isinstance(raw_item, dict):
-				raise ValueError("Every subgoal entry must be a JSON object.")
-			subgoal_id = str(raw_item.get("id") or raw_item.get("subgoal_id") or "").strip()
-			if not self._SUBGOAL_ID_PATTERN.fullmatch(subgoal_id):
-				raise ValueError(
-					f'Invalid subgoal id "{subgoal_id}". Expected ids matching "subgoal_N".',
-				)
-			if subgoal_id in seen_subgoal_ids:
-				raise ValueError(f'Duplicate subgoal id "{subgoal_id}".')
-			seen_subgoal_ids.add(subgoal_id)
+		formula_atoms = self._extract_formula_atoms_in_order(ltlf_formula)
+		if not formula_atoms:
+			raise ValueError("LTLf formula does not contain any grounded task-event atoms.")
 
-			raw_task_name = str(raw_item.get("task_name") or "").strip()
-			if not raw_task_name:
-				raise ValueError(f'Subgoal "{subgoal_id}" omitted task_name.')
-			task_name = task_name_map.get(raw_task_name, raw_task_name)
+		formula_atom_occurrences: Dict[str, int] = defaultdict(int)
+		for atom_expression in formula_atoms:
+			formula_atom_occurrences[str(atom_expression).strip()] += 1
+
+		seen_symbols: set[str] = set()
+		subgoals = []
+		for atom_expression in formula_atoms:
+			raw_task_name, raw_args = self.symbol_normalizer.parse_predicate_string(atom_expression)
+			event_task_name, raw_base_task_name, has_explicit_event_identity = (
+				self._parse_task_event_predicate_name(raw_task_name)
+			)
+			if formula_atom_occurrences[str(atom_expression).strip()] > 1:
+				raise ValueError(
+					"Repeated grounded task call requires explicit grounded task-event identities. "
+					f'Use distinct atoms such as "{raw_base_task_name}__e1(...)" and '
+					f'"{raw_base_task_name}__e2(...)" instead of repeating "{atom_expression}".',
+				)
+			task_name = task_name_map.get(raw_base_task_name, raw_base_task_name)
 			if method_library is not None and method_library.task_for_name(task_name) is None:
 				raise ValueError(
-					f'Subgoal "{subgoal_id}" references unknown task "{raw_task_name}".',
+					f'LTLf formula references unknown grounded task "{raw_base_task_name}".',
 				)
-
-			raw_args = raw_item.get("args") or ()
-			if not isinstance(raw_args, (list, tuple)):
-				raise ValueError(f'Subgoal "{subgoal_id}" args must be a list.')
 			args = tuple(str(arg).strip() for arg in raw_args if str(arg).strip())
 			if any(arg.startswith("?") for arg in args):
 				raise ValueError(
-					f'Subgoal "{subgoal_id}" contains lifted variables: {list(args)}.',
+					f'LTLf formula contains lifted variables in task atom "{atom_expression}".',
 				)
 			argument_types = tuple(task_type_map.get(task_name, ()))
 			if argument_types and len(args) != len(argument_types):
 				raise ValueError(
-					f'Subgoal "{subgoal_id}" arity mismatch for task "{task_name}": '
-					f"{len(args)} vs {len(argument_types)}.",
+					f'Task atom "{atom_expression}" has arity {len(args)} but task "{task_name}" '
+					f'expects {len(argument_types)}.',
 				)
 			for index, arg in enumerate(args):
 				if typed_objects and arg not in typed_objects:
 					raise ValueError(
-						f'Subgoal "{subgoal_id}" references unknown problem object "{arg}".',
+						f'Task atom "{atom_expression}" references unknown problem object "{arg}".',
 					)
 				if index >= len(argument_types) or arg not in typed_objects:
 					continue
@@ -440,29 +415,25 @@ class NLToLTLfGenerator:
 					type_parent_map=type_parent_map,
 				):
 					raise ValueError(
-						f'Subgoal "{subgoal_id}" argument "{arg}" has type "{actual_type}", '
+						f'Task atom "{atom_expression}" argument "{arg}" has type "{actual_type}", '
 						f'expected "{expected_type}".',
 					)
+			if not has_explicit_event_identity:
+				event_task_name = raw_base_task_name
+			symbol = self.symbol_normalizer.create_propositional_symbol(event_task_name, list(args))
+			if symbol in seen_symbols:
+				raise ValueError(
+					f'LTLf formula reuses grounded task-event identity "{atom_expression}". '
+					"Each event atom must be unique within the formula.",
+				)
+			seen_symbols.add(symbol)
 			subgoals.append(
 				GroundedSubgoal(
-					subgoal_id=subgoal_id,
+					subgoal_id=symbol,
 					task_name=task_name,
 					args=args,
 					argument_types=argument_types,
 				),
-			)
-
-		formula_atoms = self._extract_formula_atoms(ltlf_formula)
-		declared_subgoal_ids = {subgoal.subgoal_id for subgoal in subgoals}
-		undeclared_atoms = sorted(formula_atoms - declared_subgoal_ids)
-		if undeclared_atoms:
-			raise ValueError(
-				"LTLf formula references undeclared subgoals: " + ", ".join(undeclared_atoms),
-			)
-		unused_subgoals = sorted(declared_subgoal_ids - formula_atoms)
-		if unused_subgoals:
-			raise ValueError(
-				"Subgoals not referenced by ltlf_formula: " + ", ".join(unused_subgoals),
 			)
 
 		return TemporalGroundingResult(
@@ -471,32 +442,61 @@ class NLToLTLfGenerator:
 			subgoals=tuple(subgoals),
 			typed_objects=dict(typed_objects),
 			query_object_inventory=self._build_query_object_inventory(typed_objects),
-			diagnostics=tuple(
-				str(item).strip()
-				for item in (payload.get("diagnostics") or ())
-				if str(item).strip()
-			),
+			diagnostics=(),
 		)
 
 	@classmethod
 	def _extract_formula_atoms(cls, ltlf_formula: str) -> set[str]:
-		atoms: set[str] = set()
+		return set(cls._extract_formula_atoms_in_order(ltlf_formula))
+
+	@classmethod
+	def _extract_formula_atoms_in_order(cls, ltlf_formula: str) -> Tuple[str, ...]:
+		ordered_atoms: list[str] = []
 		invalid_tokens: set[str] = set()
-		for token in cls._FORMULA_TOKEN_PATTERN.findall(str(ltlf_formula or "")):
-			if token in cls._RESERVED_FORMULA_TOKENS:
+		text = str(ltlf_formula or "")
+		index = 0
+		while index < len(text):
+			if not (text[index].isalpha() or text[index] == "_"):
+				index += 1
 				continue
-			if cls._FORMULA_OPERATOR_SEQUENCE_PATTERN.fullmatch(token):
+			start = index
+			index += 1
+			while index < len(text) and (text[index].isalnum() or text[index] == "_"):
+				index += 1
+			token = text[start:index]
+			if token in cls._RESERVED_FORMULA_TOKENS or cls._FORMULA_OPERATOR_SEQUENCE_PATTERN.fullmatch(token):
 				continue
-			if cls._SUBGOAL_ID_PATTERN.fullmatch(token):
-				atoms.add(token)
+			if index < len(text) and text[index] == "(":
+				if token in cls._RESERVED_FORMULA_TOKENS or cls._FORMULA_OPERATOR_SEQUENCE_PATTERN.fullmatch(token):
+					index += 1
+					continue
+				depth = 1
+				index += 1
+				while index < len(text) and depth > 0:
+					if text[index] == "(":
+						depth += 1
+					elif text[index] == ")":
+						depth -= 1
+					index += 1
+				token = text[start:index]
+			if token.startswith("subgoal_") or token.startswith("query_step_"):
+				invalid_tokens.add(token)
 				continue
-			invalid_tokens.add(token)
+			ordered_atoms.append(token)
 		if invalid_tokens:
 			raise ValueError(
-				"LTLf formula may reference only subgoal_* atoms. Found: "
+				"LTLf formula may not use placeholder atoms such as subgoal_* or query_step_*. Found: "
 				+ ", ".join(sorted(invalid_tokens)),
 			)
-		return atoms
+		return tuple(ordered_atoms)
+
+	@classmethod
+	def _parse_task_event_predicate_name(cls, raw_predicate_name: str) -> Tuple[str, str, bool]:
+		predicate_name = str(raw_predicate_name or "").strip()
+		match = cls._TASK_EVENT_SUFFIX_PATTERN.fullmatch(predicate_name)
+		if match is None:
+			return predicate_name, predicate_name, False
+		return predicate_name, str(match.group("base") or "").strip(), True
 
 	@staticmethod
 	def _task_name_map(method_library: Optional[HTNMethodLibrary]) -> Dict[str, str]:
@@ -578,33 +578,20 @@ class NLToLTLfGenerator:
 		messages: list[dict[str, str]],
 		*,
 		response_max_tokens: Optional[int] = None,
+		request_timeout: Optional[float] = None,
 	):
 		request_kwargs = {
 			"model": self.model,
 			"messages": messages,
 			"temperature": 0.0,
-			"timeout": self.request_timeout,
+			"timeout": float(request_timeout or self.request_timeout),
 			"max_tokens": int(response_max_tokens or self.response_max_tokens),
+			"response_format": {"type": "json_object"},
 		}
-		request_variants = [
-			{"response_format": {"type": "json_object"}},
-			{},
-		]
-		last_optional_error: Exception | None = None
-		for variant in request_variants:
-			try:
-				return self.client.chat.completions.create(
-					**request_kwargs,
-					**variant,
-				)
-			except Exception as exc:
-				if self._is_unsupported_json_response_format_error(exc):
-					last_optional_error = exc
-					continue
-				raise
-		if last_optional_error is not None:
-			raise last_optional_error
-		raise RuntimeError("goal grounding could not create a chat completion request.")
+		extra_body = self._openrouter_provider_routing_body()
+		if extra_body is not None:
+			request_kwargs["extra_body"] = extra_body
+		return self.client.chat.completions.create(**request_kwargs)
 
 	def _extract_response_text(self, response: object) -> str:
 		choices = getattr(response, "choices", None) or ()
@@ -630,6 +617,45 @@ class NLToLTLfGenerator:
 				if extracted is not None:
 					return extracted
 		raise RuntimeError("LLM response did not contain usable textual JSON content.")
+
+	@staticmethod
+	def _extract_finish_reason(response: object) -> str:
+		choices = getattr(response, "choices", None) or ()
+		if not choices:
+			return ""
+		return str(getattr(choices[0], "finish_reason", "") or "").strip()
+
+	@staticmethod
+	def _serialise_raw_response(response: object) -> str:
+		if hasattr(response, "model_dump"):
+			try:
+				return json.dumps(response.model_dump(), ensure_ascii=False)
+			except Exception:
+				pass
+		return repr(response)
+
+	def _openrouter_provider_routing_body(self) -> Dict[str, Any] | None:
+		base_url = str(self.base_url or "").strip().lower()
+		if "openrouter.ai" not in base_url:
+			return None
+		model_name = str(self.model or "").strip()
+		if "/" not in model_name:
+			return None
+		provider_name = model_name.split("/", 1)[0].strip().lower()
+		if not provider_name:
+			return None
+		extra_body: Dict[str, Any] = {
+			"provider": {
+				"only": [provider_name],
+				"allow_fallbacks": False,
+			},
+		}
+		if provider_name == "minimax":
+			extra_body["reasoning"] = {
+				"max_tokens": 1,
+				"exclude": True,
+			}
+		return extra_body
 
 	def _normalise_response_content(self, content: object) -> str | None:
 		if content is None:
@@ -660,13 +686,43 @@ class NLToLTLfGenerator:
 	@staticmethod
 	def _suggest_response_max_tokens(query_text: str) -> int:
 		query_length = len(str(query_text or ""))
-		if query_length >= 6000:
+		task_call_mentions = len(
+			re.findall(r"\b[a-z_][a-z0-9_]*\([^()]*\)", str(query_text or "")),
+		)
+		if task_call_mentions >= 40:
+			return 64000
+		if task_call_mentions >= 20:
+			return 48000
+		if task_call_mentions >= 12:
 			return 32000
-		if query_length >= 3000:
+		if task_call_mentions >= 8:
 			return 24000
+		if query_length >= 20000:
+			return 64000
+		if query_length >= 10000:
+			return 48000
+		if query_length >= 6000:
+			return 40000
+		if query_length >= 3000:
+			return 32000
 		if query_length >= 1200:
-			return 16000
+			return 20000
 		return 12000
+
+	@staticmethod
+	def _suggest_request_timeout(query_text: str) -> float:
+		query_length = len(str(query_text or ""))
+		if query_length >= 30000:
+			return 180.0
+		if query_length >= 20000:
+			return 150.0
+		if query_length >= 10000:
+			return 120.0
+		if query_length >= 6000:
+			return 90.0
+		if query_length >= 3000:
+			return 60.0
+		return 30.0
 
 	@staticmethod
 	def _normalise_ltlf_formula(ltlf_formula: str) -> str:
@@ -690,20 +746,3 @@ class NLToLTLfGenerator:
 		if open_parentheses > 0:
 			normalised_chars.extend(")" for _ in range(open_parentheses))
 		return "".join(normalised_chars).strip()
-
-	@staticmethod
-	def _is_unsupported_json_response_format_error(exc: Exception) -> bool:
-		message = str(exc).lower()
-		if "response_format" not in message and "json_object" not in message:
-			return False
-		return any(
-			marker in message
-			for marker in (
-				"unsupported",
-				"not supported",
-				"invalid parameter",
-				"unknown parameter",
-				"unrecognized request argument",
-				"extra inputs are not permitted",
-			)
-		)

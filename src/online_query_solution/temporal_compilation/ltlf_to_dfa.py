@@ -2,7 +2,10 @@
 LTLf to DFA conversion using `ltlf2dfa`.
 """
 
+import os
 import re
+import shutil
+import sys
 import subprocess
 from collections import defaultdict
 from pathlib import Path
@@ -35,6 +38,8 @@ class PredicateToProposition:
             normalizer: SymbolNormalizer instance (creates new one if not provided)
         """
         self.normalizer = normalizer or SymbolNormalizer()
+        self.event_symbol_to_prop: Dict[str, str] = {}
+        self.prop_to_event_symbol: Dict[str, str] = {}
 
     def encode_predicate(self, predicate_str: str) -> str:
         """
@@ -50,11 +55,11 @@ class PredicateToProposition:
         pred_name, args = self.normalizer.parse_predicate_string(predicate_str.strip())
 
         if not args:
-            # Already propositional (e.g., "handempty", "a", "b")
-            return predicate_str.strip()
+            event_symbol = predicate_str.strip().lower()
+        else:
+            event_symbol = self.normalizer.create_propositional_symbol(pred_name, args)
 
-        # Create propositional symbol using normalizer
-        return self.normalizer.create_propositional_symbol(pred_name, args)
+        return self._compact_prop_for_event_symbol(event_symbol)
 
     def convert_formula(self, ltlf_formula_str: str) -> str:
         """
@@ -66,16 +71,52 @@ class PredicateToProposition:
         Returns:
             Propositional formula: e.g., "F(on_a_b)" or "F(on_blockhh1_blockhh2) & G(clear_c)"
         """
-        # Use normalizer's formula normalization
-        return self.normalizer.normalize_formula_string(ltlf_formula_str)
+        ltl_operators = {'F', 'G', 'X', 'WX', 'U', 'R', 'W', 'M'}
+
+        def replacer(match):
+            full_match = match.group(0)
+            pred_name = match.group(1)
+            args_str = match.group(2)
+            if pred_name in ltl_operators:
+                return full_match
+            args = [arg.strip() for arg in args_str.split(',')]
+            event_symbol = self.normalizer.create_propositional_symbol(pred_name, args)
+            return self._compact_prop_for_event_symbol(event_symbol)
+
+        prev_converted = ltlf_formula_str
+        max_iterations = 10
+        for _ in range(max_iterations):
+            converted = self.normalizer.PREDICATE_PATTERN.sub(replacer, prev_converted)
+            if converted == prev_converted:
+                break
+            prev_converted = converted
+        else:
+            raise RuntimeError(
+                f"Failed to normalize formula after {max_iterations} iterations. "
+                f"Formula: {ltlf_formula_str}"
+            )
+
+        return converted
+
+    def _compact_prop_for_event_symbol(self, event_symbol: str) -> str:
+        event_key = str(event_symbol or "").strip().lower()
+        if not event_key:
+            raise ValueError("Cannot allocate a compact proposition for an empty event symbol.")
+        existing = self.event_symbol_to_prop.get(event_key)
+        if existing is not None:
+            return existing
+        prop_symbol = f"p{len(self.event_symbol_to_prop) + 1}"
+        self.event_symbol_to_prop[event_key] = prop_symbol
+        self.prop_to_event_symbol[prop_symbol] = event_key
+        return prop_symbol
 
     def get_mapping(self) -> Dict[str, str]:
         """Get original → normalized mapping"""
-        return self.normalizer.get_original_to_normalized_map()
+        return dict(self.event_symbol_to_prop)
 
     def get_reverse_mapping(self) -> Dict[str, str]:
         """Get normalized → original mapping"""
-        return self.normalizer.get_normalized_to_original_map()
+        return dict(self.prop_to_event_symbol)
 
 
 class LTLfToDFA:
@@ -124,6 +165,10 @@ class LTLfToDFA:
 
         # Convert to propositional encoding
         propositional_formula = self.encoder.convert_formula(original_formula)
+        prior_recursion_limit = sys.getrecursionlimit()
+        required_recursion_limit = max(prior_recursion_limit, 20000)
+        if required_recursion_limit != prior_recursion_limit:
+            sys.setrecursionlimit(required_recursion_limit)
 
         # Parse and convert to DFA
         try:
@@ -136,13 +181,17 @@ class LTLfToDFA:
                 f"Propositional formula: {propositional_formula}\n"
                 f"Error: {str(e)}"
             ) from e
+        finally:
+            if sys.getrecursionlimit() != prior_recursion_limit:
+                sys.setrecursionlimit(prior_recursion_limit)
 
         # Prepare metadata
+        reverse_mapping = self.encoder.get_reverse_mapping()
         metadata = {
             "original_formula": original_formula,
             "propositional_formula": propositional_formula,
             "predicate_to_prop_mapping": self.encoder.get_mapping(),
-            "prop_to_predicate_mapping": self.encoder.get_reverse_mapping(),
+            "prop_to_predicate_mapping": reverse_mapping,
             "num_states": int(
                 parse_metadata.get("num_states") or self._count_dfa_states(dfa_dot)
             ),
@@ -150,7 +199,7 @@ class LTLfToDFA:
                 parse_metadata.get("num_transitions")
                 or self._count_dfa_transitions(dfa_dot)
             ),
-            "alphabet": self._extract_alphabet(dfa_dot),
+            "alphabet": self._extract_alphabet(dfa_dot, reverse_mapping),
             "construction": "generic_ltlf2dfa",
         }
 
@@ -186,6 +235,7 @@ class LTLfToDFA:
     def _invoke_mona_directly(self, formula_obj: Any) -> str | bool:
         """Invoke MONA directly so we can strip oversized debug comments and tune timeout safely."""
         mona_program = self._render_mona_program(formula_obj)
+        mona_command, mona_env = self._resolve_mona_runtime()
 
         with TemporaryDirectory(prefix="ltlf2dfa_mona_") as temp_dir:
             program_path = Path(temp_dir) / "automa.mona"
@@ -195,12 +245,13 @@ class LTLfToDFA:
             with stdout_path.open("w", encoding="utf-8") as stdout_handle:
                 try:
                     completed = subprocess.run(
-                        ["mona", "-q", "-u", "-w", str(program_path)],
+                        [mona_command, "-q", "-u", "-w", str(program_path)],
                         stdout=stdout_handle,
                         stderr=subprocess.PIPE,
                         text=True,
                         timeout=self.MONA_TIMEOUT_SECONDS,
                         check=False,
+                        env=mona_env,
                     )
                 except subprocess.TimeoutExpired:
                     return False
@@ -219,6 +270,59 @@ class LTLfToDFA:
                 raise RuntimeError(stderr[:500])
             return stdout_path.read_text(encoding="utf-8").strip()
 
+    @staticmethod
+    def _resolve_mona_runtime() -> Tuple[str, Dict[str, str]]:
+        env = dict(os.environ)
+        explicit_mona = str(env.get("MONA_BIN") or "").strip()
+        candidate_commands = [
+            explicit_mona,
+            shutil.which("mona") or "",
+            str(Path.home() / "Downloads" / "mona-1.4" / "Front" / ".libs" / "mona"),
+            str(Path.home() / "Downloads" / "mona-1.4" / "Front" / "mona"),
+        ]
+        mona_command = next(
+            (
+                candidate
+                for candidate in candidate_commands
+                if candidate and Path(candidate).exists()
+            ),
+            "",
+        )
+        if not mona_command:
+            raise FileNotFoundError(
+                "mona executable not found. Set MONA_BIN or add mona to PATH.",
+            )
+
+        if shutil.which("mona") is None:
+            env["PATH"] = os.pathsep.join(
+                [
+                    str(Path(mona_command).resolve().parent),
+                    str(env.get("PATH") or "").strip(),
+                ],
+            ).strip(os.pathsep)
+
+        library_dirs = [
+            str(Path.home() / "Downloads" / "mona-1.4" / "Mem" / ".libs"),
+            str(Path.home() / "Downloads" / "mona-1.4" / "BDD" / ".libs"),
+            str(Path.home() / "Downloads" / "mona-1.4" / "DFA" / ".libs"),
+            str(Path.home() / "Downloads" / "mona-1.4" / "GTA" / ".libs"),
+        ]
+        for key in ("DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH"):
+            existing_entries = [
+                entry
+                for entry in str(env.get(key) or "").split(os.pathsep)
+                if entry
+            ]
+            merged_entries = [
+                directory
+                for directory in library_dirs
+                if directory and Path(directory).exists()
+            ] + existing_entries
+            if merged_entries:
+                env[key] = os.pathsep.join(dict.fromkeys(merged_entries))
+
+        return mona_command, env
+
 
     @staticmethod
     def _render_mona_program(formula_obj: Any) -> str:
@@ -231,7 +335,10 @@ class LTLfToDFA:
 
     def _parse_mona_output(self, mona_output: str) -> Dict[str, Any]:
         """Parse raw MONA output into a grouped graph representation."""
-        free_variables = self._extract_mona_free_variables(mona_output)
+        free_variables = self._extract_mona_free_variables(
+            mona_output,
+            self.encoder.get_reverse_mapping(),
+        )
         accepting_states = self._extract_mona_accepting_states(mona_output)
         grouped_guards: Dict[Tuple[str, str], List[str]] = defaultdict(list)
         init_targets: List[str] = []
@@ -272,7 +379,10 @@ class LTLfToDFA:
         }
 
     @staticmethod
-    def _extract_mona_free_variables(mona_output: str) -> Tuple[str, ...]:
+    def _extract_mona_free_variables(
+        mona_output: str,
+        reverse_mapping: Dict[str, str],
+    ) -> Tuple[str, ...]:
         match = re.search(
             r"DFA for formula with free variables:\s*(.*?)\s*\n",
             mona_output,
@@ -287,7 +397,7 @@ class LTLfToDFA:
         ]
         if len(raw_tokens) == 1 and raw_tokens[0] == "state":
             return ()
-        return tuple(raw_tokens)
+        return tuple(reverse_mapping.get(token, token) for token in raw_tokens)
 
     @staticmethod
     def _extract_mona_accepting_states(mona_output: str) -> Tuple[str, ...]:
@@ -409,12 +519,16 @@ class LTLfToDFA:
         init_edges = dfa_dot.count("init ->")
         return max(0, total_edges - init_edges)
 
-    def _extract_alphabet(self, dfa_dot: str) -> List[str]:
+    def _extract_alphabet(
+        self,
+        dfa_dot: str,
+        reverse_mapping: Dict[str, str],
+    ) -> List[str]:
         """Extract alphabet (propositional variables) from DFA"""
-        # This would require parsing DOT more carefully
-        # For now, return from our encoder mapping (normalized symbols)
+        if reverse_mapping:
+            return list(reverse_mapping.values())
         mapping = self.encoder.get_mapping()
-        return list(mapping.values()) if mapping else []
+        return list(mapping.keys()) if mapping else []
 
 
 def test_converter():

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-DEFAULT_GOAL_GROUNDING_MODEL = "deepseek/deepseek-chat-v3-0324"
+DEFAULT_GOAL_GROUNDING_MODEL = "minimax/minimax-m2.7"
 DEFAULT_METHOD_SYNTHESIS_MODEL = "minimax/minimax-m2.7"
 DEFAULT_SHARED_MODEL = "deepseek-chat"
 DEFAULT_ONLINE_DOMAIN_SOURCE = "benchmark"
@@ -54,7 +54,13 @@ class Config:
 		The query grounding path is benchmark-pinned and should not silently drift
 		between providers.
 		"""
-		return os.getenv("GOAL_GROUNDING_MODEL", DEFAULT_GOAL_GROUNDING_MODEL)
+		explicit_model = str(os.getenv("GOAL_GROUNDING_MODEL", "")).strip()
+		if explicit_model:
+			return explicit_model
+		shared_model = str(os.getenv("OPENAI_MODEL", "")).strip()
+		if shared_model:
+			return shared_model
+		return DEFAULT_GOAL_GROUNDING_MODEL
 
 	@property
 	def method_synthesis_model(self) -> str:
