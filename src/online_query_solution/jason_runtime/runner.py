@@ -1,0 +1,7081 @@
+"""
+Jason runtime runner.
+
+Runs generated AgentSpeak code with Jason (RunLocalMAS), boots a real Jason
+`Environment` implementation for domain action semantics, and returns structured
+runtime metadata for pipeline logging.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+import hashlib
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+import planning.panda_portfolio as panda_planner_module
+from offline_method_generation.method_synthesis.naming import query_root_alias_task_name
+from offline_method_generation.method_synthesis.schema import HTNLiteral, HTNMethodLibrary
+from online_query_solution.jason_runtime.environment_adapter import (
+	EnvironmentAdapterResult,
+	Stage6EnvironmentAdapter,
+	build_environment_adapter,
+)
+
+
+class JasonValidationError(RuntimeError):
+	"""Raised when Jason runtime validation fails."""
+
+	def __init__(self, message: str, *, metadata: Optional[Dict[str, Any]] = None) -> None:
+		super().__init__(message)
+		self.metadata = dict(metadata or {})
+
+
+@dataclass(frozen=True)
+class JasonValidationResult:
+	"""Structured result for Jason runtime validation."""
+
+	status: str
+	backend: str
+	java_path: Optional[str]
+	java_version: Optional[int]
+	javac_path: Optional[str]
+	jason_jar: Optional[str]
+	exit_code: Optional[int]
+	timed_out: bool
+	stdout: str
+	stderr: str
+	action_path: List[str]
+	method_trace: List[Dict[str, Any]]
+	failed_goals: List[str]
+	environment_adapter: Dict[str, Any]
+	failure_class: Optional[str]
+	consistency_checks: Dict[str, Any]
+	artifacts: Dict[str, str]
+	timing_profile: Dict[str, Any]
+
+	def to_dict(self) -> Dict[str, Any]:
+		return {
+			"status": self.status,
+			"backend": self.backend,
+			"java_path": self.java_path,
+			"java_version": self.java_version,
+			"javac_path": self.javac_path,
+			"jason_jar": self.jason_jar,
+			"exit_code": self.exit_code,
+			"timed_out": self.timed_out,
+			"stdout": self.stdout,
+			"stderr": self.stderr,
+			"action_path": list(self.action_path),
+			"method_trace": list(self.method_trace),
+			"failed_goals": list(self.failed_goals),
+			"environment_adapter": dict(self.environment_adapter),
+			"failure_class": self.failure_class,
+			"consistency_checks": dict(self.consistency_checks),
+			"artifacts": dict(self.artifacts),
+			"timing_profile": dict(self.timing_profile),
+		}
+
+
+class JasonRunner:
+	"""Run rendered AgentSpeak code in Jason and validate runtime outcomes."""
+
+	backend_name = "RunLocalMAS"
+	success_marker = "execute success"
+	failure_marker = "execute failed"
+	min_java_major = 17
+	max_java_major = 23
+	environment_class_name = "JasonPipelineEnvironment"
+	_UNORDERED_TARGET_RETRY_LIMIT = 64
+
+	def __init__(
+		self,
+		*,
+		runtime_dir: str | Path | None = None,
+		timeout_seconds: int = 120,
+		environment_adapter: Stage6EnvironmentAdapter | None = None,
+		environment_adapter_name: str | None = None,
+	) -> None:
+		base_dir = (
+			Path(runtime_dir).resolve()
+			if runtime_dir is not None
+			else Path(__file__).resolve().parent
+		)
+		self.runtime_dir = base_dir
+		self.jason_src_dir = self.runtime_dir / "jason_src"
+		self.timeout_seconds = timeout_seconds
+		adapter_name = (
+			environment_adapter_name
+			or os.getenv("JASON_RUNTIME_ENV_ADAPTER")
+			or os.getenv("STAGE6_ENV_ADAPTER")
+		)
+		self.environment_adapter = environment_adapter or build_environment_adapter(adapter_name)
+		self._action_schema_lookup_cache: Dict[int, Dict[str, Dict[str, Any]]] = {}
+
+	def validate(
+		self,
+		*,
+		agentspeak_code: str,
+		target_literals: Sequence[HTNLiteral],
+		protected_target_literals: Sequence[HTNLiteral] = (),
+		method_library: HTNMethodLibrary | None = None,
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str] = (),
+		runtime_objects: Sequence[str] = (),
+		object_types: Optional[Dict[str, str]] = None,
+		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
+		domain_name: str,
+		problem_file: str | Path | None = None,
+		output_dir: str | Path,
+		completion_mode: str = "target_literals",
+		ordered_query_sequence: bool = True,
+		planning_domain: Any | None = None,
+		guided_action_path: Sequence[str] = (),
+		guided_method_trace: Sequence[Dict[str, Any]] = (),
+		guided_continue_with_runtime_goal: bool = False,
+		guided_post_seed_facts: Sequence[str] = (),
+		local_witness_support_facts: Sequence[str] = (),
+		guided_completed_target_count: int = 0,
+		guided_completed_target_ids: Sequence[str] = (),
+		runtime_plan_records: Sequence[Dict[str, Any]] = (),
+		skip_method_trace_reconstruction: bool = False,
+		preferred_unordered_target_ids: Sequence[str] = (),
+		preferred_method_trace: Sequence[Dict[str, Any]] = (),
+		preferred_action_path: Sequence[str] = (),
+	) -> JasonValidationResult:
+		"""Execute Jason validation and return a structured result."""
+		total_start = time.perf_counter()
+		timing_profile: Dict[str, float] = {}
+
+		if not action_schemas:
+			raise JasonValidationError(
+				"Jason runtime requires action schemas for real environment execution.",
+				metadata={"action_schema_count": 0},
+			)
+
+		output_path = Path(output_dir).resolve()
+		output_path.mkdir(parents=True, exist_ok=True)
+
+		runtime_resolution_start = time.perf_counter()
+		java_bin, java_major = self._select_java_binary()
+		javac_bin = self._select_javac_binary(java_bin)
+		jason_jar = self._ensure_jason_jar(java_bin)
+		log_conf = self._resolve_log_config()
+		timing_profile["runtime_resolution_seconds"] = (
+			time.perf_counter() - runtime_resolution_start
+		)
+
+		runner_asl_path = output_path / "agentspeak_generated.asl"
+		runner_mas2j_path = output_path / "jason_runner.mas2j"
+		env_java_path = output_path / f"{self.environment_class_name}.java"
+		env_class_path = output_path / f"{self.environment_class_name}.class"
+		no_ancestor_goal_java_path = output_path / "pipeline" / "no_ancestor_goal.java"
+		no_ancestor_goal_class_path = output_path / "pipeline" / "no_ancestor_goal.class"
+		stdout_path = output_path / "jason_stdout.txt"
+		stderr_path = output_path / "jason_stderr.txt"
+		action_path_path = output_path / "action_path.txt"
+		method_trace_path = output_path / "method_trace.json"
+		validation_json_path = output_path / "jason_validation.json"
+
+		unordered_target_order_ids: List[str] = []
+		unordered_target_order_signatures: List[str] = []
+		ordering_guided_method_trace: List[Dict[str, Any]] = []
+		ordering_guided_action_path: List[str] = []
+		explicit_unordered_target_order_ids = [
+			str(target_id).strip()
+			for target_id in preferred_unordered_target_ids
+			if str(target_id).strip()
+		]
+		explicit_preferred_method_trace = [
+			{
+				"method_name": str((entry or {}).get("method_name") or "").strip(),
+				"task_args": [
+					str(arg).strip()
+					for arg in tuple((entry or {}).get("task_args") or ())
+					if str(arg).strip()
+				],
+			}
+			for entry in preferred_method_trace
+			if str((entry or {}).get("method_name") or "").strip()
+		]
+		explicit_preferred_action_path = [
+			str(step).strip()
+			for step in preferred_action_path
+			if str(step).strip()
+		]
+		effective_agentspeak_code = agentspeak_code
+		ordering_seed_facts = tuple(seed_facts)
+		ordering_target_literals = tuple(target_literals)
+		target_id_offset = 0
+		if guided_continue_with_runtime_goal:
+			if guided_post_seed_facts:
+				ordering_seed_facts = tuple(guided_post_seed_facts)
+			if guided_completed_target_count > 0:
+				target_id_offset = guided_completed_target_count
+				ordering_target_literals = tuple(target_literals[guided_completed_target_count:])
+		if (
+			not ordered_query_sequence
+			and completion_mode == "target_literals"
+			and ordering_target_literals
+		):
+			ordering_start = time.perf_counter()
+			ordering = self._infer_unordered_target_execution_order(
+				target_literals=ordering_target_literals,
+				method_library=method_library,
+				action_schemas=action_schemas,
+				seed_facts=ordering_seed_facts,
+				runtime_objects=runtime_objects,
+				object_types=object_types or {},
+				planning_domain=planning_domain,
+				output_path=output_path,
+				target_id_offset=target_id_offset,
+				plan_records=runtime_plan_records,
+				prefer_query_order=True,
+			)
+			unordered_target_order_ids = list(ordering.get("target_ids") or [])
+			unordered_target_order_signatures = list(ordering.get("target_signatures") or [])
+			ordering_guided_method_trace = list(ordering.get("guided_method_trace") or [])
+			ordering_guided_action_path = [
+				str(step).strip()
+				for step in tuple(ordering.get("guided_action_path") or ())
+				if str(step).strip()
+			]
+			if unordered_target_order_ids:
+				effective_agentspeak_code = self._reorder_unordered_control_plan_blocks(
+					agentspeak_code,
+					unordered_target_order_ids,
+				)
+			if ordering_guided_method_trace or ordering_guided_action_path:
+				effective_agentspeak_code = self._prioritise_guided_method_chunks(
+					effective_agentspeak_code,
+					ordering_guided_method_trace,
+					ordering_guided_action_path,
+					predicate_argument_types=self._infer_runtime_predicate_argument_types(
+						ordering_seed_facts,
+						object_types or {},
+					),
+					object_types=object_types or {},
+				)
+			timing_profile["unordered_target_ordering_seconds"] = (
+				time.perf_counter() - ordering_start
+			)
+		if explicit_preferred_method_trace or explicit_preferred_action_path:
+			effective_agentspeak_code = self._prioritise_guided_method_chunks(
+				effective_agentspeak_code,
+				explicit_preferred_method_trace,
+				explicit_preferred_action_path,
+				predicate_argument_types=self._infer_runtime_predicate_argument_types(
+					ordering_seed_facts,
+					object_types or {},
+				),
+				object_types=object_types or {},
+			)
+
+		source_build_start = time.perf_counter()
+		runtime_agentspeak_code = self._strip_seed_fact_beliefs(
+			effective_agentspeak_code,
+			seed_facts=seed_facts,
+		)
+		runner_asl = self._build_runner_asl(
+			runtime_agentspeak_code,
+			target_literals,
+			protected_target_literals=protected_target_literals,
+			method_library=method_library,
+			seed_facts=seed_facts,
+			runtime_objects=runtime_objects,
+			object_types=object_types or {},
+			type_parent_map=type_parent_map or {},
+			completion_mode=completion_mode,
+			ordered_query_sequence=ordered_query_sequence,
+			guided_action_path=guided_action_path,
+			guided_method_trace=guided_method_trace,
+			guided_continue_with_runtime_goal=guided_continue_with_runtime_goal,
+			guided_completed_target_ids=guided_completed_target_ids,
+		)
+		if explicit_unordered_target_order_ids:
+			runner_asl = self._reorder_unordered_control_plan_blocks(
+				runner_asl,
+				explicit_unordered_target_order_ids,
+			)
+		if unordered_target_order_ids:
+			runner_asl = self._reorder_unordered_control_plan_blocks(
+				runner_asl,
+				unordered_target_order_ids,
+			)
+		_ = local_witness_support_facts
+		runner_mas2j = self._build_runner_mas2j(domain_name)
+		env_source = self._build_environment_java_source(
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+			target_literals=target_literals,
+		)
+		no_ancestor_goal_source = self._build_no_ancestor_goal_internal_action_source()
+		timing_profile["source_build_seconds"] = time.perf_counter() - source_build_start
+		write_sources_start = time.perf_counter()
+		runner_asl_path.write_text(runner_asl)
+		runner_mas2j_path.write_text(runner_mas2j)
+		env_java_path.write_text(env_source)
+		no_ancestor_goal_java_path.parent.mkdir(parents=True, exist_ok=True)
+		no_ancestor_goal_java_path.write_text(no_ancestor_goal_source)
+		timing_profile["write_sources_seconds"] = time.perf_counter() - write_sources_start
+		compile_start = time.perf_counter()
+		self._compile_environment_java(
+			java_bin=java_bin,
+			javac_bin=javac_bin,
+			jason_jar=jason_jar,
+			env_java_path=env_java_path,
+			output_path=output_path,
+		)
+		timing_profile["environment_compile_seconds"] = time.perf_counter() - compile_start
+		if not env_class_path.exists():
+			raise JasonValidationError(
+				"Jason environment class compilation completed but class file is missing.",
+				metadata={
+					"environment_java": str(env_java_path),
+					"environment_class": str(env_class_path),
+				},
+			)
+		needs_recursive_ancestor_guard = "pipeline.no_ancestor_goal(" in runner_asl
+		if needs_recursive_ancestor_guard and not no_ancestor_goal_class_path.exists():
+			raise JasonValidationError(
+				"Jason internal action compilation completed but class file is missing.",
+				metadata={
+					"internal_action_java": str(no_ancestor_goal_java_path),
+					"internal_action_class": str(no_ancestor_goal_class_path),
+				},
+			)
+
+		runtime_classpath = os.pathsep.join([str(jason_jar), str(output_path)])
+		command = [
+			java_bin,
+			"-cp",
+			runtime_classpath,
+			"jason.infra.local.RunLocalMAS",
+			runner_mas2j_path.name,
+			"--log-conf",
+			str(log_conf),
+		]
+
+		timed_out = False
+		exit_code: Optional[int] = None
+		raw_stdout: str | bytes = ""
+		raw_stderr: str | bytes = ""
+
+		try:
+			mas_run_start = time.perf_counter()
+			result = subprocess.run(
+				command,
+				cwd=output_path,
+				text=True,
+				capture_output=True,
+				check=False,
+				timeout=self.timeout_seconds,
+			)
+			exit_code = result.returncode
+			raw_stdout = result.stdout
+			raw_stderr = result.stderr
+			timing_profile["mas_run_seconds"] = time.perf_counter() - mas_run_start
+		except subprocess.TimeoutExpired as exc:
+			timed_out = True
+			raw_stdout = exc.stdout or ""
+			raw_stderr = exc.stderr or ""
+			timing_profile["mas_run_seconds"] = time.perf_counter() - mas_run_start
+
+		output_processing_start = time.perf_counter()
+		stdout_text = self._normalise_process_output(raw_stdout)
+		stderr_text = self._normalise_process_output(raw_stderr)
+		stdout = self._combine_process_output(stdout_text, stderr_text)
+		stderr = stderr_text
+		action_path = self._extract_action_path(stdout)
+		method_trace_output = stderr_text if "runtime trace method" in stderr_text else stdout
+		extracted_method_trace = self._extract_method_trace(method_trace_output)
+		guided_prefix_mode = bool(guided_action_path and guided_continue_with_runtime_goal)
+		if guided_prefix_mode:
+			method_trace = list(guided_method_trace)
+			if method_trace and extracted_method_trace[:len(method_trace)] == method_trace:
+				method_trace.extend(extracted_method_trace[len(method_trace):])
+			else:
+				method_trace.extend(extracted_method_trace)
+		else:
+			method_trace = list(guided_method_trace) if guided_method_trace else extracted_method_trace
+			if method_library is not None and problem_file is not None:
+				bridge_augmentation_start = time.perf_counter()
+				method_trace = self._augment_method_trace_with_query_root_bridges(
+					method_trace=method_trace,
+					method_library=method_library,
+					problem_file=problem_file,
+				)
+				timing_profile["method_trace_bridge_augmentation_seconds"] = (
+					time.perf_counter() - bridge_augmentation_start
+				)
+		failed_goals = self._extract_failed_goals(stdout)
+		timing_profile["output_processing_seconds"] = (
+			time.perf_counter() - output_processing_start
+		)
+
+		artifact_write_start = time.perf_counter()
+		stdout_path.write_text(stdout)
+		stderr_path.write_text(stderr)
+		action_path_path.write_text(self._render_action_path(action_path))
+		method_trace_path.write_text(json.dumps(method_trace, indent=2))
+		timing_profile["artifact_write_seconds"] = time.perf_counter() - artifact_write_start
+
+		artifacts = {
+			"agentspeak_generated": str(runner_asl_path),
+			"jason_runner_mas2j": str(runner_mas2j_path),
+			"runtime_environment_java": str(env_java_path),
+			"runtime_environment_class": str(env_class_path),
+			"jason_stdout": str(stdout_path),
+			"jason_stderr": str(stderr_path),
+			"action_path": str(action_path_path),
+			"method_trace": str(method_trace_path),
+			"jason_validation": str(validation_json_path),
+		}
+		if unordered_target_order_ids:
+			artifacts["unordered_target_order_ids"] = list(unordered_target_order_ids)
+			artifacts["unordered_target_order_signatures"] = list(unordered_target_order_signatures)
+		if explicit_unordered_target_order_ids:
+			artifacts["preferred_unordered_target_ids"] = list(explicit_unordered_target_order_ids)
+		if explicit_preferred_method_trace:
+			artifacts["preferred_method_trace"] = [
+				{
+					"method_name": str(entry.get("method_name") or ""),
+					"task_args": [
+						str(arg)
+						for arg in tuple(entry.get("task_args") or ())
+					],
+				}
+				for entry in explicit_preferred_method_trace
+				if str(entry.get("method_name") or "").strip()
+			]
+		if explicit_preferred_action_path:
+			artifacts["preferred_action_path"] = list(explicit_preferred_action_path)
+		if ordering_guided_method_trace:
+			artifacts["unordered_guided_method_trace"] = [
+				{
+					"method_name": str(entry.get("method_name") or ""),
+					"task_args": [
+						str(arg)
+						for arg in tuple(entry.get("task_args") or ())
+					],
+				}
+				for entry in ordering_guided_method_trace
+				if str(entry.get("method_name") or "").strip()
+			]
+		if ordering_guided_action_path:
+			artifacts["unordered_guided_action_path"] = list(ordering_guided_action_path)
+		environment_validation_start = time.perf_counter()
+		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
+		timing_profile["environment_validation_seconds"] = (
+			time.perf_counter() - environment_validation_start
+		)
+		consistency_start = time.perf_counter()
+		consistency_checks = self._run_consistency_checks(
+			action_path=action_path,
+			method_trace=method_trace,
+			method_library=method_library,
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+			problem_file=problem_file,
+			skip_method_trace_reconstruction=skip_method_trace_reconstruction,
+		)
+		timing_profile["consistency_checks_seconds"] = time.perf_counter() - consistency_start
+		is_success = self._is_successful_run(
+			stdout=stdout,
+			exit_code=exit_code,
+			timed_out=timed_out,
+			environment_result=environment_result,
+			consistency_checks=consistency_checks,
+		)
+		status = "success" if is_success else "failed"
+		failure_class = None if is_success else self._failure_class(
+			stdout,
+			exit_code,
+			timed_out,
+			environment_result,
+			consistency_checks,
+		)
+		timing_profile["total_seconds"] = time.perf_counter() - total_start
+		result_payload = JasonValidationResult(
+			status=status,
+			backend=self.backend_name,
+			java_path=java_bin,
+			java_version=java_major,
+			javac_path=javac_bin,
+			jason_jar=str(jason_jar),
+			exit_code=exit_code,
+			timed_out=timed_out,
+			stdout=stdout,
+			stderr=stderr,
+			action_path=action_path,
+			method_trace=method_trace,
+			failed_goals=failed_goals,
+			environment_adapter=environment_result.to_dict(),
+			failure_class=failure_class,
+			consistency_checks=consistency_checks,
+			artifacts=artifacts,
+			timing_profile=timing_profile,
+		)
+		validation_json_path.write_text(json.dumps(result_payload.to_dict(), indent=2))
+
+		if not is_success:
+			failure_reason = self._failure_reason(
+				stdout,
+				stderr,
+				exit_code,
+				timed_out,
+				environment_result,
+				consistency_checks,
+			)
+			raise JasonValidationError(
+				f"Jason runtime validation failed: {failure_reason}",
+				metadata=result_payload.to_dict(),
+			)
+
+		return result_payload
+
+	def _infer_unordered_target_execution_order(
+		self,
+		*,
+		target_literals: Sequence[HTNLiteral],
+		method_library: HTNMethodLibrary,
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		planning_domain: Any,
+		output_path: Path,
+		target_id_offset: int = 0,
+		plan_records: Optional[Sequence[Dict[str, Any]]] = None,
+		prefer_query_order: bool = False,
+	) -> Dict[str, List[str]]:
+		del method_library, action_schemas, seed_facts, runtime_objects
+		del object_types, planning_domain, output_path, plan_records, prefer_query_order
+		default_target_ids = [
+			f"t{target_id_offset + index}"
+			for index, _ in enumerate(target_literals, start=1)
+		]
+		default_signatures = [literal.to_signature() for literal in target_literals]
+		return {
+			"target_ids": list(default_target_ids),
+			"target_signatures": list(default_signatures),
+			"guided_method_trace": [],
+			"guided_action_path": [],
+		}
+
+		max_runtime_ordering_targets = 24
+		exact_runtime_probe_suffix_limit = 6
+		query_order_protection_horizon = 9
+		current_world_probe_suffix_limit = 4
+		exact_suffix_state_budget = 256
+		default_target_ids = [
+			f"t{target_id_offset + index}"
+			for index, _ in enumerate(target_literals, start=1)
+		]
+		default_signatures = [literal.to_signature() for literal in target_literals]
+		if len(target_literals) <= 1:
+			return {
+				"target_ids": list(default_target_ids),
+				"target_signatures": list(default_signatures),
+			}
+		if len(target_literals) > max_runtime_ordering_targets:
+			return {
+				"target_ids": list(default_target_ids),
+				"target_signatures": list(default_signatures),
+			}
+		if not plan_records:
+			return {
+				"target_ids": list(default_target_ids),
+				"target_signatures": list(default_signatures),
+			}
+
+		schema_lookup = self._action_schema_lookup(action_schemas)
+		predicate_name_map = self._runtime_predicate_name_map(
+			action_schemas=action_schemas,
+			predicate_names=[
+				str(getattr(predicate, "name", "")).strip()
+				for predicate in getattr(planning_domain, "predicates", ()) or ()
+				if str(getattr(predicate, "name", "")).strip()
+			],
+		)
+		runtime_world = {
+			atom
+			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
+			if atom is not None
+		}
+		typed_objects = tuple(
+			(symbol, type_name)
+			for symbol, type_name in (
+				(
+					str(obj).strip(),
+					str(object_types.get(str(obj), "")).strip(),
+				)
+				for obj in runtime_objects
+			)
+			if symbol and type_name
+		)
+		remaining = [
+			(f"t{target_id_offset + index}", literal, target_id_offset + index)
+			for index, literal in enumerate(target_literals, start=1)
+		]
+		seed_fact_cache: Dict[frozenset[str], Tuple[str, ...]] = {}
+		replay_cache: Dict[Tuple[frozenset[str], str], Optional[Dict[str, Any]]] = {}
+		runtime_probe_cache: Dict[Tuple[frozenset[str], str], Optional[Dict[str, Any]]] = {}
+		records_by_target_id: Dict[str, Dict[str, Any]] = {}
+		records_by_signature: Dict[str, List[Dict[str, Any]]] = {}
+		record_task_lookup: Dict[str, Tuple[str, Tuple[str, ...]]] = {}
+		probe_planner: Optional[Any] = None
+		probe_planner_unavailable = False
+		target_task_bindings = {
+			str(binding.target_literal).strip(): str(binding.task_name).strip()
+			for binding in getattr(method_library, "target_task_bindings", ()) or ()
+			if str(binding.target_literal).strip() and str(binding.task_name).strip()
+		}
+		for raw_record in plan_records or ():
+			if not isinstance(raw_record, dict):
+				continue
+			record_plan = raw_record.get("plan")
+			if record_plan is None:
+				continue
+			record = dict(raw_record)
+			target_literal = record.get("target_literal")
+			signature_getter = getattr(target_literal, "to_signature", None)
+			signature = (
+				str(signature_getter() or "").strip()
+				if callable(signature_getter)
+				else str(record.get("label") or "").strip()
+			)
+			target_id = str(record.get("target_id") or "").strip()
+			if not target_id:
+				query_index = record.get("query_index")
+				if query_index is not None:
+					target_id = f"t{target_id_offset + int(query_index)}"
+			if target_id and target_id not in records_by_target_id:
+				records_by_target_id[target_id] = record
+			if signature:
+				records_by_signature.setdefault(signature, []).append(record)
+				task_name = str(record.get("task_name") or "").strip()
+				task_args = tuple(str(arg).strip() for arg in (record.get("task_args") or ()))
+				if task_name and signature not in record_task_lookup:
+					record_task_lookup[signature] = (task_name, task_args)
+		if not records_by_target_id and not records_by_signature:
+			return {
+				"target_ids": list(default_target_ids),
+				"target_signatures": list(default_signatures),
+			}
+
+		def extract_plan_method_trace(plan: Any) -> List[Dict[str, Any]]:
+			plan_text = str(
+				getattr(plan, "actual_plan", "")
+				or getattr(plan, "raw_plan", "")
+				or "",
+			).strip()
+			if not plan_text:
+				return []
+			return self._extract_panda_method_trace(plan_text)
+
+		def seed_facts_for_world(current_world: Set[str]) -> Tuple[str, ...]:
+			world_key = frozenset(current_world)
+			cached = seed_fact_cache.get(world_key)
+			if cached is not None:
+				return cached
+			seed_fact_cache[world_key] = self._runtime_world_to_hddl_facts(
+				current_world,
+				predicate_name_map=predicate_name_map,
+			)
+			return seed_fact_cache[world_key]
+
+		def usable_runtime_record(record: Dict[str, Any]) -> bool:
+			return str(record.get("runtime_seed_kind") or "problem_exact").strip() != "witness_fallback"
+
+		def replayable_candidate(
+			current_world: Set[str],
+			target_id: str,
+			literal: HTNLiteral,
+		) -> Optional[Dict[str, Any]]:
+			world_key = frozenset(current_world)
+			cache_key = (world_key, target_id)
+			if cache_key in replay_cache:
+				return replay_cache[cache_key]
+
+			candidate_records: List[Dict[str, Any]] = []
+			exact_record = records_by_target_id.get(target_id)
+			if exact_record is not None and usable_runtime_record(exact_record):
+				candidate_records.append(exact_record)
+			candidate_records.extend(
+				record
+				for record in records_by_signature.get(literal.to_signature(), ())
+				if usable_runtime_record(record)
+			)
+			seen_record_ids: Set[int] = set()
+			for record in candidate_records:
+				record_id = id(record)
+				if record_id in seen_record_ids:
+					continue
+				seen_record_ids.add(record_id)
+				record_plan = record.get("plan")
+				if record_plan is None:
+					continue
+				action_path = [
+					JasonRunner._runtime_call(step.task_name, step.args)
+					for step in getattr(record_plan, "steps", ()) or ()
+				]
+				replay = self._replay_action_path_against_schemas(
+					action_path=action_path,
+					action_schemas=action_schemas,
+					seed_facts=seed_facts_for_world(current_world),
+				)
+				if replay.get("passed") is not True:
+					continue
+				next_world = {
+					atom
+					for atom in (replay.get("world_facts") or ())
+					if atom is not None
+				}
+				candidate = {
+					"target_id": target_id,
+					"signature": literal.to_signature(),
+					"source": "replay",
+					"plan_length": len(getattr(record_plan, "steps", ()) or ()),
+					"next_world": next_world,
+					"method_trace": extract_plan_method_trace(record_plan),
+					"action_path": list(action_path),
+				}
+				replay_cache[cache_key] = candidate
+				return candidate
+
+			replay_cache[cache_key] = None
+			return None
+
+		def runtime_probe_candidate(
+			current_world: Set[str],
+			target_id: str,
+			literal: HTNLiteral,
+		) -> Optional[Dict[str, Any]]:
+			nonlocal probe_planner, probe_planner_unavailable
+			world_key = frozenset(current_world)
+			cache_key = (world_key, target_id)
+			if cache_key in runtime_probe_cache:
+				return runtime_probe_cache[cache_key]
+			if probe_planner_unavailable:
+				runtime_probe_cache[cache_key] = None
+				return None
+
+			task_signature = literal.to_signature()
+			task_name: str = ""
+			task_args: Tuple[str, ...] = ()
+			record_binding = record_task_lookup.get(task_signature)
+			if record_binding is not None:
+				task_name, task_args = record_binding
+			else:
+				task_name = str(method_library.task_name_for_literal(literal) or "").strip()
+				task_args = tuple(str(arg).strip() for arg in literal.args)
+			if not task_name:
+				runtime_probe_cache[cache_key] = None
+				return None
+
+			if probe_planner is None:
+				probe_planner = panda_planner_module.PANDAPlanner(
+					workspace=output_path / ".runtime_ordering_probe",
+				)
+				toolchain_available = getattr(probe_planner, "toolchain_available", None)
+				if callable(toolchain_available) and not toolchain_available():
+					probe_planner_unavailable = True
+					runtime_probe_cache[cache_key] = None
+					return None
+
+			probe_digest = hashlib.sha1(
+				"\n".join(sorted(world_key)).encode("utf-8")
+				+ b"|"
+				+ target_id.encode("utf-8"),
+			).hexdigest()[:12]
+			try:
+				plan = probe_planner.plan(
+					domain=planning_domain,
+					method_library=method_library,
+					objects=tuple(runtime_objects),
+					target_literal=literal,
+					task_name=task_name,
+					transition_name=f"runtime_probe_{target_id}_{probe_digest}",
+					task_args=task_args,
+					typed_objects=typed_objects,
+					allow_empty_plan=False,
+					initial_facts=seed_facts_for_world(current_world),
+				)
+			except Exception:
+				runtime_probe_cache[cache_key] = None
+				return None
+
+			action_path = [
+				JasonRunner._runtime_call(step.task_name, step.args)
+				for step in getattr(plan, "steps", ()) or ()
+			]
+			replay = self._replay_action_path_against_schemas(
+				action_path=action_path,
+				action_schemas=action_schemas,
+				seed_facts=seed_facts_for_world(current_world),
+			)
+			if replay.get("passed") is not True:
+				runtime_probe_cache[cache_key] = None
+				return None
+			next_world = {
+				atom
+				for atom in (replay.get("world_facts") or ())
+				if atom is not None
+			}
+			candidate = {
+				"target_id": target_id,
+				"signature": task_signature,
+				"source": "runtime_probe",
+				"plan_length": len(getattr(plan, "steps", ()) or ()),
+				"next_world": next_world,
+				"method_trace": extract_plan_method_trace(plan),
+				"action_path": list(action_path),
+			}
+			runtime_probe_cache[cache_key] = candidate
+			return candidate
+
+		def replayable_target_ids_for_world(
+			current_world: Set[str],
+			remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+		) -> Set[str]:
+			return {
+				target_id
+				for target_id, literal, _ in remaining_targets
+				if replayable_candidate(current_world, target_id, literal) is not None
+			}
+
+		def candidate_for_world(
+			current_world: Set[str],
+			target_id: str,
+			literal: HTNLiteral,
+			remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+		) -> Optional[Dict[str, Any]]:
+			replayed = replayable_candidate(current_world, target_id, literal)
+			if replayed is not None:
+				return replayed
+			if len(remaining_targets) <= current_world_probe_suffix_limit:
+				probed = runtime_probe_candidate(current_world, target_id, literal)
+				if probed is not None:
+					return probed
+			return None
+
+		def ranked_candidates(
+			current_world: Set[str],
+			remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+		) -> List[Dict[str, Any]]:
+			candidates: List[Dict[str, Any]] = []
+			for target_id, literal, original_index in remaining_targets:
+				candidate = candidate_for_world(
+					current_world,
+					target_id,
+					literal,
+					remaining_targets,
+				)
+				if candidate is None:
+					continue
+				follow_on_count = 0
+				for other_target_id, other_literal, _ in remaining_targets:
+					if other_target_id == target_id:
+						continue
+					if (
+						candidate_for_world(
+							set(candidate["next_world"]),
+							other_target_id,
+							other_literal,
+							tuple(
+								(item_target_id, item_literal, item_original_index)
+								for item_target_id, item_literal, item_original_index in remaining_targets
+								if item_target_id != target_id
+							),
+						)
+						is not None
+					):
+						follow_on_count += 1
+				next_targets = tuple(
+					(item_target_id, item_literal, item_original_index)
+					for item_target_id, item_literal, item_original_index in remaining_targets
+					if item_target_id != target_id
+				)
+				next_query_target_reachable = True
+				if next_targets:
+					next_target_id, next_literal, _ = next_targets[0]
+					next_query_target_reachable = (
+						candidate_for_world(
+							set(candidate["next_world"]),
+							next_target_id,
+							next_literal,
+							next_targets,
+						)
+						is not None
+					)
+					if not next_query_target_reachable:
+						next_query_target_reachable = (
+							runtime_probe_candidate(
+								set(candidate["next_world"]),
+								next_target_id,
+								next_literal,
+							)
+							is not None
+						)
+				candidates.append(
+					{
+						**candidate,
+						"original_index": original_index,
+						"follow_on_count": follow_on_count,
+						"next_query_target_reachable": next_query_target_reachable,
+					},
+				)
+
+			if prefer_query_order:
+				candidates.sort(
+					key=lambda item: (
+						-int(bool(item["next_query_target_reachable"])),
+						-item["follow_on_count"],
+						item["plan_length"],
+						item["original_index"],
+						item["signature"],
+						item["target_id"],
+					),
+				)
+			else:
+				candidates.sort(
+					key=lambda item: (
+						-item["follow_on_count"],
+						item["plan_length"],
+						item["original_index"],
+						item["signature"],
+						item["target_id"],
+					),
+				)
+			return candidates
+
+		def greedy_ordered_candidates(
+			current_world: Set[str],
+			remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+		) -> List[Dict[str, Any]]:
+			def candidate_follow_on_count(
+				candidate: Dict[str, Any],
+				remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+			) -> int:
+				target_id = str(candidate.get("target_id") or "").strip()
+				if not target_id:
+					return 0
+				next_targets = tuple(
+					(item_target_id, item_literal, item_original_index)
+					for item_target_id, item_literal, item_original_index in remaining_targets
+					if item_target_id != target_id
+				)
+				follow_on_count = 0
+				for other_target_id, other_literal, _ in next_targets:
+					if (
+						candidate_for_world(
+							set(candidate["next_world"]),
+							other_target_id,
+							other_literal,
+							next_targets,
+						)
+						is not None
+					):
+						follow_on_count += 1
+				return follow_on_count
+
+			def candidate_query_prefix_survival(
+				candidate: Dict[str, Any],
+				remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+			) -> bool:
+				target_id = str(candidate.get("target_id") or "").strip()
+				if not target_id:
+					return True
+				next_targets = tuple(
+					(item_target_id, item_literal, item_original_index)
+					for item_target_id, item_literal, item_original_index in remaining_targets
+					if item_target_id != target_id
+				)
+				if not next_targets:
+					return True
+				next_target_id, next_literal, _ = next_targets[0]
+				next_query_target_reachable = (
+					candidate_for_world(
+						set(candidate["next_world"]),
+						next_target_id,
+						next_literal,
+						next_targets,
+					)
+					is not None
+				)
+				if not next_query_target_reachable:
+					next_query_target_reachable = (
+						runtime_probe_candidate(
+							set(candidate["next_world"]),
+							next_target_id,
+							next_literal,
+					)
+					is not None
+				)
+				return next_query_target_reachable
+
+			def earliest_horizon_blocked_target_id(
+				current_world: Set[str],
+				candidate: Dict[str, Any],
+				remaining_targets: Sequence[Tuple[str, HTNLiteral, int]],
+			) -> Optional[str]:
+				target_id = str(candidate.get("target_id") or "").strip()
+				if not target_id:
+					return None
+				horizon_targets = tuple(remaining_targets[:query_order_protection_horizon])
+				next_targets = tuple(
+					(item_target_id, item_literal, item_original_index)
+					for item_target_id, item_literal, item_original_index in horizon_targets
+					if item_target_id != target_id
+				)
+				for other_target_id, other_literal, _other_original_index in next_targets:
+					current_candidate = candidate_for_world(
+						current_world,
+						other_target_id,
+						other_literal,
+						horizon_targets,
+					)
+					next_candidate = candidate_for_world(
+						set(candidate["next_world"]),
+						other_target_id,
+						other_literal,
+						next_targets,
+					)
+					if current_candidate is not None and next_candidate is None:
+						return other_target_id
+				return None
+
+			def exact_suffix_candidates(
+				suffix_world: Set[str],
+				suffix_targets: Sequence[Tuple[str, HTNLiteral, int]],
+			) -> Optional[List[Dict[str, Any]]]:
+				exact_probe_rescue_cache: Dict[
+					Tuple[frozenset[str], Tuple[str, ...]],
+					Optional[str],
+				] = {}
+				exact_search_states = 0
+
+				def exact_probe_rescue_target_id(
+					search_world: Set[str],
+					search_targets: Sequence[Tuple[str, HTNLiteral, int]],
+				) -> Optional[str]:
+					if len(search_targets) <= current_world_probe_suffix_limit:
+						return None
+					state_key = (
+						frozenset(search_world),
+						tuple(target_id for target_id, _, _ in search_targets),
+					)
+					if state_key in exact_probe_rescue_cache:
+						return exact_probe_rescue_cache[state_key]
+
+					for target_id, literal, _ in search_targets:
+						if replayable_candidate(search_world, target_id, literal) is not None:
+							continue
+						if runtime_probe_candidate(search_world, target_id, literal) is not None:
+							exact_probe_rescue_cache[state_key] = target_id
+							return target_id
+
+					exact_probe_rescue_cache[state_key] = None
+					return None
+
+				def exact_candidate_for_world(
+					search_world: Set[str],
+					target_id: str,
+					literal: HTNLiteral,
+					search_targets: Sequence[Tuple[str, HTNLiteral, int]],
+				) -> Optional[Dict[str, Any]]:
+					if len(search_targets) <= current_world_probe_suffix_limit:
+						return candidate_for_world(
+							search_world,
+							target_id,
+							literal,
+							search_targets,
+						)
+					replayed = replayable_candidate(search_world, target_id, literal)
+					if replayed is not None:
+						return replayed
+					if len(search_targets) <= exact_runtime_probe_suffix_limit:
+						rescue_target_id = exact_probe_rescue_target_id(
+							search_world,
+							search_targets,
+						)
+						if rescue_target_id == target_id:
+							return runtime_probe_candidate(search_world, target_id, literal)
+					return None
+
+				def exact_ranked_candidates(
+					search_world: Set[str],
+					search_targets: Sequence[Tuple[str, HTNLiteral, int]],
+				) -> List[Dict[str, Any]]:
+					candidates: List[Dict[str, Any]] = []
+					for target_id, literal, original_index in search_targets:
+						candidate = exact_candidate_for_world(
+							search_world,
+							target_id,
+							literal,
+							search_targets,
+						)
+						if candidate is None:
+							continue
+						follow_on_count = 0
+						for other_target_id, other_literal, _ in search_targets:
+							if other_target_id == target_id:
+								continue
+							if (
+								exact_candidate_for_world(
+									set(candidate["next_world"]),
+									other_target_id,
+									other_literal,
+									tuple(
+										(item_target_id, item_literal, item_original_index)
+										for item_target_id, item_literal, item_original_index in search_targets
+										if item_target_id != target_id
+									),
+								)
+								is not None
+							):
+								follow_on_count += 1
+						candidates.append(
+							{
+								**candidate,
+								"original_index": original_index,
+								"follow_on_count": follow_on_count,
+							},
+						)
+					candidates.sort(
+						key=lambda item: (
+							-item["follow_on_count"],
+							item["plan_length"],
+							item["original_index"],
+							item["signature"],
+							item["target_id"],
+						),
+					)
+					return candidates
+
+				solution_cache: Dict[
+					Tuple[frozenset[str], Tuple[str, ...]],
+					Optional[Tuple[int, List[Dict[str, Any]]]],
+				] = {}
+
+				def search_exact(
+					search_world: Set[str],
+					search_targets: Sequence[Tuple[str, HTNLiteral, int]],
+				) -> Optional[Tuple[int, List[Dict[str, Any]]]]:
+					nonlocal exact_search_states
+					if not search_targets:
+						return 0, []
+					exact_search_states += 1
+					if exact_search_states > exact_suffix_state_budget:
+						return None
+
+					state_key = (
+						frozenset(search_world),
+						tuple(target_id for target_id, _, _ in search_targets),
+					)
+					if state_key in solution_cache:
+						return solution_cache[state_key]
+
+					candidates = exact_ranked_candidates(search_world, search_targets)
+					if not candidates:
+						solution_cache[state_key] = None
+						return None
+
+					best_result: Optional[Tuple[int, List[Dict[str, Any]]]] = None
+					for candidate in candidates:
+						next_targets = tuple(
+							(item_target_id, item_literal, item_original_index)
+							for item_target_id, item_literal, item_original_index in search_targets
+							if item_target_id != candidate["target_id"]
+						)
+						suffix = search_exact(set(candidate["next_world"]), next_targets)
+						if suffix is None:
+							continue
+						suffix_cost, suffix_pairs = suffix
+						candidate_result = (
+							int(candidate["plan_length"]) + int(suffix_cost),
+							[
+								{
+									**candidate,
+									"next_world": set(candidate["next_world"]),
+									"method_trace": list(candidate.get("method_trace") or ()),
+									"action_path": list(candidate.get("action_path") or ()),
+								},
+								*suffix_pairs,
+							],
+						)
+						if best_result is None or candidate_result[0] < best_result[0]:
+							best_result = candidate_result
+
+					solution_cache[state_key] = best_result
+					return best_result
+
+				exact_result = search_exact(set(suffix_world), tuple(suffix_targets))
+				return None if exact_result is None else exact_result[1]
+
+			ordered_candidates: List[Dict[str, Any]] = []
+			pending_world = set(current_world)
+			pending_targets = list(remaining_targets)
+			while pending_targets:
+				should_try_exact_suffix = False
+				if len(pending_targets) <= exact_runtime_probe_suffix_limit:
+					if not prefer_query_order:
+						should_try_exact_suffix = True
+					else:
+						query_target_id, query_literal, _query_original_index = pending_targets[0]
+						replayable_target_ids = replayable_target_ids_for_world(
+							pending_world,
+							pending_targets,
+						)
+						if (
+							query_target_id not in replayable_target_ids
+							and runtime_probe_candidate(
+								pending_world,
+								query_target_id,
+								query_literal,
+							)
+							is not None
+						):
+							should_try_exact_suffix = True
+				if should_try_exact_suffix:
+					exact_suffix = exact_suffix_candidates(pending_world, pending_targets)
+					if exact_suffix:
+						ordered_candidates.extend(exact_suffix)
+						break
+
+				candidates = ranked_candidates(pending_world, pending_targets)
+				if not candidates:
+					break
+				candidate_lookup = {
+					str(item["target_id"]): item
+					for item in candidates
+				}
+				chosen = candidates[0]
+				if prefer_query_order and pending_targets:
+					query_target_id, query_literal, query_original_index = pending_targets[0]
+					query_candidate = candidate_lookup.get(query_target_id)
+					if query_candidate is None:
+						probed_query_candidate = runtime_probe_candidate(
+							pending_world,
+							query_target_id,
+							query_literal,
+						)
+						if probed_query_candidate is not None:
+							query_candidate = {
+								**probed_query_candidate,
+								"original_index": query_original_index,
+								"follow_on_count": candidate_follow_on_count(
+									probed_query_candidate,
+									pending_targets,
+								),
+								"next_query_target_reachable": candidate_query_prefix_survival(
+									probed_query_candidate,
+									pending_targets,
+								),
+							}
+					if query_candidate is not None:
+						query_preserves_next = bool(
+							query_candidate.get("next_query_target_reachable", True),
+						)
+						chosen_preserves_next = bool(
+							chosen.get("next_query_target_reachable", True),
+						)
+						blocked_target_id = earliest_horizon_blocked_target_id(
+							pending_world,
+							query_candidate,
+							pending_targets,
+						)
+						if blocked_target_id:
+							blocked_candidate = candidate_lookup.get(blocked_target_id)
+							if blocked_candidate is not None:
+								chosen = blocked_candidate
+								query_candidate = None
+						if query_candidate is None:
+							pass
+						elif str(query_candidate.get("source") or "") == "replay":
+							if query_preserves_next or not chosen_preserves_next:
+								chosen = query_candidate
+						elif query_preserves_next:
+							chosen = query_candidate
+				ordered_candidates.append(
+					{
+						**chosen,
+						"next_world": set(chosen["next_world"]),
+						"method_trace": list(chosen.get("method_trace") or ()),
+						"action_path": list(chosen.get("action_path") or ()),
+					},
+				)
+				pending_world = set(chosen["next_world"])
+				pending_targets = [
+					(item_target_id, item_literal, item_original_index)
+					for item_target_id, item_literal, item_original_index in pending_targets
+					if item_target_id != chosen["target_id"]
+				]
+			return ordered_candidates
+
+		ordered_candidates = greedy_ordered_candidates(set(runtime_world), list(remaining))
+
+		ordered_target_ids = [
+			str(candidate.get("target_id") or "").strip()
+			for candidate in ordered_candidates
+			if str(candidate.get("target_id") or "").strip()
+		]
+		ordered_signatures = [
+			str(candidate.get("signature") or "").strip()
+			for candidate in ordered_candidates
+			if str(candidate.get("target_id") or "").strip()
+		]
+		ordered_guided_method_trace: List[Dict[str, Any]] = []
+		ordered_guided_action_path: List[str] = []
+		for candidate in ordered_candidates:
+			for entry in candidate.get("method_trace") or ():
+				method_name = str(entry.get("method_name") or "").strip()
+				task_args = tuple(
+					str(arg).strip()
+					for arg in tuple(entry.get("task_args") or ())
+					if str(arg).strip()
+				)
+				if not method_name:
+					continue
+				ordered_guided_method_trace.append(
+					{
+						"method_name": method_name,
+						"task_args": list(task_args),
+					},
+				)
+			for action_step in tuple(candidate.get("action_path") or ()):
+				action_text = str(action_step).strip()
+				if action_text:
+					ordered_guided_action_path.append(action_text)
+		for target_id, literal, _ in remaining:
+			if target_id in ordered_target_ids:
+				continue
+			ordered_target_ids.append(target_id)
+			ordered_signatures.append(literal.to_signature())
+
+		return {
+			"target_ids": ordered_target_ids,
+			"target_signatures": ordered_signatures,
+			"guided_method_trace": ordered_guided_method_trace,
+			"guided_action_path": ordered_guided_action_path,
+		}
+
+	def _prioritise_guided_method_chunks(
+		self,
+		agentspeak_code: str,
+		guided_method_trace: Sequence[Dict[str, Any]],
+		guided_action_path: Sequence[str] = (),
+		preserve_task_names: Optional[Set[str]] = None,
+		predicate_argument_types: Optional[Dict[Tuple[str, int], Set[str]]] = None,
+		object_types: Optional[Dict[str, str]] = None,
+	) -> str:
+		protected_task_names = {
+			str(task_name).strip()
+			for task_name in (preserve_task_names or set())
+			if str(task_name).strip()
+		}
+		trace_entries = [
+			(
+				str(entry.get("method_name") or "").strip(),
+				tuple(
+					str(arg).strip()
+					for arg in tuple(entry.get("task_args") or ())
+					if str(arg).strip()
+				),
+			)
+			for entry in guided_method_trace or ()
+			if str(entry.get("method_name") or "").strip()
+		]
+		preferred_actions = [
+			action_goal
+			for action_goal in (
+				self._parse_runtime_action_call(action_call)
+				for action_call in guided_action_path or ()
+			)
+			if action_goal is not None
+		]
+		if not trace_entries and not preferred_actions:
+			return agentspeak_code
+
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* DFA Transition Wrappers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in section_lines[1:]:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+		if not chunks:
+			return agentspeak_code
+
+		predicate_type_map = {
+			(str(predicate), int(index)): {str(type_name) for type_name in (type_names or set()) if str(type_name)}
+			for (predicate, index), type_names in (predicate_argument_types or {}).items()
+		}
+		runtime_object_types = {
+			str(symbol).strip(): str(type_name).strip()
+			for symbol, type_name in (object_types or {}).items()
+			if str(symbol).strip() and str(type_name).strip()
+		}
+		if preferred_actions:
+			chunks, specialised_changed = self._specialise_chunks_from_guided_action_path(
+				chunks,
+				preferred_actions=preferred_actions,
+				max_candidates_per_chunk=32,
+			)
+			if not chunks:
+				return agentspeak_code
+		else:
+			specialised_changed = False
+
+		grouped_indexes: Dict[str, List[int]] = {}
+		group_order: List[str] = []
+		for index, chunk in enumerate(chunks):
+			parsed_head = self._split_method_trigger_head(chunk[0]) if chunk else None
+			task_name = parsed_head[1] if parsed_head is not None else f"__raw_{index}"
+			if task_name not in grouped_indexes:
+				grouped_indexes[task_name] = []
+				group_order.append(task_name)
+			grouped_indexes[task_name].append(index)
+
+		changed = specialised_changed
+		ordered_chunks: List[str] = []
+		seen_chunk_texts: Set[str] = set()
+		for task_name in group_order:
+			group_items: List[Dict[str, Any]] = []
+			for original_index in grouped_indexes[task_name]:
+				chunk = chunks[original_index]
+				parsed_head = self._split_method_trigger_head(chunk[0]) if chunk else None
+				head_args = parsed_head[2] if parsed_head is not None else ()
+				method_name = self._trace_method_name_from_chunk(chunk)
+				best_trace_index: Optional[int] = None
+				best_trace_wildcards: Optional[int] = None
+				best_action_index: Optional[int] = None
+				best_action_wildcards: Optional[int] = None
+				if method_name and head_args:
+					for trace_index, (trace_method_name, trace_args) in enumerate(trace_entries):
+						if trace_method_name != method_name:
+							continue
+						trace_wildcards = self._wildcard_count_for_grounding_match(
+							head_args,
+							trace_args,
+						)
+						if trace_wildcards is None:
+							continue
+						best_trace_index = trace_index
+						best_trace_wildcards = trace_wildcards
+						break
+				elif method_name:
+					for trace_index, (trace_method_name, trace_args) in enumerate(trace_entries):
+						if trace_method_name != method_name or trace_args:
+							continue
+						best_trace_index = trace_index
+						best_trace_wildcards = 0
+						break
+				body_goals = [
+					goal
+					for goal in (
+						self._parse_asl_goal_statement(line)
+						for line in chunk[1:]
+					)
+					if goal is not None
+				]
+				action_signature, action_signature_wildcards = (
+					self._guided_body_action_signature(body_goals, preferred_actions)
+				)
+				for action_index, preferred_action in enumerate(preferred_actions):
+					action_name, action_args = preferred_action
+					if best_action_index is not None and action_index >= best_action_index:
+						break
+					for body_goal_name, body_goal_args in body_goals:
+						if body_goal_name != action_name:
+							continue
+						action_wildcards = self._wildcard_count_for_grounding_match(
+							body_goal_args,
+							action_args,
+						)
+						if action_wildcards is None:
+							continue
+						best_action_index = action_index
+						best_action_wildcards = action_wildcards
+						break
+				head_variable_count = sum(
+					1
+					for argument in head_args
+					if self._looks_like_asl_variable(argument)
+				)
+				group_items.append(
+					{
+						"chunk": "\n".join(chunk),
+						"original_index": original_index,
+						"method_name": method_name,
+						"head_args": head_args,
+						"trace_index": best_trace_index,
+						"trace_wildcards": best_trace_wildcards,
+						"action_index": best_action_index,
+						"action_wildcards": best_action_wildcards,
+						"action_signature": action_signature,
+						"action_signature_wildcards": action_signature_wildcards,
+						"body_goal_names": tuple(goal_name for goal_name, _ in body_goals),
+						"body_goal_count": len(body_goals),
+						"matched_body_goal_count": len(action_signature),
+						"unmatched_body_goal_count": max(
+							len(body_goals) - len(action_signature),
+							0,
+						),
+						"type_sane": self._chunk_context_type_sane(
+							"\n".join(chunk),
+							predicate_argument_types=predicate_type_map,
+							object_types=runtime_object_types,
+						),
+						"head_variable_count": head_variable_count,
+						"noop_only": len(body_goals) == 1 and tuple(
+							goal_name for goal_name, _ in body_goals
+						) == ("noop",),
+					},
+				)
+			if task_name not in protected_task_names:
+				group_items, group_pruned = self._shadow_prune_guided_group_items(group_items)
+				if group_pruned:
+					changed = True
+			original_group_order = [item["original_index"] for item in group_items]
+			group_items.sort(key=self._guided_chunk_preference_key)
+			if [item["original_index"] for item in group_items] != original_group_order:
+				changed = True
+			for item in group_items:
+				chunk_text = str(item["chunk"])
+				if chunk_text in seen_chunk_texts:
+					changed = True
+					continue
+				seen_chunk_texts.add(chunk_text)
+				ordered_chunks.append(chunk_text)
+
+		if not changed:
+			return agentspeak_code
+
+		reordered_section = "\n\n".join([header, *ordered_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{reordered_section}{suffix}"
+
+	@classmethod
+	def _wildcard_count_for_grounding_match(
+		cls,
+		pattern_args: Sequence[str],
+		fact_args: Sequence[str],
+	) -> Optional[int]:
+		if cls._match_grounding_atom(pattern_args, fact_args, {}) is None:
+			return None
+		return sum(1 for term in pattern_args if cls._looks_like_asl_variable(term))
+
+	def _guided_body_action_signature(
+		self,
+		body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
+		preferred_actions: Sequence[Tuple[str, Tuple[str, ...]]],
+	) -> Tuple[Tuple[int, ...], Tuple[int, ...]]:
+		if not body_goals or not preferred_actions:
+			return (), ()
+
+		matched_indexes: List[int] = []
+		matched_wildcards: List[int] = []
+		search_start = 0
+		for goal_name, goal_args in body_goals:
+			best_match_index: Optional[int] = None
+			best_match_wildcards: Optional[int] = None
+			for action_index in range(search_start, len(preferred_actions)):
+				action_name, action_args = preferred_actions[action_index]
+				if goal_name != action_name:
+					continue
+				action_wildcards = self._wildcard_count_for_grounding_match(
+					goal_args,
+					action_args,
+				)
+				if action_wildcards is None:
+					continue
+				best_match_index = action_index
+				best_match_wildcards = action_wildcards
+				break
+			if best_match_index is None or best_match_wildcards is None:
+				continue
+			matched_indexes.append(best_match_index)
+			matched_wildcards.append(best_match_wildcards)
+			search_start = best_match_index + 1
+		return tuple(matched_indexes), tuple(matched_wildcards)
+
+	@staticmethod
+	def _guided_chunk_preference_key(item: Dict[str, Any]) -> Tuple[Any, ...]:
+		return (
+			0 if item.get("type_sane", True) else 1,
+			item.get("head_variable_count", 0),
+			0 if item.get("noop_only", False) else 1,
+			0
+			if int(item.get("matched_body_goal_count", 0) or 0) > 0
+			and int(item.get("matched_body_goal_count", 0) or 0)
+			== int(item.get("body_goal_count", 0) or 0)
+			else 1,
+			item.get("unmatched_body_goal_count")
+			if item.get("matched_body_goal_count") is not None
+			else 1_000_000_000,
+			item.get("trace_wildcards")
+			if item.get("trace_wildcards") is not None
+			else 1_000_000_000,
+			item.get("trace_index")
+			if item.get("trace_index") is not None
+			else 1_000_000_000,
+			tuple(item.get("action_signature_wildcards") or ()),
+			item.get("action_wildcards")
+			if item.get("action_wildcards") is not None
+			else 1_000_000_000,
+			item.get("original_index", 0),
+		)
+
+	@staticmethod
+	def _infer_runtime_predicate_argument_types(
+		seed_facts: Sequence[str],
+		object_types: Dict[str, str],
+	) -> Dict[Tuple[str, int], Set[str]]:
+		predicate_argument_types: Dict[Tuple[str, int], Set[str]] = {}
+		for fact in seed_facts:
+			parsed = JasonRunner._parse_runtime_fact_atom(
+				JasonRunner._hddl_fact_to_atom(fact),
+			)
+			if parsed is None:
+				continue
+			predicate, args = parsed
+			for index, argument in enumerate(args):
+				type_name = str(object_types.get(str(argument).strip()) or "").strip()
+				if not type_name:
+					continue
+				predicate_argument_types.setdefault((predicate, index), set()).add(type_name)
+		return predicate_argument_types
+
+	def _chunk_context_type_sane(
+		self,
+		chunk_text: str,
+		*,
+		predicate_argument_types: Dict[Tuple[str, int], Set[str]],
+		object_types: Dict[str, str],
+	) -> bool:
+		if not predicate_argument_types or not object_types:
+			return True
+		lines = str(chunk_text or "").splitlines()
+		if not lines:
+			return True
+		parsed_head = self._parse_asl_method_head(lines[0])
+		if parsed_head is None:
+			return True
+		_task_name, _head_args, context_parts = parsed_head
+		for part in context_parts:
+			parsed = self._parse_asl_context_conjunct(part)
+			if parsed is None or parsed.get("kind") != "atom":
+				continue
+			predicate = str(parsed.get("predicate") or "").strip()
+			args = tuple(parsed.get("args") or ())
+			for index, argument in enumerate(args):
+				token = str(argument).strip()
+				if not token or self._looks_like_asl_variable(token):
+					continue
+				actual_type = str(object_types.get(token) or "").strip()
+				allowed_types = predicate_argument_types.get((predicate, index)) or set()
+				if actual_type and allowed_types and actual_type not in allowed_types:
+					return False
+		return True
+
+	@classmethod
+	def _guided_heads_compatible(
+		cls,
+		left_args: Sequence[str],
+		right_args: Sequence[str],
+	) -> bool:
+		if len(left_args) != len(right_args):
+			return False
+		return (
+			cls._match_grounding_atom(left_args, right_args, {}) is not None
+			or cls._match_grounding_atom(right_args, left_args, {}) is not None
+		)
+
+	def _shadow_prune_guided_group_items(
+		self,
+		group_items: Sequence[Dict[str, Any]],
+	) -> Tuple[List[Dict[str, Any]], bool]:
+		if len(group_items) <= 1:
+			return list(group_items), False
+
+		bucketed_items: Dict[Tuple[str, Tuple[str, ...]], List[Dict[str, Any]]] = {}
+		bucket_order: List[Tuple[str, Tuple[str, ...]]] = []
+		for item in group_items:
+			bucket_key = (
+				str(item.get("method_name") or "").strip(),
+				tuple(item.get("body_goal_names") or ()),
+			)
+			if bucket_key not in bucketed_items:
+				bucketed_items[bucket_key] = []
+				bucket_order.append(bucket_key)
+			bucketed_items[bucket_key].append(item)
+
+		kept_items: List[Dict[str, Any]] = []
+		changed = False
+		for bucket_key in bucket_order:
+			bucket_items = bucketed_items[bucket_key]
+			if len(bucket_items) <= 1:
+				kept_items.extend(bucket_items)
+				continue
+
+			action_signature_items = [
+				item
+				for item in bucket_items
+				if tuple(item.get("action_signature") or ())
+				and int(item.get("matched_body_goal_count", 0)) > 0
+				and int(item.get("matched_body_goal_count", 0))
+				== int(item.get("body_goal_count", 0))
+			]
+			if action_signature_items:
+				sorted_action_items = sorted(
+					action_signature_items,
+					key=self._guided_chunk_preference_key,
+				)
+				kept_action_items: List[Dict[str, Any]] = []
+				for item in sorted_action_items:
+					action_signature = tuple(item.get("action_signature") or ())
+					head_args = tuple(item.get("head_args") or ())
+					if int(item.get("head_variable_count", 0) or 0) > 0:
+						kept_action_items.append(item)
+						continue
+					if any(
+						int(existing.get("head_variable_count", 0) or 0) == 0
+						and tuple(existing.get("action_signature") or ()) == action_signature
+						and self._guided_heads_compatible(
+							tuple(existing.get("head_args") or ()),
+							head_args,
+						)
+						for existing in kept_action_items
+					):
+						changed = True
+						continue
+					kept_action_items.append(item)
+				bucket_kept = list(kept_action_items)
+				for item in bucket_items:
+					if tuple(item.get("action_signature") or ()):
+						continue
+					head_args = tuple(item.get("head_args") or ())
+					if int(item.get("head_variable_count", 0) or 0) > 0:
+						bucket_kept.append(item)
+						continue
+					if any(
+						int(existing.get("head_variable_count", 0) or 0) == 0
+						and self._guided_heads_compatible(
+							tuple(existing.get("head_args") or ()),
+							head_args,
+						)
+						for existing in kept_action_items
+					):
+						changed = True
+						continue
+					bucket_kept.append(item)
+				if len(bucket_kept) != len(bucket_items):
+					changed = True
+				kept_items.extend(
+					sorted(bucket_kept, key=lambda item: int(item.get("original_index", 0))),
+				)
+				continue
+
+			trace_items = [
+				item
+				for item in bucket_items
+				if item.get("trace_index") is not None
+				and int(item.get("body_goal_count", 0)) == 0
+			]
+			if trace_items:
+				sorted_trace_items = sorted(
+					trace_items,
+					key=self._guided_chunk_preference_key,
+				)
+				kept_trace_items: List[Dict[str, Any]] = []
+				for item in sorted_trace_items:
+					trace_signature = (
+						int(item.get("trace_index", 0)),
+						int(item.get("trace_wildcards", 0) or 0),
+					)
+					head_args = tuple(item.get("head_args") or ())
+					if int(item.get("head_variable_count", 0) or 0) > 0:
+						kept_trace_items.append(item)
+						continue
+					if any(
+						(
+							int(existing.get("trace_index", 0)),
+							int(existing.get("trace_wildcards", 0) or 0),
+						)
+						== trace_signature
+						and int(existing.get("head_variable_count", 0) or 0) == 0
+						and self._guided_heads_compatible(
+							tuple(existing.get("head_args") or ()),
+							head_args,
+						)
+						for existing in kept_trace_items
+					):
+						changed = True
+						continue
+					kept_trace_items.append(item)
+				bucket_kept = list(kept_trace_items)
+				for item in bucket_items:
+					if item.get("trace_index") is not None:
+						continue
+					head_args = tuple(item.get("head_args") or ())
+					if int(item.get("head_variable_count", 0) or 0) > 0:
+						bucket_kept.append(item)
+						continue
+					if any(
+						int(existing.get("head_variable_count", 0) or 0) == 0
+						and self._guided_heads_compatible(
+							tuple(existing.get("head_args") or ()),
+							head_args,
+						)
+						for existing in kept_trace_items
+					):
+						changed = True
+						continue
+					bucket_kept.append(item)
+				if len(bucket_kept) != len(bucket_items):
+					changed = True
+				kept_items.extend(
+					sorted(bucket_kept, key=lambda item: int(item.get("original_index", 0))),
+				)
+				continue
+
+			kept_items.extend(bucket_items)
+
+		return kept_items, changed
+
+	def _specialise_chunks_from_guided_action_path(
+		self,
+		chunks: Sequence[Sequence[str]],
+		*,
+		preferred_actions: Sequence[Tuple[str, Tuple[str, ...]]],
+		max_candidates_per_chunk: int,
+	) -> Tuple[List[List[str]], bool]:
+		if not preferred_actions:
+			return [list(chunk) for chunk in chunks], False
+
+		actions_by_name: Dict[str, List[Tuple[str, ...]]] = {}
+		for action_name, action_args in preferred_actions:
+			actions_by_name.setdefault(str(action_name), []).append(tuple(action_args))
+
+		specialised_chunks: List[List[str]] = []
+		changed = False
+		for chunk in chunks:
+			lines = [str(line) for line in chunk]
+			if not lines:
+				continue
+			original_chunk = "\n".join(lines)
+			candidate_chunks: List[List[str]] = [list(lines)]
+			seen_chunks = {original_chunk}
+			chunk_vars = self._extract_asl_variables(original_chunk)
+			parsed_head = self._split_method_trigger_head(lines[0])
+			head_args = parsed_head[2] if parsed_head is not None else ()
+			head_vars = {
+				argument
+				for argument in head_args
+				if self._looks_like_asl_variable(argument)
+			}
+			combined_bindings: List[Dict[str, str]] = [{}]
+			seen_binding_signatures: set[Tuple[Tuple[str, str], ...]] = {()}
+			for line in lines[1:]:
+				goal = self._parse_asl_goal_call(line)
+				if goal is None:
+					continue
+				action_bindings: List[Dict[str, str]] = []
+				for preferred_args in actions_by_name.get(str(goal[0]), ()):
+					binding = self._match_grounding_atom(goal[1], preferred_args, {})
+					if binding is None:
+						continue
+					chunk_binding = {
+						variable: value
+						for variable, value in binding.items()
+						if variable in chunk_vars
+					}
+					if not chunk_binding:
+						continue
+					action_bindings.append(chunk_binding)
+				if not action_bindings:
+					continue
+				next_combined_bindings = list(combined_bindings)
+				for existing_binding in combined_bindings:
+					for action_binding in action_bindings:
+						merged_binding = self._merge_asl_bindings(
+							existing_binding,
+							action_binding,
+						)
+						if merged_binding is None:
+							continue
+						signature = tuple(sorted(merged_binding.items()))
+						if signature in seen_binding_signatures:
+							continue
+						if len(next_combined_bindings) >= max_candidates_per_chunk:
+							continue
+						seen_binding_signatures.add(signature)
+						next_combined_bindings.append(merged_binding)
+				combined_bindings = next_combined_bindings
+
+			for binding in combined_bindings:
+				if not binding:
+					continue
+				bound_vars = set(binding)
+				bound_head_vars = bound_vars & head_vars
+				bound_non_head_vars = bound_vars - head_vars
+				if head_vars:
+					if not bound_head_vars:
+						continue
+					if bound_non_head_vars and bound_head_vars != head_vars:
+						continue
+				specialised_chunk = [
+					self._substitute_asl_bindings(chunk_line, binding)
+					for chunk_line in lines
+				]
+				specialised_text = "\n".join(specialised_chunk)
+				if specialised_text in seen_chunks:
+					continue
+				if len(candidate_chunks) >= max_candidates_per_chunk:
+					continue
+				seen_chunks.add(specialised_text)
+				candidate_chunks.insert(len(candidate_chunks) - 1, specialised_chunk)
+				changed = True
+			specialised_chunks.extend(candidate_chunks)
+		return specialised_chunks, changed
+
+	def _reorder_unordered_control_plan_blocks(
+		self,
+		agentspeak_code: str,
+		preferred_target_ids: Sequence[str],
+	) -> str:
+		start_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		if start_index == -1:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		end_index = self._next_section_index(
+			agentspeak_code,
+			start_index + len(start_marker),
+			(
+				"/* Target Observation Plans */",
+				"/* Failure Handlers */",
+				"/* Execution Entry */",
+				"/* Primitive Action Plans */",
+				"/* HTN Method Plans */",
+			),
+		)
+		control_section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		blocks = [
+			block.strip()
+			for block in re.split(r"\n\s*\n", control_section.strip())
+			if block.strip()
+		]
+		if not blocks:
+			return agentspeak_code
+
+		header = blocks[0]
+		success_blocks: List[str] = []
+		clear_blocks: List[str] = []
+		fallback_blocks: List[str] = []
+		passthrough_blocks: List[str] = []
+		pair_lookup: Dict[str, List[str]] = {}
+		original_pair_order: List[str] = []
+		pending_run_target_id: Optional[str] = None
+		transition_target_lookup = self._unordered_transition_target_lookup(agentspeak_code)
+
+		for block in blocks[1:]:
+			target_id = self._unordered_control_target_id(block)
+			header_line = block.splitlines()[0].strip()
+			if header_line.startswith("+!run_dfa : target_seen("):
+				success_blocks.append(block)
+				continue
+			if header_line.startswith("+!clear_blocked_targets"):
+				clear_blocks.append(block)
+				continue
+			if header_line.startswith("+!run_dfa : true <-"):
+				fallback_blocks.append(block)
+				continue
+			if (
+				header_line.startswith("+!run_dfa : dfa_state(")
+				and "accepting_state(" in header_line
+			):
+				success_blocks.append(block)
+				continue
+			if header_line.startswith("+!run_dfa : dfa_state("):
+				transition_name = self._unordered_control_transition_name(block)
+				if transition_name is None:
+					passthrough_blocks.append(block)
+					continue
+				target_id = transition_target_lookup.get(transition_name)
+				if target_id is None:
+					passthrough_blocks.append(block)
+					continue
+				pair_lookup.setdefault(target_id, []).append(block)
+				if target_id not in original_pair_order:
+					original_pair_order.append(target_id)
+				continue
+			if header_line.startswith("+!run_dfa : not target_seen(") and target_id is not None:
+				pending_run_target_id = target_id
+				pair_lookup.setdefault(target_id, []).append(block)
+				if target_id not in original_pair_order:
+					original_pair_order.append(target_id)
+				continue
+			if header_line.startswith("-!") and target_id is not None:
+				pair_target_id = target_id if pending_run_target_id is None else pending_run_target_id
+				pair_lookup.setdefault(pair_target_id, []).append(block)
+				if pair_target_id not in original_pair_order:
+					original_pair_order.append(pair_target_id)
+				pending_run_target_id = None
+				continue
+			passthrough_blocks.append(block)
+
+		ordered_target_ids = [
+			target_id
+			for target_id in preferred_target_ids
+			if target_id in pair_lookup
+		]
+		ordered_target_ids.extend(
+			target_id
+			for target_id in original_pair_order
+			if target_id not in ordered_target_ids
+		)
+
+		reordered_blocks: List[str] = [header]
+		reordered_blocks.extend(success_blocks)
+		reordered_blocks.extend(clear_blocks)
+		for target_id in ordered_target_ids:
+			reordered_blocks.extend(pair_lookup.get(target_id, ()))
+		reordered_blocks.extend(passthrough_blocks)
+		reordered_blocks.extend(fallback_blocks)
+		reordered_section = "\n\n".join(reordered_blocks).rstrip() + "\n"
+		return prefix + reordered_section + suffix
+
+	@staticmethod
+	def _next_section_index(
+		agentspeak_code: str,
+		start_index: int,
+		markers: Sequence[str],
+	) -> int:
+		candidates = [
+			index
+			for marker in markers
+			if (index := agentspeak_code.find(marker, start_index)) != -1
+		]
+		if not candidates:
+			return len(agentspeak_code)
+		return min(candidates)
+
+	def _unordered_transition_target_lookup(self, agentspeak_code: str) -> Dict[str, str]:
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return {}
+
+		transition_section = agentspeak_code[start_index:end_index]
+		blocks = [
+			block.strip()
+			for block in re.split(r"\n\s*\n", transition_section.strip())
+			if block.strip()
+		]
+		if not blocks:
+			return {}
+
+		lookup: Dict[str, str] = {}
+		for block in blocks[1:]:
+			lines = [line.strip() for line in block.splitlines() if line.strip()]
+			if not lines:
+				continue
+			header_match = re.match(r"^\+!([^\s(:]+)", lines[0])
+			if header_match is None:
+				continue
+			target_match = re.search(r"!mark_target_(t\d+)", block)
+			if target_match is None:
+				continue
+			lookup[header_match.group(1).strip()] = target_match.group(1)
+		return lookup
+
+	@staticmethod
+	def _unordered_control_transition_name(block: str) -> Optional[str]:
+		match = re.search(r"!\s*([A-Za-z0-9_]+)\s*;", block)
+		if match is None:
+			return None
+		return match.group(1).strip()
+
+	@staticmethod
+	def _unordered_control_target_id(block: str) -> Optional[str]:
+		match = re.search(r"target_seen\((t\d+)\)", block)
+		if match:
+			return match.group(1)
+		return None
+
+	def _action_schema_lookup(
+		self,
+		action_schemas: Sequence[Dict[str, Any]],
+	) -> Dict[str, Dict[str, Any]]:
+		cache_key = id(action_schemas)
+		cached = self._action_schema_lookup_cache.get(cache_key)
+		if cached is not None:
+			return cached
+		schema_lookup: Dict[str, Dict[str, Any]] = {}
+		for schema in action_schemas:
+			functor = str(schema.get("functor", "")).strip()
+			source_name = str(schema.get("source_name", "")).strip()
+			if functor:
+				schema_lookup.setdefault(functor, schema)
+			if source_name:
+				schema_lookup.setdefault(source_name, schema)
+		if len(self._action_schema_lookup_cache) >= 16:
+			self._action_schema_lookup_cache.clear()
+		self._action_schema_lookup_cache[cache_key] = schema_lookup
+		return schema_lookup
+
+	def _replay_plan_steps_into_world(
+		self,
+		*,
+		world: Set[str],
+		steps: Sequence[Any],
+		schema_lookup: Dict[str, Dict[str, Any]],
+	) -> Set[str]:
+		next_world = set(world)
+		for step in steps:
+			step_name = str(getattr(step, "action_name", None) or getattr(step, "task_name", "")).strip()
+			schema = schema_lookup.get(step_name)
+			if schema is None:
+				continue
+			parameters = [str(item) for item in (schema.get("parameters") or [])]
+			bindings: Dict[str, str] = {}
+			for parameter, value in zip(parameters, getattr(step, "args", ()) or ()):
+				token = self._canonical_runtime_token(parameter)
+				bindings[token] = str(value)
+				if token.startswith("?"):
+					bindings[token[1:]] = str(value)
+
+			for effect in schema.get("effects") or []:
+				predicate = str(effect.get("predicate", "")).strip()
+				if not predicate or predicate == "=":
+					continue
+				grounded = self._ground_runtime_pattern(
+					predicate,
+					effect.get("args") or [],
+					bindings,
+				)
+				if effect.get("is_positive", True):
+					next_world.add(grounded)
+				else:
+					next_world.discard(grounded)
+		return next_world
+
+	def _runtime_world_to_hddl_facts(
+		self,
+		world: Sequence[str],
+		*,
+		predicate_name_map: Optional[Dict[str, str]] = None,
+	) -> Tuple[str, ...]:
+		return tuple(
+			self._runtime_atom_to_hddl_fact(
+				atom,
+				predicate_name_map=predicate_name_map,
+			)
+			for atom in sorted(world)
+			if atom
+		)
+
+	@classmethod
+	def _runtime_atom_to_hddl_fact(
+		cls,
+		atom: str,
+		*,
+		predicate_name_map: Optional[Dict[str, str]] = None,
+	) -> str:
+		text = (atom or "").strip()
+		if not text:
+			return "()"
+		if "(" not in text:
+			predicate = (
+				predicate_name_map.get(text, text)
+				if predicate_name_map is not None
+				else text
+			)
+			return f"({predicate})"
+		functor, remainder = text.split("(", 1)
+		functor = functor.strip()
+		predicate = (
+			predicate_name_map.get(functor, functor)
+			if predicate_name_map is not None
+			else functor
+		)
+		args_text = remainder[:-1].strip()
+		if not args_text:
+			return f"({predicate})"
+		args = [
+			cls._canonical_runtime_token(part.strip())
+			for part in args_text.split(",")
+			if part.strip()
+		]
+		return f"({predicate} {' '.join(args)})"
+
+	@classmethod
+	def _runtime_predicate_name_map(
+		cls,
+		*,
+		action_schemas: Sequence[Dict[str, Any]] = (),
+		predicate_names: Sequence[str] = (),
+	) -> Dict[str, str]:
+		mapping: Dict[str, str] = {}
+
+		def register(name: Any) -> None:
+			source_name = str(name or "").strip()
+			if not source_name or source_name == "=":
+				return
+			mapping.setdefault(cls._sanitize_name(source_name), source_name)
+			mapping.setdefault(source_name, source_name)
+
+		for predicate_name in predicate_names or ():
+			register(predicate_name)
+		for schema in action_schemas or ():
+			for collection_name in ("preconditions", "effects"):
+				for literal in schema.get(collection_name) or ():
+					if isinstance(literal, dict):
+						register(literal.get("predicate"))
+			for clause in schema.get("precondition_clauses") or ():
+				for literal in clause or ():
+					if isinstance(literal, dict):
+						register(literal.get("predicate"))
+		return mapping
+
+	def toolchain_available(self) -> bool:
+		"""Return whether Java and Jason runtime requirements are available."""
+
+		try:
+			java_bin, _ = self._select_java_binary()
+			self._select_javac_binary(java_bin)
+			self._ensure_jason_jar(java_bin)
+			self._resolve_log_config()
+			return True
+		except Exception:
+			return False
+
+	def _build_runner_asl(
+		self,
+		agentspeak_code: str,
+		target_literals: Sequence[HTNLiteral],
+		*,
+		protected_target_literals: Sequence[HTNLiteral] = (),
+		method_library: HTNMethodLibrary | None = None,
+		seed_facts: Sequence[str] = (),
+		runtime_objects: Sequence[str] = (),
+		object_types: Optional[Dict[str, str]] = None,
+		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
+		completion_mode: str = "target_literals",
+		ordered_query_sequence: bool = True,
+		guided_action_path: Sequence[str] = (),
+		guided_method_trace: Sequence[Dict[str, Any]] = (),
+		guided_continue_with_runtime_goal: bool = False,
+		guided_completed_target_ids: Sequence[str] = (),
+	) -> str:
+		runtime_ready_code = self._inject_runtime_object_beliefs(
+			agentspeak_code,
+			seed_facts=seed_facts,
+			runtime_objects=runtime_objects,
+			object_types=object_types or {},
+			type_parent_map=type_parent_map or {},
+		)
+		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
+		trace_ready_code = self._instrument_method_plans(
+			environment_ready_code,
+			method_library,
+		)
+		subgoal_target_observations = self._extract_unordered_subgoal_observations(
+			trace_ready_code,
+		)
+		protected_target_signatures = {
+			literal.to_signature()
+			for literal in protected_target_literals
+			if not literal.is_equality
+		}
+		target_observations = self._extract_transition_target_observations(
+			trace_ready_code,
+			target_literals,
+			protected_literal_signatures=(
+				protected_target_signatures
+				if protected_target_signatures
+				else None
+			),
+		)
+		trace_ready_code = self._restrict_unsafe_noop_methods_to_satisfied_or_protected_targets(
+			trace_ready_code,
+			method_library,
+			target_observations,
+		)
+		if completion_mode == "accepting_state":
+			if guided_action_path:
+				guided_replay_code = self._strip_planning_sections_for_guided_replay(
+					trace_ready_code,
+				)
+				return self._build_guided_runner_asl(
+					guided_replay_code,
+					method_library=method_library,
+					ordered_query_sequence=ordered_query_sequence,
+					guided_action_path=guided_action_path,
+					guided_method_trace=guided_method_trace,
+				)
+			if not ordered_query_sequence:
+				observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
+					trace_ready_code,
+					subgoal_target_observations,
+				)
+				observation_ready_code = self._rewrite_unordered_control_plans(
+					observation_ready_code,
+					subgoal_target_observations,
+					method_library=method_library,
+				)
+				target_context = self._observed_target_context_expression(
+					subgoal_target_observations,
+				)
+				lines = [
+					observation_ready_code.rstrip(),
+					"",
+					*self._render_target_observation_plans(subgoal_target_observations),
+					"",
+					*self._render_failure_handlers(
+						method_library,
+						ordered_query_sequence=False,
+					),
+					"",
+					"/* Execution Entry */",
+					"!execute.",
+					"",
+				]
+				lines.append(
+					f"+!verify_targets : {target_context or 'true'} <-"
+				)
+				lines.extend(self._indent_body(["true"]))
+				lines.append("")
+				lines.append("+!execute : true <-")
+				lines.extend(
+					self._indent_body(
+						[
+							'.print("execute start")',
+							".perceive",
+							"!run_dfa",
+							"!verify_targets",
+							'.print("execute success")',
+							".stopMAS",
+						],
+					),
+				)
+				lines.append("")
+				lines.append("-!execute : true <-")
+				lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+				lines.append("")
+				return "\n".join(lines)
+			lines = [
+				trace_ready_code.rstrip(),
+				"",
+				*self._render_failure_handlers(
+					method_library,
+					ordered_query_sequence=True,
+				),
+				"",
+				"/* Execution Entry */",
+				"!execute.",
+				"",
+				"+!execute : true <-",
+			]
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute start")',
+						".perceive",
+						"!run_dfa",
+						"?dfa_state(FINAL_STATE)",
+						"?accepting_state(FINAL_STATE)",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("")
+			lines.append("-!execute : true <-")
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+			lines.append("")
+			return "\n".join(lines)
+		completed_target_ids = [
+			str(target_id).strip()
+			for target_id in guided_completed_target_ids
+			if str(target_id).strip()
+		]
+		completed_literal_signatures = {
+			observation["literal"].to_signature()
+			for observation in target_observations
+			if str(observation.get("target_id", "")).strip() in completed_target_ids
+		}
+		remaining_target_observations = [
+			observation
+			for observation in target_observations
+			if observation["literal"].to_signature() not in completed_literal_signatures
+		]
+		if guided_action_path and guided_continue_with_runtime_goal:
+			observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
+				trace_ready_code,
+				target_observations,
+			)
+			if not ordered_query_sequence:
+				observation_ready_code = self._rewrite_unordered_control_plans(
+					observation_ready_code,
+					remaining_target_observations,
+					method_library=method_library,
+				)
+			return self._build_guided_prefix_runner_asl(
+				observation_ready_code,
+				target_literals=target_literals,
+				target_observations=target_observations,
+				remaining_target_observations=remaining_target_observations,
+				method_library=method_library,
+				completion_mode=completion_mode,
+				ordered_query_sequence=ordered_query_sequence,
+				guided_action_path=guided_action_path,
+				guided_method_trace=guided_method_trace,
+				guided_completed_target_ids=guided_completed_target_ids,
+			)
+		if guided_action_path:
+			guided_replay_code = self._strip_planning_sections_for_guided_replay(trace_ready_code)
+			return self._build_guided_runner_asl(
+				guided_replay_code,
+				method_library=method_library,
+				ordered_query_sequence=ordered_query_sequence,
+				guided_action_path=guided_action_path,
+				guided_method_trace=guided_method_trace,
+			)
+		observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
+			trace_ready_code,
+			target_observations,
+		)
+		if not ordered_query_sequence:
+			observation_ready_code = self._rewrite_unordered_control_plans(
+				observation_ready_code,
+				target_observations,
+				method_library=method_library,
+			)
+		target_context = (
+			self._observed_target_context_expression(target_observations)
+			or self._target_context_expression(target_literals)
+		)
+		ordered_transition_chain = (
+			self._ordered_target_transition_chain(
+				observation_ready_code,
+				target_observations,
+			)
+			if ordered_query_sequence
+			else []
+		)
+		lines = [
+			observation_ready_code.rstrip(),
+			"",
+			*self._render_target_observation_plans(target_observations),
+			"",
+			*self._render_failure_handlers(
+				method_library,
+				ordered_query_sequence=ordered_query_sequence,
+			),
+			"",
+			"/* Execution Entry */",
+			"!execute.",
+			"",
+		]
+		if completion_mode != "target_literals":
+			raise JasonValidationError(
+				f"Unsupported Jason runtime completion mode: {completion_mode}",
+				metadata={"completion_mode": completion_mode},
+			)
+
+		lines.append(f"+!verify_targets : {target_context} <-")
+		lines.extend(self._indent_body(["true"]))
+		lines.append("")
+		if not ordered_query_sequence:
+			lines.append("+!execute : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute start")',
+						".perceive",
+						"!run_dfa",
+						"!verify_targets",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("")
+			lines.append("-!execute : true <-")
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+			lines.append("")
+			return "\n".join(lines)
+
+		lines.append("+!execute : true <-")
+		execute_body = [
+			'.print("execute start")',
+			".perceive",
+			(
+				"!execute_progress_chain_1"
+				if ordered_transition_chain
+				else "!run_dfa"
+			),
+		]
+		if not ordered_transition_chain:
+			execute_body.extend(
+				[
+					"?dfa_state(FINAL_STATE)",
+					"?accepting_state(FINAL_STATE)",
+					"!verify_targets",
+					'.print("execute success")',
+					".stopMAS",
+				],
+			)
+		lines.extend(
+			self._indent_body(execute_body),
+		)
+		lines.append("")
+		if ordered_transition_chain:
+			lines.extend(
+				self._render_chained_goal_plans(
+					"execute_progress_chain",
+					[
+						f"!{transition_name}"
+						for transition_name in ordered_transition_chain
+					],
+					[
+						"?dfa_state(FINAL_STATE)",
+						"?accepting_state(FINAL_STATE)",
+						"!verify_targets",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+		lines.append("-!execute : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		lines.append("")
+		return "\n".join(lines)
+
+	def _build_guided_prefix_runner_asl(
+		self,
+		agentspeak_code: str,
+		*,
+		target_literals: Sequence[HTNLiteral],
+		target_observations: Sequence[Dict[str, Any]],
+		remaining_target_observations: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		completion_mode: str,
+		ordered_query_sequence: bool,
+		guided_action_path: Sequence[str],
+		guided_method_trace: Sequence[Dict[str, Any]],
+		guided_completed_target_ids: Sequence[str],
+	) -> str:
+		completed_target_ids = [
+			str(target_id).strip()
+			for target_id in guided_completed_target_ids
+			if str(target_id).strip()
+		]
+		remaining_observations = [
+			observation
+			for observation in remaining_target_observations
+			if str(observation.get("target_id", "")).strip() not in completed_target_ids
+		]
+		target_context = self._observed_target_context_expression(remaining_observations)
+		if not target_context:
+			target_context = (
+				"true"
+				if completed_target_ids and not remaining_observations
+				else self._target_context_expression(target_literals)
+			)
+		ordered_transition_chain = (
+			self._ordered_target_transition_chain(
+				agentspeak_code,
+				remaining_observations,
+				require_initial_state=False,
+			)
+			if ordered_query_sequence
+			else []
+		)
+		prefix_body = [
+			f"!{self._render_guided_action_goal(action_step)}"
+			for action_step in guided_action_path
+		]
+		for target_id in completed_target_ids:
+			prefix_body.append(f"!mark_target_{target_id}")
+			prefix_body.append(f"!advance_dfa_for_{target_id}")
+		guided_dfa_sync_plans = self._render_guided_dfa_sync_plans(
+			agentspeak_code,
+			completed_target_ids,
+		)
+		lines = [
+			agentspeak_code.rstrip(),
+			"",
+			*self._render_target_observation_plans(target_observations),
+			"",
+			*guided_dfa_sync_plans,
+			"",
+			*self._render_failure_handlers(
+				method_library,
+				ordered_query_sequence=ordered_query_sequence,
+			),
+			"",
+			"/* Execution Entry */",
+			"!execute.",
+			"",
+		]
+
+		if completion_mode == "accepting_state":
+			lines.append("+!execute : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute start")',
+						".perceive",
+						"!guided_prefix_replay_1",
+					],
+				),
+			)
+			lines.append("")
+			lines.extend(
+				self._render_chained_goal_plans(
+					"guided_prefix_replay",
+					prefix_body,
+					[
+						"!run_dfa",
+						"?dfa_state(FINAL_STATE)",
+						"?accepting_state(FINAL_STATE)",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("-!execute : true <-")
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+			lines.append("")
+			return "\n".join(lines)
+
+		if completion_mode != "target_literals":
+			raise JasonValidationError(
+				f"Unsupported Jason runtime completion mode: {completion_mode}",
+				metadata={"completion_mode": completion_mode},
+			)
+
+		lines.append(f"+!verify_targets : {target_context} <-")
+		lines.extend(self._indent_body(["true"]))
+		lines.append("")
+		if not ordered_query_sequence:
+			lines.append("+!execute : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						'.print("execute start")',
+						".perceive",
+						"!guided_prefix_replay_1",
+					],
+				),
+			)
+			lines.append("")
+			lines.extend(
+				self._render_chained_goal_plans(
+					"guided_prefix_replay",
+					prefix_body,
+					[
+						"!run_dfa",
+						"!verify_targets",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+			lines.append("-!execute : true <-")
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+			lines.append("")
+			return "\n".join(lines)
+
+		lines.append("+!execute : true <-")
+		lines.extend(
+			self._indent_body(
+				[
+					'.print("execute start")',
+					".perceive",
+					"!guided_prefix_replay_1",
+				],
+			),
+		)
+		lines.append("")
+		runtime_tail = (
+			["!execute_progress_chain_1"]
+			if ordered_transition_chain
+			else [
+				"!run_dfa",
+				"?dfa_state(FINAL_STATE)",
+				"?accepting_state(FINAL_STATE)",
+				"!verify_targets",
+				'.print("execute success")',
+				".stopMAS",
+			]
+		)
+		lines.extend(
+			self._render_chained_goal_plans(
+				"guided_prefix_replay",
+				prefix_body,
+				runtime_tail,
+			),
+		)
+		if ordered_transition_chain:
+			lines.extend(
+				self._render_chained_goal_plans(
+					"execute_progress_chain",
+					[
+						f"!{transition_name}"
+						for transition_name in ordered_transition_chain
+					],
+					[
+						"?dfa_state(FINAL_STATE)",
+						"?accepting_state(FINAL_STATE)",
+						"!verify_targets",
+						'.print("execute success")',
+						".stopMAS",
+					],
+				),
+			)
+		lines.append("-!execute : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		lines.append("")
+		return "\n".join(lines)
+
+	def _render_guided_dfa_sync_plans(
+		self,
+		agentspeak_code: str,
+		completed_target_ids: Sequence[str],
+	) -> List[str]:
+		if not completed_target_ids:
+			return []
+
+		target_state_advances = self._extract_target_state_advances(agentspeak_code)
+		lines = ["/* Guided DFA Sync Plans */"]
+		rendered_any = False
+		for target_id in completed_target_ids:
+			advance_pairs = target_state_advances.get(str(target_id), ())
+			for source_state, target_state in advance_pairs:
+				rendered_any = True
+				lines.append(
+					f"+!advance_dfa_for_{target_id} : target_seen({target_id}) & "
+					f"{self._call('dfa_state', (source_state,))} <-"
+				)
+				if source_state == target_state:
+					lines.extend(self._indent_body(["true"]))
+				else:
+					lines.extend(
+						self._indent_body(
+							[
+								f"-{self._call('dfa_state', (source_state,))}",
+								f"+{self._call('dfa_state', (target_state,))}",
+							],
+						),
+					)
+				lines.append("")
+			lines.append(f"+!advance_dfa_for_{target_id} : true <-")
+			lines.extend(self._indent_body(["true"]))
+			lines.append("")
+		return lines if rendered_any or completed_target_ids else []
+
+	def _extract_target_state_advances(
+		self,
+		agentspeak_code: str,
+	) -> Dict[str, Tuple[Tuple[str, str], ...]]:
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return {}
+
+		transition_section = agentspeak_code[start_index:end_index]
+		blocks = [
+			block.strip()
+			for block in re.split(r"\n\s*\n", transition_section.strip())
+			if block.strip()
+		]
+		if not blocks:
+			return {}
+
+		advances: Dict[str, List[Tuple[str, str]]] = {}
+		for block in blocks[1:]:
+			source_match = re.search(
+				r"^\+![^\s(:]+\s*:\s*dfa_state\(([^)]+)\)",
+				block,
+				re.MULTILINE,
+			)
+			target_id_match = re.search(r"!mark_target_(t\d+)", block)
+			if source_match is None or target_id_match is None:
+				continue
+			source_state = source_match.group(1).strip()
+			target_state_match = re.search(r"\+dfa_state\(([^)]+)\)", block)
+			target_state = (
+				target_state_match.group(1).strip()
+				if target_state_match is not None
+				else source_state
+			)
+			advances.setdefault(target_id_match.group(1), []).append(
+				(source_state, target_state),
+			)
+		return {
+			target_id: tuple(pairs)
+			for target_id, pairs in advances.items()
+		}
+
+	def _build_guided_runner_asl(
+		self,
+		agentspeak_code: str,
+		*,
+		method_library: HTNMethodLibrary | None,
+		ordered_query_sequence: bool,
+		guided_action_path: Sequence[str],
+		guided_method_trace: Sequence[Dict[str, Any]],
+	) -> str:
+		lines = [
+			agentspeak_code.rstrip(),
+			"",
+			*self._render_failure_handlers(
+				method_library,
+				ordered_query_sequence=ordered_query_sequence,
+			),
+			"",
+			"/* Execution Entry */",
+			"!execute.",
+			"",
+			"+!execute : true <-",
+		]
+		lines.extend(
+			self._indent_body(['.print("execute start")', ".perceive", "!guided_replay_1"])
+		)
+		lines.append("")
+		lines.extend(
+			self._render_chained_goal_plans(
+				"guided_replay",
+				[
+					f"!{self._render_guided_action_goal(action_step)}"
+					for action_step in guided_action_path
+				],
+				['.print("execute success")', ".stopMAS"],
+			),
+		)
+		lines.append("")
+		lines.append("-!execute : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		lines.append("")
+		return "\n".join(lines)
+
+	def _render_chained_goal_plans(
+		self,
+		goal_prefix: str,
+		statements: Sequence[str],
+		final_statements: Sequence[str],
+		*,
+		chunk_size: int = 128,
+	) -> List[str]:
+		if chunk_size < 1:
+			raise ValueError("chunk_size must be positive")
+
+		chunks = [
+			list(statements[index:index + chunk_size])
+			for index in range(0, len(statements), chunk_size)
+		] or [[]]
+		lines: List[str] = []
+		for index, chunk in enumerate(chunks, start=1):
+			goal_name = f"{goal_prefix}_{index}"
+			is_last = index == len(chunks)
+			body_lines = list(chunk)
+			if is_last:
+				body_lines.extend(final_statements)
+			else:
+				body_lines.append(f"!{goal_prefix}_{index + 1}")
+			lines.append(f"+!{goal_name} : true <-")
+			lines.extend(self._indent_body(body_lines))
+			lines.append("")
+		return lines
+
+	@staticmethod
+	def _strip_planning_sections_for_guided_replay(agentspeak_code: str) -> str:
+		start_marker = "/* HTN Method Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		if start_index == -1:
+			return agentspeak_code
+		return agentspeak_code[:start_index].rstrip() + "\n"
+
+	def _render_guided_method_trace_statement(self, entry: Dict[str, Any]) -> str:
+		method_name = str(entry.get("method_name", "") or "")
+		task_args = tuple(
+			self._runtime_atom_term(str(arg))
+			for arg in (entry.get("task_args") or ())
+		)
+		return self._render_flat_method_trace_statement(method_name, task_args)
+
+	def _inject_runtime_object_beliefs(
+		self,
+		agentspeak_code: str,
+		*,
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> str:
+		if not runtime_objects and not seed_facts:
+			return agentspeak_code
+
+		start_marker = "/* Initial Beliefs */"
+		end_marker = "/* Primitive Action Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		body_lines = [line for line in section_lines[1:] if line.strip()]
+		existing = {line.strip() for line in body_lines}
+		inserted: List[str] = []
+
+		for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts):
+			if not atom:
+				continue
+			belief_line = f"{atom}."
+			if belief_line in existing:
+				continue
+			existing.add(belief_line)
+			inserted.append(belief_line)
+
+		for obj in runtime_objects:
+			object_line = f"{self._call('object', (self._runtime_atom_term(obj),))}."
+			if object_line not in existing:
+				existing.add(object_line)
+				inserted.append(object_line)
+			for type_name in self._type_closure(object_types.get(str(obj)), type_parent_map):
+				type_line = (
+					f"{self._call('object_type', (self._runtime_atom_term(obj), self._type_atom(type_name)))}."
+				)
+				if type_line in existing:
+					continue
+				existing.add(type_line)
+				inserted.append(type_line)
+
+		if not inserted:
+			return agentspeak_code
+
+		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
+		return f"{prefix}{injected_section}{suffix}"
+
+	def _extract_transition_target_observations(
+		self,
+		agentspeak_code: str,
+		target_literals: Sequence[HTNLiteral],
+		*,
+		protected_literal_signatures: Optional[Set[str]] = None,
+	) -> List[Dict[str, Any]]:
+		if not target_literals:
+			return []
+		targets_by_signature = {
+			literal.to_signature(): literal
+			for literal in target_literals
+		}
+		target_id_by_signature: Dict[str, str] = {}
+		observations: List[Dict[str, Any]] = []
+		seen_transitions: set[str] = set()
+		for match in re.finditer(
+			r'dfa_edge_label\(([^,]+),\s*"([^"]*)"\)\.',
+			agentspeak_code,
+		):
+			transition_name = match.group(1).strip()
+			label = match.group(2).strip()
+			target_literal = targets_by_signature.get(label)
+			if target_literal is None or transition_name in seen_transitions:
+				continue
+			seen_transitions.add(transition_name)
+			target_id = target_id_by_signature.get(label)
+			if target_id is None:
+				target_id = f"t{len(target_id_by_signature) + 1}"
+				target_id_by_signature[label] = target_id
+			observations.append(
+				{
+					"transition_name": transition_name,
+					"target_id": target_id,
+					"literal": target_literal,
+					"protect_target": (
+						True
+						if protected_literal_signatures is None
+						else target_literal.to_signature() in protected_literal_signatures
+					),
+				},
+			)
+		return observations
+
+	def _extract_unordered_subgoal_observations(
+		self,
+		agentspeak_code: str,
+	) -> List[Dict[str, Any]]:
+		observations: List[Dict[str, Any]] = []
+		seen_target_ids: Set[str] = set()
+		for match in re.finditer(
+			r'dfa_edge_label\(([^,]+),\s*"(subgoal_\d+)"\)\.',
+			agentspeak_code,
+		):
+			transition_name = match.group(1).strip()
+			target_id = match.group(2).strip()
+			if not transition_name or not target_id or target_id in seen_target_ids:
+				continue
+			seen_target_ids.add(target_id)
+			observations.append(
+				{
+					"transition_name": transition_name,
+					"target_id": target_id,
+					"literal": None,
+					"protect_target": False,
+				},
+			)
+		return observations
+
+	def _instrument_transition_wrappers_for_target_observations(
+		self,
+		agentspeak_code: str,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> str:
+		if not target_observations:
+			return agentspeak_code
+
+		observation_by_transition = {
+			str(item["transition_name"]): item
+			for item in target_observations
+		}
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		instrumented_chunks: List[str] = []
+		for chunk in chunks:
+			head_line = chunk[0]
+			body_lines = list(chunk[1:])
+			match = re.match(r"^\s*\+!([^\s(:]+)", head_line)
+			if match is None or not body_lines:
+				instrumented_chunks.append("\n".join(chunk))
+				continue
+			transition_name = match.group(1).strip()
+			observation = observation_by_transition.get(transition_name)
+			if observation is None:
+				instrumented_chunks.append("\n".join(chunk))
+				continue
+			target_id = str(observation["target_id"])
+			insert_at = 1
+			for index, line in enumerate(body_lines, start=1):
+				stripped = line.strip()
+				if not stripped.startswith("!"):
+					continue
+				if stripped.startswith("!mark_target_"):
+					continue
+				insert_at = index
+			instrumented_body = list(body_lines)
+			instrumented_body.insert(insert_at, f"\t!mark_target_{target_id};")
+			normalised_body = [
+				line.strip().rstrip(";.")
+				for line in instrumented_body
+				if line.strip()
+			]
+			progress_guard_chunks = self._render_progress_guarded_transition_chunks(
+				head_line,
+				normalised_body,
+				observation,
+			)
+			if progress_guard_chunks:
+				instrumented_chunks.extend(progress_guard_chunks)
+				continue
+			instrumented_chunks.append(
+				"\n".join([head_line, *self._indent_body(normalised_body)]),
+			)
+
+		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{instrumented_section}{suffix}"
+
+	def _render_progress_guarded_transition_chunks(
+		self,
+		head_line: str,
+		body_lines: Sequence[str],
+		observation: Dict[str, Any],
+	) -> List[str]:
+		literal = observation.get("literal")
+		if not isinstance(literal, HTNLiteral) or literal.is_equality:
+			return []
+
+		first_goal_index = None
+		first_goal: Optional[Tuple[str, Tuple[str, ...]]] = None
+		for index, line in enumerate(body_lines):
+			goal = self._parse_asl_goal_statement(line)
+			if goal is None:
+				continue
+			goal_name, _ = goal
+			if goal_name.startswith("mark_target_") or goal_name.startswith("advance_dfa_for_"):
+				continue
+			first_goal_index = index
+			first_goal = goal
+			break
+		if first_goal_index is None or first_goal is None:
+			return []
+
+		task_name, _task_args = first_goal
+		guard_atom = self._progress_target_guard_atom(
+			task_name,
+			literal.predicate,
+			tuple(literal.args),
+		)
+		if not guard_atom:
+			return []
+
+		parsed_head = self._split_plan_head(head_line)
+		if parsed_head is None:
+			return []
+		head_prefix, base_context, head_suffix = parsed_head
+		target_context = self._literal_to_context_expression(literal)
+		unmet_context = self._literal_to_unmet_context_expression(literal)
+		satisfied_head = (
+			f"{head_prefix}{self._combine_contexts(base_context, target_context)}{head_suffix}"
+		)
+		unmet_head = (
+			f"{head_prefix}{self._combine_contexts(base_context, unmet_context)}{head_suffix}"
+		)
+
+		unmet_body = list(body_lines)
+		unmet_body.insert(first_goal_index, f"+{guard_atom}")
+		unmet_body.insert(first_goal_index + 2, f"-{guard_atom}")
+		return [
+			"\n".join([satisfied_head, *self._indent_body(body_lines)]),
+			"\n".join([unmet_head, *self._indent_body(unmet_body)]),
+		]
+
+	def _render_target_observation_plans(
+		self,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> List[str]:
+		if not target_observations:
+			return []
+
+		lines = ["/* Target Observation Plans */"]
+		seen_targets: set[str] = set()
+		for observation in target_observations:
+			target_id = str(observation["target_id"])
+			if target_id in seen_targets:
+				continue
+			seen_targets.add(target_id)
+			literal = observation["literal"]
+			if not isinstance(literal, HTNLiteral) or literal.is_equality:
+				lines.append(f"+!mark_target_{target_id} : target_seen({target_id}) <-")
+				lines.extend(self._indent_body(["true"]))
+				lines.append("")
+				lines.append(f"+!mark_target_{target_id} : true <-")
+				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
+				lines.append("")
+				continue
+			context = self._literal_to_context_expression(literal)
+			protection_atom = (
+				self._target_protection_atom(literal)
+				if bool(observation.get("protect_target", True))
+				else ""
+			)
+			lines.append(f"+!mark_target_{target_id} : target_seen({target_id}) <-")
+			lines.extend(self._indent_body(["true"]))
+			lines.append("")
+			if protection_atom:
+				lines.append(
+					f"+!mark_target_{target_id} : {context} & {protection_atom} <-"
+				)
+				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
+				lines.append("")
+				lines.append(
+					f"+!mark_target_{target_id} : {context} & not {protection_atom} <-"
+				)
+				lines.extend(
+					self._indent_body(
+						[
+							f"+target_seen({target_id})",
+							f"+{protection_atom}",
+						],
+					),
+				)
+			else:
+				lines.append(f"+!mark_target_{target_id} : {context} <-")
+				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
+			lines.append("")
+		return lines
+
+	def _rewrite_unordered_control_plans(
+		self,
+		agentspeak_code: str,
+		target_observations: Sequence[Dict[str, Any]],
+		*,
+		method_library: HTNMethodLibrary | None = None,
+	) -> str:
+		start_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		if start_index == -1:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		target_context = self._observed_target_context_expression(target_observations)
+		transition_edges = self._extract_transition_state_edges(agentspeak_code)
+		if not transition_edges:
+			return self._rewrite_unordered_control_plans_linear_fallback(
+				agentspeak_code,
+				target_observations,
+				method_library=method_library,
+			)
+		observations_by_target: Dict[str, List[Dict[str, Any]]] = {}
+		for item in target_observations:
+			target_id = str(item["target_id"])
+			transition_name = str(item["transition_name"])
+			if transition_name not in transition_edges:
+				continue
+			observations_by_target.setdefault(target_id, []).append(dict(item))
+		if not observations_by_target:
+			return self._rewrite_unordered_control_plans_linear_fallback(
+				agentspeak_code,
+				target_observations,
+				method_library=method_library,
+			)
+
+		control_lines = ["/* DFA Control Plans */"]
+		if target_context:
+			control_lines.append(f"+!run_dfa : {target_context} <-")
+			control_lines.extend(self._indent_body(["true"]))
+			control_lines.append("")
+		control_lines.extend(self._render_runtime_blocker_clearers(method_library))
+		control_lines.append("+!clear_blocked_targets : blocked_target(TARGET_ID) <-")
+		control_lines.extend(
+			self._indent_body(
+				[
+					"-blocked_target(TARGET_ID)",
+					"!clear_blocked_targets",
+				],
+			),
+		)
+		control_lines.append("")
+		control_lines.append("+!clear_blocked_targets : true <-")
+		control_lines.extend(self._indent_body(["true"]))
+		control_lines.append("")
+		for target_id in observations_by_target:
+			control_lines.append(
+				f"+!run_dfa : not target_seen({target_id}) & "
+				f"not blocked_target({target_id}) <-"
+			)
+			control_lines.extend(
+				self._indent_body(
+					[
+						f"!advance_target_{target_id}",
+						"!clear_runtime_blockers",
+						"!clear_blocked_targets",
+						"!run_dfa",
+					],
+				),
+			)
+			control_lines.append("")
+			for retry_index in range(1, self._UNORDERED_TARGET_RETRY_LIMIT + 1):
+				retry_marker = f"r{retry_index}"
+				control_lines.append(
+					f"-!advance_target_{target_id} : not target_seen({target_id}) & "
+					f"not target_retry({target_id}, {retry_marker}) <-"
+				)
+				control_lines.extend(
+					self._indent_body(
+						[
+							f"+target_retry({target_id}, {retry_marker})",
+							"!clear_runtime_blockers",
+							f"!advance_target_{target_id}",
+						],
+					),
+				)
+				control_lines.append("")
+			control_lines.append(f"-!advance_target_{target_id} : not target_seen({target_id}) <-")
+			control_lines.extend(
+				self._indent_body(
+					[
+						f"+blocked_target({target_id})",
+						"!clear_runtime_blockers",
+						"!run_dfa",
+					],
+				),
+			)
+			control_lines.append("")
+		for target_id, observations in observations_by_target.items():
+			seen_state_transition_pairs: set[Tuple[str, str]] = set()
+			for item in observations:
+				transition_name = str(item["transition_name"])
+				source_state, _target_state = transition_edges[transition_name]
+				pair = (source_state, transition_name)
+				if pair in seen_state_transition_pairs:
+					continue
+				seen_state_transition_pairs.add(pair)
+				control_lines.append(
+					f"+!advance_target_{target_id} : "
+					f"{self._call('dfa_state', (source_state,))} <-"
+				)
+				control_lines.extend(self._indent_body([f"!{transition_name}"]))
+				control_lines.append("")
+			control_lines.append(f"+!advance_target_{target_id} : true <-")
+			control_lines.extend(self._indent_body([".fail"]))
+			control_lines.append("")
+		control_lines.append("+!run_dfa : true <-")
+		control_lines.extend(self._indent_body([".fail"]))
+		control_lines.append("")
+		return prefix + "\n".join(control_lines).rstrip() + "\n"
+
+	def _render_runtime_blocker_clearers(
+		self,
+		method_library: HTNMethodLibrary | None,
+	) -> List[str]:
+		lines: List[str] = []
+		if method_library is None:
+			lines.append("+!clear_runtime_blockers : true <-")
+			lines.extend(self._indent_body(["true"]))
+			lines.append("")
+			return lines
+
+		target_task_names = {
+			str(binding.task_name).strip()
+			for binding in method_library.target_task_bindings or []
+			if str(binding.task_name).strip()
+		}
+		seen_triggers: set[str] = set()
+		for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
+			if not task.is_primitive and task.name in target_task_names:
+				continue
+			handler_args = self._failure_handler_args(task.parameters)
+			blocked_goal = self._call(
+				"blocked_runtime_goal",
+				(self._asl_atom_or_string(self._sanitize_name(task.name)), *handler_args),
+			)
+			if blocked_goal in seen_triggers:
+				continue
+			seen_triggers.add(blocked_goal)
+			lines.append(f"+!clear_runtime_blockers : {blocked_goal} <-")
+			lines.extend(
+				self._indent_body(
+					[
+						f"-{blocked_goal}",
+						"!clear_runtime_blockers",
+					],
+				),
+			)
+			lines.append("")
+		lines.append("+!clear_runtime_blockers : true <-")
+		lines.extend(self._indent_body(["true"]))
+		lines.append("")
+		return lines
+
+	def _rewrite_unordered_control_plans_linear_fallback(
+		self,
+		agentspeak_code: str,
+		target_observations: Sequence[Dict[str, Any]],
+		*,
+		method_library: HTNMethodLibrary | None = None,
+	) -> str:
+		start_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		if start_index == -1:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		target_context = self._observed_target_context_expression(target_observations)
+		control_lines = ["/* DFA Control Plans */"]
+		if target_context:
+			control_lines.append(f"+!run_dfa : {target_context} <-")
+			control_lines.extend(self._indent_body(["true"]))
+			control_lines.append("")
+		control_lines.extend(self._render_runtime_blocker_clearers(method_library))
+		control_lines.append("+!clear_blocked_targets : blocked_transition(TRANSITION_ID) <-")
+		control_lines.extend(
+			self._indent_body(
+				[
+					"-blocked_transition(TRANSITION_ID)",
+					"!clear_blocked_targets",
+				],
+			),
+		)
+		control_lines.append("")
+		control_lines.append("+!clear_blocked_targets : true <-")
+		control_lines.extend(self._indent_body(["true"]))
+		control_lines.append("")
+		for item in target_observations:
+			target_id = str(item["target_id"])
+			transition_name = str(item["transition_name"])
+			transition_atom = self._asl_atom_or_string(transition_name)
+			control_lines.append(
+				f"+!run_dfa : not target_seen({target_id}) & "
+				f"not blocked_transition({transition_atom}) <-"
+			)
+			control_lines.extend(
+				self._indent_body(
+					[
+						f"!{transition_name}",
+						"!clear_runtime_blockers",
+						"!clear_blocked_targets",
+						"!run_dfa",
+					],
+				),
+			)
+			control_lines.append("")
+			control_lines.append(f"-!{transition_name} : not target_seen({target_id}) <-")
+			control_lines.extend(
+				self._indent_body(
+					[
+						f"+blocked_transition({transition_atom})",
+						"!run_dfa",
+					],
+				),
+			)
+			control_lines.append("")
+		control_lines.append("+!run_dfa : true <-")
+		control_lines.extend(self._indent_body([".fail"]))
+		control_lines.append("")
+		return prefix + "\n".join(control_lines).rstrip() + "\n"
+
+	def _observed_target_context_expression(
+		self,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> str:
+		if not target_observations:
+			return ""
+		seen_targets: set[str] = set()
+		ordered_targets: List[str] = []
+		for observation in target_observations:
+			target_id = str(observation["target_id"])
+			if target_id in seen_targets:
+				continue
+			seen_targets.add(target_id)
+			ordered_targets.append(target_id)
+		return " & ".join(f"target_seen({target_id})" for target_id in ordered_targets)
+
+	def _ordered_target_transition_chain(
+		self,
+		agentspeak_code: str,
+		target_observations: Sequence[Dict[str, Any]],
+		*,
+		require_initial_state: bool = True,
+	) -> List[str]:
+		if not target_observations:
+			return []
+
+		transition_edges = self._extract_transition_state_edges(agentspeak_code)
+		if not transition_edges:
+			return []
+
+		transition_names: List[str] = []
+		seen_transitions: set[str] = set()
+		for observation in target_observations:
+			transition_name = str(observation.get("transition_name", "")).strip()
+			if not transition_name or transition_name in seen_transitions:
+				continue
+			if transition_name not in transition_edges:
+				return []
+			transition_names.append(transition_name)
+			seen_transitions.add(transition_name)
+
+		if not transition_names:
+			return []
+
+		previous_target_state: Optional[str] = None
+		for transition_name in transition_names:
+			source_state, target_state = transition_edges[transition_name]
+			if not source_state or not target_state or source_state == target_state:
+				return []
+			if previous_target_state is not None and source_state != previous_target_state:
+				return []
+			previous_target_state = target_state
+
+		if require_initial_state:
+			initial_state = self._extract_initial_dfa_state(agentspeak_code)
+			first_source_state = transition_edges[transition_names[0]][0]
+			if initial_state and first_source_state != initial_state:
+				return []
+
+		accepting_states = self._extract_accepting_dfa_states(agentspeak_code)
+		final_state = transition_edges[transition_names[-1]][1]
+		if accepting_states and final_state not in accepting_states:
+			return []
+
+		return transition_names
+
+	def _extract_transition_state_edges(self, agentspeak_code: str) -> Dict[str, Tuple[str, str]]:
+		start_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* DFA Control Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return {}
+
+		section = agentspeak_code[start_index:end_index]
+		edges: Dict[str, Tuple[str, str]] = {}
+		chunks = [
+			chunk.strip()
+			for chunk in re.split(r"\n\s*\n", section.strip())
+			if chunk.strip()
+		]
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines or lines[0].strip() == start_marker:
+				continue
+			header_line = lines[0].strip()
+			header_match = re.match(r"^\+!([^\s(:]+)\s*:\s*(.*?)\s*<-$", header_line)
+			if header_match is None:
+				continue
+			transition_name = header_match.group(1).strip()
+			source_match = re.search(r"\bdfa_state\(([^)]+)\)", header_match.group(2))
+			if source_match is None:
+				continue
+			body_text = "\n".join(lines[1:])
+			target_matches = re.findall(r"\+dfa_state\(([^)]+)\)", body_text)
+			if not target_matches:
+				continue
+			edges[transition_name] = (
+				source_match.group(1).strip(),
+				target_matches[-1].strip(),
+			)
+		return edges
+
+	@staticmethod
+	def _extract_accepting_dfa_states(agentspeak_code: str) -> set[str]:
+		return {
+			match.group(1).strip()
+			for match in re.finditer(
+				r"^accepting_state\(([^)]+)\)\.",
+				agentspeak_code,
+				flags=re.MULTILINE,
+			)
+			if match.group(1).strip()
+		}
+
+	def _extract_initial_dfa_state(self, agentspeak_code: str) -> Optional[str]:
+		match = re.search(r"^\s*dfa_state\(([^)]+)\)\.\s*$", agentspeak_code, re.MULTILINE)
+		if match is None:
+			return None
+		return match.group(1).strip()
+
+	def _extract_action_path(self, stdout: str) -> List[str]:
+		pattern = re.compile(r"^runtime env action success (.+?)\s*$")
+		return [
+			match.group(1).strip()
+			for line in stdout.splitlines()
+			if (match := pattern.match(line.strip())) is not None
+		]
+
+	def _extract_method_trace(self, stdout: str) -> List[Dict[str, Any]]:
+		flat_pattern = re.compile(r"runtime trace method flat\s+(.+?)\s*$")
+		legacy_pattern = re.compile(r"runtime trace method\s+trace_method\((.*)\)\s*$")
+		trace: List[Dict[str, Any]] = []
+		for raw_line in stdout.splitlines():
+			line = raw_line.strip()
+			flat_match = flat_pattern.search(line)
+			if flat_match is not None:
+				payload = flat_match.group(1).strip()
+				parts = [part.strip() for part in payload.split("|")]
+				if not parts or not parts[0]:
+					continue
+				trace.append(
+					{
+						"method_name": parts[0],
+						"task_args": [
+							part
+							for part in parts[1:]
+							if part
+						],
+					},
+				)
+				continue
+
+			legacy_match = legacy_pattern.search(line)
+			if legacy_match is None:
+				continue
+			payload = legacy_match.group(1).strip()
+			if not payload:
+				continue
+			parts = [part.strip() for part in payload.split(",")]
+			if not parts or not parts[0]:
+				continue
+			trace.append(
+				{
+					"method_name": self._strip_quoted_atom(parts[0]),
+					"task_args": [
+						self._strip_quoted_atom(part)
+						for part in parts[1:]
+						if part
+					],
+				},
+			)
+		return trace
+
+	def _extract_panda_method_trace(self, plan_text: str) -> List[Dict[str, Any]]:
+		lines = [
+			line.strip()
+			for line in str(plan_text or "").splitlines()
+			if line.strip() and line.strip() != "==>"
+		]
+		if not lines:
+			return []
+
+		method_nodes: Dict[int, Dict[str, Any]] = {}
+		primitive_node_ids: set[int] = set()
+		root_ids: List[int] = []
+		for line in lines:
+			if line.startswith("root "):
+				root_ids.extend(self._parse_plan_node_ids(line.split()[1:]))
+				continue
+			parts = line.split()
+			if not parts:
+				continue
+			try:
+				node_id = int(parts[0])
+			except ValueError:
+				continue
+			if "->" not in parts:
+				primitive_node_ids.add(node_id)
+				continue
+			arrow_index = parts.index("->")
+			if arrow_index < 2 or arrow_index + 1 >= len(parts):
+				continue
+			method_nodes[node_id] = {
+				"method_name": parts[arrow_index + 1],
+				"task_args": parts[2:arrow_index],
+				"children": self._parse_plan_node_ids(parts[arrow_index + 2:]),
+			}
+
+		trace: List[Dict[str, Any]] = []
+		visited: set[int] = set()
+		first_primitive_cache: Dict[int, int] = {}
+
+		def first_primitive_id(node_id: int) -> int:
+			if node_id in first_primitive_cache:
+				return first_primitive_cache[node_id]
+			if node_id in primitive_node_ids:
+				first_primitive_cache[node_id] = node_id
+				return node_id
+			node = method_nodes.get(node_id)
+			if node is None:
+				first_primitive_cache[node_id] = node_id
+				return node_id
+			child_order = [first_primitive_id(child_id) for child_id in node["children"]]
+			first_primitive_cache[node_id] = min(child_order) if child_order else node_id
+			return first_primitive_cache[node_id]
+
+		def visit(node_id: int) -> None:
+			if node_id in visited:
+				return
+			node = method_nodes.get(node_id)
+			if node is None:
+				return
+			visited.add(node_id)
+			trace.append(
+				{
+					"method_name": node["method_name"],
+					"task_args": list(node["task_args"]),
+				},
+			)
+			for child_id in sorted(
+				node["children"],
+				key=lambda child_id: (first_primitive_id(child_id), child_id),
+			):
+				visit(child_id)
+
+		for node_id in sorted(root_ids, key=lambda node_id: (first_primitive_id(node_id), node_id)):
+			visit(node_id)
+		for node_id in sorted(method_nodes, key=lambda node_id: (first_primitive_id(node_id), node_id)):
+			visit(node_id)
+		return trace
+
+	@staticmethod
+	def _parse_plan_node_ids(tokens: Sequence[str]) -> List[int]:
+		node_ids: List[int] = []
+		for token in tokens:
+			try:
+				node_ids.append(int(str(token)))
+			except ValueError:
+				continue
+		return node_ids
+
+	def _augment_method_trace_with_query_root_bridges(
+		self,
+		*,
+		method_trace: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		problem_file: str | Path | None,
+	) -> List[Dict[str, Any]]:
+		"""Insert missing official-root bridge entries for transition-native traces."""
+		trace = [dict(item) for item in (method_trace or ())]
+		if not trace or method_library is None or problem_file is None:
+			return trace
+
+		bridge_specs = self._query_root_bridge_trace_specs(
+			method_library=method_library,
+			problem_file=problem_file,
+		)
+		if not bridge_specs:
+			return trace
+
+		method_by_name = {
+			str(method.method_name).strip(): method
+			for method in method_library.methods
+			if str(method.method_name).strip()
+		}
+		bridge_task_names = {
+			str(spec.get("bridge_task_name", "")).strip()
+			for spec in bridge_specs
+			if str(spec.get("bridge_task_name", "")).strip()
+		}
+		if any(
+			str(getattr(method_by_name.get(str(entry.get("method_name", "")).strip()), "task_name", "")).strip()
+			in bridge_task_names
+			for entry in trace
+		):
+			return trace
+		remaining_specs = list(bridge_specs)
+		augmented_trace: List[Dict[str, Any]] = []
+		changed = False
+
+		for entry in trace:
+			method_name = str(entry.get("method_name", "")).strip()
+			method = method_by_name.get(method_name)
+			if method is None:
+				augmented_trace.append(entry)
+				continue
+
+			existing_bridge_index = self._first_bridge_spec_index(
+				remaining_specs,
+				key="bridge_method_name",
+				value=method_name,
+			)
+			if existing_bridge_index is not None:
+				remaining_specs.pop(existing_bridge_index)
+				augmented_trace.append(entry)
+				continue
+
+			child_bridge_index = self._first_bridge_spec_index(
+				remaining_specs,
+				key="child_task_name",
+				value=str(method.task_name).strip(),
+			)
+			if child_bridge_index is not None:
+				spec = remaining_specs.pop(child_bridge_index)
+				augmented_trace.append({
+					"method_name": spec["bridge_method_name"],
+					"task_args": list(spec["root_task_args"]),
+				})
+				changed = True
+			augmented_trace.append(entry)
+
+		return augmented_trace if changed else trace
+
+	@staticmethod
+	def _first_bridge_spec_index(
+		bridge_specs: Sequence[Dict[str, Any]],
+		*,
+		key: str,
+		value: str,
+	) -> Optional[int]:
+		for index, spec in enumerate(bridge_specs):
+			if str(spec.get(key, "")).strip() == value:
+				return index
+		return None
+
+	def _query_root_bridge_trace_specs(
+		self,
+		*,
+		method_library: HTNMethodLibrary,
+		problem_file: str | Path,
+	) -> List[Dict[str, Any]]:
+		try:
+			from utils.hddl_parser import HDDLParser
+
+			problem = HDDLParser.parse_problem(str(problem_file))
+		except Exception:
+			return []
+
+		root_tasks = list(getattr(problem, "htn_tasks", ()) or ())
+		if not root_tasks:
+			return []
+
+		bridge_methods_by_task: Dict[str, List[Any]] = {}
+		for method in method_library.methods:
+			ordered_subtasks = tuple(getattr(method, "subtasks", ()) or ())
+			if len(ordered_subtasks) != 1:
+				continue
+			child = ordered_subtasks[0]
+			if getattr(child, "kind", "") != "compound":
+				continue
+			bridge_methods_by_task.setdefault(str(method.task_name).strip(), []).append(method)
+
+		bridge_tasks_by_source: Dict[str, List[str]] = {}
+		for task in method_library.compound_tasks:
+			source_name = str(getattr(task, "source_name", "") or "").strip()
+			task_name = str(getattr(task, "name", "") or "").strip()
+			if not source_name or not task_name or source_name == task_name:
+				continue
+			if task_name not in bridge_methods_by_task:
+				continue
+			bridge_tasks_by_source.setdefault(source_name, []).append(task_name)
+
+		occurrence_counts: Dict[str, int] = {}
+		bridge_specs: List[Dict[str, Any]] = []
+		for root_index, root_task in enumerate(root_tasks, start=1):
+			source_name = str(getattr(root_task, "task_name", "") or "").strip()
+			if not source_name:
+				continue
+			candidates = bridge_tasks_by_source.get(source_name) or ()
+			expected_bridge_task_name = query_root_alias_task_name(root_index, source_name)
+			if expected_bridge_task_name in candidates:
+				bridge_task_name = expected_bridge_task_name
+				occurrence_counts[source_name] = occurrence_counts.get(source_name, 0) + 1
+				for bridge_method in bridge_methods_by_task.get(bridge_task_name, ()):
+					child = tuple(getattr(bridge_method, "subtasks", ()) or ())[0]
+					bridge_specs.append({
+						"bridge_task_name": bridge_task_name,
+						"bridge_method_name": str(bridge_method.method_name).strip(),
+						"child_task_name": str(getattr(child, "task_name", "")).strip(),
+						"root_task_args": [
+							str(arg).strip()
+							for arg in (getattr(root_task, "args", ()) or ())
+						],
+					})
+				continue
+			occurrence_index = occurrence_counts.get(source_name, 0)
+			occurrence_counts[source_name] = occurrence_index + 1
+			if occurrence_index >= len(candidates):
+				continue
+			bridge_task_name = candidates[occurrence_index]
+			for bridge_method in bridge_methods_by_task.get(bridge_task_name, ()):
+				child = tuple(getattr(bridge_method, "subtasks", ()) or ())[0]
+				bridge_specs.append({
+					"bridge_task_name": bridge_task_name,
+					"bridge_method_name": str(bridge_method.method_name).strip(),
+					"child_task_name": str(getattr(child, "task_name", "")).strip(),
+					"root_task_args": [
+						str(arg).strip()
+						for arg in (getattr(root_task, "args", ()) or ())
+					],
+				})
+		return bridge_specs
+
+	def _extract_failed_goals(self, stdout: str) -> List[str]:
+		pattern = re.compile(r"runtime goal failed\s+fail_goal\((.*)\)\s*$")
+		failed: List[str] = []
+		for raw_line in stdout.splitlines():
+			line = raw_line.strip()
+			match = pattern.search(line)
+			if match is None:
+				continue
+			payload = match.group(1).strip()
+			if payload:
+				failed.append(payload)
+		return failed
+
+	def _render_action_path(self, action_path: Sequence[str]) -> str:
+		if not action_path:
+			return ""
+		return "\n".join(action_path) + "\n"
+
+	@staticmethod
+	def _call(name: str, args: Sequence[str] = ()) -> str:
+		functor = JasonRunner._sanitize_name(name)
+		if not args:
+			return functor
+		return f"{functor}({', '.join(args)})"
+
+	@classmethod
+	def _runtime_call(cls, name: str, args: Sequence[str] = ()) -> str:
+		functor = cls._sanitize_name(name)
+		if not args:
+			return functor
+		rendered_args = [cls._runtime_atom_term(arg) for arg in args]
+		return f"{functor}({', '.join(rendered_args)})"
+
+	@staticmethod
+	def _type_atom(type_name: str) -> str:
+		return JasonRunner._sanitize_name(str(type_name or "object")).lower() or "object"
+
+	@staticmethod
+	def _sanitize_name(name: str) -> str:
+		return re.sub(r"[^A-Za-z0-9_]+", "_", str(name).strip()).strip("_") or "term"
+
+	@staticmethod
+	def _asl_string(text: str) -> str:
+		return json.dumps(str(text))
+
+	@classmethod
+	def _asl_atom_or_string(cls, text: str) -> str:
+		token = str(text).strip()
+		if re.fullmatch(r"[a-z][a-z0-9_]*", token):
+			return token
+		return cls._asl_string(token)
+
+	@classmethod
+	def _runtime_atom_term(cls, text: str) -> str:
+		token = str(text).strip()
+		if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+			return token
+		return cls._asl_atom_or_string(token)
+
+	@classmethod
+	def _type_closure(
+		cls,
+		type_name: Optional[str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> Tuple[str, ...]:
+		if not type_name:
+			return ()
+
+		closure: List[str] = []
+		visited: set[str] = set()
+		cursor: Optional[str] = str(type_name).strip()
+		while cursor and cursor not in visited:
+			visited.add(cursor)
+			if cursor != "object":
+				closure.append(cursor)
+			cursor = type_parent_map.get(cursor)
+		return tuple(closure)
+
+	@staticmethod
+	def _split_plan_head(head_line: str) -> Optional[Tuple[str, str, str]]:
+		match = re.match(r"^(\s*\+![^\s(:]+(?:\([^)]*\))?\s*:\s*)(.*?)(\s*<-\s*)$", head_line)
+		if match is None:
+			return None
+		return match.group(1), match.group(2).strip(), match.group(3)
+
+	@staticmethod
+	def _split_method_trigger_head(
+		head_line: str,
+	) -> Optional[Tuple[str, str, Tuple[str, ...], str, str]]:
+		match = re.match(
+			r"^(\s*\+!([^\s(:]+)(?:\(([^)]*)\))?\s*:\s*)(.*?)(\s*<-\s*)$",
+			head_line,
+		)
+		if match is None:
+			return None
+		args_text = (match.group(3) or "").strip()
+		args = tuple(part.strip() for part in args_text.split(",") if part.strip())
+		return match.group(1), match.group(2).strip(), args, match.group(4).strip(), match.group(5)
+
+	@staticmethod
+	def _parse_asl_goal_statement(line: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		statement = str(line).strip().rstrip(";.")
+		match = re.match(r"^!([^\s(;]+)(?:\(([^)]*)\))?$", statement)
+		if match is None:
+			return None
+		args_text = (match.group(2) or "").strip()
+		args = tuple(part.strip() for part in args_text.split(",") if part.strip())
+		return match.group(1).strip(), args
+
+	@staticmethod
+	def _parse_runtime_action_call(line: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		statement = str(line).strip().rstrip(";.")
+		match = re.match(r"^([^\s(;]+)(?:\(([^)]*)\))?$", statement)
+		if match is None:
+			return None
+		args_text = (match.group(2) or "").strip()
+		args = tuple(part.strip() for part in args_text.split(",") if part.strip())
+		return match.group(1).strip(), args
+
+	@classmethod
+	def _render_guided_action_goal(cls, action_call: str) -> str:
+		parsed_action = cls._parse_runtime_action_call(action_call)
+		if parsed_action is None:
+			return str(action_call).strip()
+		action_name, action_args = parsed_action
+		return cls._runtime_call(action_name, action_args)
+
+	@staticmethod
+	def _trace_method_name_from_chunk(chunk: Sequence[str]) -> str:
+		for line in chunk:
+			match = re.search(r'"runtime trace method flat "\s*,\s*"([^"]+)"', line)
+			if match is not None:
+				return match.group(1).strip()
+		return ""
+
+	@staticmethod
+	def _method_is_runtime_noop(method: Any) -> bool:
+		subtasks = tuple(getattr(method, "subtasks", ()) or ())
+		if not subtasks:
+			return True
+		if len(subtasks) != 1:
+			return False
+		step = subtasks[0]
+		if str(getattr(step, "kind", "") or "") != "primitive":
+			return False
+		action_name = str(
+			getattr(step, "action_name", None)
+			or getattr(step, "task_name", "")
+			or "",
+		).strip()
+		return action_name in {"nop", "noop"}
+
+	@classmethod
+	def _progress_guard_specs_by_task(
+		cls,
+		method_library: HTNMethodLibrary,
+	) -> Dict[str, Tuple[Tuple[str, Tuple[int, ...]], ...]]:
+		specs_by_task: Dict[str, List[Tuple[str, Tuple[int, ...]]]] = {}
+		inferred_source_specs: Dict[str, Dict[str, Tuple[int, ...]]] = {}
+		for method in method_library.methods or ():
+			task_name = str(getattr(method, "task_name", "") or "").strip()
+			task = method_library.task_for_name(task_name)
+			if task is None:
+				continue
+			task_parameters = tuple(str(item) for item in (getattr(task, "parameters", ()) or ()))
+			parameter_index = {parameter: index for index, parameter in enumerate(task_parameters)}
+			source_predicates = {
+				cls._sanitize_name(predicate)
+				for predicate in tuple(getattr(task, "source_predicates", ()) or ())
+				if str(predicate or "").strip()
+			}
+			if not source_predicates:
+				continue
+			for literal in tuple(getattr(method, "context", ()) or ()):
+				if getattr(literal, "is_equality", False) or not getattr(literal, "is_positive", True):
+					continue
+				predicate_name = str(getattr(literal, "predicate", "") or "").strip()
+				if cls._sanitize_name(predicate_name) not in source_predicates:
+					continue
+				literal_args = tuple(str(arg) for arg in (getattr(literal, "args", ()) or ()))
+				if any(arg not in parameter_index for arg in literal_args):
+					continue
+				inferred_source_specs.setdefault(task_name, {})[predicate_name] = tuple(
+					parameter_index[arg]
+					for arg in literal_args
+				)
+		tasks = tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ())
+		for task in tasks:
+			task_name = str(getattr(task, "name", "") or "").strip()
+			if not task_name:
+				continue
+			parameters = tuple(str(item) for item in (getattr(task, "parameters", ()) or ()))
+			parameter_index = {parameter: index for index, parameter in enumerate(parameters)}
+			specs: List[Tuple[str, Tuple[int, ...]]] = []
+			headline = getattr(task, "headline_literal", None)
+			if headline is not None and not getattr(headline, "is_equality", False):
+				headline_args = tuple(getattr(headline, "args", ()) or ())
+				predicate = str(getattr(headline, "predicate", "") or "").strip()
+				indices = tuple(
+					parameter_index[arg]
+					for arg in headline_args
+					if arg in parameter_index
+				)
+				if predicate and len(indices) == len(headline_args):
+					specs.append((predicate, indices))
+			if not specs:
+				for predicate in tuple(getattr(task, "source_predicates", ()) or ()):
+					predicate_name = str(predicate or "").strip()
+					if not predicate_name:
+						continue
+					inferred_indices = (
+						inferred_source_specs.get(task_name, {}).get(predicate_name)
+					)
+					if inferred_indices is not None:
+						specs.append((predicate_name, inferred_indices))
+					else:
+						specs.append((predicate_name, tuple(range(len(parameters)))))
+			if specs:
+				specs_by_task[task_name] = specs
+		return {
+			task_name: tuple(specs)
+			for task_name, specs in specs_by_task.items()
+		}
+
+	@classmethod
+	def _progress_target_guard_atom(
+		cls,
+		task_name: str,
+		predicate_name: str,
+		args: Sequence[str],
+		*,
+		preserve_variables: bool = False,
+	) -> str:
+		predicate = str(predicate_name or "").strip()
+		if not predicate:
+			return ""
+		rendered_args = (
+			cls._runtime_atom_term(task_name),
+			cls._runtime_atom_term(predicate),
+			*tuple(
+				(
+					str(arg).strip()
+					if preserve_variables and cls._looks_like_asl_variable(str(arg).strip())
+					else cls._runtime_atom_term(arg)
+				)
+				for arg in args
+				if str(arg).strip()
+			),
+		)
+		return cls._call(f"progress_target_{len(rendered_args) - 2}", rendered_args)
+
+	@staticmethod
+	def _combine_contexts(*contexts: str) -> str:
+		parts: List[str] = []
+		seen: set[str] = set()
+		for context in contexts:
+			for part in str(context or "").split(" & "):
+				cleaned = part.strip()
+				if not cleaned or cleaned == "true" or cleaned in seen:
+					continue
+				seen.add(cleaned)
+				parts.append(cleaned)
+		return " & ".join(parts) if parts else "true"
+
+	@staticmethod
+	def _strip_quoted_atom(text: str) -> str:
+		token = str(text).strip()
+		if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+			return token[1:-1]
+		return token
+
+	@staticmethod
+	def _failure_handler_args(parameters: Sequence[str]) -> Tuple[str, ...]:
+		used_counts: Dict[str, int] = {}
+		rendered_args: List[str] = []
+		for index, parameter in enumerate(parameters, start=1):
+			token = re.sub(r"^[?]+", "", str(parameter).strip())
+			token = re.sub(r"[^A-Za-z0-9]+", "_", token).strip("_").upper()
+			if not token:
+				token = f"ARG{index}"
+			if not token[0].isalpha():
+				token = f"ARG_{token}"
+			count = used_counts.get(token, 0) + 1
+			used_counts[token] = count
+			rendered_args.append(token if count == 1 else f"{token}{count}")
+		return tuple(rendered_args)
+
+	def _render_failure_handlers(
+		self,
+		method_library: HTNMethodLibrary | None,
+		*,
+		ordered_query_sequence: bool = True,
+	) -> List[str]:
+		lines = ["/* Failure Handlers */"]
+		lines.append("-!run_dfa : true <-")
+		lines.extend(
+			self._indent_body(
+				['.print("runtime goal failed ", fail_goal(run_dfa))', ".stopMAS"],
+			),
+		)
+		lines.append("")
+		lines.append("-!verify_targets : true <-")
+		lines.extend(
+			self._indent_body(
+				['.print("runtime goal failed ", fail_goal(verify_targets))', ".stopMAS"],
+			),
+		)
+		lines.append("")
+		if method_library is None:
+			return lines
+		target_task_names = {
+			str(binding.task_name).strip()
+			for binding in method_library.target_task_bindings or []
+			if str(binding.task_name).strip()
+		}
+		seen_triggers: set[str] = set()
+		for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
+			if not task.is_primitive and task.name in target_task_names:
+				continue
+			handler_args = self._failure_handler_args(task.parameters)
+			trigger = self._call(self._sanitize_name(task.name), handler_args)
+			if trigger in seen_triggers:
+				continue
+			seen_triggers.add(trigger)
+			fail_term = self._call("fail_goal", (self._asl_atom_or_string(task.name), *handler_args))
+			blocked_goal = self._call(
+				"blocked_runtime_goal",
+				(self._asl_atom_or_string(self._sanitize_name(task.name)), *handler_args),
+			)
+			lines.append(f"-!{trigger} : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						f'.print("runtime goal failed ", {fail_term})',
+						f"+{blocked_goal}",
+						".fail",
+					],
+				),
+			)
+			lines.append("")
+		return lines
+
+	def _rewrite_primitive_wrappers_for_environment(self, agentspeak_code: str) -> str:
+		start_marker = "/* Primitive Action Plans */"
+		end_marker = "/* HTN Method Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		rewritten_chunks: List[str] = []
+		for chunk in chunks:
+			head_line = chunk[0]
+			body_lines = chunk[1:]
+			if not head_line.strip().startswith("+!"):
+				rewritten_chunks.append("\n".join(chunk))
+				continue
+			if not body_lines:
+				rewritten_chunks.append("\n".join(chunk))
+				continue
+			statements = [line.strip().rstrip(";.") for line in body_lines if line.strip()]
+			if not statements or not statements[0]:
+				rewritten_chunks.append("\n".join(chunk))
+				continue
+			statements.append(".perceive")
+			rewritten_body = [
+				f"\t{statement}{'.' if index == len(statements) - 1 else ';'}"
+				for index, statement in enumerate(statements)
+			]
+			rewritten_chunks.append("\n".join([head_line, *rewritten_body]))
+
+		rewritten_section = "\n\n".join([header, *rewritten_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _ground_local_witness_method_plans(
+		self,
+		agentspeak_code: str,
+		*,
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+		max_candidates_per_clause: int = 64,
+		max_total_specialised_chunks: int = 1024,
+	) -> str:
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* DFA Transition Wrappers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		fact_index, type_domains = self._runtime_fact_index_for_local_witness_grounding(
+			seed_facts=seed_facts,
+			runtime_objects=runtime_objects,
+			object_types=object_types,
+			type_parent_map=type_parent_map,
+		)
+		specialised_chunks: List[str] = []
+		changed = False
+		total_specialised_chunks = 0
+		for chunk in chunks:
+			specialised = self._specialise_method_chunk_local_witnesses(
+				chunk,
+				fact_index=fact_index,
+				type_domains=type_domains,
+				max_candidates_per_clause=max_candidates_per_clause,
+			)
+			next_specialised_count = total_specialised_chunks + max(0, len(specialised) - 1)
+			if next_specialised_count > max_total_specialised_chunks:
+				specialised = ["\n".join(chunk)]
+			else:
+				total_specialised_chunks = next_specialised_count
+			if len(specialised) != 1 or specialised[0] != "\n".join(chunk):
+				changed = True
+			specialised_chunks.extend(specialised)
+
+		pre_noop_specialisation_chunks = list(specialised_chunks)
+		specialised_chunks = self._specialise_chunks_from_noop_body_support(
+			specialised_chunks,
+			fact_index=fact_index,
+			type_domains=type_domains,
+			max_candidates_per_chunk=max_candidates_per_clause,
+		)
+		if specialised_chunks != pre_noop_specialisation_chunks:
+			changed = True
+		pre_noop_prefix_context_chunks = list(specialised_chunks)
+		specialised_chunks = self._specialise_chunks_from_noop_prefix_contexts(
+			specialised_chunks,
+			max_candidates_per_chunk=max_candidates_per_clause,
+		)
+		if specialised_chunks != pre_noop_prefix_context_chunks:
+			changed = True
+		pre_guard_promotion_chunks = list(specialised_chunks)
+		specialised_chunks = self._promote_body_no_ancestor_guards_to_context(
+			specialised_chunks,
+		)
+		if specialised_chunks != pre_guard_promotion_chunks:
+			changed = True
+		pre_ordered_chunks = list(specialised_chunks)
+		specialised_chunks = self._order_runtime_method_plan_chunks(
+			specialised_chunks,
+			fact_index=fact_index,
+			type_domains=type_domains,
+		)
+		if specialised_chunks != pre_ordered_chunks:
+			changed = True
+
+		if not changed:
+			return agentspeak_code
+
+		rewritten_section = "\n\n".join([header, *specialised_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _strip_seed_fact_beliefs(
+		self,
+		agentspeak_code: str,
+		*,
+		seed_facts: Sequence[str],
+	) -> str:
+		def normalise_belief_line(text: str) -> str:
+			return re.sub(r"\s+", "", str(text or "").strip())
+
+		seed_belief_lines = {
+			normalise_belief_line(f"{atom}.")
+			for atom in (
+				self._hddl_fact_to_atom(fact)
+				for fact in seed_facts
+			)
+			if atom
+		}
+		if not seed_belief_lines:
+			return agentspeak_code
+		lines = [
+			line
+			for line in agentspeak_code.splitlines()
+			if normalise_belief_line(line) not in seed_belief_lines
+		]
+		return "\n".join(lines).rstrip() + "\n"
+
+	def _specialise_chunks_from_noop_body_support(
+		self,
+		chunks: Sequence[str],
+		*,
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		type_domains: Dict[str, Tuple[str, ...]],
+		max_candidates_per_chunk: int,
+	) -> List[str]:
+		if not chunks:
+			return []
+
+		noop_specs_by_task: Dict[str, List[Dict[str, Any]]] = {}
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				continue
+			parsed_head = self._parse_asl_method_head(lines[0])
+			if parsed_head is None or not self._chunk_is_noop_method_plan(lines[1:]):
+				continue
+			task_name, head_args, context_parts = parsed_head
+			context_atoms: List[Dict[str, Any]] = []
+			inequalities: List[Tuple[str, str]] = []
+			for part in context_parts:
+				parsed = self._parse_asl_context_conjunct(part)
+				if parsed is None:
+					continue
+				if parsed.get("kind") == "atom":
+					context_atoms.append(parsed)
+				elif parsed.get("kind") == "inequality":
+					inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
+			noop_specs_by_task.setdefault(task_name, []).append(
+				{
+					"head_args": head_args,
+					"context_atoms": tuple(context_atoms),
+					"inequalities": tuple(inequalities),
+				},
+			)
+
+		expanded_chunks: List[str] = []
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				expanded_chunks.append(chunk)
+				continue
+			parsed_head = self._parse_asl_method_head(lines[0])
+			if parsed_head is None:
+				expanded_chunks.append(chunk)
+				continue
+			_, head_args, context_parts = parsed_head
+			trigger_vars = {
+				arg
+				for arg in head_args
+				if self._looks_like_asl_variable(arg)
+			}
+			caller_type_constraints: List[Tuple[str, str]] = []
+			caller_inequalities: List[Tuple[str, str]] = []
+			for part in context_parts:
+				parsed = self._parse_asl_context_conjunct(part)
+				if parsed is None:
+					continue
+				if parsed.get("kind") == "atom" and str(parsed.get("predicate")) == "object_type":
+					args = tuple(parsed.get("args") or ())
+					if len(args) == 2:
+						caller_type_constraints.append((str(args[0]), str(args[1])))
+				elif parsed.get("kind") == "inequality":
+					caller_inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
+
+			candidate_chunks = [chunk]
+			seen_chunks = {chunk}
+			chunk_vars = self._extract_asl_variables(chunk)
+			combined_bindings: List[Dict[str, str]] = [{}]
+			seen_combined_bindings: set[Tuple[Tuple[str, str], ...]] = {()}
+			for line in lines[1:]:
+				goal = self._parse_asl_goal_call(line)
+				if goal is None:
+					continue
+				goal_support_bindings: List[Dict[str, str]] = []
+				for spec in noop_specs_by_task.get(str(goal[0]), ()):
+					for binding in self._noop_support_bindings(
+						head_args=tuple(spec.get("head_args") or ()),
+						goal_args=tuple(goal[1]),
+						context_atoms=tuple(spec.get("context_atoms") or ()),
+						inequalities=tuple(spec.get("inequalities") or ()),
+						fact_index=fact_index,
+						type_domains=type_domains,
+						caller_type_constraints=tuple(caller_type_constraints),
+						caller_inequalities=tuple(caller_inequalities),
+					):
+						goal_support_bindings.append(binding)
+						head_binding = {
+							variable: value
+							for variable, value in binding.items()
+							if variable in trigger_vars
+						}
+						if not head_binding:
+							continue
+						specialised_chunk = "\n".join(
+							self._substitute_asl_bindings(chunk_line, head_binding)
+							for chunk_line in lines
+						)
+						if specialised_chunk in seen_chunks:
+							continue
+						if len(candidate_chunks) >= max_candidates_per_chunk:
+							continue
+						seen_chunks.add(specialised_chunk)
+						candidate_chunks.append(specialised_chunk)
+				if not goal_support_bindings:
+					continue
+				next_combined_bindings = list(combined_bindings)
+				for existing_binding in combined_bindings:
+					for support_binding in goal_support_bindings:
+						merged_binding = self._merge_asl_bindings(
+							existing_binding,
+							support_binding,
+						)
+						if merged_binding is None:
+							continue
+						signature = tuple(sorted(merged_binding.items()))
+						if signature in seen_combined_bindings:
+							continue
+						if len(next_combined_bindings) >= max_candidates_per_chunk:
+							continue
+						seen_combined_bindings.add(signature)
+						next_combined_bindings.append(merged_binding)
+				combined_bindings = next_combined_bindings
+			for binding in combined_bindings:
+				chunk_binding = {
+					variable: value
+					for variable, value in binding.items()
+					if variable in chunk_vars
+				}
+				if not chunk_binding:
+					continue
+				specialised_chunk = "\n".join(
+					self._substitute_asl_bindings(chunk_line, chunk_binding)
+					for chunk_line in lines
+				)
+				if specialised_chunk in seen_chunks:
+					continue
+				if len(candidate_chunks) >= max_candidates_per_chunk:
+					continue
+				seen_chunks.add(specialised_chunk)
+				candidate_chunks.append(specialised_chunk)
+			expanded_chunks.extend(candidate_chunks)
+
+		return expanded_chunks
+
+	def _specialise_chunks_from_noop_prefix_contexts(
+		self,
+		chunks: Sequence[str],
+		*,
+		max_candidates_per_chunk: int,
+	) -> List[str]:
+		if not chunks:
+			return []
+
+		noop_contexts_by_task: Dict[str, List[Tuple[Tuple[str, ...], Tuple[str, ...]]]] = {}
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				continue
+			parsed_head = self._parse_asl_method_head(lines[0])
+			if parsed_head is None or not self._chunk_is_noop_method_plan(lines[1:]):
+				continue
+			task_name, head_args, context_parts = parsed_head
+			no_op_context_parts = tuple(
+				part
+				for part in context_parts
+				if not str(part).strip().startswith("object_type(")
+			)
+			if not no_op_context_parts:
+				continue
+			noop_contexts_by_task.setdefault(task_name, []).append(
+				(head_args, no_op_context_parts),
+			)
+
+		if not noop_contexts_by_task:
+			return list(chunks)
+
+		expanded_chunks: List[str] = []
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				expanded_chunks.append(chunk)
+				continue
+			parsed_head = self._parse_asl_method_head(lines[0])
+			if parsed_head is None or self._chunk_is_noop_method_plan(lines[1:]):
+				expanded_chunks.append(chunk)
+				continue
+
+			chunk_vars = self._extract_asl_variables(chunk)
+			prefix_context_variants: List[Tuple[str, ...]] = [()]
+			candidate_chunks: List[str] = []
+			seen_candidates = {chunk}
+			for line in lines[1:]:
+				goal = self._parse_asl_goal_call(line)
+				if goal is None:
+					continue
+				goal_task_name, goal_args = goal
+				noop_specs = noop_contexts_by_task.get(goal_task_name)
+				if not noop_specs:
+					break
+
+				next_variants: List[Tuple[str, ...]] = []
+				for prefix_context in prefix_context_variants:
+					for head_args, context_parts in noop_specs:
+						instantiated_context = self._instantiate_noop_prefix_context(
+							head_args=head_args,
+							goal_args=goal_args,
+							context_parts=context_parts,
+							chunk_vars=chunk_vars,
+						)
+						if not instantiated_context:
+							continue
+						combined_context = tuple(
+							dict.fromkeys([*prefix_context, *instantiated_context]),
+						)
+						if not combined_context or combined_context in next_variants:
+							continue
+						next_variants.append(combined_context)
+						if len(combined_context) < 2:
+							continue
+						rewritten_head = self._append_asl_method_context_parts(
+							lines[0],
+							combined_context,
+						)
+						if rewritten_head == lines[0]:
+							continue
+						specialised_chunk = "\n".join([rewritten_head, *lines[1:]])
+						if specialised_chunk in seen_candidates:
+							continue
+						seen_candidates.add(specialised_chunk)
+						candidate_chunks.append(specialised_chunk)
+						if len(candidate_chunks) >= max_candidates_per_chunk:
+							break
+					if len(candidate_chunks) >= max_candidates_per_chunk:
+						break
+				if not next_variants or len(candidate_chunks) >= max_candidates_per_chunk:
+					break
+				prefix_context_variants = next_variants
+
+			expanded_chunks.extend(candidate_chunks)
+			expanded_chunks.append(chunk)
+		return expanded_chunks
+
+	def _instantiate_noop_prefix_context(
+		self,
+		*,
+		head_args: Sequence[str],
+		goal_args: Sequence[str],
+		context_parts: Sequence[str],
+		chunk_vars: Set[str],
+	) -> Tuple[str, ...]:
+		if len(head_args) != len(goal_args):
+			return ()
+		binding: Dict[str, str] = {}
+		for head_arg, goal_arg in zip(head_args, goal_args):
+			if self._looks_like_asl_variable(str(head_arg)):
+				binding[str(head_arg)] = str(goal_arg)
+				continue
+			if self._looks_like_asl_variable(str(goal_arg)):
+				continue
+			if self._canonical_runtime_token(str(head_arg)) != (
+				self._canonical_runtime_token(str(goal_arg))
+			):
+				return ()
+
+		instantiated_parts: List[str] = []
+		for part in context_parts:
+			substituted = self._substitute_asl_bindings(str(part), binding).strip()
+			if (
+				not substituted
+				or substituted == "true"
+				or substituted.startswith("object_type(")
+			):
+				continue
+			introduced_vars = self._extract_asl_variables(substituted) - set(chunk_vars)
+			if introduced_vars:
+				return ()
+			instantiated_parts.append(substituted)
+		return tuple(dict.fromkeys(instantiated_parts))
+
+	def _promote_body_no_ancestor_guards_to_context(
+		self,
+		chunks: Sequence[str],
+	) -> List[str]:
+		rewritten_chunks: List[str] = []
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				rewritten_chunks.append(chunk)
+				continue
+			head_line = lines[0]
+			guard_context_parts: List[str] = []
+			for line in lines[1:]:
+				statement = str(line or "").strip().rstrip(";.")
+				if not statement.startswith("pipeline.no_ancestor_goal("):
+					continue
+				if statement not in guard_context_parts:
+					guard_context_parts.append(statement)
+			if not guard_context_parts:
+				rewritten_chunks.append(chunk)
+				continue
+			rewritten_head = self._append_asl_method_context_parts(
+				head_line,
+				guard_context_parts,
+			)
+			if rewritten_head == head_line:
+				rewritten_chunks.append(chunk)
+				continue
+			rewritten_chunks.append("\n".join([rewritten_head, *lines[1:]]))
+		return rewritten_chunks
+
+	@staticmethod
+	def _append_asl_method_context_parts(
+		head_line: str,
+		extra_context_parts: Sequence[str],
+	) -> str:
+		if not extra_context_parts:
+			return head_line
+		match = re.match(r"^(\s*\+![^\s(:]+(?:\([^)]*\))?\s*:\s*)(.*?)(\s*<-\s*)$", head_line)
+		if match is None:
+			return head_line
+		prefix, context_text, suffix = match.groups()
+		context_parts = [
+			part.strip()
+			for part in str(context_text or "").split("&")
+			if part.strip() and part.strip() != "true"
+		]
+		seen = set(context_parts)
+		for part in extra_context_parts:
+			rendered = str(part or "").strip()
+			if not rendered or rendered in seen:
+				continue
+			context_parts.append(rendered)
+			seen.add(rendered)
+		rewritten_context = " & ".join(context_parts) if context_parts else "true"
+		return f"{prefix}{rewritten_context}{suffix}"
+
+	def _order_runtime_method_plan_chunks(
+		self,
+		chunks: Sequence[str],
+		*,
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		type_domains: Dict[str, Tuple[str, ...]],
+	) -> List[str]:
+		if not chunks:
+			return []
+
+		current_fact_arg_pairs = self._runtime_fact_arg_pair_index(fact_index)
+		parsed_chunks: List[Dict[str, Any]] = []
+		for index, chunk in enumerate(chunks):
+			lines = chunk.splitlines()
+			if not lines:
+				parsed_chunks.append({"index": index, "chunk": chunk, "task_name": "", "sort_key": (0,)})
+				continue
+			parsed_head = self._parse_asl_method_head(lines[0])
+			if parsed_head is None:
+				parsed_chunks.append({"index": index, "chunk": chunk, "task_name": "", "sort_key": (0,)})
+				continue
+			task_name, head_args, context_parts = parsed_head
+			body_lines = list(lines[1:])
+			parsed_chunks.append(
+				{
+					"index": index,
+					"chunk": chunk,
+					"task_name": task_name,
+					"head_args": head_args,
+					"context_parts": context_parts,
+					"body_lines": body_lines,
+				},
+			)
+
+		noop_specs_by_task: Dict[str, List[Dict[str, Any]]] = {}
+		for item in parsed_chunks:
+			if not self._chunk_is_noop_method_plan(item.get("body_lines") or ()):
+				continue
+			task_name = str(item.get("task_name") or "")
+			if not task_name:
+				continue
+			context_atoms: List[Dict[str, Any]] = []
+			inequalities: List[Tuple[str, str]] = []
+			for part in item.get("context_parts") or ():
+				parsed = self._parse_asl_context_conjunct(str(part))
+				if parsed is None:
+					continue
+				if parsed.get("kind") == "atom":
+					context_atoms.append(parsed)
+				elif parsed.get("kind") == "inequality":
+					inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
+			noop_specs_by_task.setdefault(task_name, []).append(
+				{
+					"head_args": tuple(item.get("head_args") or ()),
+					"context_atoms": tuple(context_atoms),
+					"inequalities": tuple(inequalities),
+				},
+			)
+
+		grouped_indexes: Dict[str, List[int]] = {}
+		group_order: List[str] = []
+		for index, item in enumerate(parsed_chunks):
+			task_name = str(item.get("task_name") or f"__raw_{index}")
+			if task_name not in grouped_indexes:
+				grouped_indexes[task_name] = []
+				group_order.append(task_name)
+			grouped_indexes[task_name].append(index)
+
+		ordered_chunks: List[str] = []
+		for task_name in group_order:
+			group_items = [parsed_chunks[index] for index in grouped_indexes[task_name]]
+			for item in group_items:
+				body_lines = list(item.get("body_lines") or ())
+				caller_type_constraints: List[Tuple[str, str]] = []
+				caller_inequalities: List[Tuple[str, str]] = []
+				for part in tuple(item.get("context_parts") or ()):
+					parsed = self._parse_asl_context_conjunct(str(part))
+					if parsed is None:
+						continue
+					if parsed.get("kind") == "atom" and str(parsed.get("predicate")) == "object_type":
+						args = tuple(parsed.get("args") or ())
+						if len(args) == 2:
+							caller_type_constraints.append((str(args[0]), str(args[1])))
+					elif parsed.get("kind") == "inequality":
+						caller_inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
+				body_goals = [
+					goal
+					for goal in (
+						self._parse_asl_goal_call(line)
+						for line in body_lines
+					)
+					if goal is not None
+				]
+				weighted_noop_support = 0
+				for goal_index, goal in enumerate(body_goals, start=1):
+					if self._goal_has_noop_runtime_support(
+						goal_task_name=str(goal[0]),
+						goal_args=tuple(goal[1]),
+						noop_specs_by_task=noop_specs_by_task,
+						fact_index=fact_index,
+						type_domains=type_domains,
+						caller_type_constraints=tuple(caller_type_constraints),
+						caller_inequalities=tuple(caller_inequalities),
+					):
+						weighted_noop_support += goal_index
+				body_current_fact_pair_score = self._body_current_fact_pair_score(
+					body_goals,
+					current_fact_arg_pairs,
+				)
+				grounded_head_arg_count = sum(
+					1
+					for arg in tuple(item.get("head_args") or ())
+					if not self._looks_like_asl_variable(str(arg))
+				)
+				non_type_context_count = sum(
+					1
+					for part in tuple(item.get("context_parts") or ())
+					if not str(part).strip().startswith("object_type(")
+				)
+				grounded_context_arg_count = 0
+				for part in tuple(item.get("context_parts") or ()):
+					parsed = self._parse_asl_context_conjunct(str(part))
+					if parsed is None:
+						continue
+					if parsed.get("kind") == "atom":
+						grounded_context_arg_count += sum(
+							1
+							for arg in tuple(parsed.get("args") or ())
+							if not self._looks_like_asl_variable(str(arg))
+						)
+					elif parsed.get("kind") == "inequality":
+						grounded_context_arg_count += sum(
+							1
+							for arg in (str(parsed["lhs"]), str(parsed["rhs"]))
+							if not self._looks_like_asl_variable(arg)
+						)
+				item["sort_key"] = (
+					0 if self._chunk_is_noop_method_plan(body_lines) else 1,
+					-non_type_context_count,
+					-grounded_head_arg_count,
+					-grounded_context_arg_count,
+					-body_current_fact_pair_score,
+					-weighted_noop_support,
+					int(item.get("index", 0)),
+				)
+			group_items.sort(key=lambda item: tuple(item.get("sort_key") or ()))
+			group_items = list(reversed(group_items))
+			ordered_chunks.extend(str(item["chunk"]) for item in group_items)
+
+		return ordered_chunks
+
+	def _runtime_fact_arg_pair_index(
+		self,
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+	) -> Set[Tuple[str, str]]:
+		arg_pairs: Set[Tuple[str, str]] = set()
+		for (predicate, _), facts in fact_index.items():
+			if predicate in {"object", "object_type"}:
+				continue
+			for fact_args in facts:
+				ground_args = [
+					self._canonical_runtime_token(str(arg))
+					for arg in tuple(fact_args)
+					if not self._looks_like_asl_variable(str(arg))
+				]
+				for left_index, left in enumerate(ground_args):
+					for right in ground_args[left_index + 1:]:
+						if left == right:
+							continue
+						arg_pairs.add((left, right))
+						arg_pairs.add((right, left))
+		return arg_pairs
+
+	def _body_current_fact_pair_score(
+		self,
+		body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
+		current_fact_arg_pairs: Set[Tuple[str, str]],
+	) -> int:
+		score = 0
+		for _, goal_args in body_goals:
+			ground_args = [
+				self._canonical_runtime_token(str(arg))
+				for arg in tuple(goal_args)
+				if not self._looks_like_asl_variable(str(arg))
+			]
+			matched_pairs: Set[Tuple[str, str]] = set()
+			for left_index, left in enumerate(ground_args):
+				for right in ground_args[left_index + 1:]:
+					if left == right:
+						continue
+					pair = (left, right)
+					if pair in current_fact_arg_pairs:
+						matched_pairs.add(pair)
+			score += len(matched_pairs)
+		return score
+
+	def _specialise_method_chunk_local_witnesses(
+		self,
+		chunk: Sequence[str],
+		*,
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		type_domains: Dict[str, Tuple[str, ...]],
+		max_candidates_per_clause: int,
+	) -> List[str]:
+		original = "\n".join(chunk)
+		if not chunk:
+			return [original]
+
+		parsed_head = self._parse_asl_method_head(chunk[0])
+		if parsed_head is None:
+			return [original]
+		_, head_args, context_parts = parsed_head
+		chunk_text = "\n".join(chunk)
+		trigger_vars = {
+			term
+			for term in head_args
+			if self._looks_like_asl_variable(term)
+		}
+		all_vars = self._extract_asl_variables(chunk_text)
+		local_vars = sorted(all_vars - trigger_vars)
+		if not local_vars:
+			return [original]
+
+		type_constraints: List[Tuple[str, str]] = []
+		inequalities: List[Tuple[str, str]] = []
+		binding_atoms: List[Dict[str, Any]] = []
+		local_var_set = set(local_vars)
+		for part in context_parts:
+			parsed = self._parse_asl_context_conjunct(part)
+			if parsed is None:
+				continue
+			kind = parsed.get("kind")
+			if kind == "inequality":
+				inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
+				continue
+			if kind != "atom":
+				continue
+			predicate = str(parsed["predicate"])
+			args = tuple(str(arg) for arg in parsed["args"])
+			if predicate == "object_type" and len(args) == 2:
+				type_constraints.append((args[0], args[1]))
+				continue
+			atom_vars = {
+				term
+				for term in args
+				if self._looks_like_asl_variable(term)
+			}
+			if atom_vars & local_var_set:
+				binding_atoms.append({"predicate": predicate, "args": args})
+
+		binding_atoms.sort(
+			key=lambda atom: (
+				len(fact_index.get((str(atom["predicate"]), len(tuple(atom["args"]))), ())),
+				-len(
+					[
+						term
+						for term in tuple(atom["args"])
+						if not self._looks_like_asl_variable(term)
+					],
+				),
+			),
+		)
+
+		candidate_bindings = self._candidate_bindings_for_local_witnesses(
+			binding_atoms=binding_atoms,
+			type_constraints=type_constraints,
+			inequalities=inequalities,
+			local_vars=local_vars,
+			fact_index=fact_index,
+			type_domains=type_domains,
+			max_candidates_per_clause=max_candidates_per_clause,
+		)
+		if not candidate_bindings:
+			return [original]
+
+		specialised_chunks: List[str] = []
+		seen_chunks: set[str] = set()
+		for binding in candidate_bindings:
+			specialised_chunk = "\n".join(
+				self._substitute_asl_bindings(line, binding)
+				for line in chunk
+			)
+			if specialised_chunk == original or specialised_chunk in seen_chunks:
+				continue
+			seen_chunks.add(specialised_chunk)
+			specialised_chunks.append(specialised_chunk)
+
+		if not specialised_chunks:
+			return [original]
+		specialised_chunks.append(original)
+		return specialised_chunks
+
+	def _candidate_bindings_for_local_witnesses(
+		self,
+		*,
+		binding_atoms: Sequence[Dict[str, Any]],
+		type_constraints: Sequence[Tuple[str, str]],
+		inequalities: Sequence[Tuple[str, str]],
+		local_vars: Sequence[str],
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		type_domains: Dict[str, Tuple[str, ...]],
+		max_candidates_per_clause: int,
+	) -> List[Dict[str, str]]:
+		bindings: List[Dict[str, str]] = [{}]
+		for atom in binding_atoms:
+			next_bindings: List[Dict[str, str]] = []
+			facts = fact_index.get((str(atom["predicate"]), len(tuple(atom["args"]))), ())
+			if not facts:
+				return []
+			for binding in bindings:
+				for fact_args in facts:
+					matched = self._match_grounding_atom(
+						tuple(atom["args"]),
+						fact_args,
+						binding,
+					)
+					if matched is None:
+						continue
+					if not self._binding_satisfies_local_witness_filters(
+						matched,
+						type_constraints=type_constraints,
+						type_domains=type_domains,
+						inequalities=inequalities,
+						local_vars=local_vars,
+						require_all_local_bindings=False,
+					):
+						continue
+					next_bindings.append(matched)
+					if len(next_bindings) > max_candidates_per_clause:
+						return []
+			if not next_bindings:
+				return []
+			bindings = next_bindings
+
+		completed_bindings: List[Dict[str, str]] = []
+		def expand_binding(index: int, binding: Dict[str, str]) -> bool:
+			if len(completed_bindings) > max_candidates_per_clause:
+				return False
+			if index >= len(local_vars):
+				if not self._binding_satisfies_local_witness_filters(
+					binding,
+					type_constraints=type_constraints,
+					type_domains=type_domains,
+					inequalities=inequalities,
+					local_vars=local_vars,
+					require_all_local_bindings=True,
+				):
+					return True
+				completed_bindings.append(dict(binding))
+				return True
+
+			variable = str(local_vars[index])
+			if variable in binding:
+				return expand_binding(index + 1, binding)
+
+			domain = self._local_witness_type_domain(
+				variable,
+				type_constraints=type_constraints,
+				type_domains=type_domains,
+			)
+			if domain is None:
+				return True
+			if not domain:
+				return True
+			if len(domain) > max_candidates_per_clause:
+				return False
+
+			for value in domain:
+				binding[variable] = value
+				if not self._binding_satisfies_local_witness_filters(
+					binding,
+					type_constraints=type_constraints,
+					type_domains=type_domains,
+					inequalities=inequalities,
+					local_vars=local_vars,
+					require_all_local_bindings=False,
+				):
+					binding.pop(variable, None)
+					continue
+				if expand_binding(index + 1, binding) is False:
+					binding.pop(variable, None)
+					return False
+				binding.pop(variable, None)
+			return True
+
+		for binding in bindings:
+			if expand_binding(0, dict(binding)) is False:
+				return []
+
+		unique: Dict[Tuple[Tuple[str, str], ...], Dict[str, str]] = {}
+		for binding in completed_bindings:
+			signature = tuple(sorted(
+				(item, value)
+				for item, value in binding.items()
+				if item in set(local_vars) or value
+			))
+			unique.setdefault(signature, binding)
+		return list(unique.values())
+
+	def _binding_satisfies_local_witness_filters(
+		self,
+		binding: Dict[str, str],
+		*,
+		type_constraints: Sequence[Tuple[str, str]],
+		type_domains: Dict[str, Tuple[str, ...]],
+		inequalities: Sequence[Tuple[str, str]],
+		local_vars: Sequence[str],
+		require_all_local_bindings: bool,
+	) -> bool:
+		if require_all_local_bindings and any(var not in binding for var in local_vars):
+			return False
+
+		for term, type_name in type_constraints:
+			resolved = self._resolve_local_witness_term(term, binding)
+			if resolved is None:
+				continue
+			domain = type_domains.get(str(type_name))
+			if domain is None or resolved not in domain:
+				return False
+
+		for lhs, rhs in inequalities:
+			left_value = self._resolve_local_witness_term(lhs, binding)
+			right_value = self._resolve_local_witness_term(rhs, binding)
+			if left_value is None or right_value is None:
+				continue
+			if self._canonical_runtime_token(left_value) == self._canonical_runtime_token(right_value):
+				return False
+		return True
+
+	def _local_witness_type_domain(
+		self,
+		variable: str,
+		*,
+		type_constraints: Sequence[Tuple[str, str]],
+		type_domains: Dict[str, Tuple[str, ...]],
+	) -> Optional[Tuple[str, ...]]:
+		required_types = [
+			str(type_name)
+			for term, type_name in type_constraints
+			if term == variable
+		]
+		if not required_types:
+			return None
+
+		domain_sets = [
+			set(type_domains.get(type_name, ()))
+			for type_name in required_types
+		]
+		if not domain_sets:
+			return ()
+		domain = set.intersection(*domain_sets)
+		return tuple(sorted(domain))
+
+	@staticmethod
+	def _match_grounding_atom(
+		pattern_args: Sequence[str],
+		fact_args: Sequence[str],
+		binding: Dict[str, str],
+	) -> Optional[Dict[str, str]]:
+		if len(pattern_args) != len(fact_args):
+			return None
+
+		candidate = dict(binding)
+		for pattern_term, fact_term in zip(pattern_args, fact_args):
+			if JasonRunner._looks_like_asl_variable(pattern_term):
+				existing = candidate.get(pattern_term)
+				if existing is not None:
+					if JasonRunner._canonical_runtime_token(existing) != (
+						JasonRunner._canonical_runtime_token(fact_term)
+					):
+						return None
+					continue
+				candidate[pattern_term] = fact_term
+				continue
+			if JasonRunner._canonical_runtime_token(pattern_term) != (
+				JasonRunner._canonical_runtime_token(fact_term)
+			):
+				return None
+		return candidate
+
+	def _runtime_fact_index_for_local_witness_grounding(
+		self,
+		*,
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> Tuple[
+		Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		Dict[str, Tuple[str, ...]],
+	]:
+		facts_by_predicate: Dict[Tuple[str, int], set[Tuple[str, ...]]] = {}
+		type_domains: Dict[str, set[str]] = {}
+
+		for fact in seed_facts:
+			atom = self._hddl_fact_to_atom(fact)
+			parsed = self._parse_runtime_fact_atom(atom)
+			if parsed is None:
+				continue
+			predicate, args = parsed
+			facts_by_predicate.setdefault((predicate, len(args)), set()).add(args)
+
+		for obj in runtime_objects:
+			rendered_object = self._runtime_atom_term(str(obj))
+			facts_by_predicate.setdefault(("object", 1), set()).add((rendered_object,))
+			for type_name in self._type_closure(object_types.get(str(obj)), type_parent_map):
+				type_atom = self._type_atom(type_name)
+				facts_by_predicate.setdefault(("object_type", 2), set()).add(
+					(rendered_object, type_atom),
+				)
+				type_domains.setdefault(type_atom, set()).add(rendered_object)
+
+		return (
+			{
+				key: tuple(sorted(values))
+				for key, values in facts_by_predicate.items()
+			},
+			{
+				type_name: tuple(sorted(values))
+				for type_name, values in type_domains.items()
+			},
+		)
+
+	@staticmethod
+	def _parse_runtime_fact_atom(atom: Optional[str]) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		text = str(atom or "").strip()
+		if not text:
+			return None
+		match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]*)(?:\((.*)\))?", text)
+		if match is None:
+			return None
+		predicate = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		if not args_text:
+			return predicate, ()
+		return predicate, JasonRunner._split_asl_arguments(args_text)
+
+	def _parse_asl_method_head(
+		self,
+		head_line: str,
+	) -> Optional[Tuple[str, Tuple[str, ...], Tuple[str, ...]]]:
+		match = re.match(
+			r"^\s*\+!([^\s(:]+)(?:\(([^)]*)\))?\s*:\s*(.*?)\s*<-\s*$",
+			head_line,
+		)
+		if match is None:
+			return None
+		task_name = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		context_text = (match.group(3) or "").strip()
+		head_args = self._split_asl_arguments(args_text)
+		context_parts = tuple(
+			part.strip()
+			for part in context_text.split("&")
+			if part.strip()
+		)
+		return task_name, head_args, context_parts
+
+	@staticmethod
+	def _parse_asl_context_conjunct(part: str) -> Optional[Dict[str, Any]]:
+		text = str(part or "").strip()
+		if not text or text == "true":
+			return None
+		if "\\==" in text:
+			lhs, rhs = text.split("\\==", 1)
+			return {"kind": "inequality", "lhs": lhs.strip(), "rhs": rhs.strip()}
+		match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]*)(?:\((.*)\))?", text)
+		if match is None:
+			return {"kind": "other", "text": text}
+		predicate = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		args = JasonRunner._split_asl_arguments(args_text) if args_text else ()
+		return {"kind": "atom", "predicate": predicate, "args": args}
+
+	@staticmethod
+	def _chunk_is_noop_method_plan(body_lines: Sequence[str]) -> bool:
+		statements = [
+			line.strip().rstrip(";.")
+			for line in body_lines
+			if line.strip()
+		]
+		if not statements:
+			return False
+		if statements[0].startswith('.print("runtime trace method flat "'):
+			statements = statements[1:]
+		return statements == ["true"]
+
+	@staticmethod
+	def _parse_asl_goal_call(line: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		text = str(line or "").strip().rstrip(";.")
+		if not text.startswith("!"):
+			return None
+		match = re.fullmatch(r"!([A-Za-z][A-Za-z0-9_]*)(?:\((.*)\))?", text)
+		if match is None:
+			return None
+		task_name = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		args = JasonRunner._split_asl_arguments(args_text) if args_text else ()
+		return task_name, args
+
+	def _goal_has_noop_runtime_support(
+		self,
+		*,
+		goal_task_name: str,
+		goal_args: Sequence[str],
+		noop_specs_by_task: Dict[str, List[Dict[str, Any]]],
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		type_domains: Dict[str, Tuple[str, ...]],
+		caller_type_constraints: Sequence[Tuple[str, str]] = (),
+		caller_inequalities: Sequence[Tuple[str, str]] = (),
+	) -> bool:
+		for spec in noop_specs_by_task.get(str(goal_task_name), ()):
+			if self._noop_support_bindings(
+				head_args=tuple(spec.get("head_args") or ()),
+				goal_args=tuple(goal_args),
+				context_atoms=tuple(spec.get("context_atoms") or ()),
+				inequalities=tuple(spec.get("inequalities") or ()),
+				fact_index=fact_index,
+				type_domains=type_domains,
+				caller_type_constraints=caller_type_constraints,
+				caller_inequalities=caller_inequalities,
+			):
+				return True
+		return False
+
+	def _noop_support_bindings(
+		self,
+		*,
+		head_args: Sequence[str],
+		goal_args: Sequence[str],
+		context_atoms: Sequence[Dict[str, Any]],
+		inequalities: Sequence[Tuple[str, str]],
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+		type_domains: Dict[str, Tuple[str, ...]],
+		caller_type_constraints: Sequence[Tuple[str, str]],
+		caller_inequalities: Sequence[Tuple[str, str]],
+	) -> List[Dict[str, str]]:
+		if len(head_args) != len(goal_args):
+			return []
+
+		head_binding = {
+			str(pattern): str(actual)
+			for pattern, actual in zip(head_args, goal_args)
+			if self._looks_like_asl_variable(str(pattern))
+		}
+		instantiated_atoms: List[Dict[str, Any]] = []
+		for atom in context_atoms:
+			instantiated_atoms.append(
+				{
+					"predicate": str(atom.get("predicate") or ""),
+					"args": tuple(
+						head_binding.get(str(arg), str(arg))
+						for arg in tuple(atom.get("args") or ())
+					),
+				},
+			)
+		instantiated_inequalities = [
+			(
+				head_binding.get(str(lhs), str(lhs)),
+				head_binding.get(str(rhs), str(rhs)),
+			)
+			for lhs, rhs in inequalities
+		]
+		bindings: List[Dict[str, str]] = [{}]
+		instantiated_atoms.sort(
+			key=lambda atom: len(
+				fact_index.get((str(atom["predicate"]), len(tuple(atom["args"]))), ()),
+			),
+		)
+		for atom in instantiated_atoms:
+			facts = fact_index.get((str(atom["predicate"]), len(tuple(atom["args"]))), ())
+			if not facts:
+				return []
+			next_bindings: List[Dict[str, str]] = []
+			for binding in bindings:
+				for fact_args in facts:
+					matched = self._match_grounding_atom(
+						tuple(atom["args"]),
+						fact_args,
+						binding,
+					)
+					if matched is None:
+						continue
+					if not self._binding_satisfies_local_witness_filters(
+						matched,
+						type_constraints=caller_type_constraints,
+						type_domains=type_domains,
+						inequalities=tuple(instantiated_inequalities) + tuple(caller_inequalities),
+						local_vars=(),
+						require_all_local_bindings=False,
+					):
+						continue
+					next_bindings.append(matched)
+			if not next_bindings:
+				return []
+			bindings = next_bindings
+		return [
+			dict(binding)
+			for binding in bindings
+			if self._binding_satisfies_local_witness_filters(
+				binding,
+				type_constraints=caller_type_constraints,
+				type_domains=type_domains,
+				inequalities=tuple(instantiated_inequalities) + tuple(caller_inequalities),
+				local_vars=(),
+				require_all_local_bindings=False,
+			)
+		]
+
+	@staticmethod
+	def _merge_asl_bindings(
+		first: Dict[str, str],
+		second: Dict[str, str],
+	) -> Optional[Dict[str, str]]:
+		merged = dict(first)
+		for variable, value in second.items():
+			existing = merged.get(variable)
+			if existing is not None and (
+				JasonRunner._canonical_runtime_token(existing)
+				!= JasonRunner._canonical_runtime_token(value)
+			):
+				return None
+			merged[variable] = value
+		return merged
+
+	@staticmethod
+	def _extract_asl_variables(text: str) -> Set[str]:
+		return {
+			token
+			for token in re.findall(r"\b[A-Z][A-Z0-9_]*\b", str(text or ""))
+			if JasonRunner._looks_like_asl_variable(token)
+		}
+
+	@staticmethod
+	def _looks_like_asl_variable(token: str) -> bool:
+		return re.fullmatch(r"[A-Z][A-Z0-9_]*", str(token or "").strip()) is not None
+
+	@staticmethod
+	def _split_asl_arguments(args_text: str) -> Tuple[str, ...]:
+		text = str(args_text or "").strip()
+		if not text:
+			return ()
+		parts: List[str] = []
+		current: List[str] = []
+		depth = 0
+		quote: Optional[str] = None
+		for character in text:
+			if quote is not None:
+				current.append(character)
+				if character == quote:
+					quote = None
+				continue
+			if character in {'"', "'"}:
+				quote = character
+				current.append(character)
+				continue
+			if character == "(":
+				depth += 1
+				current.append(character)
+				continue
+			if character == ")":
+				depth = max(0, depth - 1)
+				current.append(character)
+				continue
+			if character == "," and depth == 0:
+				part = "".join(current).strip()
+				if part:
+					parts.append(part)
+				current = []
+				continue
+			current.append(character)
+		part = "".join(current).strip()
+		if part:
+			parts.append(part)
+		return tuple(parts)
+
+	def _resolve_local_witness_term(
+		self,
+		term: str,
+		binding: Dict[str, str],
+	) -> Optional[str]:
+		token = str(term or "").strip()
+		if self._looks_like_asl_variable(token):
+			return binding.get(token)
+		return token
+
+	def _substitute_asl_bindings(
+		self,
+		text: str,
+		binding: Dict[str, str],
+	) -> str:
+		rendered = str(text)
+		for variable, value in sorted(binding.items(), key=lambda item: len(item[0]), reverse=True):
+			pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(variable)}(?![A-Za-z0-9_])")
+			rendered = pattern.sub(value, rendered)
+		return rendered
+
+	def _instrument_method_plans(
+		self,
+		agentspeak_code: str,
+		method_library: HTNMethodLibrary | None,
+	) -> str:
+		if method_library is None or not method_library.methods:
+			return agentspeak_code
+		if "runtime trace method" in agentspeak_code:
+			return agentspeak_code
+
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* DFA Transition Wrappers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		if len(chunks) != len(method_library.methods):
+			return agentspeak_code
+
+		instrumented_chunks: List[str] = []
+		for method, chunk in zip(method_library.methods, chunks):
+			head_line = chunk[0]
+			body_lines = chunk[1:]
+			trace_line = self._render_method_trace_statement(method, head_line)
+			instrumented_chunks.append("\n".join([head_line, trace_line, *body_lines]))
+
+		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{instrumented_section}{suffix}"
+
+	def _restrict_unsafe_noop_methods_to_satisfied_or_protected_targets(
+		self,
+		agentspeak_code: str,
+		method_library: HTNMethodLibrary | None,
+		target_observations: Sequence[Dict[str, Any]],
+	) -> str:
+		if method_library is None or not method_library.methods:
+			return agentspeak_code
+
+		guard_specs_by_task = self._progress_guard_specs_by_task(method_library)
+		if not guard_specs_by_task:
+			return agentspeak_code
+
+		method_lookup = {
+			str(getattr(method, "method_name", "") or ""): method
+			for method in method_library.methods
+		}
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* DFA Transition Wrappers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in section_lines[1:]:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		changed = False
+		restricted_chunks: List[str] = []
+		for chunk in chunks:
+			if not chunk:
+				continue
+			method_name = self._trace_method_name_from_chunk(chunk)
+			method = method_lookup.get(method_name)
+			if (
+				method is None
+				or not self._method_is_runtime_noop(method)
+				or self._method_noop_context_satisfies_advertised_guard(method, guard_specs_by_task)
+			):
+				restricted_chunks.append("\n".join(chunk))
+				continue
+			parsed_head = self._split_method_trigger_head(chunk[0])
+			if parsed_head is None:
+				restricted_chunks.append("\n".join(chunk))
+				continue
+			head_prefix, task_name, head_args, context, head_suffix = parsed_head
+			specs = guard_specs_by_task.get(str(getattr(method, "task_name", "") or ""))
+			if not specs:
+				specs = guard_specs_by_task.get(task_name)
+			if specs and self._rendered_noop_head_context_satisfies_guard_specs(
+				head_args,
+				context,
+				specs,
+			):
+				restricted_chunks.append("\n".join(chunk))
+				continue
+			guard_contexts = self._unsafe_noop_allowed_contexts(
+				task_name,
+				head_args,
+				specs or (),
+				target_observations,
+			)
+			if not guard_contexts:
+				restricted_chunks.append("\n".join(chunk))
+				continue
+			changed = True
+			for guard_context in guard_contexts:
+				next_context = self._combine_contexts(context, guard_context)
+				restricted_chunks.append(
+					"\n".join([f"{head_prefix}{next_context}{head_suffix}", *chunk[1:]]),
+				)
+
+		if not changed:
+			return agentspeak_code
+
+		restricted_section = "\n\n".join([header, *restricted_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{restricted_section}{suffix}"
+
+	def _method_noop_context_satisfies_advertised_guard(
+		self,
+		method: HTNMethod,
+		guard_specs_by_task: Dict[str, Tuple[Tuple[str, Tuple[int, ...]], ...]],
+	) -> bool:
+		task_name = str(getattr(method, "task_name", "") or "")
+		specs = guard_specs_by_task.get(task_name)
+		if not specs:
+			return False
+
+		task_args = tuple(str(arg) for arg in (getattr(method, "task_args", ()) or ()))
+		if not task_args:
+			task_args = tuple(str(arg) for arg in (getattr(method, "parameters", ()) or ()))
+		context_literals = tuple(getattr(method, "context", ()) or ())
+		for predicate_name, arg_indices in specs:
+			if any(index >= len(task_args) for index in arg_indices):
+				continue
+			expected_args = tuple(task_args[index] for index in arg_indices)
+			for literal in context_literals:
+				if getattr(literal, "is_equality", False) or not getattr(literal, "is_positive", True):
+					continue
+				if self._sanitize_name(getattr(literal, "predicate", "")) != self._sanitize_name(predicate_name):
+					continue
+				if tuple(str(arg) for arg in (getattr(literal, "args", ()) or ())) == expected_args:
+					return True
+		return False
+
+	def _rendered_noop_head_context_satisfies_guard_specs(
+		self,
+		head_args: Sequence[str],
+		context_text: str,
+		specs: Sequence[Tuple[str, Tuple[int, ...]]],
+	) -> bool:
+		context_parts = tuple(
+			part.strip()
+			for part in str(context_text or "").split("&")
+			if part.strip()
+		)
+		if not context_parts:
+			return False
+
+		for predicate_name, arg_indices in specs:
+			if any(index >= len(head_args) for index in arg_indices):
+				continue
+			expected_args = tuple(str(head_args[index]) for index in arg_indices)
+			for part in context_parts:
+				parsed = self._parse_asl_context_conjunct(part)
+				if parsed is None or parsed.get("kind") != "atom":
+					continue
+				if self._sanitize_name(str(parsed.get("predicate", ""))) != (
+					self._sanitize_name(predicate_name)
+				):
+					continue
+				if tuple(str(arg) for arg in tuple(parsed.get("args") or ())) == expected_args:
+					return True
+		return False
+
+	def _unsafe_noop_allowed_contexts(
+		self,
+		task_name: str,
+		head_args: Sequence[str],
+		specs: Sequence[Tuple[str, Tuple[int, ...]]],
+		target_observations: Sequence[Dict[str, Any]],
+	) -> Tuple[str, ...]:
+		contexts: List[str] = []
+		seen: set[str] = set()
+
+		def add_context(context: str) -> None:
+			cleaned = str(context or "").strip()
+			if not cleaned or cleaned in seen:
+				return
+			seen.add(cleaned)
+			contexts.append(cleaned)
+
+		for predicate_name, arg_indices in specs:
+			if any(index >= len(head_args) for index in arg_indices):
+				continue
+			guard_args = tuple(head_args[index] for index in arg_indices)
+			add_context(
+				self._context_atom(
+					predicate_name,
+					guard_args,
+					preserve_variables=True,
+				),
+			)
+
+		for context in self._protected_target_guard_contexts(
+			head_args,
+			specs,
+			target_observations,
+		):
+			add_context(context)
+
+		_ = task_name
+		return tuple(contexts)
+
+	def _protected_target_guard_contexts(
+		self,
+		head_args: Sequence[str],
+		specs: Sequence[Tuple[str, Tuple[int, ...]]],
+		target_observations: Sequence[Dict[str, Any]],
+	) -> Tuple[str, ...]:
+		contexts: List[str] = []
+		seen: set[str] = set()
+		protected_specs: set[Tuple[str, bool, int]] = set()
+		prefix_protected_contexts: List[str] = []
+		for observation in target_observations:
+			if not bool(observation.get("protect_target", True)):
+				continue
+			literal = observation.get("literal")
+			if not isinstance(literal, HTNLiteral) or literal.is_equality:
+				continue
+			protected_specs.add(
+				(
+					self._sanitize_name(literal.predicate),
+					bool(literal.is_positive),
+					len(tuple(literal.args or ())),
+				),
+			)
+			prefix_context = self._protected_target_prefix_context(
+				head_args,
+				literal,
+			)
+			if prefix_context:
+				prefix_protected_contexts.append(prefix_context)
+		for predicate_name, arg_indices in specs:
+			if any(index >= len(head_args) for index in arg_indices):
+				continue
+			sanitized_predicate = self._sanitize_name(predicate_name)
+			if not sanitized_predicate:
+				continue
+			guard_args = tuple(head_args[index] for index in arg_indices)
+			positive_key = (sanitized_predicate, True, len(arg_indices))
+			negative_key = (sanitized_predicate, False, len(arg_indices))
+			if positive_key in protected_specs:
+				protection_context = self._context_atom(
+					f"protected_target_{sanitized_predicate}",
+					guard_args,
+					preserve_variables=True,
+				)
+				if protection_context and protection_context not in seen:
+					seen.add(protection_context)
+					contexts.append(protection_context)
+			if negative_key in protected_specs:
+				absence_context = self._context_atom(
+					f"protected_absence_{sanitized_predicate}",
+					guard_args,
+					preserve_variables=True,
+				)
+				if absence_context and absence_context not in seen:
+					seen.add(absence_context)
+					contexts.append(absence_context)
+		for prefix_context in prefix_protected_contexts:
+			if prefix_context and prefix_context not in seen:
+				seen.add(prefix_context)
+				contexts.append(prefix_context)
+		return tuple(contexts)
+
+	def _protected_target_prefix_context(
+		self,
+		head_args: Sequence[str],
+		literal: HTNLiteral,
+	) -> str:
+		if not bool(literal.is_positive):
+			return ""
+		normalized_head_args = tuple(
+			str(arg).strip()
+			for arg in head_args
+			if str(arg).strip()
+		)
+		normalized_literal_args = tuple(
+			str(arg).strip()
+			for arg in tuple(literal.args or ())
+			if str(arg).strip()
+		)
+		if not normalized_head_args or len(normalized_literal_args) <= len(normalized_head_args):
+			return ""
+		variable_bindings: Dict[str, str] = {}
+		for index, head_arg in enumerate(normalized_head_args):
+			literal_arg = normalized_literal_args[index]
+			if self._looks_like_asl_variable(head_arg):
+				existing = variable_bindings.get(head_arg)
+				if existing is not None and existing != literal_arg:
+					return ""
+				variable_bindings[head_arg] = literal_arg
+				continue
+			if head_arg != literal_arg:
+				return ""
+		return self._context_atom(
+			f"protected_target_{self._sanitize_name(literal.predicate)}",
+			normalized_head_args + normalized_literal_args[len(normalized_head_args):],
+			preserve_variables=True,
+		)
+
+	@classmethod
+	def _context_atom(
+		cls,
+		predicate_name: str,
+		args: Sequence[str],
+		*,
+		preserve_variables: bool = False,
+	) -> str:
+		rendered_args = tuple(
+			(
+				str(arg).strip()
+				if preserve_variables and cls._looks_like_asl_variable(str(arg).strip())
+				else cls._runtime_atom_term(arg)
+			)
+			for arg in args
+			if str(arg).strip()
+		)
+		return cls._call(predicate_name, rendered_args)
+
+	def _render_method_trace_statement(self, method: Any, head_line: str) -> str:
+		trigger_args = self._extract_trigger_args(head_line)
+		trace_line = self._render_flat_method_trace_statement(method.method_name, trigger_args)
+		return f"\t{trace_line};"
+
+	@classmethod
+	def _render_flat_method_trace_statement(
+		cls,
+		method_name: str,
+		rendered_args: Sequence[str],
+	) -> str:
+		trace_args = [
+			cls._asl_string("runtime trace method flat "),
+			cls._asl_string(method_name),
+		]
+		for arg in rendered_args:
+			trace_args.extend((cls._asl_string("|"), arg))
+		return f".print({', '.join(trace_args)})"
+
+	@staticmethod
+	def _extract_trigger_args(head_line: str) -> Tuple[str, ...]:
+		match = re.match(r"^\s*\+![^\s(:]+(?:\(([^)]*)\))?\s*:", head_line)
+		if match is None:
+			return ()
+		args_text = (match.group(1) or "").strip()
+		if not args_text:
+			return ()
+		return tuple(part.strip() for part in args_text.split(",") if part.strip())
+
+	def _build_runner_mas2j(self, domain_name: str) -> str:
+		sanitized_domain = re.sub(r"[^a-zA-Z0-9_]+", "_", domain_name).strip("_").lower()
+		if not sanitized_domain:
+			sanitized_domain = "runtime"
+		return (
+			f"MAS execute_{sanitized_domain} {{\n"
+			f"    environment: {self.environment_class_name}\n"
+			"    agents: agentspeak_generated;\n"
+			"    aslSourcePath: \".\";\n"
+			"}\n"
+		)
+
+	def _build_no_ancestor_goal_internal_action_source(self) -> str:
+		return """
+package pipeline;
+
+import jason.asSemantics.DefaultInternalAction;
+import jason.asSemantics.Event;
+import jason.asSemantics.IntendedMeans;
+import jason.asSemantics.Intention;
+import jason.asSemantics.TransitionSystem;
+import jason.asSemantics.Unifier;
+import jason.asSyntax.Literal;
+import jason.asSyntax.Term;
+
+public class no_ancestor_goal extends DefaultInternalAction {
+
+	@Override
+	public Object execute(TransitionSystem ts, Unifier un, Term[] args) throws Exception {
+		if (args.length < 1) {
+			return false;
+		}
+
+		Intention currentIntention = ts.getC().getSelectedIntention();
+		if (currentIntention == null) {
+			Event event = ts.getC().getSelectedEvent();
+			if (event != null) {
+				currentIntention = event.getIntention();
+			}
+		}
+		if (currentIntention == null) {
+			return true;
+		}
+
+		String requestedFunctor = canonicalTerm(args[0].capply(un));
+		if (requestedFunctor.isEmpty()) {
+			return false;
+		}
+
+		int requestedArity = args.length - 1;
+		String[] requestedArgs = new String[requestedArity];
+		for (int index = 0; index < requestedArity; index++) {
+			requestedArgs[index] = canonicalTerm(args[index + 1].capply(un));
+		}
+
+		for (IntendedMeans intendedMeans : currentIntention) {
+			Literal literal = intendedMeans.getTrigger().getLiteral();
+			if (literal == null) {
+				continue;
+			}
+			if (!requestedFunctor.equals(canonicalText(literal.getFunctor()))) {
+				continue;
+			}
+			if (literal.getArity() != requestedArity) {
+				continue;
+			}
+			boolean sameGoal = true;
+			for (int index = 0; index < requestedArity; index++) {
+				String ancestorArg = canonicalTerm(literal.getTerm(index).capply(intendedMeans.getUnif()));
+				if (!requestedArgs[index].equals(ancestorArg)) {
+					sameGoal = false;
+					break;
+				}
+			}
+			if (sameGoal) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private String canonicalTerm(Term term) {
+		return canonicalText(term == null ? "" : term.toString());
+	}
+
+	private String canonicalText(String rawValue) {
+		String value = rawValue == null ? "" : rawValue.trim();
+		if (value.length() >= 2) {
+			boolean quoted =
+				(value.startsWith("\\\"") && value.endsWith("\\\""))
+				|| (value.startsWith("'") && value.endsWith("'"));
+			if (quoted) {
+				value = value.substring(1, value.length() - 1);
+			}
+		}
+		return value;
+	}
+}
+""".strip() + "\n"
+
+	def _build_environment_java_source(
+		self,
+		*,
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+		target_literals: Sequence[HTNLiteral],
+	) -> str:
+		_ = target_literals
+		seed_atoms = [
+			atom
+			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
+			if atom is not None
+		]
+
+		action_blocks: List[str] = []
+		for schema in action_schemas:
+			functor = schema.get("functor")
+			if not functor:
+				continue
+			source_name = str(schema.get("source_name") or functor)
+			parameters = [str(item) for item in (schema.get("parameters") or [])]
+			preconditions = list(schema.get("preconditions") or [])
+			precondition_clauses = list(schema.get("precondition_clauses") or [])
+			if not precondition_clauses:
+				precondition_clauses = [preconditions] if preconditions else [[]]
+			effects = list(schema.get("effects") or [])
+			action_blocks.append(
+				"""
+		register(new ActionSchema(
+			{functor},
+			{source_name},
+			new String[]{{{parameters}}},
+			{precondition_clauses},
+			new Pattern[]{{{effects}}}
+		));
+		""".strip().format(
+					functor=self._java_quote(functor),
+					source_name=self._java_quote(source_name),
+					parameters=", ".join(self._java_quote(item) for item in parameters),
+					precondition_clauses=self._render_precondition_clauses_java(
+						precondition_clauses,
+					),
+					effects=", ".join(self._render_pattern_java(item) for item in effects),
+				),
+			)
+
+		seed_lines = "\n".join(
+			f"\t\tworld.add({self._java_quote(atom)});"
+			for atom in seed_atoms
+		)
+		action_lines = "\n\t\t".join(action_blocks)
+		if not action_lines:
+			action_lines = "// no action schemas"
+
+		return f"""
+import jason.asSyntax.Literal;
+import jason.asSyntax.Structure;
+import jason.environment.Environment;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+public class {self.environment_class_name} extends Environment {{
+
+	private static final class Pattern {{
+		final String predicate;
+		final boolean positive;
+		final String[] args;
+
+		Pattern(String predicate, boolean positive, String[] args) {{
+			this.predicate = predicate;
+			this.positive = positive;
+			this.args = args;
+		}}
+	}}
+
+	private static final class ActionSchema {{
+		final String name;
+		final String sourceName;
+		final String[] parameters;
+		final Pattern[][] preconditionClauses;
+		final Pattern[] effects;
+
+		ActionSchema(
+			String name,
+			String sourceName,
+			String[] parameters,
+			Pattern[][] preconditionClauses,
+			Pattern[] effects
+		) {{
+			this.name = name;
+			this.sourceName = sourceName;
+			this.parameters = parameters;
+			this.preconditionClauses = preconditionClauses;
+			this.effects = effects;
+		}}
+	}}
+
+	private final Set<String> world = new LinkedHashSet<>();
+	private final Map<String, ActionSchema> actions = new HashMap<>();
+
+	@Override
+	public synchronized void init(String[] args) {{
+		super.init(args);
+		seedInitialFacts();
+		loadActions();
+		syncPercepts();
+		System.out.println("runtime env ready");
+	}}
+
+	@Override
+	public synchronized boolean executeAction(String agName, Structure action) {{
+		if ("true".equals(action.getFunctor()) && action.getArity() == 0) {{
+			return true;
+		}}
+		ActionSchema schema = actions.get(action.getFunctor());
+		if (schema == null) {{
+			System.out.println("runtime env unknown action " + action);
+			return false;
+		}}
+		String tracedAction = renderTraceAction(schema.sourceName, action);
+		if (action.getArity() != schema.parameters.length) {{
+			System.out.println("runtime env action failed " + tracedAction + " reason=arity");
+			return false;
+		}}
+
+		Map<String, String> bindings = new HashMap<>();
+		for (int i = 0; i < schema.parameters.length; i++) {{
+			String parameter = canonical(schema.parameters[i]);
+			String value = canonical(action.getTerm(i).toString());
+			bindings.put(parameter, value);
+			if (parameter.startsWith("?")) {{
+				bindings.put(parameter.substring(1), value);
+			}}
+		}}
+
+		if (!checkPreconditions(schema.preconditionClauses, bindings)) {{
+			System.out.println("runtime env action failed " + tracedAction + " reason=precondition");
+			return false;
+		}}
+
+		applyEffects(schema.effects, bindings);
+		syncPercepts();
+		System.out.println("runtime env action success " + tracedAction);
+		return true;
+	}}
+
+	private void seedInitialFacts() {{
+		world.clear();
+{seed_lines if seed_lines else ""}
+	}}
+
+	private void loadActions() {{
+		actions.clear();
+		{action_lines}
+	}}
+
+	private void register(ActionSchema schema) {{
+		actions.put(schema.name, schema);
+	}}
+
+	private boolean checkPreconditions(Pattern[][] preconditionClauses, Map<String, String> bindings) {{
+		if (preconditionClauses.length == 0) {{
+			return true;
+		}}
+		for (Pattern[] clause : preconditionClauses) {{
+			if (checkPreconditionClause(clause, bindings)) {{
+				return true;
+			}}
+		}}
+		return false;
+	}}
+
+	private boolean checkPreconditionClause(Pattern[] preconditions, Map<String, String> bindings) {{
+		for (Pattern pattern : preconditions) {{
+			if ("=".equals(pattern.predicate) && pattern.args.length == 2) {{
+				String left = resolveToken(pattern.args[0], bindings);
+				String right = resolveToken(pattern.args[1], bindings);
+				boolean equal = left.equals(right);
+				if (pattern.positive != equal) {{
+					return false;
+				}}
+				continue;
+			}}
+
+			String grounded = ground(pattern.predicate, pattern.args, bindings);
+			boolean holds;
+			if (pattern.positive) {{
+				holds = world.contains(grounded);
+			}} else {{
+				holds = !world.contains(grounded);
+			}}
+			if (!holds) {{
+				return false;
+			}}
+		}}
+		return true;
+	}}
+
+	private void applyEffects(Pattern[] effects, Map<String, String> bindings) {{
+		for (Pattern pattern : effects) {{
+			if ("=".equals(pattern.predicate)) {{
+				continue;
+			}}
+			String grounded = ground(pattern.predicate, pattern.args, bindings);
+			if (pattern.positive) {{
+				world.add(grounded);
+			}} else {{
+				world.remove(grounded);
+			}}
+		}}
+	}}
+
+	private String ground(String predicate, String[] args, Map<String, String> bindings) {{
+		if (args.length == 0) {{
+			return predicate;
+		}}
+		String[] groundedArgs = Arrays.stream(args)
+			.map(arg -> renderTerm(resolveToken(arg, bindings)))
+			.toArray(String[]::new);
+		return predicate + "(" + String.join(",", groundedArgs) + ")";
+	}}
+
+	private String resolveToken(String rawToken, Map<String, String> bindings) {{
+		String token = canonical(rawToken);
+		if (bindings.containsKey(token)) {{
+			return bindings.get(token);
+		}}
+		if (token.startsWith("?")) {{
+			String bare = token.substring(1);
+			if (bindings.containsKey(bare)) {{
+				return bindings.get(bare);
+			}}
+		}}
+		return token;
+	}}
+
+	private String canonical(String token) {{
+		String value = token == null ? "" : token.trim();
+		if (value.length() >= 2) {{
+			boolean quoted =
+				(value.startsWith("\\\"") && value.endsWith("\\\""))
+				|| (value.startsWith("'") && value.endsWith("'"));
+			if (quoted) {{
+				value = value.substring(1, value.length() - 1);
+			}}
+		}}
+		return value;
+	}}
+
+	private String renderTerm(String token) {{
+		String value = canonical(token);
+		if (value.matches("[a-z][a-z0-9_]*")) {{
+			return value;
+		}}
+		return "\\\"" + value.replace("\\\\", "\\\\\\\\").replace("\\\"", "\\\\\\\"") + "\\\"";
+	}}
+
+	private String renderTraceAction(String sourceName, Structure action) {{
+		if (action.getArity() == 0) {{
+			return sourceName + "()";
+		}}
+		String[] args = new String[action.getArity()];
+		for (int i = 0; i < action.getArity(); i++) {{
+			args[i] = canonical(action.getTerm(i).toString());
+		}}
+		return sourceName + "(" + String.join(",", args) + ")";
+	}}
+
+	private void syncPercepts() {{
+		clearPercepts();
+		for (String atom : world) {{
+			addPercept(Literal.parseLiteral(atom));
+		}}
+		informAgsEnvironmentChanged();
+	}}
+}}
+""".strip() + "\n"
+
+	def _compile_environment_java(
+		self,
+		*,
+		java_bin: str,
+		javac_bin: str,
+		jason_jar: Path,
+		env_java_path: Path,
+		output_path: Path,
+	) -> None:
+		java_home = str(Path(java_bin).resolve().parent.parent)
+		env = dict(os.environ)
+		env["JAVA_HOME"] = java_home
+		env["PATH"] = f"{java_home}/bin:{env.get('PATH', '')}"
+		java_sources = sorted(
+			str(path.relative_to(output_path))
+			for path in output_path.rglob("*.java")
+		)
+		compile_cmd = [
+			javac_bin,
+			"-cp",
+			str(jason_jar),
+			*java_sources,
+		]
+		result = subprocess.run(
+			compile_cmd,
+			cwd=output_path,
+			text=True,
+			capture_output=True,
+			check=False,
+			env=env,
+		)
+		if result.returncode == 0:
+			return
+
+		raise JasonValidationError(
+			"Jason environment Java compilation failed.",
+			metadata={
+				"java_bin": java_bin,
+				"javac_bin": javac_bin,
+				"environment_java": str(env_java_path),
+				"java_sources": java_sources,
+				"stdout": result.stdout,
+				"stderr": result.stderr,
+				"return_code": result.returncode,
+			},
+		)
+
+	@staticmethod
+	def _java_quote(value: str) -> str:
+		escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+		return f'"{escaped}"'
+
+	def _render_pattern_java(self, payload: Dict[str, Any]) -> str:
+		predicate = self._sanitize_name(str(payload.get("predicate", "")))
+		args = [str(item) for item in (payload.get("args") or [])]
+		is_positive = bool(payload.get("is_positive", True))
+		args_expr = ", ".join(self._java_quote(item) for item in args)
+		return (
+			f"new Pattern({self._java_quote(predicate)}, "
+			f"{str(is_positive).lower()}, new String[]{{{args_expr}}})"
+		)
+
+	def _render_precondition_clauses_java(
+		self,
+		clauses: Sequence[Sequence[Dict[str, Any]]],
+	) -> str:
+		if not clauses:
+			return "new Pattern[][]{}"
+		rendered_clauses = []
+		for clause in clauses:
+			rendered_patterns = ", ".join(self._render_pattern_java(item) for item in clause)
+			rendered_clauses.append(f"new Pattern[]{{{rendered_patterns}}}")
+		return f"new Pattern[][]{{{', '.join(rendered_clauses)}}}"
+
+	def _target_context_expression(self, target_literals: Sequence[HTNLiteral]) -> str:
+		rendered_literals = [
+			self._literal_to_context_expression(literal)
+			for literal in target_literals
+		]
+		rendered_literals = [item for item in rendered_literals if item]
+		if not rendered_literals:
+			return "true"
+		return " & ".join(rendered_literals)
+
+	@classmethod
+	def _literal_to_context_expression(cls, literal: HTNLiteral) -> str:
+		if literal.is_equality and len(literal.args) == 2:
+			operator = "==" if literal.is_positive else "\\=="
+			return (
+				f"{cls._runtime_atom_term(literal.args[0])} {operator} "
+				f"{cls._runtime_atom_term(literal.args[1])}"
+			)
+		predicate = cls._sanitize_name(literal.predicate)
+		atom = (
+			f"{predicate}({', '.join(cls._runtime_atom_term(arg) for arg in literal.args)})"
+			if literal.args
+			else predicate
+		)
+		if literal.is_positive:
+			return atom
+		return f"not {atom}"
+
+	@classmethod
+	def _literal_to_unmet_context_expression(cls, literal: HTNLiteral) -> str:
+		if literal.is_equality and len(literal.args) == 2:
+			operator = "\\==" if literal.is_positive else "=="
+			return (
+				f"{cls._runtime_atom_term(literal.args[0])} {operator} "
+				f"{cls._runtime_atom_term(literal.args[1])}"
+			)
+		predicate = cls._sanitize_name(literal.predicate)
+		atom = (
+			f"{predicate}({', '.join(cls._runtime_atom_term(arg) for arg in literal.args)})"
+			if literal.args
+			else predicate
+		)
+		if literal.is_positive:
+			return f"not {atom}"
+		return atom
+
+	@classmethod
+	def _target_protection_atom(cls, literal: HTNLiteral) -> str:
+		if literal.is_equality:
+			return ""
+		family = "protected_target" if literal.is_positive else "protected_absence"
+		predicate = cls._sanitize_name(literal.predicate)
+		args = tuple(cls._runtime_atom_term(arg) for arg in literal.args)
+		return cls._call(f"{family}_{predicate}", args)
+
+	def _resolve_log_config(self) -> Path:
+		log_conf = (
+			self.jason_src_dir
+			/ "jason-interpreter"
+			/ "src"
+			/ "main"
+			/ "resources"
+			/ "templates"
+			/ "console-info-logging.properties"
+		)
+		if log_conf.exists():
+			return log_conf
+		raise JasonValidationError(
+			"Jason runtime log configuration file is missing.",
+			metadata={"log_conf": str(log_conf)},
+		)
+
+	def _ensure_jason_jar(self, java_bin: str) -> Path:
+		jar_path = self._find_jason_jar()
+		if jar_path is not None:
+			return jar_path
+
+		self._build_jason_cli(java_bin)
+		jar_path = self._find_jason_jar()
+		if jar_path is not None:
+			return jar_path
+
+		raise JasonValidationError(
+			"Jason CLI jar is unavailable after build.",
+			metadata={
+				"jason_src_dir": str(self.jason_src_dir),
+			},
+		)
+
+	def _find_jason_jar(self) -> Optional[Path]:
+		bin_dir = self.jason_src_dir / "jason-cli" / "build" / "bin"
+		if not bin_dir.exists():
+			return None
+
+		jars = sorted(bin_dir.glob("jason-cli-all-*.jar"), key=self._jar_version_key, reverse=True)
+		if not jars:
+			return None
+		return jars[0]
+
+	@staticmethod
+	def _jar_version_key(path: Path) -> Tuple[int, ...]:
+		match = re.search(r"jason-cli-all-(\d+(?:\.\d+)*)\.jar$", path.name)
+		if not match:
+			return (0,)
+		return tuple(int(item) for item in match.group(1).split("."))
+
+	def _build_jason_cli(self, java_bin: str) -> None:
+		gradlew = self.jason_src_dir / "gradlew"
+		if not gradlew.exists():
+			raise JasonValidationError(
+				"Jason source directory is missing gradlew.",
+				metadata={"gradlew": str(gradlew)},
+			)
+
+		java_home = str(Path(java_bin).resolve().parent.parent)
+		env = dict(os.environ)
+		env["JAVA_HOME"] = java_home
+		env["PATH"] = f"{java_home}/bin:{env.get('PATH', '')}"
+
+		result = subprocess.run(
+			[str(gradlew), "config"],
+			cwd=self.jason_src_dir,
+			text=True,
+			capture_output=True,
+			check=False,
+			timeout=600,
+			env=env,
+		)
+		if result.returncode == 0:
+			return
+
+		raise JasonValidationError(
+			"Jason build failed while running './gradlew config'.",
+			metadata={
+				"return_code": result.returncode,
+				"stdout": result.stdout,
+				"stderr": result.stderr,
+				"java_home": java_home,
+			},
+		)
+
+	def _select_java_binary(self) -> Tuple[str, int]:
+		candidate_bins = self._discover_java_candidates()
+		supported: List[Tuple[str, int]] = []
+		unsupported: Dict[str, Optional[int]] = {}
+
+		for candidate in candidate_bins:
+			major = self._probe_java_binary(candidate)
+			if major is None:
+				unsupported[candidate] = None
+				continue
+			if self.min_java_major <= major <= self.max_java_major:
+				supported.append((candidate, major))
+			else:
+				unsupported[candidate] = major
+
+		if not supported:
+			raise JasonValidationError(
+				"No supported Java runtime found for Jason execution (requires Java 17-23).",
+				metadata={"candidates": unsupported},
+			)
+
+		supported.sort(key=lambda item: item[1], reverse=True)
+		return supported[0]
+
+	def _select_javac_binary(self, java_bin: str) -> str:
+		java_home = Path(java_bin).resolve().parent.parent
+		candidates = [
+			str(java_home / "bin" / "javac"),
+			shutil.which("javac") or "",
+		]
+		for candidate in candidates:
+			if not candidate:
+				continue
+			path = Path(candidate)
+			if path.exists() and os.access(path, os.X_OK):
+				return str(path)
+		raise JasonValidationError(
+			"No javac binary found for Jason environment compilation.",
+			metadata={"java_bin": java_bin, "candidates": candidates},
+		)
+
+	def _discover_java_candidates(self) -> List[str]:
+		candidates: List[str] = []
+		self._append_candidate(candidates, os.getenv("JASON_RUNTIME_JAVA_BIN"))
+		self._append_candidate(candidates, os.getenv("STAGE6_JAVA_BIN"))
+
+		runtime_java_home = os.getenv("JASON_RUNTIME_JAVA_HOME") or os.getenv("STAGE6_JAVA_HOME")
+		if runtime_java_home:
+			self._append_candidate(candidates, str(Path(runtime_java_home) / "bin" / "java"))
+
+		java_home = os.getenv("JAVA_HOME")
+		if java_home:
+			self._append_candidate(candidates, str(Path(java_home) / "bin" / "java"))
+
+		which_java = shutil.which("java")
+		self._append_candidate(candidates, which_java)
+
+		if os.name == "posix":
+			for root in (
+				Path.home() / "Library" / "Java" / "JavaVirtualMachines",
+				Path("/Library/Java/JavaVirtualMachines"),
+			):
+				if not root.exists():
+					continue
+				for jdk_home in sorted(root.glob("*/Contents/Home/bin/java")):
+					self._append_candidate(candidates, str(jdk_home))
+
+		return candidates
+
+	@staticmethod
+	def _append_candidate(candidates: List[str], candidate: Optional[str]) -> None:
+		if not candidate:
+			return
+		resolved = str(Path(candidate).expanduser())
+		if resolved in candidates:
+			return
+		candidates.append(resolved)
+
+	@staticmethod
+	def _probe_java_binary(java_bin: str) -> Optional[int]:
+		java_path = Path(java_bin)
+		if not java_path.exists():
+			return None
+		try:
+			result = subprocess.run(
+				[str(java_path), "-version"],
+				text=True,
+				capture_output=True,
+				check=False,
+				timeout=10,
+			)
+		except Exception:
+			return None
+
+		version_text = (result.stderr or "") + "\n" + (result.stdout or "")
+		match = re.search(r'version "([^"]+)"', version_text)
+		if not match:
+			return None
+		version = match.group(1)
+		return JasonRunner._java_major_from_version(version)
+
+	@staticmethod
+	def _java_major_from_version(version: str) -> Optional[int]:
+		if not version:
+			return None
+		parts = version.split(".")
+		if parts[0] == "1" and len(parts) > 1:
+			try:
+				return int(parts[1])
+			except ValueError:
+				return None
+		try:
+			return int(parts[0])
+		except ValueError:
+			return None
+
+	def _is_successful_run(
+		self,
+		*,
+		stdout: str,
+		exit_code: Optional[int],
+		timed_out: bool,
+		environment_result: EnvironmentAdapterResult,
+		consistency_checks: Dict[str, Any],
+	) -> bool:
+		if timed_out:
+			return False
+		if exit_code is None or exit_code != 0:
+			return False
+		if self.success_marker not in stdout:
+			return False
+		if self.failure_marker in stdout:
+			return False
+		if not environment_result.success:
+			return False
+		if not bool(consistency_checks.get("success", True)):
+			return False
+		return True
+
+	def _failure_reason(
+		self,
+		stdout: str,
+		stderr: str,
+		exit_code: Optional[int],
+		timed_out: bool,
+		environment_result: EnvironmentAdapterResult,
+		consistency_checks: Dict[str, Any],
+	) -> str:
+		if timed_out:
+			return f"timeout ({self.timeout_seconds}s)"
+		if exit_code is None:
+			return "missing process exit code"
+		if exit_code != 0:
+			return f"process exited with code {exit_code}"
+		if self.failure_marker in stdout:
+			return "failure marker detected in stdout"
+		if self.success_marker not in stdout:
+			stderr_hint = stderr.strip().splitlines()[-1] if stderr.strip() else "none"
+			return f"success marker missing (stderr tail: {stderr_hint})"
+		if not environment_result.success:
+			return (
+				"environment adapter validation failed: "
+				+ (environment_result.error or "unknown adapter error")
+			)
+		if not bool(consistency_checks.get("success", True)):
+			for check_name in ("action_path_schema_replay", "method_trace_reconstruction"):
+				check_payload = consistency_checks.get(check_name) or {}
+				if check_payload.get("passed") is False:
+					return (
+						f"{check_name} failed: "
+						f"{check_payload.get('message') or check_payload.get('failure_class') or 'unknown'}"
+					)
+		return "unknown validation error"
+
+	def _failure_class(
+		self,
+		stdout: str,
+		exit_code: Optional[int],
+		timed_out: bool,
+		environment_result: EnvironmentAdapterResult,
+		consistency_checks: Dict[str, Any],
+	) -> str:
+		if timed_out:
+			return "timeout"
+		if exit_code is None:
+			return "missing_exit_code"
+		if exit_code != 0:
+			return "runtime_process_failed"
+		if self.failure_marker in stdout:
+			return "runtime_failure_marker"
+		if self.success_marker not in stdout:
+			return "missing_success_marker"
+		if not environment_result.success:
+			return "environment_adapter_failure"
+		for check_name in ("action_path_schema_replay", "method_trace_reconstruction"):
+			check_payload = consistency_checks.get(check_name) or {}
+			if check_payload.get("passed") is False:
+				return str(check_payload.get("failure_class") or f"{check_name}_failed")
+		return "validation_failed"
+
+	def _run_consistency_checks(
+		self,
+		*,
+		action_path: Sequence[str],
+		method_trace: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+		problem_file: str | Path | None,
+		skip_method_trace_reconstruction: bool = False,
+	) -> Dict[str, Any]:
+		action_replay = self._replay_action_path_against_schemas(
+			action_path=action_path,
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+		)
+		if skip_method_trace_reconstruction:
+			method_trace_check = {
+				"passed": None,
+				"failure_class": None,
+				"message": "skipped: authoritative guided hierarchical plan available",
+			}
+		else:
+			method_trace_check = self._check_method_trace_reconstruction(
+				action_path=action_path,
+				method_trace=method_trace,
+				method_library=method_library,
+				problem_file=problem_file,
+			)
+		return {
+			"success": bool(action_replay.get("passed", False))
+			and method_trace_check.get("passed") is not False,
+			"action_path_schema_replay": action_replay,
+			"method_trace_reconstruction": method_trace_check,
+		}
+
+	def _replay_action_path_against_schemas(
+		self,
+		*,
+		action_path: Sequence[str],
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+	) -> Dict[str, Any]:
+		world = {
+			atom
+			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
+			if atom is not None
+		}
+		schema_lookup = self._action_schema_lookup(action_schemas)
+
+		for index, step in enumerate(action_path):
+			parsed_step = self._parse_runtime_action_step(step)
+			if parsed_step is None:
+				return {
+					"passed": False,
+					"failure_class": "action_path_malformed_step",
+					"message": f"runtime action step #{index + 1} is malformed: {step}",
+					"checked_steps": index,
+					"world_facts": sorted(world),
+				}
+			action_name, action_args = parsed_step
+			schema = schema_lookup.get(action_name)
+			if schema is None:
+				return {
+					"passed": False,
+					"failure_class": "action_path_unknown_action",
+					"message": f"runtime action step #{index + 1} references unknown action '{action_name}'",
+					"checked_steps": index,
+					"world_facts": sorted(world),
+				}
+			parameters = [str(item) for item in (schema.get("parameters") or [])]
+			if len(parameters) != len(action_args):
+				return {
+					"passed": False,
+					"failure_class": "action_path_arity_mismatch",
+					"message": (
+						f"runtime action step #{index + 1} has arity {len(action_args)} for "
+						f"'{action_name}', expected {len(parameters)}"
+					),
+					"checked_steps": index,
+					"world_facts": sorted(world),
+				}
+
+			bindings: Dict[str, str] = {}
+			for parameter, value in zip(parameters, action_args):
+				token = self._canonical_runtime_token(parameter)
+				bindings[token] = value
+				if token.startswith("?"):
+					bindings[token[1:]] = value
+
+			precondition_clauses = list(schema.get("precondition_clauses") or [])
+			if not precondition_clauses:
+				precondition_clauses = [list(schema.get("preconditions") or [])]
+			if not any(
+				self._replay_precondition_clause_holds(clause, bindings, world)
+				for clause in precondition_clauses
+			):
+				return {
+					"passed": False,
+					"failure_class": "action_path_precondition_violation",
+					"message": (
+						f"runtime action step #{index + 1} violates schema preconditions for "
+						f"'{action_name}{self._render_runtime_args(action_args)}'"
+					),
+					"checked_steps": index,
+					"world_facts": sorted(world),
+				}
+
+			for effect in schema.get("effects") or []:
+				predicate = str(effect.get("predicate", "")).strip()
+				if not predicate or predicate == "=":
+					continue
+				grounded = self._ground_runtime_pattern(
+					predicate,
+					effect.get("args") or [],
+					bindings,
+				)
+				if effect.get("is_positive", True):
+					world.add(grounded)
+				else:
+					world.discard(grounded)
+
+		return {
+			"passed": True,
+			"failure_class": None,
+			"message": None,
+			"checked_steps": len(action_path),
+			"world_facts": sorted(world),
+		}
+
+	def _check_method_trace_reconstruction(
+		self,
+		*,
+		action_path: Sequence[str],
+		method_trace: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None,
+		problem_file: str | Path | None,
+	) -> Dict[str, Any]:
+		if problem_file is None:
+			return {
+				"passed": None,
+				"failure_class": None,
+				"message": "skipped: no problem_file",
+			}
+		if method_library is None or not method_library.methods:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_reconstruction_failed",
+				"message": "method trace cannot be checked without a non-empty method library",
+			}
+
+		from verification.official_plan_verifier import IPCPlanVerifier
+
+		verifier = IPCPlanVerifier()
+		try:
+			rendered_plan = verifier._render_supported_hierarchical_plan(
+				domain_file=problem_file,
+				problem_file=problem_file,
+				action_path=action_path,
+				method_library=method_library,
+				method_trace=method_trace,
+			)
+		except Exception as exc:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_reconstruction_failed",
+				"message": str(exc),
+			}
+
+		build_warning = getattr(verifier, "_last_hierarchical_build_warning", None)
+		if not rendered_plan:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_reconstruction_failed",
+				"message": "hierarchical plan reconstruction returned no plan",
+			}
+		if build_warning:
+			return {
+				"passed": False,
+				"failure_class": "method_trace_partial_reconstruction",
+				"message": build_warning,
+			}
+		return {
+			"passed": True,
+			"failure_class": None,
+			"message": None,
+		}
+
+	def _replay_precondition_clause_holds(
+		self,
+		clause: Sequence[Dict[str, Any]],
+		bindings: Dict[str, str],
+		world: Set[str],
+	) -> bool:
+		for pattern in clause:
+			predicate = str(pattern.get("predicate", "")).strip()
+			args = [str(item) for item in (pattern.get("args") or [])]
+			is_positive = bool(pattern.get("is_positive", True))
+			if predicate == "=" and len(args) == 2:
+				left = self._resolve_runtime_token(args[0], bindings)
+				right = self._resolve_runtime_token(args[1], bindings)
+				if (left == right) != is_positive:
+					return False
+				continue
+			grounded = self._ground_runtime_pattern(predicate, args, bindings)
+			holds = grounded in world if is_positive else grounded not in world
+			if not holds:
+				return False
+		return True
+
+	@staticmethod
+	def _parse_runtime_action_step(step: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		text = (step or "").strip()
+		match = re.fullmatch(r"([A-Za-z0-9_-]+)(?:\((.*)\))?", text)
+		if match is None:
+			return None
+		action_name = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		if not args_text:
+			return action_name, ()
+		return action_name, tuple(
+			part.strip()
+			for part in args_text.split(",")
+			if part.strip()
+		)
+
+	@staticmethod
+	def _canonical_runtime_token(token: str) -> str:
+		value = str(token or "").strip()
+		if len(value) >= 2 and (
+			(value.startswith('"') and value.endswith('"'))
+			or (value.startswith("'") and value.endswith("'"))
+		):
+			return value[1:-1]
+		return value
+
+	def _resolve_runtime_token(
+		self,
+		token: str,
+		bindings: Dict[str, str],
+	) -> str:
+		canonical = self._canonical_runtime_token(token)
+		if canonical in bindings:
+			return bindings[canonical]
+		if canonical.startswith("?") and canonical[1:] in bindings:
+			return bindings[canonical[1:]]
+		return canonical
+
+	def _ground_runtime_pattern(
+		self,
+		predicate: str,
+		args: Sequence[str],
+		bindings: Dict[str, str],
+	) -> str:
+		functor = self._sanitize_name(predicate)
+		if not args:
+			return functor
+		grounded_args = [
+			self._runtime_atom_term(self._resolve_runtime_token(arg, bindings))
+			for arg in args
+		]
+		return f"{functor}({','.join(grounded_args)})"
+
+	@staticmethod
+	def _render_runtime_args(args: Sequence[str]) -> str:
+		if not args:
+			return "()"
+		return f"({', '.join(args)})"
+
+	@staticmethod
+	@lru_cache(maxsize=131072)
+	def _hddl_fact_to_atom(fact: str) -> Optional[str]:
+		text = (fact or "").strip()
+		if not text.startswith("(") or not text.endswith(")"):
+			return None
+		inner = text[1:-1].strip()
+		if not inner or inner.startswith("not "):
+			return None
+		tokens = inner.split()
+		if not tokens:
+			return None
+		predicate, args = tokens[0], tokens[1:]
+		if predicate == "=":
+			return None
+		functor = JasonRunner._sanitize_name(predicate)
+		if not args:
+			return functor
+		rendered_args = [JasonRunner._runtime_atom_term(arg) for arg in args]
+		return f"{functor}({','.join(rendered_args)})"
+
+	@staticmethod
+	def _normalise_process_output(output: str | bytes | None) -> str:
+		if output is None:
+			return ""
+		if isinstance(output, bytes):
+			return output.decode("utf-8", errors="replace")
+		return output
+
+	@staticmethod
+	def _combine_process_output(stdout: str, stderr: str) -> str:
+		if not stderr:
+			return stdout
+		if not stdout:
+			return stderr
+		separator = "" if stdout.endswith("\n") else "\n"
+		return f"{stdout}{separator}{stderr}"
+
+	@staticmethod
+	def _indent_body(lines: Iterable[str]) -> List[str]:
+		body_lines = list(lines)
+		if not body_lines:
+			return ["\ttrue."]
+		rendered: List[str] = []
+		last_index = len(body_lines) - 1
+		for index, line in enumerate(body_lines):
+			suffix = "." if index == last_index else ";"
+			rendered.append(f"\t{line}{suffix}")
+		return rendered

@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from domain_build.method_synthesis.schema import HTNMethod, HTNMethodLibrary
-from domain_build.method_synthesis.naming import query_root_alias_task_name
+from offline_method_generation.method_synthesis.schema import HTNMethod, HTNMethodLibrary
+from offline_method_generation.method_synthesis.naming import query_root_alias_task_name
 from utils.hddl_parser import HDDLParser
 
 

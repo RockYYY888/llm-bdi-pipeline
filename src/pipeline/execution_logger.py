@@ -14,9 +14,12 @@ from typing import Any, Dict, Optional
 
 STEP_TITLES = {
 	"goal_grounding": "GOAL GROUNDING",
+	"temporal_compilation": "TEMPORAL COMPILATION",
 	"method_synthesis": "METHOD SYNTHESIS",
 	"domain_gate": "DOMAIN GATE",
+	"agentspeak_rendering": "AGENTSPEAK RENDERING",
 	"plan_solve": "PLAN SOLVE",
+	"runtime_execution": "RUNTIME EXECUTION",
 	"plan_verification": "OFFICIAL VERIFICATION",
 }
 
@@ -28,7 +31,9 @@ class ExecutionRecord:
 	timestamp: str
 	natural_language: str
 	success: bool
-	mode: str = "query_execution"
+	status: Optional[str] = None
+	step: Optional[str] = None
+	mode: str = "online_query_solution"
 	run_origin: str = "src"
 	logs_root: str = "artifacts/runs"
 	domain_name: Optional[str] = None
@@ -39,9 +44,12 @@ class ExecutionRecord:
 	execution_time_seconds: float = 0.0
 	timings: Dict[str, Any] = field(default_factory=dict)
 	goal_grounding: Optional[Dict[str, Any]] = None
+	temporal_compilation: Optional[Dict[str, Any]] = None
 	method_synthesis: Optional[Dict[str, Any]] = None
 	domain_gate: Optional[Dict[str, Any]] = None
+	agentspeak_rendering: Optional[Dict[str, Any]] = None
 	plan_solve: Optional[Dict[str, Any]] = None
+	runtime_execution: Optional[Dict[str, Any]] = None
 	plan_verification: Optional[Dict[str, Any]] = None
 
 
@@ -59,7 +67,7 @@ class ExecutionLogger:
 	def start_pipeline(
 		self,
 		natural_language: str,
-		mode: str = "query_execution",
+		mode: str = "online_query_solution",
 		domain_file: str = "",
 		problem_file: str | None = None,
 		domain_name: str | None = None,
@@ -138,11 +146,46 @@ class ExecutionLogger:
 			),
 		)
 
-	def log_goal_grounding_error(self, error: str) -> None:
+	def log_goal_grounding_error(
+		self,
+		error: str,
+		*,
+		model: Optional[str] = None,
+		llm_prompt: Optional[Dict[str, str]] = None,
+		llm_response: Optional[str] = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
 		self._set_step_payload(
 			"goal_grounding",
 			status="failed",
 			error=str(error),
+			metadata=metadata,
+			llm=(
+				{
+					"used": bool(model or llm_prompt or llm_response),
+					"model": model,
+					"prompt": llm_prompt,
+					"response": llm_response,
+				}
+				if model or llm_prompt or llm_response
+				else None
+			),
+		)
+
+	def log_temporal_compilation(
+		self,
+		artifacts: Optional[Dict[str, Any]],
+		status: str,
+		*,
+		error: Optional[str] = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		self._set_step_payload(
+			"temporal_compilation",
+			status=status.lower(),
+			error=error,
+			artifacts=artifacts,
+			metadata=metadata,
 		)
 
 	def log_method_synthesis(
@@ -196,6 +239,22 @@ class ExecutionLogger:
 			metadata=metadata,
 		)
 
+	def log_agentspeak_rendering(
+		self,
+		artifacts: Optional[Dict[str, Any]],
+		status: str,
+		*,
+		error: Optional[str] = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		self._set_step_payload(
+			"agentspeak_rendering",
+			status=status.lower(),
+			error=error,
+			artifacts=artifacts,
+			metadata=metadata,
+		)
+
 	def log_plan_solve(
 		self,
 		artifacts: Optional[Dict[str, Any]],
@@ -207,6 +266,24 @@ class ExecutionLogger:
 	) -> None:
 		self._set_step_payload(
 			"plan_solve",
+			status=status.lower(),
+			backend=backend,
+			error=error,
+			artifacts=artifacts,
+			metadata=metadata,
+		)
+
+	def log_runtime_execution(
+		self,
+		artifacts: Optional[Dict[str, Any]],
+		status: str,
+		*,
+		error: Optional[str] = None,
+		backend: Optional[str] = None,
+		metadata: Optional[Dict[str, Any]] = None,
+	) -> None:
+		self._set_step_payload(
+			"runtime_execution",
 			status=status.lower(),
 			backend=backend,
 			error=error,
@@ -240,6 +317,7 @@ class ExecutionLogger:
 				datetime.now() - self.start_time
 			).total_seconds()
 		self.current_record.success = bool(success)
+		self.current_record.status = "success" if success else "failed"
 		self._save_current_state()
 		self._write_human_log()
 		return self.current_log_dir / "execution.txt"
@@ -268,6 +346,9 @@ class ExecutionLogger:
 			payload["artifacts"] = self._sanitise_paths(artifacts)
 		if llm:
 			payload["llm"] = llm
+		if status == "failed":
+			self.current_record.status = "failed"
+			self.current_record.step = step_name
 		setattr(self.current_record, step_name, payload)
 		self._save_current_state()
 
@@ -304,9 +385,12 @@ class ExecutionLogger:
 		]
 		for step_name in (
 			"goal_grounding",
+			"temporal_compilation",
 			"method_synthesis",
 			"domain_gate",
+			"agentspeak_rendering",
 			"plan_solve",
+			"runtime_execution",
 			"plan_verification",
 		):
 			payload = record.get(step_name)

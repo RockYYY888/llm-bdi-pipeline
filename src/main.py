@@ -12,7 +12,8 @@ _src_dir = str(Path(__file__).parent)
 if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
+from offline_method_generation.pipeline import OfflineMethodGenerationPipeline
+from online_query_solution.pipeline import OnlineQuerySolutionPipeline
 from utils.config import get_config
 
 
@@ -24,7 +25,10 @@ def _absolute_path(path_text: str | None) -> str | None:
 
 def build_argument_parser() -> argparse.ArgumentParser:
 	return argparse.ArgumentParser(
-		description="Domain-complete HTN pipeline for domain build and query execution",
+		description=(
+			"Domain-complete HTN pipeline with masked-domain offline method generation and "
+			"Jason-based online natural-language query execution."
+		),
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog="""
 Examples:
@@ -54,7 +58,11 @@ def main() -> None:
 	parser.add_argument(
 		"--build-domain-library",
 		action="store_true",
-		help="Run only the offline domain-build pipeline and persist a cached domain library",
+		help=(
+			"Run only the offline domain-build pipeline. The build masks official methods, "
+			"synthesizes one generated library for the domain, and persists masked plus "
+			"generated domain artifacts."
+		),
 	)
 	parser.add_argument(
 		"--library-artifact",
@@ -63,6 +71,15 @@ def main() -> None:
 	parser.add_argument(
 		"--artifact-output-root",
 		help="Optional explicit output root for persisted domain-build artifacts",
+	)
+	parser.add_argument(
+		"--online-domain-source",
+		choices=("benchmark", "generated"),
+		help=(
+			"Select which domain HDDL the online query path uses for grounding, "
+			"AgentSpeak rendering, Jason runtime validation, and verification-domain "
+			"construction. Defaults to the configured ONLINE_DOMAIN_SOURCE, currently benchmark."
+		),
 	)
 
 	args = parser.parse_args()
@@ -105,12 +122,17 @@ def main() -> None:
 		print("\n" + "=" * 80)
 		sys.exit(1)
 
-	pipeline = DomainCompletePipeline(domain_file=domain_file, problem_file=problem_file)
 	if args.build_domain_library:
+		pipeline = OfflineMethodGenerationPipeline(domain_file=domain_file)
 		results = pipeline.build_domain_library(output_root=args.artifact_output_root)
 	else:
 		if not args.instruction:
 			parser.error("instruction is required unless --build-domain-library is used")
+		pipeline = OnlineQuerySolutionPipeline(
+			domain_file=domain_file,
+			problem_file=problem_file,
+			online_domain_source=args.online_domain_source,
+		)
 		if args.library_artifact:
 			results = pipeline.execute_query_with_library(
 				args.instruction,

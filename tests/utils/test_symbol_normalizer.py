@@ -13,7 +13,7 @@ if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
 from utils.symbol_normalizer import SymbolNormalizer
-from query_execution.goal_grounding.grounding_map import create_propositional_symbol
+from online_query_solution.goal_grounding.grounding_map import create_propositional_symbol
 
 
 def convert_formula_to_propositional_symbols(

@@ -1,0 +1,922 @@
+"""
+Domain-complete HTN prompt builders.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from itertools import combinations
+from typing import Any, Dict, Optional, Sequence
+
+from utils.hddl_condition_parser import HDDLConditionParser
+
+from .prompt_support import (
+	_aligned_task_parameter_labels_for_predicate,
+	_constructive_template_summary_for_task,
+	_declared_task_schema_map,
+	_dynamic_support_candidate_map,
+	_dynamic_support_hint_lines,
+	_extend_mapping_with_action_parameters,
+	_format_tagged_block,
+	_limited_unique,
+	_literal_pattern_signature,
+	_name_tokens,
+	_normalise_action_analysis,
+	_parse_literal_signature,
+	_parameter_token,
+	_parameter_type,
+	_render_signature_with_mapping,
+	_render_positive_dynamic_requirements,
+	_render_positive_static_requirements,
+	_reusable_dynamic_resource_payloads,
+	_same_arity_declared_task_candidates,
+	_sanitize_name,
+	_shared_dynamic_requirements_for_predicate,
+	_task_headline_candidate_map,
+	_task_invocation_signature,
+	_typed_task_invocation_signature,
+	_signature_types_can_biject,
+)
+
+def build_domain_prompt_analysis_payload(
+	domain: Any,
+	*,
+	action_analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+	"""Build compact domain-complete contracts for all declared compound tasks."""
+
+	analysis = _normalise_action_analysis(domain, action_analysis)
+	task_headline_candidates = _task_headline_candidate_map(domain, analysis)
+	shared_dynamic_prerequisites_by_task: Dict[str, list[str]] = {}
+	producer_consumer_templates_by_task: Dict[str, list[str]] = {}
+	domain_task_contracts: list[Dict[str, Any]] = []
+
+	for task in getattr(domain, "tasks", []):
+		task_name = str(getattr(task, "name", "")).strip()
+		if not task_name:
+			continue
+		sanitized_task_name = _sanitize_name(task_name)
+		task_parameters = tuple(_parameter_token(parameter) for parameter in task.parameters)
+		task_parameter_types = tuple(
+			_parameter_type(parameter)
+			for parameter in (getattr(task, "parameters", ()) or ())
+		)
+		headline_candidates = tuple(
+			dict.fromkeys(
+				str(predicate_name).strip()
+				for predicate_name in (
+					getattr(task, "source_predicates", ())
+					or task_headline_candidates.get(sanitized_task_name, ())
+				)
+				if str(predicate_name).strip()
+			)
+		)
+		shared_requirements: list[str] = []
+		template_summaries: list[str] = []
+		for predicate_name in headline_candidates:
+			for requirement in _shared_dynamic_requirements_for_predicate(
+				predicate_name,
+				task_parameters,
+				analysis,
+				predicate_arg_types=task_parameter_types,
+			):
+				if requirement not in shared_requirements:
+					shared_requirements.append(requirement)
+			constructive_template = _constructive_template_summary_for_task(
+				task_name,
+				task_parameters,
+				predicate_name,
+				analysis,
+				task_parameter_types=task_parameter_types,
+			)
+			if constructive_template and constructive_template not in template_summaries:
+				template_summaries.append(constructive_template)
+		shared_requirements = _limited_unique(shared_requirements, limit=4)
+		template_summaries = _limited_unique(template_summaries, limit=2)
+		shared_dynamic_prerequisites_by_task[sanitized_task_name] = shared_requirements
+		producer_consumer_templates_by_task[sanitized_task_name] = template_summaries
+		domain_task_contracts.append(
+			{
+				"task_name": task_name,
+				"task_signature": _task_invocation_signature(task_name, task_parameters),
+				"typed_task_signature": _typed_task_invocation_signature(
+					task_name,
+					getattr(task, "parameters", ()) or (),
+				),
+				"parameters": list(task_parameters),
+				"parameter_types": list(task_parameter_types),
+				"headline_candidates": list(headline_candidates),
+				"shared_dynamic_prerequisites": list(shared_requirements),
+				"producer_consumer_templates": list(template_summaries),
+				"composition_support_tasks": [],
+				"recursive_support_predicates": [],
+				"prerequisite_acquisition_templates": [],
+			}
+		)
+
+	support_task_palette = [
+		(
+			str(contract.get("task_name") or "").strip(),
+			str(contract.get("task_signature") or "").strip(),
+			list(contract.get("headline_candidates") or ()),
+		)
+		for contract in domain_task_contracts
+		if list(contract.get("headline_candidates") or ())
+	]
+	task_schemas = _declared_task_schema_map(domain)
+	generic_resource_predicates = {
+		str(payload.get("predicate") or "").strip()
+		for payload in _reusable_dynamic_resource_payloads(analysis)
+		if str(payload.get("predicate") or "").strip()
+	}
+	palette_eligible_generic_predicates = {
+		predicate_name
+		for predicate_name in generic_resource_predicates
+		if any(
+			predicate_name in candidate_headlines
+			for _, _, candidate_headlines in support_task_palette
+		)
+	}
+	task_signature_by_name = {
+		str(contract.get("task_name") or "").strip(): str(contract.get("task_signature") or "").strip()
+		for contract in domain_task_contracts
+		if str(contract.get("task_name") or "").strip()
+	}
+	task_headlines_by_name = {
+		str(contract.get("task_name") or "").strip(): list(contract.get("headline_candidates") or ())
+		for contract in domain_task_contracts
+		if str(contract.get("task_name") or "").strip()
+	}
+	support_candidates_by_predicate = _dynamic_support_candidate_map(domain, analysis)
+	for contract in domain_task_contracts:
+		task_name = str(contract.get("task_name") or "").strip()
+		task_signature = str(contract.get("task_signature") or "").strip()
+		relevant_predicates = {
+			str(predicate_name).strip()
+			for predicate_name in list(contract.get("headline_candidates") or ())
+			if str(predicate_name).strip()
+		}
+		relevant_predicates.update(
+			str(requirement).split("(", 1)[0].strip()
+			for requirement in list(contract.get("shared_dynamic_prerequisites") or ())
+			if str(requirement).strip()
+			and "(" in str(requirement)
+			and (
+				str(requirement).split("(", 1)[0].strip() not in generic_resource_predicates
+				or str(requirement).split("(", 1)[0].strip() in palette_eligible_generic_predicates
+			)
+		)
+		composition_support_tasks: list[str] = []
+		recursive_support_predicates: list[str] = []
+		for candidate_name, candidate_signature, candidate_headlines in support_task_palette:
+			if not candidate_signature or not candidate_headlines:
+				continue
+			headline_overlap = [
+				headline
+				for headline in candidate_headlines
+				if headline in relevant_predicates
+			]
+			if not headline_overlap:
+				continue
+			if candidate_signature == task_signature:
+				entry = (
+					f"{candidate_signature} stabilizes {', '.join(headline_overlap)} "
+					"(recursive reuse allowed)"
+				)
+			else:
+				entry = f"{candidate_signature} stabilizes {', '.join(headline_overlap)}"
+			if entry not in composition_support_tasks:
+				composition_support_tasks.append(entry)
+			if candidate_signature == task_signature:
+				for headline in headline_overlap:
+					if headline not in recursive_support_predicates:
+						recursive_support_predicates.append(headline)
+		for predicate_name in sorted(relevant_predicates):
+			for candidate_name in support_candidates_by_predicate.get(predicate_name, []):
+				candidate_signature = task_signature_by_name.get(candidate_name)
+				candidate_headlines = task_headlines_by_name.get(candidate_name) or []
+				if not candidate_signature:
+					continue
+				if predicate_name not in candidate_headlines:
+					continue
+				if candidate_signature == task_signature:
+					entry = (
+						f"{candidate_signature} stabilizes {predicate_name} "
+						"(recursive reuse allowed)"
+					)
+				else:
+					entry = f"{candidate_signature} stabilizes {predicate_name}"
+				if entry not in composition_support_tasks:
+					composition_support_tasks.append(entry)
+				if candidate_signature == task_signature and predicate_name not in recursive_support_predicates:
+					recursive_support_predicates.append(predicate_name)
+		if not composition_support_tasks and task_name:
+			task_schema = task_schemas.get(task_name)
+			task_parameter_types = {
+				_parameter_type(parameter)
+				for parameter in (getattr(task_schema, "parameters", ()) or ())
+			}
+			for candidate_name in _same_arity_declared_task_candidates(
+				domain,
+				task_name,
+				task_schemas,
+			):
+				candidate_signature = task_signature_by_name.get(candidate_name)
+				candidate_headlines = task_headlines_by_name.get(candidate_name) or []
+				if not candidate_signature or not candidate_headlines:
+					continue
+				entry = f"{candidate_signature} stabilizes {', '.join(candidate_headlines)}"
+				if entry not in composition_support_tasks:
+					composition_support_tasks.append(entry)
+			for candidate_name, candidate_signature, candidate_headlines in support_task_palette:
+				if candidate_name == task_name or not candidate_headlines:
+					continue
+				candidate_schema = task_schemas.get(candidate_name)
+				candidate_parameter_types = {
+					_parameter_type(parameter)
+					for parameter in (getattr(candidate_schema, "parameters", ()) or ())
+				}
+				if not candidate_parameter_types or not candidate_parameter_types.issubset(task_parameter_types):
+					continue
+				entry = f"{candidate_signature} stabilizes {', '.join(candidate_headlines)}"
+				if entry not in composition_support_tasks:
+					composition_support_tasks.append(entry)
+		contract["composition_support_tasks"] = (
+			_limited_unique(composition_support_tasks, limit=6) or ["none"]
+		)
+		contract["recursive_support_predicates"] = recursive_support_predicates or ["none"]
+		contract["prerequisite_acquisition_templates"] = (
+			_render_prerequisite_acquisition_templates(
+				list(contract.get("shared_dynamic_prerequisites") or ()),
+				analysis,
+			)
+			or ["none"]
+		)
+	method_blueprints = _build_method_blueprints(
+		action_analysis=analysis,
+		domain_task_contracts=domain_task_contracts,
+		task_schemas=task_schemas,
+		support_candidates_by_predicate=support_candidates_by_predicate,
+		domain=domain,
+	)
+
+	return {
+		"declared_compound_tasks": [
+			_task_invocation_signature(
+				str(getattr(task, "name", "")).strip(),
+				tuple(_parameter_token(parameter) for parameter in task.parameters),
+			)
+			for task in getattr(domain, "tasks", [])
+			if str(getattr(task, "name", "")).strip()
+		],
+		"typed_declared_compound_tasks": [
+			_typed_task_invocation_signature(
+				str(getattr(task, "name", "")).strip(),
+				tuple(getattr(task, "parameters", ()) or ()),
+			)
+			for task in getattr(domain, "tasks", [])
+			if str(getattr(task, "name", "")).strip()
+		],
+		"task_headline_candidates": task_headline_candidates,
+		"shared_dynamic_prerequisites_by_task": shared_dynamic_prerequisites_by_task,
+		"producer_consumer_templates_by_task": producer_consumer_templates_by_task,
+		"reusable_dynamic_resource_predicates": _reusable_dynamic_resource_payloads(analysis),
+		"domain_task_contracts": domain_task_contracts,
+		"method_blueprints": method_blueprints,
+	}
+
+
+def _type_can_fill_slot(parent_type: str, child_type: str) -> bool:
+	parent = str(parent_type or "object").strip().lower()
+	child = str(child_type or "object").strip().lower()
+	return _signature_types_can_biject((parent,), (child,), {})
+
+
+def _enumerate_aligned_support_calls(
+	parent_parameters: Sequence[str],
+	parent_parameter_types: Sequence[str],
+	child_signature: str,
+	child_parameter_types: Sequence[str],
+	*,
+	limit: int = 4,
+) -> list[str]:
+	if not child_parameter_types:
+		return [child_signature]
+	if len(child_parameter_types) > len(parent_parameter_types):
+		return []
+
+	aligned_calls: list[str] = []
+	parent_positions = range(len(parent_parameters))
+	for indices in combinations(parent_positions, len(child_parameter_types)):
+		candidate_args = [parent_parameters[index] for index in indices]
+		candidate_types = [parent_parameter_types[index] for index in indices]
+		if not all(
+			_type_can_fill_slot(parent_type, child_type)
+			for parent_type, child_type in zip(candidate_types, child_parameter_types)
+		):
+			continue
+		aligned_calls.append(_task_invocation_signature(child_signature, tuple(candidate_args)))
+		if len(aligned_calls) >= limit:
+			break
+	return aligned_calls
+
+
+def _build_method_blueprints(
+	*,
+	action_analysis: Dict[str, Any],
+	domain_task_contracts: Sequence[Dict[str, Any]],
+	task_schemas: Dict[str, Any],
+	support_candidates_by_predicate: Dict[str, list[str]],
+	domain: Any,
+) -> list[Dict[str, Any]]:
+	_ = support_candidates_by_predicate
+	contracts_by_name = {
+		str(contract.get("task_name") or "").strip(): dict(contract)
+		for contract in domain_task_contracts
+		if str(contract.get("task_name") or "").strip()
+	}
+	blueprints: list[Dict[str, Any]] = []
+	for task_name, contract in contracts_by_name.items():
+		task_parameters = list(contract.get("parameters") or ())
+		task_parameter_types = list(contract.get("parameter_types") or ())
+		headline_candidates = [
+			str(item).strip()
+			for item in (contract.get("headline_candidates") or ())
+			if str(item).strip() and str(item).strip() != "none"
+		]
+		shared_dynamic_prerequisites = [
+			str(item).strip()
+			for item in (contract.get("shared_dynamic_prerequisites") or ())
+			if str(item).strip() and str(item).strip() != "none"
+		]
+		producer_templates = [
+			str(item).strip()
+			for item in (contract.get("producer_consumer_templates") or ())
+			if str(item).strip() and str(item).strip() != "none"
+		]
+		recursive_support_predicates = [
+			str(item).strip()
+			for item in (contract.get("recursive_support_predicates") or ())
+			if str(item).strip() and str(item).strip() != "none"
+		]
+
+		support_call_palette: list[str] = []
+		uncovered_prerequisite_families: list[str] = []
+		for requirement in shared_dynamic_prerequisites:
+			parsed_requirement = _parse_literal_signature(requirement)
+			if parsed_requirement is None:
+				continue
+			predicate_name, _, is_positive = parsed_requirement
+			if not is_positive:
+				continue
+			candidate_calls: list[str] = []
+			for candidate_name, candidate_contract in contracts_by_name.items():
+				candidate_headlines = {
+					str(item).strip()
+					for item in (candidate_contract.get("headline_candidates") or ())
+					if str(item).strip() and str(item).strip() != "none"
+				}
+				if predicate_name not in candidate_headlines:
+					continue
+				candidate_tokens = set(_name_tokens(candidate_name))
+				predicate_tokens = set(_name_tokens(predicate_name))
+				if predicate_tokens and not (candidate_tokens & predicate_tokens):
+					continue
+				candidate_schema = task_schemas.get(candidate_name)
+				if candidate_schema is None:
+					continue
+				candidate_signature = _sanitize_name(candidate_name)
+				child_parameter_types = [
+					_parameter_type(parameter)
+					for parameter in (getattr(candidate_schema, "parameters", ()) or ())
+				]
+				candidate_calls.extend(
+					_enumerate_aligned_support_calls(
+						task_parameters,
+						task_parameter_types,
+						candidate_signature,
+						child_parameter_types,
+					),
+				)
+			candidate_calls = _limited_unique(candidate_calls, limit=4)
+			if candidate_calls:
+				support_call_palette.extend(candidate_calls)
+			family_lines = [
+				str(item).strip()
+				for item in (contract.get("prerequisite_acquisition_templates") or ())
+				if str(item).strip().startswith(f"{requirement} via ")
+			]
+			if not candidate_calls and family_lines:
+				uncovered_prerequisite_families.extend(family_lines)
+		method_family_schemas = _render_method_family_schemas(
+			action_analysis=action_analysis,
+			headline_candidates=headline_candidates,
+			recursive_support_predicates=recursive_support_predicates,
+			task_name=task_name,
+			task_parameters=task_parameters,
+			task_parameter_types=task_parameter_types,
+		)
+		method_family_schemas = _prune_method_family_schemas(
+			method_family_schemas,
+			task_parameters=task_parameters,
+			shared_dynamic_prerequisites=shared_dynamic_prerequisites,
+		)
+		if (
+			not shared_dynamic_prerequisites
+			and method_family_schemas
+			and all(
+				isinstance(family, dict)
+				and str(family.get("family_role") or "") == "recursive_blocker_removal"
+				for family in method_family_schemas
+			)
+		):
+			producer_templates = []
+
+		blueprints.append(
+			{
+				"task_name": task_name,
+				"task_signature": str(contract.get("task_signature") or "").strip(),
+				"typed_task_signature": str(contract.get("typed_task_signature") or "").strip(),
+				"headline_candidates": headline_candidates or ["helper_only"],
+				"support_call_palette": _limited_unique(support_call_palette, limit=6) or ["none"],
+				"direct_primitive_achievers": producer_templates or ["none"],
+				"uncovered_prerequisite_families": _limited_unique(
+					uncovered_prerequisite_families,
+					limit=4,
+				) or ["none"],
+				"method_family_schemas": method_family_schemas or ["none"],
+			},
+		)
+	return blueprints
+
+
+def _prune_method_family_schemas(
+	families: Sequence[Dict[str, Any]],
+	*,
+	task_parameters: Sequence[str],
+	shared_dynamic_prerequisites: Sequence[str],
+) -> list[Dict[str, Any]]:
+	if shared_dynamic_prerequisites:
+		return [dict(family) for family in families if isinstance(family, dict)]
+	recursive_families = [
+		dict(family)
+		for family in families
+		if isinstance(family, dict)
+		and str(family.get("family_role") or "") == "recursive_blocker_removal"
+	]
+	if not recursive_families:
+		return [dict(family) for family in families if isinstance(family, dict)]
+	task_parameter_set = {str(parameter).strip() for parameter in task_parameters if str(parameter).strip()}
+	relational_recursive_families = [
+		family
+		for family in recursive_families
+		if any(
+			(
+				(parsed_literal := _parse_literal_signature(str(signature))) is not None
+				and parsed_literal[2]
+				and len(parsed_literal[1]) >= 2
+				and any(arg in task_parameter_set for arg in parsed_literal[1])
+				and any(arg not in task_parameter_set for arg in parsed_literal[1])
+			)
+			for signature in (family.get("context") or ())
+		)
+	]
+	if relational_recursive_families:
+		return relational_recursive_families
+	return recursive_families
+
+
+def _render_method_blueprint_blocks(method_blueprints: Sequence[Dict[str, Any]]) -> str:
+	serializable_payloads: list[Dict[str, Any]] = []
+	for payload in method_blueprints:
+		headline_candidates = list(payload["headline_candidates"])
+		serializable: Dict[str, Any] = {
+			"task": payload["typed_task_signature"] or payload["task_signature"],
+		}
+		if len(headline_candidates) == 1:
+			serializable["headline"] = headline_candidates[0]
+		else:
+			serializable["headlines"] = headline_candidates
+		for key in (
+			"support_call_palette",
+			"uncovered_prerequisite_families",
+		):
+			if key == "uncovered_prerequisite_families":
+				values = []
+				for item in (payload.get(key) or ()):
+					compact_value = _compact_uncovered_prerequisite_family(item)
+					if compact_value is not None:
+						values.append(compact_value)
+			else:
+				values = [
+					str(item).strip()
+					for item in (payload.get(key) or ())
+					if str(item).strip() and str(item).strip() != "none"
+				]
+			if values:
+				serializable[key] = values
+		family_schemas = [
+			_compact_method_family_schema(family)
+			for family in (payload.get("method_family_schemas") or ())
+			if isinstance(family, dict)
+		]
+		if family_schemas:
+			serializable["method_family_schemas"] = family_schemas
+		else:
+			values = [
+				str(item).strip()
+				for item in (payload.get("direct_primitive_achievers") or ())
+				if str(item).strip() and str(item).strip() != "none"
+			]
+			if values:
+				serializable["direct_primitive_achievers"] = values
+		serializable_payloads.append(serializable)
+	return json.dumps(serializable_payloads, separators=(",", ":"))
+
+
+def _compact_uncovered_prerequisite_family(item: object) -> Dict[str, str] | None:
+	text = str(item or "").strip()
+	if not text or text == "none":
+		return None
+	match = re.fullmatch(r"(.+?) via (.+?)(?: \[needs .+\])?", text)
+	if match is None:
+		return {"need": text}
+	return {
+		"need": match.group(1).strip(),
+		"acquire": match.group(2).strip(),
+	}
+
+
+def _compact_method_family_schema(family: Dict[str, Any]) -> Dict[str, Any]:
+	serializable = dict(family)
+	if str(serializable.get("family_role") or "").strip() == "direct_achiever":
+		serializable.pop("family_role", None)
+	if serializable.get("redundant_if_noop_holds") is False:
+		serializable.pop("redundant_if_noop_holds", None)
+	return serializable
+
+
+def _render_cleanup_steps_for_family(
+	*,
+	action_analysis: Dict[str, Any],
+	headline_signature: str,
+	pattern: Dict[str, Any],
+	task_parameter_set: set[str],
+	token_mapping: Dict[str, str],
+) -> list[str]:
+	cleanup_candidates: list[tuple[int, str]] = []
+	for effect_signature in (pattern.get("positive_effect_signatures") or ()):
+		rendered_effect = _render_signature_with_mapping(effect_signature, token_mapping)
+		if rendered_effect == headline_signature:
+			continue
+		parsed_effect = _parse_literal_signature(rendered_effect)
+		if parsed_effect is None or not parsed_effect[2]:
+			continue
+		predicate_name, effect_args, _ = parsed_effect
+		if not effect_args or not any(arg not in task_parameter_set for arg in effect_args):
+			continue
+		for consumer_pattern in (
+			action_analysis.get("consumer_patterns_by_predicate", {}).get(predicate_name, ())
+		):
+			precondition_args = list(consumer_pattern.get("precondition_args") or ())
+			if len(precondition_args) != len(effect_args):
+				continue
+			consumer_mapping = {
+				token: arg
+				for token, arg in zip(precondition_args, effect_args)
+			}
+			rendered_action_args = _extend_mapping_with_action_parameters(
+				consumer_mapping,
+				consumer_pattern.get("action_parameters") or (),
+				action_parameter_types=consumer_pattern.get("action_parameter_types") or (),
+			)
+			other_needs = [
+				_render_signature_with_mapping(signature, consumer_mapping)
+				for signature in (consumer_pattern.get("other_dynamic_precondition_signatures") or ())
+				if str(signature).strip() and not str(signature).startswith("not ")
+			]
+			cleanup_candidates.append(
+				(
+					len(other_needs),
+					_task_invocation_signature(
+						str(consumer_pattern.get("action_name") or "").strip(),
+						rendered_action_args,
+					),
+				),
+			)
+	cleanup_candidates.sort(key=lambda item: (item[0], item[1]))
+	return _limited_unique((call for _, call in cleanup_candidates), limit=2)
+
+
+def _render_method_family_schemas(
+	*,
+	action_analysis: Dict[str, Any],
+	headline_candidates: Sequence[str],
+	recursive_support_predicates: Sequence[str],
+	task_name: str,
+	task_parameters: Sequence[str],
+	task_parameter_types: Sequence[str],
+) -> list[Dict[str, Any]]:
+	task_parameter_set = set(task_parameters)
+	recursive_predicates = set(recursive_support_predicates)
+	families: list[Dict[str, Any]] = []
+	seen_payloads: set[str] = set()
+	for predicate_name in headline_candidates:
+		for pattern in (action_analysis.get("producer_patterns_by_predicate", {}).get(predicate_name, ())):
+			effect_args = list(pattern.get("effect_args") or ())
+			if len(effect_args) != len(task_parameters):
+				continue
+			aligned_task_parameters = _aligned_task_parameter_labels_for_predicate(
+				predicate_name,
+				task_parameters,
+				task_parameter_types,
+				action_analysis,
+				producer_pattern=pattern,
+			)
+			if aligned_task_parameters is None:
+				continue
+			token_mapping = {
+				token: task_parameter
+				for token, task_parameter in zip(effect_args, aligned_task_parameters)
+			}
+			rendered_action_args = _extend_mapping_with_action_parameters(
+				token_mapping,
+				pattern.get("action_parameters") or (),
+				action_parameter_types=pattern.get("action_parameter_types") or (),
+			)
+			rendered_symbol_types: Dict[str, str] = {
+				str(task_parameter): str(task_parameter_type or "object")
+				for task_parameter, task_parameter_type in zip(task_parameters, task_parameter_types)
+			}
+			for rendered_arg, action_parameter_type in zip(
+				rendered_action_args,
+				pattern.get("action_parameter_types") or (),
+			):
+				rendered_symbol_types.setdefault(
+					str(rendered_arg),
+					str(action_parameter_type or "object"),
+				)
+			final_step = _task_invocation_signature(
+				str(pattern.get("action_name") or "").strip(),
+				rendered_action_args,
+			)
+			headline_signature = _task_invocation_signature(
+				predicate_name,
+				tuple(aligned_task_parameters),
+			)
+			context = _limited_unique(
+				[
+					*_render_positive_dynamic_requirements(pattern, token_mapping),
+					*_render_positive_static_requirements(pattern, token_mapping),
+				],
+				limit=8,
+			)
+			recursive_support_calls: list[str] = []
+			for requirement in _render_positive_dynamic_requirements(pattern, token_mapping):
+				parsed_requirement = _parse_literal_signature(requirement)
+				if parsed_requirement is None or not parsed_requirement[2]:
+					continue
+				requirement_predicate, requirement_args, _ = parsed_requirement
+				if requirement_predicate not in recursive_predicates:
+					continue
+				if set(requirement_args).issubset(task_parameter_set):
+					continue
+				if len(requirement_args) != len(task_parameters):
+					continue
+				if any(
+					not _signature_types_can_biject(
+						(str(rendered_symbol_types.get(str(requirement_arg), "object")),),
+						(str(task_parameter_type or "object"),),
+						action_analysis.get("type_parent_map", {}) or {},
+					)
+					for requirement_arg, task_parameter_type in zip(requirement_args, task_parameter_types)
+				):
+					continue
+				recursive_support_calls.append(
+					_task_invocation_signature(task_name, requirement_args),
+				)
+			family_payload: Dict[str, Any] = {
+				"family_role": (
+					"recursive_blocker_removal"
+					if recursive_support_calls
+					else "direct_achiever"
+				),
+				"final_step": final_step,
+				"context": context,
+				"redundant_if_noop_holds": headline_signature in context,
+			}
+			if recursive_support_calls:
+				family_payload["recursive_support_calls"] = _limited_unique(
+					recursive_support_calls,
+					limit=2,
+				)
+			cleanup_steps = _render_cleanup_steps_for_family(
+				action_analysis=action_analysis,
+				headline_signature=headline_signature,
+				pattern=pattern,
+				task_parameter_set=task_parameter_set,
+				token_mapping=dict(token_mapping),
+			)
+			if cleanup_steps:
+				family_payload["cleanup_steps"] = cleanup_steps
+			serialized = json.dumps(family_payload, sort_keys=True)
+			if serialized in seen_payloads:
+				continue
+			seen_payloads.add(serialized)
+			families.append(family_payload)
+	return families
+
+
+def _render_prerequisite_acquisition_templates(
+	shared_dynamic_prerequisites: Sequence[str],
+	action_analysis: Dict[str, Any],
+) -> list[str]:
+	lines: list[str] = []
+	per_requirement_lines: list[list[str]] = []
+	for requirement in shared_dynamic_prerequisites:
+		requirement_lines: list[str] = []
+		parsed_requirement = _parse_literal_signature(str(requirement))
+		if parsed_requirement is None:
+			continue
+		predicate_name, requirement_args, is_positive = parsed_requirement
+		if not is_positive:
+			continue
+		for producer_pattern in (
+			action_analysis.get("producer_patterns_by_predicate", {}).get(predicate_name, ())
+		):
+			effect_signature = str(producer_pattern.get("effect_signature") or "").strip()
+			parsed_effect = _parse_literal_signature(effect_signature)
+			if parsed_effect is None:
+				continue
+			_, effect_args, effect_positive = parsed_effect
+			if not effect_positive or len(effect_args) != len(requirement_args):
+				continue
+			token_mapping = {
+				source_arg: target_arg
+				for source_arg, target_arg in zip(effect_args, requirement_args)
+			}
+			rendered_action_args = _extend_mapping_with_action_parameters(
+				token_mapping,
+				tuple(producer_pattern.get("action_parameters") or ()),
+				action_parameter_types=tuple(producer_pattern.get("action_parameter_types") or ()),
+			)
+			action_signature = _task_invocation_signature(
+				str(producer_pattern.get("source_action_name") or producer_pattern.get("action_name") or "").strip(),
+				rendered_action_args,
+			)
+			dynamic_needs = [
+				_render_signature_with_mapping(str(signature), token_mapping)
+				for signature in (producer_pattern.get("dynamic_precondition_signatures") or ())
+				if str(signature).strip() and not str(signature).startswith("not ")
+			]
+			if requirement in dynamic_needs:
+				continue
+			requirement_lines.append(
+				f"{requirement} via {action_signature} "
+				f"[needs {', '.join(dynamic_needs) if dynamic_needs else 'none'}]"
+			)
+		per_requirement_lines.append(
+			_limited_unique(requirement_lines, limit=2),
+		)
+	for requirement_lines in per_requirement_lines:
+		lines.extend(requirement_lines)
+	return _limited_unique(
+		lines,
+		limit=max(6, len(shared_dynamic_prerequisites) * 2),
+	)
+def _render_domain_action_schema_blocks(domain: Any) -> str:
+	parser = HDDLConditionParser()
+	blocks: list[str] = []
+	for action in getattr(domain, "actions", []):
+		parsed_action = parser.parse_action(action)
+		parameter_signature = ", ".join(
+			f"{_parameter_token(parameter)}:{_parameter_type(parameter)}"
+			for parameter in getattr(action, "parameters", ())
+		)
+		preconditions = [
+			_literal_pattern_signature(pattern)
+			for pattern in parsed_action.preconditions
+			if pattern.predicate != "="
+		]
+		add_effects = [
+			_literal_pattern_signature(pattern)
+			for pattern in parsed_action.effects
+			if pattern.predicate != "=" and pattern.is_positive
+		]
+		delete_effects = [
+			_literal_pattern_signature(pattern)
+			for pattern in parsed_action.effects
+			if pattern.predicate != "=" and not pattern.is_positive
+		]
+		blocks.append(
+			f"{parsed_action.name}({parameter_signature}) "
+			f"pre:[{', '.join(preconditions) if preconditions else 'true'}] "
+			f"add:[{', '.join(add_effects) if add_effects else 'none'}] "
+			f"del:[{', '.join(delete_effects) if delete_effects else 'none'}]"
+		)
+	return "\n\n".join(blocks).strip()
+
+def build_domain_htn_system_prompt() -> str:
+	"""System prompt for one-shot domain-complete method synthesis."""
+
+	return (
+		"ROLE:\n"
+		"Write a typed symbolic Hierarchical Task Network method library.\n"
+		"Operate as constrained program synthesis over the provided domain signature.\n"
+		"\n"
+		"TARGET:\n"
+		"Return one domain-complete HTN library aligned with HDDL :method structure.\n"
+		"Start emitting JSON immediately.\n"
+		"\n"
+		"CONSTRAINTS:\n"
+		"- Use only declared compound tasks, declared primitive actions, declared predicates, and typed symbolic variables.\n"
+		"- Stay domain-level and query-independent.\n"
+		"- Prefer the smallest method set that still covers the declared tasks.\n"
+		"- Use one method family per real decomposition pattern, not one branch per local prerequisite permutation.\n"
+		"- Prefer declared support tasks over local primitive repair when a declared task already stabilizes the needed literal.\n"
+		"- Keep tasks with the same headline predicate distinct by task name.\n"
+		"- Method preconditions are conjunctions only.\n"
+		"- Use equality only as ARG1 == ARG2 or ARG1 != ARG2.\n"
+		"- Use explicit step objects and explicit pairwise ordering edges.\n"
+		"- Every compound child must be another declared compound task.\n"
+		"- Every constructive method must end at a final achiever child or primitive that establishes the task headline.\n"
+		"- Recursive methods must change at least one witness argument.\n"
+		"\n"
+		"OUTPUT:\n"
+		"- Emit JSON only.\n"
+		"- Emit one object with top-level keys compound_tasks and methods.\n"
+		"- Do not emit primitive_tasks, markdown, commentary, or reasoning text.\n"
+		"- Return minified JSON only.\n"
+	)
+
+def build_domain_htn_user_prompt(
+	domain: Any,
+	schema_hint: str,
+	*,
+	action_analysis: Optional[Dict[str, Any]] = None,
+	derived_analysis: Optional[Dict[str, Any]] = None,
+) -> str:
+	"""User prompt for one-shot domain-complete method synthesis synthesis."""
+
+	analysis = _normalise_action_analysis(domain, action_analysis)
+	prompt_analysis = dict(
+		derived_analysis
+		or build_domain_prompt_analysis_payload(
+			domain,
+			action_analysis=analysis,
+		)
+	)
+	method_blueprints = list(prompt_analysis.get("method_blueprints") or ())
+	action_schema_block = _render_domain_action_schema_blocks(domain)
+	method_blueprint_block = _render_method_blueprint_blocks(method_blueprints)
+	domain_summary_block = "\n".join(
+		[
+			f"domain: {domain.name}",
+			"primitive_action_schemas:",
+			action_schema_block or "none",
+		]
+	)
+	instructions_block = "\n".join(
+		[
+			"1. Emit a minimal HDDL-aligned method library, not task-level branch shorthand.",
+			"2. Define exactly the declared compound tasks in compound_tasks.",
+			"3. Read method_blueprints as the canonical task-support tree for each task.",
+			"4. Treat method_family_schemas as the minimal real decomposition families induced by the domain mechanics.",
+			"5. Prefer support_call_palette over local primitive repair whenever a declared task already stabilizes the needed literal.",
+			"6. Use direct_primitive_achievers and uncovered_prerequisite_families only to fill real support gaps left by method_family_schemas.",
+			"7. If redundant_if_noop_holds=true, do not emit that constructive method.",
+			"8. If recursive_support_calls are listed, place them before final_step.",
+			"9. If cleanup_steps are listed, append them after final_step when needed to restore shared resources.",
+			"10. Keep tasks with the same headline predicate semantically distinct by task name.",
+			"11. Every constructive method must end with a real final achiever child or primitive.",
+			"12. task_args must match exactly the declared task signature slots and never include auxiliary witness variables.",
+			"13. Auxiliary witness variables belong only in method parameters, context, subtasks, and ordering.",
+			"14. Use explicit step objects with pairwise ordering edges.",
+			"15. Omit optional fields when they add no information.",
+			"16. Never invent undeclared compound helpers, hidden predicates, or extra schema fields.",
+		]
+	)
+	sections = [
+		_format_tagged_block(
+			"task",
+			"Generate one executable JSON HTN library for the whole domain. "
+			"Do not condition the library on any benchmark query.",
+		),
+		_format_tagged_block("domain_summary", domain_summary_block),
+		_format_tagged_block(
+			"method_blueprints",
+			method_blueprint_block,
+		),
+		_format_tagged_block("instructions", instructions_block),
+		_format_tagged_block(
+			"output_schema",
+			"Emit one JSON object with keys compound_tasks and methods.\n"
+			"compound_tasks entries use: name, parameters, optional source_predicates, optional source_name.\n"
+			"methods entries use: method_name, task_name, parameters, task_args, context, subtasks, ordering.\n"
+			"Each subtask entry uses: step_id, task_name, args, kind.\n"
+			"Use empty subtasks plus empty ordering for noop methods.\n"
+			f"schema_hint: {schema_hint}",
+		),
+	]
+	return "\n\n".join(section for section in sections if section).strip() + "\n"

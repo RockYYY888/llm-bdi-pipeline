@@ -1,15 +1,25 @@
 # Query Protocol
 
-Write one single sentence in this form:
+The online Jason path no longer requires the benchmark-canonical single-sentence template.
 
-`Using <typed objects actually referenced by the requested tasks>, complete the tasks task_1(arg1, ...), task_2(arg1, ...), ... .`
+Accepted query style:
 
-Rules:
+- natural language is allowed
+- task invocations can be explicit or implicit
+- temporal wording such as `first`, `then`, `before`, `after`, `until`, `always`, and `eventually` is interpreted by the large-language-model grounding step
+- all grounded objects must still come from the current `problem.hddl` object inventory
+
+Recommended rules:
+
 - Use the exact object identifiers from the benchmark vocabulary.
-- Write every requested declared task explicitly as `task(arg, ...)`.
-- Keep the task order when the intended task network is ordered.
-- Do not mention `problem.hddl`, `:init`, `:goal`, hidden state facts, methods, repairs, or decomposition advice.
+- If you already know the intended declared task calls, naming them explicitly still improves grounding stability.
+- Keep temporal wording explicit when order matters.
+- Do not mention decomposition advice, methods, or planner internals.
 
-Example:
+Still-valid canonical example:
 
-`Using blocks b4, b2, b1, and b3, complete the tasks do_put_on(b4, b2), do_put_on(b1, b4), and do_put_on(b3, b1).`
+`Using blocks b4, b2, b1, and b3, first do_put_on(b4, b2), then do_put_on(b1, b4), then do_put_on(b3, b1).`
+
+Free-form example:
+
+`First put block b4 on block b2, then stack b1 on top of b4, and finally place b3 on b1.`

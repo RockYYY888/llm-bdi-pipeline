@@ -1,0 +1,22 @@
+/*
+    meta_programming
+    ---------------------------
+
+    Jason Project File
+
+    expected output
+
+[sample_agent] Start running plan test
+[sample_agent] command ?b(_22)
+[sample_agent] command .print(10)
+[sample_agent] 10
+[sample_agent] command !g(10)
+[sample_agent] ok10
+[sample_agent] end of execution!
+
+*/
+
+MAS meta_programming {
+
+    agents: sample_agent;
+}

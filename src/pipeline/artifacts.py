@@ -1,5 +1,5 @@
 """
-Persisted artifact structures for domain builds and query execution.
+Persisted artifact structures for domain builds and online query execution.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from domain_build.method_synthesis.schema import (
+from offline_method_generation.method_synthesis.schema import (
 	HTNLiteral,
 	HTNMethodLibrary,
 	HTNTargetTaskBinding,
@@ -36,26 +36,26 @@ def _load_literal(payload: Dict[str, Any]) -> HTNLiteral:
 
 
 @dataclass(frozen=True)
-class GoalRequestNode:
-	"""Grounded query-time task node."""
+class GroundedSubgoal:
+	"""One grounded online subgoal emitted by temporal goal grounding."""
 
-	node_id: str
+	subgoal_id: str
 	task_name: str
 	args: Tuple[str, ...] = ()
 	argument_types: Tuple[str, ...] = ()
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
-			"node_id": self.node_id,
+			"id": self.subgoal_id,
 			"task_name": self.task_name,
 			"args": list(self.args),
 			"argument_types": list(self.argument_types),
 		}
 
 	@classmethod
-	def from_dict(cls, payload: Dict[str, Any]) -> "GoalRequestNode":
+	def from_dict(cls, payload: Dict[str, Any]) -> "GroundedSubgoal":
 		return cls(
-			node_id=str(payload.get("node_id") or ""),
+			subgoal_id=str(payload.get("id") or payload.get("subgoal_id") or ""),
 			task_name=str(payload.get("task_name") or ""),
 			args=tuple(str(arg) for arg in (payload.get("args") or ())),
 			argument_types=tuple(
@@ -64,57 +64,46 @@ class GoalRequestNode:
 			),
 		)
 
-
 @dataclass(frozen=True)
-class GoalRequest:
-	"""Grounded query-time request graph."""
+class TemporalGroundingResult:
+	"""Validated online semantic grounding output."""
 
 	query_text: str
-	nodes: Tuple[GoalRequestNode, ...]
-	precedence_edges: Tuple[Tuple[str, str], ...] = ()
-	query_object_inventory: Tuple[Dict[str, Any], ...] = ()
+	ltlf_formula: str
+	subgoals: Tuple[GroundedSubgoal, ...]
 	typed_objects: Dict[str, str] = field(default_factory=dict)
+	query_object_inventory: Tuple[Dict[str, Any], ...] = ()
 	diagnostics: Tuple[str, ...] = ()
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
 			"query_text": self.query_text,
-			"nodes": [node.to_dict() for node in self.nodes],
-			"precedence_edges": [
-				{"before": before, "after": after}
-				for before, after in self.precedence_edges
-			],
-			"query_object_inventory": [dict(entry) for entry in self.query_object_inventory],
+			"ltlf_formula": self.ltlf_formula,
+			"subgoals": [subgoal.to_dict() for subgoal in self.subgoals],
 			"typed_objects": dict(self.typed_objects),
+			"query_object_inventory": [dict(entry) for entry in self.query_object_inventory],
 			"diagnostics": list(self.diagnostics),
 		}
 
 	@classmethod
-	def from_dict(cls, payload: Dict[str, Any]) -> "GoalRequest":
+	def from_dict(cls, payload: Dict[str, Any]) -> "TemporalGroundingResult":
 		return cls(
 			query_text=str(payload.get("query_text") or ""),
-			nodes=tuple(
-				GoalRequestNode.from_dict(node_payload)
-				for node_payload in (payload.get("nodes") or ())
-				if isinstance(node_payload, dict)
-			),
-			precedence_edges=tuple(
-				(
-					str(edge_payload.get("before") or ""),
-					str(edge_payload.get("after") or ""),
-				)
-				for edge_payload in (payload.get("precedence_edges") or ())
-				if isinstance(edge_payload, dict)
-			),
-			query_object_inventory=tuple(
-				dict(entry)
-				for entry in (payload.get("query_object_inventory") or ())
-				if isinstance(entry, dict)
+			ltlf_formula=str(payload.get("ltlf_formula") or ""),
+			subgoals=tuple(
+				GroundedSubgoal.from_dict(item)
+				for item in (payload.get("subgoals") or ())
+				if isinstance(item, dict)
 			),
 			typed_objects={
 				str(key): str(value)
 				for key, value in dict(payload.get("typed_objects") or {}).items()
 			},
+			query_object_inventory=tuple(
+				dict(entry)
+				for entry in (payload.get("query_object_inventory") or ())
+				if isinstance(entry, dict)
+			),
 			diagnostics=tuple(
 				str(message).strip()
 				for message in (payload.get("diagnostics") or ())
@@ -124,68 +113,121 @@ class GoalRequest:
 
 
 @dataclass(frozen=True)
-class PlanningRequest:
-	"""Planner-oriented query request context."""
+class DFACompilationResult:
+	"""Compiled deterministic automaton and renderer-facing transition data."""
 
 	query_text: str
-	goal_request: GoalRequest
-	problem_objects: Tuple[str, ...] = ()
-	typed_objects: Dict[str, str] = field(default_factory=dict)
-	task_network: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
-	task_network_ordered: bool = True
-	ordering_edges: Tuple[Tuple[str, str], ...] = ()
+	ltlf_formula: str
+	alphabet: Tuple[str, ...]
+	transition_specs: Tuple[Dict[str, Any], ...]
+	dfa_dot: Optional[str] = None
+	construction: Optional[str] = None
+	num_states: Optional[int] = None
+	num_transitions: Optional[int] = None
+	ordered_subgoal_sequence: bool = True
+	subgoals: Tuple[GroundedSubgoal, ...] = ()
+	timing_profile: Dict[str, Any] = field(default_factory=dict)
 	diagnostics: Tuple[str, ...] = ()
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
 			"query_text": self.query_text,
-			"goal_request": self.goal_request.to_dict(),
-			"problem_objects": list(self.problem_objects),
-			"typed_objects": dict(self.typed_objects),
-			"task_network": [
-				{"task_name": task_name, "args": list(args)}
-				for task_name, args in self.task_network
-			],
-			"task_network_ordered": self.task_network_ordered,
-			"ordering_edges": [
-				{"before": before, "after": after}
-				for before, after in self.ordering_edges
-			],
+			"ltlf_formula": self.ltlf_formula,
+			"alphabet": list(self.alphabet),
+			"transition_specs": [dict(spec) for spec in self.transition_specs],
+			"dfa_dot": self.dfa_dot,
+			"construction": self.construction,
+			"num_states": self.num_states,
+			"num_transitions": self.num_transitions,
+			"ordered_subgoal_sequence": self.ordered_subgoal_sequence,
+			"subgoals": [subgoal.to_dict() for subgoal in self.subgoals],
+			"timing_profile": dict(self.timing_profile),
 			"diagnostics": list(self.diagnostics),
 		}
 
 	@classmethod
-	def from_dict(cls, payload: Dict[str, Any]) -> "PlanningRequest":
-		goal_request_payload = dict(payload.get("goal_request") or {})
+	def from_dict(cls, payload: Dict[str, Any]) -> "DFACompilationResult":
 		return cls(
 			query_text=str(payload.get("query_text") or ""),
-			goal_request=GoalRequest.from_dict(goal_request_payload),
-			problem_objects=tuple(
-				str(value).strip()
-				for value in (payload.get("problem_objects") or ())
-				if str(value).strip()
+			ltlf_formula=str(payload.get("ltlf_formula") or ""),
+			alphabet=tuple(
+				str(item).strip()
+				for item in (payload.get("alphabet") or ())
+				if str(item).strip()
 			),
-			typed_objects={
-				str(key): str(value)
-				for key, value in dict(payload.get("typed_objects") or {}).items()
-			},
-			task_network=tuple(
-				(
-					str(entry.get("task_name") or ""),
-					tuple(str(arg) for arg in (entry.get("args") or ())),
-				)
-				for entry in (payload.get("task_network") or ())
-				if isinstance(entry, dict)
+			transition_specs=tuple(
+				dict(spec)
+				for spec in (payload.get("transition_specs") or ())
+				if isinstance(spec, dict)
 			),
-			task_network_ordered=bool(payload.get("task_network_ordered", True)),
-			ordering_edges=tuple(
-				(
-					str(edge_payload.get("before") or ""),
-					str(edge_payload.get("after") or ""),
-				)
-				for edge_payload in (payload.get("ordering_edges") or ())
-				if isinstance(edge_payload, dict)
+			dfa_dot=payload.get("dfa_dot"),
+			construction=payload.get("construction"),
+			num_states=payload.get("num_states"),
+			num_transitions=payload.get("num_transitions"),
+			ordered_subgoal_sequence=bool(payload.get("ordered_subgoal_sequence", True)),
+			subgoals=tuple(
+				GroundedSubgoal.from_dict(item)
+				for item in (payload.get("subgoals") or ())
+				if isinstance(item, dict)
 			),
+			timing_profile=dict(payload.get("timing_profile") or {}),
+			diagnostics=tuple(
+				str(message).strip()
+				for message in (payload.get("diagnostics") or ())
+				if str(message).strip()
+			),
+		)
+
+
+@dataclass(frozen=True)
+class JasonExecutionResult:
+	"""Structured Jason runtime outcome for one online query."""
+
+	query_text: str
+	ltlf_formula: str
+	action_path: Tuple[str, ...]
+	method_trace: Tuple[Dict[str, Any], ...]
+	guided_hierarchical_plan_text: Optional[str] = None
+	verification_problem_file: Optional[str] = None
+	verification_mode: str = "original_problem"
+	artifacts: Dict[str, Any] = field(default_factory=dict)
+	timing_profile: Dict[str, Any] = field(default_factory=dict)
+	diagnostics: Tuple[str, ...] = ()
+
+	def to_dict(self) -> Dict[str, Any]:
+		return {
+			"query_text": self.query_text,
+			"ltlf_formula": self.ltlf_formula,
+			"action_path": list(self.action_path),
+			"method_trace": [dict(item) for item in self.method_trace],
+			"guided_hierarchical_plan_text": self.guided_hierarchical_plan_text,
+			"verification_problem_file": self.verification_problem_file,
+			"verification_mode": self.verification_mode,
+			"artifacts": dict(self.artifacts),
+			"timing_profile": dict(self.timing_profile),
+			"diagnostics": list(self.diagnostics),
+		}
+
+	@classmethod
+	def from_dict(cls, payload: Dict[str, Any]) -> "JasonExecutionResult":
+		return cls(
+			query_text=str(payload.get("query_text") or ""),
+			ltlf_formula=str(payload.get("ltlf_formula") or ""),
+			action_path=tuple(
+				str(item).strip()
+				for item in (payload.get("action_path") or ())
+				if str(item).strip()
+			),
+			method_trace=tuple(
+				dict(item)
+				for item in (payload.get("method_trace") or ())
+				if isinstance(item, dict)
+			),
+			guided_hierarchical_plan_text=payload.get("guided_hierarchical_plan_text"),
+			verification_problem_file=payload.get("verification_problem_file"),
+			verification_mode=str(payload.get("verification_mode") or "original_problem"),
+			artifacts=dict(payload.get("artifacts") or {}),
+			timing_profile=dict(payload.get("timing_profile") or {}),
 			diagnostics=tuple(
 				str(message).strip()
 				for message in (payload.get("diagnostics") or ())
@@ -202,6 +244,10 @@ class DomainLibraryArtifact:
 	method_library: HTNMethodLibrary
 	method_synthesis_metadata: Dict[str, Any]
 	domain_gate: Dict[str, Any]
+	source_domain_kind: str = "generated"
+	artifact_root: Optional[str] = None
+	masked_domain_file: Optional[str] = None
+	generated_domain_file: Optional[str] = None
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
@@ -209,6 +255,10 @@ class DomainLibraryArtifact:
 			"method_library": self.method_library.to_dict(),
 			"method_synthesis_metadata": dict(self.method_synthesis_metadata),
 			"domain_gate": dict(self.domain_gate),
+			"source_domain_kind": self.source_domain_kind,
+			"artifact_root": self.artifact_root,
+			"masked_domain_file": self.masked_domain_file,
+			"generated_domain_file": self.generated_domain_file,
 		}
 
 	@classmethod
@@ -220,6 +270,22 @@ class DomainLibraryArtifact:
 			),
 			method_synthesis_metadata=dict(payload.get("method_synthesis_metadata") or {}),
 			domain_gate=dict(payload.get("domain_gate") or {}),
+			source_domain_kind=str(payload.get("source_domain_kind") or "generated"),
+			artifact_root=(
+				str(payload.get("artifact_root")).strip()
+				if payload.get("artifact_root") is not None
+				else None
+			),
+			masked_domain_file=(
+				str(payload.get("masked_domain_file")).strip()
+				if payload.get("masked_domain_file") is not None
+				else None
+			),
+			generated_domain_file=(
+				str(payload.get("generated_domain_file")).strip()
+				if payload.get("generated_domain_file") is not None
+				else None
+			),
 		)
 
 
@@ -227,25 +293,49 @@ def persist_domain_library_artifact(
 	*,
 	artifact_root: Path,
 	artifact: DomainLibraryArtifact,
+	masked_domain_text: Optional[str] = None,
+	generated_domain_text: Optional[str] = None,
 ) -> Dict[str, str]:
 	"""Persist the domain build artifact under a stable cache root."""
 
 	artifact_root.mkdir(parents=True, exist_ok=True)
+	artifact_metadata_path = artifact_root / "artifact_metadata.json"
 	method_library_path = artifact_root / "method_library.json"
 	method_synthesis_metadata_path = artifact_root / "method_synthesis_metadata.json"
 	domain_gate_path = artifact_root / "domain_gate.json"
+	masked_domain_path = artifact_root / "masked_domain.hddl"
+	generated_domain_path = artifact_root / "generated_domain.hddl"
 
+	artifact_metadata_path.write_text(
+		json.dumps(
+			{
+				"domain_name": artifact.domain_name,
+				"source_domain_kind": artifact.source_domain_kind,
+			},
+			indent=2,
+		),
+	)
 	method_library_path.write_text(json.dumps(artifact.method_library.to_dict(), indent=2))
 	method_synthesis_metadata_path.write_text(
 		json.dumps(artifact.method_synthesis_metadata, indent=2),
 	)
 	domain_gate_path.write_text(json.dumps(artifact.domain_gate, indent=2))
+	if masked_domain_text is not None:
+		masked_domain_path.write_text(str(masked_domain_text))
+	if generated_domain_text is not None:
+		generated_domain_path.write_text(str(generated_domain_text))
 
-	return {
+	paths = {
+		"artifact_metadata": str(artifact_metadata_path),
 		"method_library": str(method_library_path),
 		"method_synthesis_metadata": str(method_synthesis_metadata_path),
 		"domain_gate": str(domain_gate_path),
 	}
+	if masked_domain_text is not None:
+		paths["masked_domain"] = str(masked_domain_path)
+	if generated_domain_text is not None:
+		paths["generated_domain"] = str(generated_domain_path)
+	return paths
 
 
 def load_domain_library_artifact(
@@ -261,6 +351,7 @@ def load_domain_library_artifact(
 			method_library=library_artifact,
 			method_synthesis_metadata={},
 			domain_gate={},
+			source_domain_kind="generated",
 		)
 	if isinstance(library_artifact, dict):
 		if "method_library" in library_artifact:
@@ -270,28 +361,56 @@ def load_domain_library_artifact(
 			method_library=HTNMethodLibrary.from_dict(library_artifact),
 			method_synthesis_metadata={},
 			domain_gate={},
+			source_domain_kind="generated",
 		)
 
 	artifact_path = Path(library_artifact).expanduser().resolve()
 	if artifact_path.is_dir():
 		method_library_payload = json.loads((artifact_path / "method_library.json").read_text())
+		artifact_metadata_path = artifact_path / "artifact_metadata.json"
 		method_synthesis_metadata_path = artifact_path / "method_synthesis_metadata.json"
 		domain_gate_path = artifact_path / "domain_gate.json"
+		artifact_metadata = (
+			json.loads(artifact_metadata_path.read_text())
+			if artifact_metadata_path.exists()
+			else {}
+		)
 		method_synthesis_metadata = json.loads(method_synthesis_metadata_path.read_text())
 		domain_gate = json.loads(domain_gate_path.read_text())
+		masked_domain_path = artifact_path / "masked_domain.hddl"
+		generated_domain_path = artifact_path / "generated_domain.hddl"
 		return DomainLibraryArtifact(
-			domain_name=artifact_path.name,
+			domain_name=str(artifact_metadata.get("domain_name") or artifact_path.name),
 			method_library=HTNMethodLibrary.from_dict(method_library_payload),
 			method_synthesis_metadata=dict(method_synthesis_metadata),
 			domain_gate=dict(domain_gate),
+			source_domain_kind=str(
+				artifact_metadata.get("source_domain_kind")
+				or method_synthesis_metadata.get("source_domain_kind")
+				or "generated"
+			),
+			artifact_root=str(artifact_path),
+			masked_domain_file=str(masked_domain_path) if masked_domain_path.exists() else None,
+			generated_domain_file=(
+				str(generated_domain_path) if generated_domain_path.exists() else None
+			),
 		)
 
 	method_library_payload = json.loads(artifact_path.read_text())
+	artifact_root = str(artifact_path.parent)
+	masked_domain_path = artifact_path.parent / "masked_domain.hddl"
+	generated_domain_path = artifact_path.parent / "generated_domain.hddl"
 	return DomainLibraryArtifact(
 		domain_name=artifact_path.stem,
 		method_library=HTNMethodLibrary.from_dict(method_library_payload),
 		method_synthesis_metadata={},
 		domain_gate={},
+		source_domain_kind="generated",
+		artifact_root=artifact_root,
+		masked_domain_file=str(masked_domain_path) if masked_domain_path.exists() else None,
+		generated_domain_file=(
+			str(generated_domain_path) if generated_domain_path.exists() else None
+		),
 	)
 
 
@@ -314,9 +433,10 @@ def query_bound_method_library(
 
 __all__ = [
 	"DomainLibraryArtifact",
-	"GoalRequest",
-	"GoalRequestNode",
-	"PlanningRequest",
+	"DFACompilationResult",
+	"GroundedSubgoal",
+	"JasonExecutionResult",
+	"TemporalGroundingResult",
 	"load_domain_library_artifact",
 	"persist_domain_library_artifact",
 	"query_bound_method_library",

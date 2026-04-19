@@ -12,14 +12,13 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from domain_build.method_synthesis.schema import (
+from offline_method_generation.method_synthesis.schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
@@ -30,6 +29,7 @@ from planning.official_benchmark import (
 	OFFICIAL_PANDA_PI_SOLVER_IDS,
 	OFFICIAL_TRANSLATION_FAST_DOWNWARD_CONFIGURATION,
 )
+from planning.process_capture import read_full_process_output, run_subprocess_to_files
 from planning.problem_encoding import PANDAProblemBuilder
 from planning.plan_models import PANDAPlanResult, PANDAPlanStep
 
@@ -228,6 +228,7 @@ class PANDAPlanner:
 			"parser",
 			work_dir,
 			timeout_seconds=timeout_seconds,
+			output_label="parser",
 		)
 		timing_profile["parser_seconds"] = time.perf_counter() - parser_start
 		grounder_start = time.perf_counter()
@@ -236,6 +237,7 @@ class PANDAPlanner:
 			"grounder",
 			work_dir,
 			timeout_seconds=timeout_seconds,
+			output_label="grounder",
 		)
 		timing_profile["grounder_seconds"] = time.perf_counter() - grounder_start
 		engine_start = time.perf_counter()
@@ -301,6 +303,7 @@ class PANDAPlanner:
 					"engine",
 					work_dir,
 					timeout_seconds=attempt_timeout,
+					output_label=f"engine_{solver_id}",
 				)
 			except PANDAPlanningError as exc:
 				engine_attempts.append(
@@ -316,7 +319,7 @@ class PANDAPlanner:
 				)
 				continue
 
-			candidate_raw_plan_text = candidate_engine_run["stdout"]
+			candidate_raw_plan_text = read_full_process_output(candidate_engine_run["stdout_path"])
 			candidate_raw_plan_path = work_dir / f"plan.{solver_id}.raw.txt"
 			candidate_actual_plan_path = work_dir / f"plan.{solver_id}.actual.txt"
 			candidate_raw_plan_path.write_text(candidate_raw_plan_text)
@@ -386,6 +389,8 @@ class PANDAPlanner:
 				"steps": [step.to_dict() for step in candidate_steps],
 				"engine_stdout": candidate_engine_run["stdout"],
 				"engine_stderr": candidate_engine_run["stderr"],
+				"engine_stdout_path": candidate_engine_run["stdout_path"],
+				"engine_stderr_path": candidate_engine_run["stderr_path"],
 			}
 			engine_attempts.append(candidate_record)
 			if not has_executable_plan:
@@ -433,8 +438,12 @@ class PANDAPlanner:
 					"problem_hddl": problem_hddl,
 					"parser_stdout": parser_run["stdout"],
 					"parser_stderr": parser_run["stderr"],
+					"parser_stdout_path": parser_run["stdout_path"],
+					"parser_stderr_path": parser_run["stderr_path"],
 					"grounder_stdout": grounder_run["stdout"],
 					"grounder_stderr": grounder_run["stderr"],
+					"grounder_stdout_path": grounder_run["stdout_path"],
+					"grounder_stderr_path": grounder_run["stderr_path"],
 					"engine_attempts": list(engine_attempts),
 				},
 			)
@@ -457,6 +466,12 @@ class PANDAPlanner:
 			grounder_stderr=grounder_run["stderr"],
 			engine_stdout=engine_run["stdout"],
 			engine_stderr=engine_run["stderr"],
+			parser_stdout_path=parser_run["stdout_path"],
+			parser_stderr_path=parser_run["stderr_path"],
+			grounder_stdout_path=grounder_run["stdout_path"],
+			grounder_stderr_path=grounder_run["stderr_path"],
+			engine_stdout_path=engine_run["stdout_path"],
+			engine_stderr_path=engine_run["stderr_path"],
 			raw_plan=raw_plan_text,
 			actual_plan=actual_plan_text or raw_plan_text,
 			work_dir=str(work_dir),
@@ -730,6 +745,7 @@ class PANDAPlanner:
 				conversion_command,
 				work_dir,
 				timeout_seconds=timeout_seconds,
+				output_label=f"convert_{raw_plan_path.stem}",
 			)
 			conversion_stdout = conversion_result["stdout"]
 			conversion_stderr = conversion_result["stderr"]
@@ -744,6 +760,8 @@ class PANDAPlanner:
 					"command": list(conversion_command),
 					"stdout": exc.metadata.get("stdout", ""),
 					"stderr": exc.metadata.get("stderr", ""),
+					"stdout_path": exc.metadata.get("stdout_path"),
+					"stderr_path": exc.metadata.get("stderr_path"),
 					"work_dir": str(work_dir),
 					"timeout_seconds": timeout_seconds,
 				},
@@ -1079,12 +1097,14 @@ class PANDAPlanner:
 		work_dir: Path,
 		*,
 		timeout_seconds: Optional[float] = None,
-	) -> Dict[str, str]:
+		output_label: Optional[str] = None,
+	) -> Dict[str, Any]:
 		try:
 			result = self._run_subprocess(
 				command,
 				work_dir,
 				timeout_seconds=timeout_seconds,
+				output_label=output_label or stage,
 			)
 		except PANDAPlanningError as exc:
 			if exc.metadata.get("stage") != "subprocess_timeout":
@@ -1097,15 +1117,14 @@ class PANDAPlanner:
 					"command": list(command),
 					"stdout": exc.metadata.get("stdout", ""),
 					"stderr": exc.metadata.get("stderr", ""),
+					"stdout_path": exc.metadata.get("stdout_path"),
+					"stderr_path": exc.metadata.get("stderr_path"),
 					"work_dir": str(work_dir),
 					"timeout_seconds": timeout_seconds,
 				},
 			) from exc
 		if result["returncode"] == 0:
-			return {
-				"stdout": result["stdout"],
-				"stderr": result["stderr"],
-			}
+			return dict(result)
 
 		raise PANDAPlanningError(
 			f"PANDA {stage} step failed with exit code {result['returncode']}",
@@ -1115,6 +1134,8 @@ class PANDAPlanner:
 				"command": list(command),
 				"stdout": result["stdout"],
 				"stderr": result["stderr"],
+				"stdout_path": result["stdout_path"],
+				"stderr_path": result["stderr_path"],
 				"work_dir": str(work_dir),
 			},
 		)
@@ -1125,46 +1146,29 @@ class PANDAPlanner:
 		work_dir: Path,
 		*,
 		timeout_seconds: Optional[float] = None,
+		output_label: str,
 	) -> Dict[str, Any]:
-		process = subprocess.Popen(
+		result = run_subprocess_to_files(
 			command,
-			cwd=work_dir,
-			text=True,
-			stdout=subprocess.PIPE,
-			stderr=subprocess.PIPE,
-			start_new_session=True,
+			work_dir=work_dir,
+			output_label=output_label,
+			timeout_seconds=timeout_seconds,
 		)
-		try:
-			stdout, stderr = process.communicate(timeout=timeout_seconds)
-		except subprocess.TimeoutExpired as exc:
-			self._terminate_process_group(process)
-			stdout, stderr = process.communicate()
+		if result["timed_out"]:
 			raise PANDAPlanningError(
 				"PANDA subprocess timed out",
 				metadata={
 					"stage": "subprocess_timeout",
 					"command": list(command),
-					"stdout": exc.stdout or stdout or "",
-					"stderr": exc.stderr or stderr or "",
+					"stdout": result["stdout"],
+					"stderr": result["stderr"],
+					"stdout_path": result["stdout_path"],
+					"stderr_path": result["stderr_path"],
 					"work_dir": str(work_dir),
 					"timeout_seconds": timeout_seconds,
 				},
-			) from exc
-		return {
-			"returncode": process.returncode,
-			"stdout": stdout or "",
-			"stderr": stderr or "",
-		}
-
-	@staticmethod
-	def _terminate_process_group(process: subprocess.Popen) -> None:
-		try:
-			os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-		except Exception:
-			try:
-				process.kill()
-			except Exception:
-				return
+			)
+		return result
 
 	@staticmethod
 	def _parse_plan_node_ids(tokens: Sequence[str]) -> List[int]:

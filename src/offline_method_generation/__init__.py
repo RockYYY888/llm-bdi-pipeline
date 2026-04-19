@@ -1,0 +1,3 @@
+"""
+Offline method-generation package.
+"""

@@ -1,0 +1,10 @@
+MAS jason_stclaus {
+
+    agents:
+        santa;
+        edna     secretary.asl [beliefs="group_size(3,elf)"];
+        robin    secretary.asl [beliefs="group_size(9,reindeer)"];
+        elf      worker.asl    [beliefs="kind(elf),      secretary(edna)"]  #10;
+        reindeer worker.asl    [beliefs="kind(reindeer), secretary(robin)"]  #9;
+
+}

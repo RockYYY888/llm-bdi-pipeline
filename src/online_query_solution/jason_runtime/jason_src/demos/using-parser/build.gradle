@@ -1,0 +1,29 @@
+/*
+   Example of using Jason Parser
+*/
+
+defaultTasks 'run'
+
+apply plugin: 'java'
+
+repositories {
+    mavenCentral()
+    maven { url "https://raw.githubusercontent.com/jacamo-lang/mvn-repo/master" }
+}
+
+dependencies {
+    implementation 'io.github.jason-lang:jason-interpreter:3.2.1'
+}
+
+sourceSets {
+    main {
+        java {
+            srcDir '.'
+        }
+    }
+}
+
+task run (type: JavaExec, dependsOn: 'classes') {
+    mainClass = 'DemoParser'
+    classpath sourceSets.main.runtimeClasspath
+}
