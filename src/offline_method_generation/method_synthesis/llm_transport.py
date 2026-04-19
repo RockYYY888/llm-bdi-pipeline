@@ -1,0 +1,636 @@
+"""Language-model transport and response extraction for method synthesis."""
+
+from __future__ import annotations
+
+import json
+import queue
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
+from .errors import LLMStreamingResponseError
+
+
+class MethodSynthesisLLMTransportMixin:
+	@staticmethod
+	def _estimate_method_synthesis_response_token_budget(
+		*,
+		prompt_analysis: Optional[Dict[str, Any]],
+		ast_compiler_defaults: Optional[Dict[str, Any]],
+		default_max_tokens: int | None = None,
+	) -> int:
+		max_tokens = int(default_max_tokens or 0)
+		if max_tokens <= 0:
+			max_tokens = 8000
+		defaults = dict(ast_compiler_defaults or {})
+		task_count = len(dict(defaults.get("task_defaults") or {}))
+		prompt_payload = dict(prompt_analysis or {})
+		if task_count <= 0:
+			task_count = len(
+				list(prompt_payload.get("domain_task_contracts") or ())
+				or list(prompt_payload.get("declared_compound_tasks") or ())
+				or list(prompt_payload.get("query_task_contracts") or ())
+				or list(prompt_payload.get("support_task_contracts") or ())
+			)
+		contract_payloads = list(prompt_payload.get("domain_task_contracts") or ())
+		if not contract_payloads:
+			contract_payloads = list(prompt_payload.get("query_task_contracts") or ())
+		if not contract_payloads:
+			contract_payloads = list(prompt_payload.get("support_task_contracts") or ())
+		producer_template_count = sum(
+			len(list(payload.get("producer_consumer_templates") or ()))
+			for payload in contract_payloads
+			if isinstance(payload, dict)
+		)
+		support_task_count = sum(
+			len(list(payload.get("composition_support_tasks") or ()))
+			for payload in contract_payloads
+			if isinstance(payload, dict)
+		)
+		shared_prerequisite_count = sum(
+			len(list(payload.get("shared_dynamic_prerequisites") or ()))
+			for payload in contract_payloads
+			if isinstance(payload, dict)
+		)
+		recursive_support_count = sum(
+			len(list(payload.get("recursive_support_predicates") or ()))
+			for payload in contract_payloads
+			if isinstance(payload, dict)
+		)
+		if ast_compiler_defaults:
+			# One-shot domain synthesis only needs enough headroom for the emitted JSON
+			# library plus a very small amount of provider-side hidden reasoning.
+			estimated = (
+				2200
+				+ 300 * task_count
+				+ 80 * producer_template_count
+				+ 40 * support_task_count
+				+ 40 * shared_prerequisite_count
+				+ 60 * recursive_support_count
+			)
+		else:
+			estimated = 2200 + 900 * task_count
+		minimum_budget = 3000
+		return min(max_tokens, max(minimum_budget, estimated))
+
+	def _apply_method_synthesis_provider_token_ceiling(self, requested_max_tokens: int) -> int:
+		"""
+		Keep provider-specific handling explicit even when no extra cap is applied.
+
+		For MiniMax method synthesis, the more reliable setting is currently to avoid
+		an extra application-side completion ceiling and let the configured request
+		budget flow through unchanged.
+		"""
+		requested = max(int(requested_max_tokens or 0), 1)
+		return requested
+
+	def _call_llm(
+		self,
+		prompt: Dict[str, str],
+		*,
+		max_tokens: Optional[int] = None,
+	) -> Tuple[str, Optional[str], Dict[str, Any]]:
+		timeout_seconds = float(self.timeout or 0.0)
+		transport_metadata: Dict[str, Any] = {}
+		if timeout_seconds <= 0:
+			return self._call_llm_direct(
+				prompt,
+				max_tokens=max_tokens,
+				transport_metadata=transport_metadata,
+			)
+		result_queue: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
+
+		def _worker() -> None:
+			try:
+				result_queue.put(
+					(
+						True,
+						self._call_llm_direct(
+							prompt,
+							max_tokens=max_tokens,
+							transport_metadata=transport_metadata,
+						),
+					),
+				)
+			except BaseException as exc:  # pragma: no cover - relayed to parent thread
+				try:
+					setattr(exc, "transport_metadata", dict(transport_metadata))
+				except Exception:
+					pass
+				result_queue.put((False, exc))
+
+		worker = threading.Thread(
+			target=_worker,
+			name="method-synthesis-llm",
+			daemon=True,
+		)
+		worker.start()
+		worker.join(timeout=timeout_seconds)
+		if worker.is_alive():
+			timeout_error = TimeoutError(
+				"Method-synthesis LLM call exceeded the configured timeout before "
+				"returning a usable response.",
+			)
+			try:
+				setattr(timeout_error, "transport_metadata", dict(transport_metadata))
+			except Exception:
+				pass
+			raise timeout_error
+		if result_queue.empty():
+			raise RuntimeError("Method-synthesis LLM call exited without returning a result.")
+		success, payload = result_queue.get_nowait()
+		if success:
+			return payload  # type: ignore[return-value]
+		raise payload  # type: ignore[misc]
+
+	def _call_llm_direct(
+		self,
+		prompt: Dict[str, str],
+		*,
+		max_tokens: Optional[int] = None,
+		transport_metadata: Optional[Dict[str, Any]] = None,
+	) -> Tuple[str, Optional[str], Dict[str, Any]]:
+		metadata = transport_metadata if transport_metadata is not None else {}
+		response = self._create_chat_completion(prompt, max_tokens=max_tokens)
+		return self._consume_llm_response(
+			response,
+			transport_metadata=metadata,
+		)
+
+	def _consume_llm_response(
+		self,
+		response: object,
+		*,
+		transport_metadata: Optional[Dict[str, Any]] = None,
+	) -> Tuple[str, Optional[str], Dict[str, Any]]:
+		metadata = transport_metadata if transport_metadata is not None else {}
+		if hasattr(response, "choices"):
+			choice = response.choices[0]
+			finish_reason = getattr(choice, "finish_reason", None)
+			content = self._extract_response_text(response)
+			metadata["llm_response_mode"] = "non_streaming"
+			request_id = self._extract_transport_request_id(response)
+			if request_id:
+				metadata["llm_request_id"] = request_id
+			return content, finish_reason, dict(metadata)
+		return self._consume_streaming_llm_response(
+			response,
+			transport_metadata=metadata,
+		)
+
+	def _create_chat_completion(
+		self,
+		prompt: Dict[str, str],
+		*,
+		max_tokens: Optional[int] = None,
+	):
+		stream_response = self._should_stream_method_synthesis_response()
+		request_kwargs: Dict[str, Any] = {
+			"model": self.model,
+			"messages": [
+				{"role": "system", "content": prompt["system"]},
+				{"role": "user", "content": prompt["user"]},
+			],
+			"temperature": 0.0,
+			"max_tokens": max_tokens or self.max_tokens,
+			"timeout": self.timeout,
+			"stream": stream_response,
+		}
+		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
+			request_kwargs["response_format"] = {"type": "json_object"}
+		extra_body = self._openrouter_provider_routing_body()
+		plugins = self._method_synthesis_request_plugins(stream_response)
+		if plugins is not None:
+			extra_body = dict(extra_body or {})
+			extra_body["plugins"] = plugins
+		if extra_body is not None:
+			request_kwargs["extra_body"] = extra_body
+		return self.client.chat.completions.create(
+			**request_kwargs,
+		)
+
+	def _should_stream_method_synthesis_response(self) -> bool:
+		base_url = str(self.base_url or "").strip().lower()
+		return "openrouter.ai" in base_url
+
+	def _method_synthesis_request_plugins(
+		self,
+		stream_response: bool,
+	) -> Optional[List[Dict[str, Any]]]:
+		base_url = str(self.base_url or "").strip().lower()
+		if stream_response or "openrouter.ai" not in base_url:
+			return None
+		return [{"id": "response-healing"}]
+
+	def _openrouter_provider_routing_body(self) -> Dict[str, Any] | None:
+		base_url = str(self.base_url or "").strip().lower()
+		if "openrouter.ai" not in base_url:
+			return None
+		model_name = str(self.model or "").strip()
+		if "/" not in model_name:
+			return None
+		provider_name = model_name.split("/", 1)[0].strip().lower()
+		if not provider_name:
+			return None
+		extra_body: Dict[str, Any] = {
+			"provider": {
+				"only": [provider_name],
+				"allow_fallbacks": False,
+			},
+		}
+		if provider_name == "minimax":
+			# MiniMax requires reasoning on this endpoint, but method synthesis only needs
+			# a tiny hidden budget before emitting compact executable JSON. Larger hidden
+			# budgets have repeatedly ended in finish_reason='length' before the first
+			# textual JSON chunk arrived.
+			extra_body["reasoning"] = {
+				"max_tokens": 16,
+				"exclude": True,
+			}
+		return extra_body
+
+	def _consume_streaming_llm_response(
+		self,
+		response: object,
+		*,
+		transport_metadata: Optional[Dict[str, Any]] = None,
+	) -> Tuple[str, Optional[str], Dict[str, Any]]:
+		metadata = transport_metadata if transport_metadata is not None else {}
+		metadata["llm_response_mode"] = "streaming"
+		request_id = self._extract_transport_request_id(response)
+		if request_id:
+			metadata["llm_request_id"] = request_id
+		parts: list[str] = []
+		reasoning_parts: list[str] = []
+		finish_reason: Optional[str] = None
+		close_stream = getattr(response, "close", None)
+		stream_start = time.monotonic()
+		first_chunk_recorded = False
+		for chunk in response:
+			request_id = self._extract_transport_request_id(chunk)
+			if request_id:
+				metadata["llm_request_id"] = request_id
+			choices = getattr(chunk, "choices", None) or ()
+			if not choices:
+				continue
+			choice = choices[0]
+			finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+			delta = getattr(choice, "delta", None)
+			for candidate in (
+				getattr(delta, "content", None) if delta is not None else None,
+				getattr(delta, "parsed", None) if delta is not None else None,
+				getattr(choice, "message", None),
+			):
+				extracted = self._normalise_response_content(candidate)
+				if extracted is not None:
+					if not first_chunk_recorded:
+						metadata["llm_first_chunk_seconds"] = round(
+							time.monotonic() - stream_start,
+							6,
+						)
+						first_chunk_recorded = True
+					parts.append(extracted)
+			for reasoning_candidate in (
+				getattr(delta, "reasoning", None) if delta is not None else None,
+				getattr(delta, "reasoning_content", None) if delta is not None else None,
+				getattr(delta, "reasoning_details", None) if delta is not None else None,
+				getattr(choice, "reasoning", None),
+			):
+				extracted_reasoning = self._normalise_response_content(reasoning_candidate)
+				if extracted_reasoning is not None:
+					reasoning_parts.append(extracted_reasoning)
+			current_text = "".join(parts).strip()
+			complete_payload = self._extract_complete_json_payload_text(current_text)
+			if complete_payload is not None:
+				metadata["llm_complete_json_seconds"] = round(
+					time.monotonic() - stream_start,
+					6,
+				)
+				if callable(close_stream):
+					close_stream()
+				return complete_payload, finish_reason or "stop", dict(metadata)
+
+		text = "".join(parts).strip()
+		complete_payload = self._extract_complete_json_payload_text(text)
+		if complete_payload is not None:
+			metadata["llm_complete_json_seconds"] = round(
+				time.monotonic() - stream_start,
+				6,
+			)
+			if callable(close_stream):
+				close_stream()
+			return complete_payload, finish_reason or "stop", dict(metadata)
+		if text:
+			error = LLMStreamingResponseError(
+				"LLM response did not contain usable textual JSON content. "
+				f"finish_reason={finish_reason!r}",
+				partial_text=text,
+				finish_reason=finish_reason,
+			)
+			reasoning_preview = "\n".join(reasoning_parts).strip()
+			if reasoning_preview:
+				metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
+				metadata["llm_reasoning_characters"] = len(reasoning_preview)
+			try:
+				setattr(error, "transport_metadata", dict(metadata))
+			except Exception:
+				pass
+			raise error
+		error = LLMStreamingResponseError(
+			"LLM response did not contain usable textual JSON content. "
+			f"finish_reason={finish_reason!r}",
+			finish_reason=finish_reason,
+		)
+		reasoning_preview = "\n".join(reasoning_parts).strip()
+		if reasoning_preview:
+			metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
+			metadata["llm_reasoning_characters"] = len(reasoning_preview)
+		try:
+			setattr(error, "transport_metadata", dict(metadata))
+		except Exception:
+			pass
+		raise error
+
+	def _extract_response_text(self, response: object) -> str:
+		choices = getattr(response, "choices", None) or ()
+		if not choices:
+			response_dump = response.model_dump() if hasattr(response, "model_dump") else None
+			if isinstance(response_dump, dict):
+				extracted = self._extract_response_text_from_response_dump(response_dump)
+				if extracted is not None:
+					return extracted
+			raise RuntimeError("LLM response did not include any choices.")
+
+		message = getattr(choices[0], "message", None)
+		if message is None:
+			raise RuntimeError("LLM response choice did not include a message payload.")
+
+		for candidate in (
+			getattr(message, "content", None),
+			getattr(message, "parsed", None),
+		):
+			extracted = self._normalise_response_content(candidate)
+			if extracted is not None:
+				return extracted
+
+		dumped_message = message.model_dump() if hasattr(message, "model_dump") else None
+		if isinstance(dumped_message, dict):
+			for key in ("content", "parsed", "output_text", "text"):
+				extracted = self._normalise_response_content(dumped_message.get(key))
+				if extracted is not None:
+					return extracted
+			refusal = dumped_message.get("refusal")
+			refusal_text = self._normalise_response_content(refusal)
+			if refusal_text:
+				raise RuntimeError(f"LLM refused method-synthesis response: {refusal_text}")
+
+		response_dump = response.model_dump() if hasattr(response, "model_dump") else None
+		if isinstance(response_dump, dict):
+			extracted = self._extract_response_text_from_response_dump(response_dump)
+			if extracted is not None:
+				return extracted
+
+		finish_reason = getattr(choices[0], "finish_reason", None)
+		raise RuntimeError(
+			"LLM response did not contain usable textual JSON content. "
+			f"finish_reason={finish_reason!r}",
+		)
+
+	@staticmethod
+	def _normalise_response_content(content: object) -> str | None:
+		if content is None:
+			return None
+		if isinstance(content, str):
+			text = content.strip()
+			return text or None
+		if isinstance(content, dict):
+			for key in ("text", "value", "content"):
+				extracted = MethodSynthesisLLMTransportMixin._normalise_response_content(content.get(key))
+				if extracted is not None:
+					return extracted
+			try:
+				return json.dumps(content, ensure_ascii=False)
+			except TypeError:
+				return str(content).strip() or None
+		if isinstance(content, (list, tuple)):
+			parts: list[str] = []
+			for item in content:
+				extracted = MethodSynthesisLLMTransportMixin._normalise_response_content(item)
+				if extracted is not None:
+					parts.append(extracted)
+			if not parts:
+				return None
+			return "\n".join(parts).strip() or None
+		text_attr = getattr(content, "text", None)
+		extracted = MethodSynthesisLLMTransportMixin._normalise_response_content(text_attr)
+		if extracted is not None:
+			return extracted
+		value_attr = getattr(content, "value", None)
+		extracted = MethodSynthesisLLMTransportMixin._normalise_response_content(value_attr)
+		if extracted is not None:
+			return extracted
+		stringified = str(content).strip()
+		return stringified or None
+
+	@classmethod
+	def _extract_response_text_from_response_dump(cls, response_dump: Dict[str, Any]) -> str | None:
+		choices = response_dump.get("choices")
+		if isinstance(choices, list) and choices:
+			first_choice = choices[0]
+			if isinstance(first_choice, dict):
+				message = first_choice.get("message")
+				if isinstance(message, dict):
+					for key in ("content", "parsed", "output_text", "text"):
+						extracted = cls._normalise_response_content(message.get(key))
+						if extracted is not None:
+							return extracted
+					if any(key in message for key in ("target_task_bindings", "tasks", "compound_tasks", "methods")):
+						extracted = cls._normalise_response_content(message)
+						if extracted is not None:
+							return extracted
+				for key in ("content", "parsed", "output_text", "text"):
+					extracted = cls._normalise_response_content(first_choice.get(key))
+					if extracted is not None:
+						return extracted
+		for key in ("output_text", "text", "content", "parsed"):
+			extracted = cls._normalise_response_content(response_dump.get(key))
+			if extracted is not None:
+				return extracted
+		return None
+
+	@staticmethod
+	def _extract_transport_request_id(payload: object) -> str | None:
+		for attr_name in ("id", "response_id", "request_id", "_request_id"):
+			value = getattr(payload, attr_name, None)
+			if isinstance(value, str) and value.strip():
+				return value.strip()
+		response_payload = getattr(payload, "response", None)
+		if response_payload is not None:
+			for headers_attr in ("headers", "_headers"):
+				headers = getattr(response_payload, headers_attr, None)
+				if headers is None:
+					continue
+				for key in ("x-request-id", "request-id", "openai-request-id"):
+					try:
+						value = headers.get(key)
+					except Exception:
+						value = None
+					if isinstance(value, str) and value.strip():
+						return value.strip()
+		return None
+
+	@classmethod
+	def _extract_complete_json_payload_text(cls, text: str) -> str | None:
+		stripped = str(text or "").strip()
+		if not stripped:
+			return None
+
+		def _decode_from(start_index: int) -> str | None:
+			candidate = stripped[start_index:]
+			if cls._appears_truncated_json(candidate):
+				return None
+			try:
+				parsed, end_index = json.JSONDecoder().raw_decode(candidate)
+			except json.JSONDecodeError:
+				return None
+			if not isinstance(parsed, (dict, list)):
+				return None
+			payload = candidate[:end_index].strip()
+			return payload or None
+
+		first_nonspace = stripped[0]
+		if first_nonspace in "{[":
+			payload = _decode_from(0)
+			if payload is not None:
+				return payload
+
+		object_index = stripped.find("{")
+		if object_index != -1:
+			payload = _decode_from(object_index)
+			return payload
+
+		array_index = stripped.find("[")
+		if array_index != -1:
+			payload = _decode_from(array_index)
+			return payload
+		return None
+
+	def _parse_llm_library(
+		self,
+		response_text: str,
+		*,
+		ast_compiler_defaults: Optional[Dict[str, Any]] = None,
+	) -> HTNMethodLibrary:
+		clean_text = self._strip_code_fences(response_text)
+		salvaged_tail_payload = self._salvage_missing_object_closer_at_tail(clean_text)
+		if self._appears_truncated_json(clean_text):
+			if salvaged_tail_payload is not None:
+				payload = salvaged_tail_payload
+			else:
+				raise ValueError(
+					"LLM response appears truncated before the JSON object closed. "
+					"The HTN library was cut off mid-response.",
+				)
+		else:
+			try:
+				payload = json.loads(clean_text)
+			except json.JSONDecodeError as original_error:
+				common_quoting_repair_payload = self._salvage_common_json_quoting_errors(
+					clean_text,
+				)
+				if common_quoting_repair_payload is not None:
+					payload = common_quoting_repair_payload
+				else:
+					salvaged_payload = self._salvage_ast_payload(clean_text)
+					if salvaged_payload is not None:
+						payload = salvaged_payload
+					else:
+						salvaged_domain_payload = self._salvage_domain_task_payload(clean_text)
+						if salvaged_domain_payload is not None:
+							payload = salvaged_domain_payload
+						else:
+							missing_object_closer_payload = self._salvage_missing_object_closer(
+								clean_text,
+								original_error,
+							)
+							if missing_object_closer_payload is not None:
+								payload = missing_object_closer_payload
+							else:
+								raw_decoded = self._decode_leading_json_object(clean_text)
+								if raw_decoded is not None:
+									payload = raw_decoded
+								else:
+									candidate = self._extract_json_object_candidate(clean_text)
+									if candidate is None:
+										raise ValueError(
+											f"HTN synthesis response could not be parsed as JSON: {original_error}"
+										) from original_error
+									try:
+										payload = json.loads(candidate)
+									except json.JSONDecodeError as candidate_error:
+										raise ValueError(
+											"HTN synthesis response could not be parsed as JSON: "
+											f"{candidate_error}"
+										) from original_error
+		if isinstance(payload, list):
+			if (
+				len(payload) == 1
+				and isinstance(payload[0], dict)
+				and isinstance(payload[0].get("tasks"), list)
+			):
+				payload = payload[0]
+			elif all(isinstance(item, dict) for item in payload):
+				payload = {"tasks": payload}
+			else:
+				raise ValueError("HTN synthesis response must be a JSON object")
+		if not isinstance(payload, dict):
+			raise ValueError("HTN synthesis response must be a JSON object")
+		if ast_compiler_defaults:
+			payload = self._apply_ast_compiler_defaults(
+				payload,
+				ast_compiler_defaults=ast_compiler_defaults,
+			)
+		return HTNMethodLibrary.from_dict(payload)
+
+	@classmethod
+	def _salvage_domain_task_payload(cls, result_text: str) -> dict | None:
+		task_object_texts = cls._extract_named_task_object_fragments(result_text)
+		if not task_object_texts:
+			return None
+		tasks: List[Dict[str, Any]] = []
+		for task_text in task_object_texts:
+			try:
+				task_payload = json.loads(task_text)
+			except json.JSONDecodeError:
+				continue
+			if not isinstance(task_payload, dict):
+				continue
+			if not str(task_payload.get("name", "")).strip():
+				continue
+			tasks.append(task_payload)
+		if not tasks:
+			return None
+		return {"tasks": tasks}
+
+	@staticmethod
+	def _salvage_common_json_quoting_errors(text: str) -> Optional[Dict[str, Any] | List[Any]]:
+		repaired_text = str(text or "")
+		repaired_text = re.sub(r'([\]}])"\s*,\s*"', r'\1,"', repaired_text)
+		repaired_text = re.sub(
+			r'(?<=[}\]])\s*,\s*"name"\s*:',
+			r',{"name":',
+			repaired_text,
+		)
+		repaired_text = re.sub(
+			r'("[A-Za-z0-9_-]+"\s*:\s*"[^"\r\n]*?\))(?=\s*[,}\]])',
+			r'\1"',
+			repaired_text,
+		)
+		if repaired_text == str(text or ""):
+			return None
+		try:
+			return json.loads(repaired_text)
+		except json.JSONDecodeError:
+			return None

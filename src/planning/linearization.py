@@ -12,7 +12,6 @@ HTN problems:
 from __future__ import annotations
 
 import os
-import signal
 import shutil
 import subprocess
 import time
@@ -25,6 +24,7 @@ from planning.official_benchmark import (
 )
 from planning.panda_portfolio import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
+from planning.process_capture import run_subprocess_to_files
 
 
 class LiftedLinearPlanner:
@@ -160,6 +160,7 @@ class LiftedLinearPlanner:
 			],
 			work_dir,
 			timeout_seconds=timeout_seconds,
+			output_label="linearizer",
 		)
 		if linearizer_result["returncode"] != 0:
 			raise PANDAPlanningError(
@@ -168,6 +169,8 @@ class LiftedLinearPlanner:
 					"backend": self.SOLVER_ID,
 					"linearizer_stdout": linearizer_result["stdout"],
 					"linearizer_stderr": linearizer_result["stderr"],
+					"linearizer_stdout_path": linearizer_result["stdout_path"],
+					"linearizer_stderr_path": linearizer_result["stderr_path"],
 					"engine_attempts": [
 						{
 							"solver_id": self.SOLVER_ID,
@@ -176,6 +179,8 @@ class LiftedLinearPlanner:
 							"reason": "linearizer_failed",
 							"stdout": linearizer_result["stdout"],
 							"stderr": linearizer_result["stderr"],
+							"stdout_path": linearizer_result["stdout_path"],
+							"stderr_path": linearizer_result["stderr_path"],
 						},
 					],
 				},
@@ -187,6 +192,8 @@ class LiftedLinearPlanner:
 			"linearizer_seconds": time.perf_counter() - linearizer_start,
 			"linearizer_stdout": linearizer_result["stdout"],
 			"linearizer_stderr": linearizer_result["stderr"],
+			"linearizer_stdout_path": linearizer_result["stdout_path"],
+			"linearizer_stderr_path": linearizer_result["stderr_path"],
 		}
 
 	def plan_linearized_hddl_files(
@@ -277,6 +284,8 @@ class LiftedLinearPlanner:
 			"linearizer_seconds": float((linearization_metadata or {}).get("linearizer_seconds") or 0.0),
 			"linearizer_stdout": (linearization_metadata or {}).get("linearizer_stdout", ""),
 			"linearizer_stderr": (linearization_metadata or {}).get("linearizer_stderr", ""),
+			"linearizer_stdout_path": (linearization_metadata or {}).get("linearizer_stdout_path"),
+			"linearizer_stderr_path": (linearization_metadata or {}).get("linearizer_stderr_path"),
 			"linearized_domain_file": str(Path(linearized_domain_file).resolve()),
 			"linearized_problem_file": str(Path(linearized_problem_file).resolve()),
 		}
@@ -313,6 +322,7 @@ class LiftedLinearPlanner:
 			],
 			work_dir,
 			timeout_seconds=timeout_seconds,
+			output_label=f"linearized_convert_{raw_plan_path.stem}",
 		)
 		if conversion_result["returncode"] != 0:
 			raise PANDAPlanningError(
@@ -326,6 +336,8 @@ class LiftedLinearPlanner:
 							"reason": "linearized_plan_conversion_failed",
 							"stdout": conversion_result["stdout"],
 							"stderr": conversion_result["stderr"],
+							"stdout_path": conversion_result["stdout_path"],
+							"stderr_path": conversion_result["stderr_path"],
 						},
 					],
 				},
@@ -507,31 +519,12 @@ class LiftedLinearPlanner:
 		work_dir: Path,
 		*,
 		timeout_seconds: Optional[float],
+		output_label: str,
 	) -> Dict[str, Any]:
-		process = subprocess.Popen(
+		return run_subprocess_to_files(
 			command,
-			cwd=work_dir,
+			work_dir=work_dir,
+			output_label=output_label,
+			timeout_seconds=timeout_seconds,
 			env=self._subprocess_env(),
-			text=True,
-			stdout=subprocess.PIPE,
-			stderr=subprocess.PIPE,
-			start_new_session=True,
 		)
-		try:
-			stdout, stderr = process.communicate(timeout=timeout_seconds)
-		except subprocess.TimeoutExpired:
-			try:
-				os.killpg(process.pid, signal.SIGTERM)
-			except Exception:
-				process.terminate()
-			stdout, stderr = process.communicate()
-			return {
-				"returncode": 124,
-				"stdout": stdout or "",
-				"stderr": stderr or "",
-			}
-		return {
-			"returncode": process.returncode,
-			"stdout": stdout or "",
-			"stderr": stderr or "",
-		}

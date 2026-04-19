@@ -10,8 +10,9 @@ from typing import Iterable, Optional
 
 
 DEFAULT_GOAL_GROUNDING_MODEL = "deepseek/deepseek-chat-v3-0324"
-DEFAULT_METHOD_SYNTHESIS_MODEL = "minimax/minimax-m2"
+DEFAULT_METHOD_SYNTHESIS_MODEL = "minimax/minimax-m2.7"
 DEFAULT_SHARED_MODEL = "deepseek-chat"
+DEFAULT_ONLINE_DOMAIN_SOURCE = "benchmark"
 
 
 class Config:
@@ -63,7 +64,7 @@ class Config:
 		The domain-complete synthesis path is benchmark-pinned and should remain
 		stable across runs.
 		"""
-		return os.getenv("METHOD_SYNTHESIS_MODEL", DEFAULT_METHOD_SYNTHESIS_MODEL)
+		return DEFAULT_METHOD_SYNTHESIS_MODEL
 
 	@property
 	def openai_timeout(self) -> int:
@@ -88,6 +89,10 @@ class Config:
 	@property
 	def openai_base_url(self) -> Optional[str]:
 		return os.getenv("OPENAI_BASE_URL")
+
+	@property
+	def online_domain_source(self) -> str:
+		return os.getenv("ONLINE_DOMAIN_SOURCE", DEFAULT_ONLINE_DOMAIN_SOURCE)
 
 	def validate(self) -> bool:
 		if not self.openai_api_key:

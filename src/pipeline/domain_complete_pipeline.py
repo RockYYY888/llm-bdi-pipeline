@@ -2,6 +2,8 @@
 Domain-complete Hierarchical Task Network pipeline with Temporally Extended Goal support.
 """
 
+from __future__ import annotations
+
 import copy
 import io
 import json
@@ -25,10 +27,21 @@ if _src_dir in sys.path:
 sys.path.insert(0, _src_dir)
 
 from utils.config import get_config
-from query_execution.goal_grounding.grounder import NLToLTLfGenerator
-from query_execution.goal_grounding.formulas import LTLFormula, LogicalOperator, TemporalOperator
-from domain_build.method_synthesis.synthesizer import HTNMethodSynthesizer
-from domain_build.method_synthesis.schema import (
+from online_query_solution.domain_selection import (
+    ONLINE_DOMAIN_SOURCE_BENCHMARK,
+    ONLINE_DOMAIN_SOURCE_GENERATED,
+    OnlineDomainContext,
+    normalize_online_domain_source,
+)
+from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
+from online_query_solution.temporal_compilation import build_dfa_from_ltlf
+from online_query_solution.agentspeak import (
+    AgentSpeakRenderer,
+    build_agentspeak_transition_specs,
+)
+from online_query_solution.jason_runtime import JasonRunner
+from offline_method_generation.method_synthesis.synthesizer import HTNMethodSynthesizer
+from offline_method_generation.method_synthesis.schema import (
     HTNLiteral,
     HTNMethod,
     HTNMethodLibrary,
@@ -36,7 +49,11 @@ from domain_build.method_synthesis.schema import (
     HTNTargetTaskBinding,
     _parse_signature_literal,
 )
-from domain_build.method_synthesis.naming import query_root_alias_task_name, sanitize_identifier
+from offline_method_generation.method_synthesis.naming import query_root_alias_task_name, sanitize_identifier
+from offline_method_generation.method_synthesis.domain_materialization import (
+    write_generated_domain_file,
+    write_masked_domain_file,
+)
 from planning.problem_structure import ProblemStructure, ProblemStructureAnalyzer
 from planning.official_benchmark import (
     OFFICIAL_BACKEND_SELECTION_RULE,
@@ -54,11 +71,13 @@ from planning.backends import (
     default_official_backends,
     expand_backend_tasks_for_representations,
 )
+from planning.problem_encoding import PANDAProblemBuilder
 from pipeline.artifacts import (
+    DFACompilationResult,
     DomainLibraryArtifact,
-    GoalRequest,
-    GoalRequestNode,
-    PlanningRequest,
+    GroundedSubgoal,
+    JasonExecutionResult,
+    TemporalGroundingResult,
     load_domain_library_artifact,
     persist_domain_library_artifact,
     query_bound_method_library,
@@ -126,6 +145,9 @@ def _official_problem_root_planning_task_worker(
                 None,
                 None,
                 plan_solve_data,
+                online_domain=pipeline._resolve_online_domain_context(
+                    source=ONLINE_DOMAIN_SOURCE_BENCHMARK,
+                ),
             )
             plan_verification_seconds = time.perf_counter() - plan_verification_start
 
@@ -228,7 +250,12 @@ class DomainCompletePipeline:
         OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
     )
 
-    def __init__(self, domain_file: str, problem_file: str | None = None):
+    def __init__(
+        self,
+        domain_file: str,
+        problem_file: str | None = None,
+        online_domain_source: str | None = None,
+    ):
         """
         Initialize pipeline
 
@@ -250,6 +277,9 @@ class DomainCompletePipeline:
 
         self.domain_file = domain_file
         self.problem_file = problem_file
+        self.online_domain_source = normalize_online_domain_source(
+            online_domain_source or self.config.online_domain_source,
+        )
 
         # Parse domain to extract actions, predicates, tasks, and methods
         from utils.hddl_parser import HDDLParser
@@ -296,6 +326,139 @@ class DomainCompletePipeline:
             if key != "total_seconds" and value is not None
         }
 
+    def _resolve_online_domain_context(
+        self,
+        artifact: Optional[DomainLibraryArtifact] = None,
+        *,
+        source: Optional[str] = None,
+    ) -> OnlineDomainContext:
+        source = normalize_online_domain_source(source or self.online_domain_source)
+        domain_file = str(Path(self.domain_file).resolve())
+        domain = self.domain
+
+        if source == ONLINE_DOMAIN_SOURCE_GENERATED:
+            generated_domain_file = str(
+                getattr(artifact, "generated_domain_file", None) or "",
+            ).strip()
+            generated_domain_path = (
+                Path(generated_domain_file).expanduser().resolve()
+                if generated_domain_file
+                else None
+            )
+            if generated_domain_path is None or not generated_domain_path.exists():
+                generated_domain_file = self._materialize_generated_online_domain_artifact(
+                    artifact,
+                )
+                generated_domain_path = Path(generated_domain_file).expanduser().resolve()
+            from utils.hddl_parser import HDDLParser
+
+            domain_file = str(generated_domain_path)
+            domain = HDDLParser.parse_domain(domain_file)
+
+        type_parent_map = self._build_type_parent_map_for_domain(domain)
+        domain_type_names = set(type_parent_map.keys())
+        return OnlineDomainContext(
+            source=source,
+            domain_file=domain_file,
+            domain=domain,
+            type_parent_map=type_parent_map,
+            predicate_type_map=self._predicate_type_map_for_domain(domain, domain_type_names),
+            action_type_map=self._action_type_map_for_domain(domain, domain_type_names),
+            task_type_map=self._task_type_map_for_domain(domain, domain_type_names),
+        )
+
+    def _materialize_generated_online_domain_artifact(
+        self,
+        artifact: Optional[DomainLibraryArtifact],
+    ) -> str:
+        if artifact is None:
+            raise ValueError(
+                "ONLINE_DOMAIN_SOURCE=generated requires a domain library artifact in order "
+                "to materialize generated_domain.hddl.",
+            )
+        artifact_root = (
+            Path(str(artifact.artifact_root)).expanduser().resolve()
+            if getattr(artifact, "artifact_root", None)
+            else (
+                Path(self.output_dir).resolve() / "online_domain_artifact"
+                if self.output_dir is not None
+                else self._stable_domain_artifact_root()
+            )
+        )
+        artifact_root.mkdir(parents=True, exist_ok=True)
+
+        masked_domain_path = artifact_root / "masked_domain.hddl"
+        if masked_domain_path.exists():
+            masked_domain_text = masked_domain_path.read_text()
+        else:
+            masked_inputs = write_masked_domain_file(
+                official_domain_file=self.domain_file,
+                output_path=masked_domain_path,
+            )
+            masked_domain_text = str(masked_inputs["masked_domain_text"])
+
+        generated_outputs = write_generated_domain_file(
+            masked_domain_text=masked_domain_text,
+            domain=self.domain,
+            method_library=artifact.method_library,
+            output_path=artifact_root / "generated_domain.hddl",
+        )
+        return str(generated_outputs["generated_domain_file"])
+
+    @staticmethod
+    def _is_total_ordered_subgoal_chain(
+        transition_specs: Sequence[Dict[str, Any]],
+        *,
+        expected_subgoal_count: int,
+    ) -> bool:
+        indexed_specs = [
+            spec
+            for spec in transition_specs
+            if isinstance(spec.get("subgoal_index"), int)
+        ]
+        if expected_subgoal_count <= 0 or len(indexed_specs) < expected_subgoal_count:
+            return False
+
+        initial_state = str(indexed_specs[0].get("initial_state") or "").strip()
+        accepting_states = {
+            str(state).strip()
+            for spec in indexed_specs
+            for state in (spec.get("accepting_states") or ())
+            if str(state).strip()
+        }
+        if not initial_state:
+            return False
+
+        current_state = initial_state
+        for expected_index in range(1, expected_subgoal_count + 1):
+            available_specs = [
+                spec
+                for spec in indexed_specs
+                if str(spec.get("source_state") or "").strip() == current_state
+            ]
+            available_indices = {
+                int(spec["subgoal_index"])
+                for spec in available_specs
+                if isinstance(spec.get("subgoal_index"), int)
+            }
+            if available_indices != {expected_index}:
+                return False
+
+            expected_specs = [
+                spec
+                for spec in available_specs
+                if int(spec["subgoal_index"]) == expected_index
+            ]
+            if len(expected_specs) != 1:
+                return False
+
+            next_state = str(expected_specs[0].get("target_state") or "").strip()
+            if not next_state or next_state == current_state:
+                return False
+            current_state = next_state
+
+        return current_state in accepting_states
+
     def run_query(self, nl_instruction: str) -> Dict[str, Any]:
         """
         Run the end-to-end convenience path:
@@ -303,7 +466,7 @@ class DomainCompletePipeline:
         """
         self.logger.start_pipeline(
             nl_instruction,
-            mode="query_execution",
+            mode="online_query_solution",
             domain_file=self.domain_file,
             problem_file=self.problem_file,
             domain_name=self.domain.name,
@@ -322,36 +485,19 @@ class DomainCompletePipeline:
         print(f"Output directory: {self.output_dir}")
         print("\n" + "-" * 80)
 
-        method_library, method_synthesis_data = self._synthesise_domain_methods()
-        if not method_library:
+        domain_build = self._build_generated_domain_library_artifact()
+        if not domain_build.get("success", False):
             log_filepath = self.logger.end_pipeline(success=False)
             print(f"\nExecution log saved to: {log_filepath}")
             return {
                 "success": False,
-                "step": "method_synthesis",
-                "error": "Domain HTN synthesis failed",
+                "step": str(domain_build.get("step") or "domain_build"),
+                "error": str(domain_build.get("error") or "Domain build failed"),
             }
 
-        domain_gate_data = self._validate_domain_library(method_library)
-        if domain_gate_data is None:
-            log_filepath = self.logger.end_pipeline(success=False)
-            print(f"\nExecution log saved to: {log_filepath}")
-            return {
-                "success": False,
-                "step": "domain_gate",
-                "error": "Domain gate failed",
-            }
-
-        artifact = DomainLibraryArtifact(
-            domain_name=self.domain.name,
-            method_library=method_library,
-            method_synthesis_metadata=method_synthesis_data,
-            domain_gate=domain_gate_data,
-        )
-        artifact_paths = self._persist_domain_library_artifact(artifact)
         query_result = self._execute_query_with_loaded_library(
             nl_instruction,
-            artifact,
+            domain_build["artifact"],
         )
         if not query_result.get("success", False):
             log_filepath = self.logger.end_pipeline(success=False)
@@ -367,10 +513,8 @@ class DomainCompletePipeline:
         return {
             "success": True,
             "domain_build": {
-                "method_library": method_library.to_dict(),
-                "method_synthesis_metadata": method_synthesis_data,
-                "domain_gate": domain_gate_data,
-                "artifact_paths": artifact_paths,
+                **domain_build["artifact"].to_dict(),
+                "artifact_paths": domain_build["artifact_paths"],
             },
             **query_result,
         }
@@ -384,7 +528,7 @@ class DomainCompletePipeline:
 
         self.logger.start_pipeline(
             f"Build domain-complete HTN library for {self.domain.name}",
-            mode="domain_build",
+            mode="offline_method_generation",
             domain_file=self.domain_file,
             problem_file=None,
             domain_name=self.domain.name,
@@ -396,42 +540,23 @@ class DomainCompletePipeline:
             self.logger.current_record.output_dir = str(self.output_dir)
             self.logger._save_current_state()
 
-        method_library, method_synthesis_data = self._synthesise_domain_methods()
-        if not method_library:
-            log_filepath = self.logger.end_pipeline(success=False)
-            return {
-                "success": False,
-                "step": "method_synthesis",
-                "error": "Domain HTN synthesis failed",
-                "log_path": str(log_filepath),
-            }
-
-        domain_gate_data = self._validate_domain_library(method_library)
-        if domain_gate_data is None:
-            log_filepath = self.logger.end_pipeline(success=False)
-            return {
-                "success": False,
-                "step": "domain_gate",
-                "error": "Domain gate failed",
-                "log_path": str(log_filepath),
-            }
-
-        artifact = DomainLibraryArtifact(
-            domain_name=self.domain.name,
-            method_library=method_library,
-            method_synthesis_metadata=method_synthesis_data,
-            domain_gate=domain_gate_data,
-        )
-        artifact_paths = self._persist_domain_library_artifact(
-            artifact,
+        domain_build = self._build_generated_domain_library_artifact(
             output_root=output_root,
         )
+        if not domain_build.get("success", False):
+            log_filepath = self.logger.end_pipeline(success=False)
+            return {
+                "success": False,
+                "step": str(domain_build.get("step") or "domain_build"),
+                "error": str(domain_build.get("error") or "Domain build failed"),
+                "log_path": str(log_filepath),
+            }
         log_filepath = self.logger.end_pipeline(success=True)
         return {
             "success": True,
             "domain_name": self.domain.name,
-            "artifact": artifact.to_dict(),
-            "artifact_paths": artifact_paths,
+            "artifact": domain_build["artifact"].to_dict(),
+            "artifact_paths": domain_build["artifact_paths"],
             "log_path": str(log_filepath),
         }
 
@@ -445,7 +570,7 @@ class DomainCompletePipeline:
 
         self.logger.start_pipeline(
             nl_query,
-            mode="query_execution",
+            mode="online_query_solution",
             domain_file=self.domain_file,
             problem_file=self.problem_file,
             domain_name=self.domain.name,
@@ -486,49 +611,236 @@ class DomainCompletePipeline:
         artifact: DomainLibraryArtifact,
         *,
         output_root: Optional[str] = None,
+        masked_domain_text: Optional[str] = None,
+        generated_domain_text: Optional[str] = None,
     ) -> Dict[str, str]:
         return persist_domain_library_artifact(
             artifact_root=self._stable_domain_artifact_root(output_root),
             artifact=artifact,
+            masked_domain_text=masked_domain_text,
+            generated_domain_text=generated_domain_text,
         )
+
+    def _prepare_masked_domain_build_inputs(self) -> Dict[str, Any]:
+        if self.output_dir is None:
+            raise ValueError("Masked domain preparation requires an active output directory.")
+        masked_domain_path = Path(self.output_dir) / "masked_domain.hddl"
+        return write_masked_domain_file(
+            official_domain_file=self.domain_file,
+            output_path=masked_domain_path,
+        )
+
+    def _materialize_generated_domain_build_output(
+        self,
+        *,
+        masked_domain_text: str,
+        method_library: HTNMethodLibrary,
+    ) -> Dict[str, Any]:
+        if self.output_dir is None:
+            raise ValueError("Generated domain materialization requires an active output directory.")
+        generated_domain_path = Path(self.output_dir) / "generated_domain.hddl"
+        return write_generated_domain_file(
+            masked_domain_text=masked_domain_text,
+            domain=self.domain,
+            method_library=method_library,
+            output_path=generated_domain_path,
+        )
+
+    def _build_generated_domain_library_artifact(
+        self,
+        *,
+        output_root: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        masked_domain_inputs = self._prepare_masked_domain_build_inputs()
+        synthesis_domain = masked_domain_inputs["masked_domain"]
+        method_library, method_synthesis_data = self._synthesise_domain_methods(
+            synthesis_domain=synthesis_domain,
+            source_domain_kind="masked_official",
+            masked_domain_file=str(masked_domain_inputs["masked_domain_file"]),
+            original_method_count=int(masked_domain_inputs["original_method_count"]),
+        )
+        if not method_library:
+            return {
+                "success": False,
+                "step": "method_synthesis",
+                "error": "Domain HTN synthesis failed",
+            }
+
+        generated_domain_outputs = self._materialize_generated_domain_build_output(
+            masked_domain_text=str(masked_domain_inputs["masked_domain_text"]),
+            method_library=method_library,
+        )
+        domain_gate_data = self._validate_domain_library(method_library)
+        if domain_gate_data is None:
+            return {
+                "success": False,
+                "step": "domain_gate",
+                "error": "Domain gate failed",
+            }
+
+        persisted_artifact = DomainLibraryArtifact(
+            domain_name=self.domain.name,
+            method_library=method_library,
+            method_synthesis_metadata=method_synthesis_data,
+            domain_gate=domain_gate_data,
+            source_domain_kind="masked_official",
+        )
+        artifact_paths = self._persist_domain_library_artifact(
+            persisted_artifact,
+            output_root=output_root,
+            masked_domain_text=str(masked_domain_inputs["masked_domain_text"]),
+            generated_domain_text=str(generated_domain_outputs["generated_domain_text"]),
+        )
+        artifact = DomainLibraryArtifact(
+            domain_name=self.domain.name,
+            method_library=method_library,
+            method_synthesis_metadata=method_synthesis_data,
+            domain_gate=domain_gate_data,
+            source_domain_kind="masked_official",
+            artifact_root=str(Path(artifact_paths["method_library"]).resolve().parent),
+            masked_domain_file=(
+                str(artifact_paths.get("masked_domain"))
+                if artifact_paths.get("masked_domain") is not None
+                else None
+            ),
+            generated_domain_file=(
+                str(artifact_paths.get("generated_domain"))
+                if artifact_paths.get("generated_domain") is not None
+                else None
+            ),
+        )
+        return {
+            "success": True,
+            "artifact": artifact,
+            "artifact_paths": artifact_paths,
+            "masked_domain": masked_domain_inputs,
+            "generated_domain": generated_domain_outputs,
+        }
 
     def _execute_query_with_loaded_library(
         self,
         nl_instruction: str,
         artifact: DomainLibraryArtifact,
     ) -> Dict[str, Any]:
-        """Run the new query-time path with a prebuilt domain-complete method library."""
+        """Run the online Jason query path with a prebuilt domain-complete method library."""
 
         domain_library = artifact.method_library
-        planning_request = self._ground_query_goal(
+        online_domain = self._resolve_online_domain_context(artifact)
+        if self.logger.current_record is not None:
+            self.logger.current_record.domain_file = online_domain.domain_file
+            self.logger.current_record.domain_name = online_domain.domain.name
+            self.logger._save_current_state()
+        grounding_result, grounding_prompt, grounding_response = self._ground_query_temporally(
             nl_instruction,
             domain_library,
+            online_domain=online_domain,
         )
-        if planning_request is None:
+        if grounding_result is None:
             return {
                 "success": False,
                 "step": "goal_grounding",
-                "error": "Goal grounding failed",
+                "error": "Temporal goal grounding failed",
                 "method_library": domain_library.to_dict(),
             }
 
-        plan_solve_data = self._solve_query_request(
-            domain_library,
-            planning_request,
-        )
-        if plan_solve_data is None:
+        dfa_result = self._compile_temporal_goal(grounding_result)
+        if dfa_result is None:
             return {
                 "success": False,
-                "step": "plan_solve",
-                "error": "Hierarchical Task Network planning failed",
+                "step": "temporal_compilation",
+                "error": "LTLf to DFA compilation failed",
                 "method_library": domain_library.to_dict(),
-                "planning_request_context": planning_request.to_dict(),
+                "goal_grounding": grounding_result.to_dict(),
             }
 
+        verification_problem_file, verification_mode = self._determine_verification_problem(
+            dfa_result=dfa_result,
+            method_library=domain_library,
+            online_domain=online_domain,
+        )
+        if verification_problem_file is None:
+            return {
+                "success": False,
+                "step": "plan_verification",
+                "error": "Could not determine a verification problem file",
+                "method_library": domain_library.to_dict(),
+                "goal_grounding": grounding_result.to_dict(),
+                "temporal_compilation": dfa_result.to_dict(),
+            }
+
+        agentspeak_render = self._render_agentspeak_program(
+            grounding_result=grounding_result,
+            dfa_result=dfa_result,
+            method_library=domain_library,
+            online_domain=online_domain,
+        )
+        if agentspeak_render is None:
+            return {
+                "success": False,
+                "step": "agentspeak_rendering",
+                "error": "AgentSpeak rendering failed",
+                "method_library": domain_library.to_dict(),
+                "goal_grounding": grounding_result.to_dict(),
+                "temporal_compilation": dfa_result.to_dict(),
+            }
+
+        jason_result = self._execute_query_with_jason(
+            grounding_result=grounding_result,
+            dfa_result=dfa_result,
+            method_library=domain_library,
+            agentspeak_code=agentspeak_render["agentspeak_code"],
+            agentspeak_artifacts=agentspeak_render["artifacts"],
+            verification_problem_file=verification_problem_file,
+            verification_mode=verification_mode,
+            online_domain=online_domain,
+        )
+        if jason_result is None:
+            return {
+                "success": False,
+                "step": "runtime_execution",
+                "error": "Jason runtime execution failed",
+                "method_library": domain_library.to_dict(),
+                "goal_grounding": grounding_result.to_dict(),
+                "temporal_compilation": dfa_result.to_dict(),
+            }
+
+        plan_solve_data = {
+            "summary": {
+                "backend": "jason",
+                "status": "success",
+                "planning_mode": "jason_runtime",
+                "verification_mode": verification_mode,
+                "online_domain_source": online_domain.source,
+                "online_domain_file": online_domain.domain_file,
+                "task_count": len(grounding_result.subgoals),
+                "step_count": len(jason_result.action_path),
+            },
+            "artifacts": {
+                "backend": "jason",
+                "status": "success",
+                "planning_mode": "jason_runtime",
+                "verification_mode": verification_mode,
+                "online_domain_source": online_domain.source,
+                "online_domain_file": online_domain.domain_file,
+                "ltlf_formula": grounding_result.ltlf_formula,
+                "subgoals": [subgoal.to_dict() for subgoal in grounding_result.subgoals],
+                "ordered_subgoal_sequence": dfa_result.ordered_subgoal_sequence,
+                "action_path": list(jason_result.action_path),
+                "method_trace": list(jason_result.method_trace),
+                "guided_hierarchical_plan_text": jason_result.guided_hierarchical_plan_text,
+                "guided_hierarchical_plan_source": "jason_runtime",
+                "verification_problem_file": jason_result.verification_problem_file,
+                "verification_domain_file": None,
+                "timing_profile": dict(jason_result.timing_profile),
+                "artifacts": dict(jason_result.artifacts),
+            },
+        }
+
         plan_verification_data = self._verify_plan_officially(
-            None,
+            grounding_result,
             domain_library,
             plan_solve_data,
+            online_domain=online_domain,
         )
         if plan_verification_data is None:
             return {
@@ -536,481 +848,738 @@ class DomainCompletePipeline:
                 "step": "plan_verification",
                 "error": "Official IPC verification failed",
                 "method_library": domain_library.to_dict(),
-                "planning_request_context": planning_request.to_dict(),
+                "goal_grounding": grounding_result.to_dict(),
+                "temporal_compilation": dfa_result.to_dict(),
                 "plan_solve": plan_solve_data,
             }
 
         return {
             "success": True,
             "method_library": domain_library.to_dict(),
-            "goal_request": planning_request.goal_request.to_dict(),
-            "planning_request_context": planning_request.to_dict(),
-            "plans": [],
+            "goal_grounding": grounding_result.to_dict(),
+            "temporal_compilation": dfa_result.to_dict(),
             "plan_solve": plan_solve_data,
             "plan_verification": plan_verification_data,
+            "llm_prompt": grounding_prompt,
+            "llm_response": grounding_response,
         }
 
-    def _ground_query_goal(
+    def _ground_query_temporally(
         self,
         nl_instruction: str,
-        method_library,
-    ) -> Optional[PlanningRequest]:
-        """Ground a natural-language query into a planner request."""
+        method_library: HTNMethodLibrary,
+        *,
+        online_domain: OnlineDomainContext,
+    ) -> Tuple[Optional[TemporalGroundingResult], Optional[Dict[str, str]], Optional[str]]:
         print("\n[GOAL GROUNDING]")
         print("-" * 80)
         stage_start = time.perf_counter()
+        generator: Optional[NLToLTLfGenerator] = None
 
         try:
-            query_text = str(nl_instruction or "").strip()
-            if not query_text:
-                raise ValueError("Natural-language query is empty.")
-
-            query_object_inventory = self._extract_query_object_inventory(query_text)
-            query_task_anchors = self._extract_query_task_anchors(query_text)
-            if not query_task_anchors:
-                raise ValueError(
-                    "No declared domain task invocations were found in the natural-language query.",
-                )
-
-            query_task_name_map = self._method_library_source_task_name_map(method_library)
-            merged_object_types = self._goal_grounding_object_types(query_object_inventory)
-            grounding_inventory = (
-                query_object_inventory
-                if query_object_inventory
-                else self._problem_object_inventory()
+            generator = NLToLTLfGenerator(
+                api_key=self.config.openai_api_key,
+                model=self.config.goal_grounding_model,
+                base_url=self.config.openai_base_url,
+                domain_file=online_domain.domain_file,
+                request_timeout=float(self.config.openai_timeout),
+                response_max_tokens=int(self.config.goal_grounding_max_tokens),
             )
-            variable_assignments: Dict[str, str] = {}
-            diagnostics: List[str] = []
-            teg_nodes: List[GoalRequestNode] = []
-
-            for index, anchor in enumerate(query_task_anchors, start=1):
-                source_task_name = str(anchor.get("task_name") or "").strip()
-                resolved_task_name = query_task_name_map.get(source_task_name, source_task_name)
-                raw_args = tuple(
-                    str(arg).strip()
-                    for arg in (anchor.get("args") or ())
-                    if str(arg).strip()
-                )
-                grounded_args = self._ground_query_task_arguments(
-                    task_name=resolved_task_name,
-                    task_args=raw_args,
-                    query_object_inventory=grounding_inventory,
-                    variable_assignments=variable_assignments,
-                )
-                unresolved_args = [
-                    arg
-                    for arg in grounded_args
-                    if self._is_query_variable_symbol(arg)
-                ]
-                if unresolved_args:
-                    raise ValueError(
-                        "Goal grounding could not resolve query variables for "
-                        f"{resolved_task_name}{grounded_args}: {unresolved_args}",
-                    )
-                argument_types = self._task_type_signature(resolved_task_name, method_library)
-                self._validate_grounded_task_arguments(
-                    task_name=resolved_task_name,
-                    grounded_args=grounded_args,
-                    argument_types=argument_types,
-                    object_types=merged_object_types,
-                )
-                teg_nodes.append(
-                    GoalRequestNode(
-                        node_id=f"t{index}",
-                        task_name=resolved_task_name,
-                        args=grounded_args,
-                        argument_types=tuple(argument_types),
-                    ),
-                )
-
-            precedence_edges = self._goal_grounding_precedence_edges(
-                query_text=query_text,
-                teg_nodes=tuple(teg_nodes),
-            )
-            goal_request = GoalRequest(
-                query_text=query_text,
-                nodes=tuple(teg_nodes),
-                precedence_edges=precedence_edges,
-                query_object_inventory=tuple(query_object_inventory),
-                typed_objects=dict(merged_object_types),
-                diagnostics=tuple(diagnostics),
-            )
-            planning_request = self._build_planning_request_context(goal_request)
-
-            self.logger.log_goal_grounding_success(
+            typed_objects = (
                 {
-                    "query_text": planning_request.query_text,
-                    "goal_request": goal_request.to_dict(),
-                    "task_network": [
-                        {
-                            "task_name": task_name,
-                            "args": list(task_args),
-                        }
-                        for task_name, task_args in planning_request.task_network
-                    ],
-                    "task_network_ordered": planning_request.task_network_ordered,
-                    "ordering_edges": [
-                        {"before": before, "after": after}
-                        for before, after in planning_request.ordering_edges
-                    ],
-                    "problem_objects": list(planning_request.problem_objects),
-                    "typed_objects": dict(planning_request.typed_objects),
-                    "diagnostics": list(planning_request.diagnostics),
-                },
-                used_llm=False,
-                model=None,
-                llm_prompt=None,
-                llm_response=None,
+                    str(name).strip(): str(type_name).strip()
+                    for name, type_name in dict(getattr(self.problem, "object_types", {}) or {}).items()
+                    if str(name).strip() and str(type_name).strip()
+                }
+                if self.problem is not None
+                else {}
+            )
+            grounding_result, llm_prompt, llm_response = generator.generate(
+                nl_instruction,
+                method_library=method_library,
+                typed_objects=typed_objects,
+                task_type_map=online_domain.task_type_map,
+                type_parent_map=online_domain.type_parent_map,
+            )
+            self.logger.log_goal_grounding_success(
+                grounding_result.to_dict(),
+                used_llm=True,
+                model=self.config.goal_grounding_model,
+                llm_prompt=llm_prompt,
+                llm_response=llm_response,
             )
             self._record_step_timing(
                 "goal_grounding",
                 stage_start,
-                breakdown={
-                    "goal_grounding_seconds": time.perf_counter() - stage_start,
-                },
                 metadata={
-                    "grounded_task_count": len(teg_nodes),
-                    "precedence_edge_count": len(precedence_edges),
+                    "subgoal_count": len(grounding_result.subgoals),
+                    "online_domain_source": online_domain.source,
                 },
             )
-            print(f"✓ Grounded tasks: {len(teg_nodes)}")
-            print(f"  Ordered edges: {len(precedence_edges)}")
-            return planning_request
+            print(f"✓ Grounded subgoals: {len(grounding_result.subgoals)}")
+            print(f"  LTLf: {grounding_result.ltlf_formula}")
+            return grounding_result, llm_prompt, llm_response
         except Exception as exc:
-            self.logger.log_goal_grounding_error(str(exc))
+            generation_metadata = dict(getattr(generator, "last_generation_metadata", {}) or {})
+            llm_prompt = generation_metadata.get("last_prompt")
+            self.logger.log_goal_grounding_error(
+                str(exc),
+                model=self.config.goal_grounding_model,
+                llm_prompt=llm_prompt if isinstance(llm_prompt, dict) else None,
+                llm_response=str(generation_metadata.get("last_response") or "") or None,
+                metadata={
+                    "online_domain_source": online_domain.source,
+                    "attempt_mode": generation_metadata.get("attempt_mode"),
+                    "attempt_count": generation_metadata.get("attempt_count"),
+                    "attempt_errors": generation_metadata.get("attempt_errors"),
+                },
+            )
             self._record_step_timing("goal_grounding", stage_start)
             print(f"✗ Goal grounding failed: {exc}")
-            return None
+            return None, None, None
 
-    def _problem_object_inventory(self) -> Tuple[Dict[str, Any], ...]:
-        if self.problem is None:
-            return ()
-        grouped: Dict[str, List[str]] = defaultdict(list)
-        for object_name, type_name in dict(getattr(self.problem, "object_types", {}) or {}).items():
-            grouped[str(type_name).strip() or "object"].append(str(object_name).strip())
-        return tuple(
-            {
-                "type": type_name,
-                "label": self._plural_query_type_label(type_name),
-                "objects": sorted(
-                    object_name
-                    for object_name in objects
-                    if object_name
-                ),
-            }
-            for type_name, objects in sorted(grouped.items())
-        )
-
-    def _goal_grounding_object_types(
+    def _compile_temporal_goal(
         self,
-        query_object_inventory: Sequence[Dict[str, Any]],
-    ) -> Dict[str, str]:
-        query_object_types = self._query_inventory_object_type_map(query_object_inventory)
-        if self.problem is None:
-            return dict(query_object_types)
-
-        problem_object_types = {
-            str(name).strip(): str(type_name).strip()
-            for name, type_name in dict(getattr(self.problem, "object_types", {}) or {}).items()
-            if str(name).strip() and str(type_name).strip()
-        }
-        for object_name, query_type in query_object_types.items():
-            problem_type = problem_object_types.get(object_name)
-            if problem_type is None:
-                raise TypeResolutionError(
-                    f"Goal grounding references object '{object_name}' that is not declared in "
-                    f"problem '{self.problem.name}'.",
-                )
-            if not (
-                query_type == problem_type
-                or self._is_subtype(problem_type, query_type)
-                or self._is_subtype(query_type, problem_type)
-            ):
-                raise TypeResolutionError(
-                    f"Goal grounding assigned incompatible types '{query_type}' and "
-                    f"'{problem_type}' to object '{object_name}'.",
-                )
-        return problem_object_types
-
-    def _validate_grounded_task_arguments(
-        self,
-        *,
-        task_name: str,
-        grounded_args: Sequence[str],
-        argument_types: Sequence[str],
-        object_types: Dict[str, str],
-    ) -> None:
-        if argument_types and len(grounded_args) != len(argument_types):
-            raise TypeResolutionError(
-                f"Grounded task '{task_name}' arity mismatch: "
-                f"{len(grounded_args)} args vs {len(argument_types)} signature entries.",
-            )
-        for index, arg in enumerate(grounded_args):
-            object_name = str(arg).strip()
-            if not object_name:
-                raise TypeResolutionError(
-                    f"Grounded task '{task_name}' contains an empty argument.",
-                )
-            if self.problem is not None and object_name not in set(self.problem.objects or ()):
-                raise TypeResolutionError(
-                    f"Grounded task '{task_name}' references object '{object_name}' that is "
-                    f"absent from problem '{self.problem.name}'.",
-                )
-            if index >= len(argument_types):
-                continue
-            actual_type = object_types.get(object_name)
-            expected_type = str(argument_types[index] or "").strip()
-            if not actual_type or not expected_type:
-                continue
-            if actual_type == expected_type or self._is_subtype(actual_type, expected_type):
-                continue
-            raise TypeResolutionError(
-                f"Grounded task '{task_name}' argument '{object_name}' has type '{actual_type}', "
-                f"expected '{expected_type}'.",
-            )
-
-    def _goal_grounding_precedence_edges(
-        self,
-        *,
-        query_text: str,
-        teg_nodes: Sequence[GoalRequestNode],
-    ) -> Tuple[Tuple[str, str], ...]:
-        if len(teg_nodes) <= 1:
-            return ()
-        if not self._query_requests_ordered_task_sequence(query_text):
-            return ()
-        return tuple(
-            (teg_nodes[index].node_id, teg_nodes[index + 1].node_id)
-            for index in range(len(teg_nodes) - 1)
-        )
-
-    def _build_planning_request_context(
-        self,
-        goal_request: GoalRequest,
-    ) -> PlanningRequest:
-        task_network = tuple(
-            (node.task_name, tuple(node.args))
-            for node in goal_request.nodes
-        )
-        problem_objects = tuple(
-            str(obj).strip()
-            for obj in (self.problem.objects if self.problem is not None else ())
-            if str(obj).strip()
-        )
-        if not problem_objects:
-            problem_objects = tuple(
-                object_name
-                for entry in goal_request.query_object_inventory
-                for object_name in entry.get("objects", ())
-                if str(object_name).strip()
-            )
-        task_network_ordered = (
-            len(task_network) <= 1
-            and not goal_request.precedence_edges
-        )
-        return PlanningRequest(
-            query_text=goal_request.query_text,
-            goal_request=goal_request,
-            problem_objects=problem_objects,
-            typed_objects=dict(goal_request.typed_objects),
-            task_network=task_network,
-            task_network_ordered=task_network_ordered,
-            ordering_edges=tuple(goal_request.precedence_edges),
-            diagnostics=tuple(goal_request.diagnostics),
-        )
-
-    def _solve_query_request(
-        self,
-        method_library,
-        planning_request: PlanningRequest,
-    ) -> Optional[Dict[str, Any]]:
-        """Solve the grounded request with PANDA."""
-        print("\n[PLAN SOLVE]")
+        grounding_result: TemporalGroundingResult,
+    ) -> Optional[DFACompilationResult]:
+        print("\n[TEMPORAL COMPILATION]")
         print("-" * 80)
         stage_start = time.perf_counter()
-        planner = PANDAPlanner(workspace=str(self.output_dir))
 
         try:
-            if not planning_request.task_network:
-                raise ValueError("Planning request contains no grounded task network.")
+            dfa_payload = build_dfa_from_ltlf(grounding_result)
+            dfa_dot = str(dfa_payload.get("dfa_dot") or "")
+            dfa_dot_path = self.output_dir / "query_dfa.dot"
+            dfa_dot_path.write_text(dfa_dot)
 
-            if not planner.toolchain_available():
-                raise ValueError(
-                    "PANDA planning toolchain is unavailable on PATH.",
-                )
-
-            problem_objects = tuple(planning_request.problem_objects)
-            if not problem_objects:
-                raise ValueError("Planning request contains no problem objects.")
-            typed_objects = self._typed_object_entries(
-                problem_objects,
-                planning_request.typed_objects,
+            ordered_probe_specs = build_agentspeak_transition_specs(
+                dfa_result=dfa_payload,
+                grounding_map=None,
+                ordered_query_sequence=True,
             )
-            initial_facts = (
-                tuple(self._render_problem_fact(fact) for fact in (self.problem.init_facts or ()))
-                if self.problem is not None
-                else ()
+            ordered_subgoal_sequence = self._is_total_ordered_subgoal_chain(
+                ordered_probe_specs,
+                expected_subgoal_count=len(grounding_result.subgoals),
             )
-            planning_mode = "single_request"
-            combined_plan_text: Optional[str] = None
-            if self._should_sequence_goal_request(planning_request):
-                sequential_result = self._solve_ordered_goal_sequence(
-                    planner=planner,
-                    method_library=method_library,
-                    planning_request=planning_request,
-                    problem_objects=problem_objects,
-                    typed_objects=typed_objects,
-                    initial_facts=initial_facts,
-                )
-                action_path = list(sequential_result["action_path"])
-                method_trace = list(sequential_result["method_trace"])
-                timing_profile = dict(sequential_result["timing_profile"])
-                combined_plan_text = sequential_result.get("hierarchical_plan_text")
-                planning_mode = str(sequential_result.get("planning_mode") or planning_mode)
-                work_dir = None
-            else:
-                primary_task_name, primary_task_args = planning_request.task_network[0]
-                plan = planner.plan(
-                    domain=self.domain,
-                    method_library=method_library,
-                    objects=problem_objects,
-                    target_literal=None,
-                    task_name=str(primary_task_name),
-                    transition_name="teg_request",
-                    typed_objects=typed_objects,
-                    task_args=tuple(primary_task_args),
-                    task_network=planning_request.task_network,
-                    task_network_ordered=planning_request.task_network_ordered,
-                    ordering_edges=planning_request.ordering_edges,
-                    allow_empty_plan=False,
-                    initial_facts=initial_facts,
-                    timeout_seconds=float(self.config.planning_timeout),
-                )
 
-                action_path = [
-                    (
-                        f"{step.action_name}({', '.join(step.args)})"
-                        if step.args
-                        else str(step.action_name)
-                    )
-                    for step in plan.steps
-                ]
-                method_trace = planner.extract_method_trace(plan.actual_plan)
-                timing_profile = dict(plan.timing_profile or {})
-                combined_plan_text = plan.actual_plan or ""
-                work_dir = Path(str(plan.work_dir)).resolve() if plan.work_dir else None
-
-            action_path_file = self.output_dir / "plan_solve_action_path.txt"
-            action_path_file.write_text(
-                "".join(f"{step}\n" for step in action_path),
+            transition_specs = build_agentspeak_transition_specs(
+                dfa_result=dfa_payload,
+                grounding_map=None,
+                ordered_query_sequence=ordered_subgoal_sequence,
             )
-            method_trace_file = self.output_dir / "plan_solve_method_trace.json"
-            method_trace_file.write_text(json.dumps(method_trace, indent=2))
-            combined_plan_file = None
-            if combined_plan_text:
-                combined_plan_file = self.output_dir / "plan_solve_hierarchical_plan.txt"
-                combined_plan_file.write_text(str(combined_plan_text))
-
-            artifacts = {
-                "backend": "pandaPI",
-                "status": "success",
-                "planning_mode": planning_mode,
-                "task_network": [
-                    {
-                        "task_name": task_name,
-                        "args": list(task_args),
-                    }
-                    for task_name, task_args in planning_request.task_network
-                ],
-                "task_network_ordered": planning_request.task_network_ordered,
-                "ordering_edges": [
-                    {"before": before, "after": after}
-                    for before, after in planning_request.ordering_edges
-                ],
-                "step_count": len(action_path),
-                "action_path": action_path,
-                "method_trace": method_trace,
-                "guided_hierarchical_plan_text": combined_plan_text,
-                "guided_hierarchical_plan_source": (
-                    "planner_reconstructed_hierarchical_plan"
-                    if planning_mode != "single_request"
-                    else "panda_plan"
+            result = DFACompilationResult(
+                query_text=grounding_result.query_text,
+                ltlf_formula=grounding_result.ltlf_formula,
+                alphabet=tuple(
+                    str(item).strip()
+                    for item in (dfa_payload.get("alphabet") or ())
+                    if str(item).strip()
                 ),
-                "timing_profile": timing_profile,
-                "artifacts": {
-                    "domain_hddl": str(work_dir / "domain.hddl") if work_dir else None,
-                    "problem_hddl": str(work_dir / "problem.hddl") if work_dir else None,
-                    "parsed_problem": str(work_dir / "problem.psas") if work_dir else None,
-                    "grounded_problem": str(work_dir / "problem.psas.grounded") if work_dir else None,
-                    "raw_plan": str(work_dir / "plan.original") if work_dir else None,
-                    "actual_plan": str(combined_plan_file) if combined_plan_file else None,
-                    "action_path": str(action_path_file),
-                    "method_trace": str(method_trace_file),
+                transition_specs=tuple(dict(spec) for spec in transition_specs),
+                dfa_dot=dfa_dot,
+                construction=str(dfa_payload.get("construction") or "generic_ltlf2dfa"),
+                num_states=int(dfa_payload.get("num_states") or 0) or None,
+                num_transitions=int(dfa_payload.get("num_transitions") or 0) or None,
+                ordered_subgoal_sequence=ordered_subgoal_sequence,
+                subgoals=tuple(grounding_result.subgoals),
+                timing_profile=dict(dfa_payload.get("timing_profile") or {}),
+            )
+            self.logger.log_temporal_compilation(
+                {
+                    **result.to_dict(),
+                    "dfa_dot_path": str(dfa_dot_path),
                 },
-            }
-            summary = {
-                "backend": "pandaPI",
-                "status": "success",
-                "planning_mode": planning_mode,
-                "task_count": len(planning_request.task_network),
-                "precedence_edge_count": len(planning_request.ordering_edges),
-                "step_count": len(action_path),
-            }
-            self.logger.log_plan_solve(
-                artifacts,
                 "Success",
-                metadata=summary,
+                metadata={
+                    "num_states": result.num_states,
+                    "num_transitions": result.num_transitions,
+                    "ordered_subgoal_sequence": result.ordered_subgoal_sequence,
+                },
             )
             self._record_step_timing(
-                "plan_solve",
+                "temporal_compilation",
                 stage_start,
-                breakdown={
-                    key: value
-                    for key, value in timing_profile.items()
-                    if key != "total_seconds"
-                },
+                breakdown=self._timing_breakdown_without_total(result.timing_profile),
                 metadata={
-                    "task_count": len(planning_request.task_network),
-                    "step_count": len(action_path),
-                    "planning_mode": planning_mode,
+                    "num_states": result.num_states,
+                    "num_transitions": result.num_transitions,
+                    "ordered_subgoal_sequence": result.ordered_subgoal_sequence,
                 },
             )
-            print(f"✓ Planner returned {len(action_path)} primitive steps")
-            print(f"  Task network size: {len(planning_request.task_network)}")
+            print(f"✓ DFA states: {result.num_states or 0}")
+            print(f"  Ordered subgoal sequence: {result.ordered_subgoal_sequence}")
+            return result
+        except Exception as exc:
+            self.logger.log_temporal_compilation(
+                None,
+                "Failed",
+                error=str(exc),
+            )
+            self._record_step_timing("temporal_compilation", stage_start)
+            print(f"✗ Temporal compilation failed: {exc}")
+            return None
+
+    def _render_agentspeak_program(
+        self,
+        *,
+        grounding_result: TemporalGroundingResult,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        online_domain: OnlineDomainContext,
+    ) -> Optional[Dict[str, Any]]:
+        print("\n[AGENTSPEAK RENDERING]")
+        print("-" * 80)
+        stage_start = time.perf_counter()
+
+        try:
+            renderer = AgentSpeakRenderer()
+            runtime_objects = tuple(
+                str(object_name).strip()
+                for object_name in (
+                    self.problem.objects if self.problem is not None else grounding_result.typed_objects.keys()
+                )
+                if str(object_name).strip()
+            )
+            typed_object_entries = self._typed_object_entries(
+                runtime_objects,
+                grounding_result.typed_objects,
+            )
+            agentspeak_code = renderer.generate(
+                domain=online_domain.domain,
+                objects=runtime_objects,
+                method_library=method_library,
+                plan_records=(),
+                typed_objects=typed_object_entries,
+                ordered_query_sequence=dfa_result.ordered_subgoal_sequence,
+                prompt_analysis=None,
+                transition_specs=dfa_result.transition_specs,
+                subgoals=[subgoal.to_dict() for subgoal in grounding_result.subgoals],
+                subgoal_task_name_map=self._method_library_source_task_name_map(method_library),
+            )
+            asl_path = self.output_dir / "query_runtime.asl"
+            asl_path.write_text(agentspeak_code)
+            artifacts = {
+                "asl_file": str(asl_path),
+                "ordered_subgoal_sequence": dfa_result.ordered_subgoal_sequence,
+                "transition_spec_count": len(dfa_result.transition_specs),
+            }
+            self.logger.log_agentspeak_rendering(
+                artifacts,
+                "Success",
+                metadata={"transition_spec_count": len(dfa_result.transition_specs)},
+            )
+            self._record_step_timing(
+                "agentspeak_rendering",
+                stage_start,
+                metadata={
+                    "transition_spec_count": len(dfa_result.transition_specs),
+                    "online_domain_source": online_domain.source,
+                },
+            )
+            print(f"✓ AgentSpeak file: {asl_path}")
             return {
-                "summary": summary,
+                "agentspeak_code": agentspeak_code,
                 "artifacts": artifacts,
             }
         except Exception as exc:
-            failure_artifacts = {
-                "backend": "pandaPI",
-                "status": "failed",
-                "task_network": [
-                    {
-                        "task_name": task_name,
-                        "args": list(task_args),
-                    }
-                    for task_name, task_args in planning_request.task_network
-                ],
-                "task_network_ordered": planning_request.task_network_ordered,
-                "ordering_edges": [
-                    {"before": before, "after": after}
-                    for before, after in planning_request.ordering_edges
-                ],
-                "step_count": 0,
-            }
-            self.logger.log_plan_solve(
-                failure_artifacts,
+            self.logger.log_agentspeak_rendering(
+                None,
                 "Failed",
                 error=str(exc),
+            )
+            self._record_step_timing("agentspeak_rendering", stage_start)
+            print(f"✗ AgentSpeak rendering failed: {exc}")
+            return None
+
+    def _execute_query_with_jason(
+        self,
+        *,
+        grounding_result: TemporalGroundingResult,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        agentspeak_code: str,
+        agentspeak_artifacts: Dict[str, Any],
+        verification_problem_file: str | Path,
+        verification_mode: str,
+        online_domain: OnlineDomainContext,
+    ) -> Optional[JasonExecutionResult]:
+        print("\n[RUNTIME EXECUTION]")
+        print("-" * 80)
+        stage_start = time.perf_counter()
+
+        try:
+            runner = JasonRunner()
+            action_schemas = self._planner_action_schemas_for_domain(online_domain.domain)
+            seed_facts = tuple(
+                self._render_problem_fact(fact)
+                for fact in (self.problem.init_facts or ())
+            ) if self.problem is not None else ()
+            runtime_objects = tuple(
+                str(object_name).strip()
+                for object_name in (
+                    self.problem.objects if self.problem is not None else grounding_result.typed_objects.keys()
+                )
+                if str(object_name).strip()
+            )
+            unordered_execution_guidance = self._infer_unordered_execution_guidance(
+                dfa_result=dfa_result,
+                method_library=method_library,
+                online_domain=online_domain,
+            )
+            preferred_unordered_target_ids = tuple(
+                str(target_id).strip()
+                for target_id in (
+                    unordered_execution_guidance.get("preferred_unordered_target_ids") or ()
+                )
+                if str(target_id).strip()
+            )
+            preferred_method_trace = tuple(
+                {
+                    "method_name": str((entry or {}).get("method_name") or "").strip(),
+                    "task_args": [
+                        str(arg).strip()
+                        for arg in tuple((entry or {}).get("task_args") or ())
+                        if str(arg).strip()
+                    ],
+                }
+                for entry in (
+                    unordered_execution_guidance.get("preferred_method_trace") or ()
+                )
+                if str((entry or {}).get("method_name") or "").strip()
+            )
+            preferred_action_path = tuple(
+                str(step).strip()
+                for step in (
+                    unordered_execution_guidance.get("preferred_action_path") or ()
+                )
+                if str(step).strip()
+            )
+            preferred_hierarchical_plan_text = str(
+                unordered_execution_guidance.get("preferred_hierarchical_plan_text") or ""
+            ).strip()
+            validation_kwargs = {
+                "agentspeak_code": agentspeak_code,
+                "target_literals": (),
+                "protected_target_literals": (),
+                "method_library": method_library,
+                "action_schemas": action_schemas,
+                "seed_facts": seed_facts,
+                "runtime_objects": runtime_objects,
+                "object_types": dict(grounding_result.typed_objects),
+                "type_parent_map": dict(online_domain.type_parent_map),
+                "domain_name": online_domain.domain.name,
+                "problem_file": str(Path(verification_problem_file).resolve()),
+                "output_dir": self.output_dir,
+                "completion_mode": "accepting_state",
+                "ordered_query_sequence": dfa_result.ordered_subgoal_sequence,
+                "planning_domain": online_domain.domain,
+                "skip_method_trace_reconstruction": False,
+                "preferred_unordered_target_ids": preferred_unordered_target_ids,
+                "preferred_method_trace": preferred_method_trace,
+                "preferred_action_path": preferred_action_path,
+            }
+            runtime_execution_mode = "jason_runtime"
+            primary_runtime_error = ""
+            prefer_guided_replay = bool(
+                preferred_action_path
+                and verification_mode == "original_problem"
+                and online_domain.source == ONLINE_DOMAIN_SOURCE_BENCHMARK
+                and not dfa_result.ordered_subgoal_sequence
+            )
+            if prefer_guided_replay:
+                runtime_execution_mode = "planner_guided_jason_replay"
+                validation = runner.validate(
+                    **{
+                        **validation_kwargs,
+                        "preferred_method_trace": (),
+                        "preferred_action_path": (),
+                        "guided_action_path": preferred_action_path,
+                        "guided_method_trace": preferred_method_trace,
+                        "skip_method_trace_reconstruction": True,
+                    },
+                )
+            else:
+                try:
+                    validation = runner.validate(**validation_kwargs)
+                except Exception as exc:
+                    primary_runtime_error = str(exc)
+                    if not preferred_action_path:
+                        raise
+                    runtime_execution_mode = "planner_guided_jason_replay"
+                    validation = runner.validate(
+                        **{
+                            **validation_kwargs,
+                            "preferred_method_trace": (),
+                            "preferred_action_path": (),
+                            "guided_action_path": preferred_action_path,
+                            "guided_method_trace": preferred_method_trace,
+                            "skip_method_trace_reconstruction": True,
+                        },
+                    )
+            if validation.status != "success":
+                raise ValueError(validation.stderr or validation.stdout or "Jason runtime returned failure")
+
+            guided_plan_text = self._render_supported_hierarchical_plan(
+                action_path=validation.action_path,
+                method_library=method_library,
+                method_trace=validation.method_trace,
+                problem_file=str(Path(verification_problem_file).resolve()),
+                domain_file=online_domain.domain_file,
+            )
+            if (
+                guided_plan_text is None
+                and runtime_execution_mode == "planner_guided_jason_replay"
+                and preferred_hierarchical_plan_text
+            ):
+                guided_plan_text = preferred_hierarchical_plan_text
+            result = JasonExecutionResult(
+                query_text=grounding_result.query_text,
+                ltlf_formula=grounding_result.ltlf_formula,
+                action_path=tuple(validation.action_path),
+                method_trace=tuple(dict(item) for item in validation.method_trace),
+                guided_hierarchical_plan_text=guided_plan_text,
+                verification_problem_file=str(Path(verification_problem_file).resolve()),
+                verification_mode=verification_mode,
+                artifacts={
+                    **agentspeak_artifacts,
+                    **dict(validation.artifacts),
+                    "stdout_path": dict(validation.artifacts).get("stdout"),
+                    "stderr_path": dict(validation.artifacts).get("stderr"),
+                },
+                timing_profile=dict(validation.timing_profile),
+                diagnostics=tuple(str(item) for item in validation.failed_goals),
+            )
+            self.logger.log_runtime_execution(
+                result.to_dict(),
+                "Success",
+                backend="RunLocalMAS",
                 metadata={
-                    "backend": "pandaPI",
-                    "status": "failed",
+                    "step_count": len(result.action_path),
+                    "method_trace_count": len(result.method_trace),
+                    "verification_mode": verification_mode,
+                    "online_domain_source": online_domain.source,
+                    "preferred_unordered_target_ids": list(preferred_unordered_target_ids),
+                    "preferred_method_trace_count": len(preferred_method_trace),
+                    "preferred_action_path_count": len(preferred_action_path),
+                    "runtime_execution_mode": runtime_execution_mode,
+                    "primary_runtime_error": primary_runtime_error or None,
+                    "planner_guidance_active": bool(
+                        preferred_unordered_target_ids or preferred_method_trace or preferred_action_path
+                    ),
                 },
             )
-            self._record_step_timing("plan_solve", stage_start)
-            print(f"✗ Plan solve failed: {exc}")
+            self._record_step_timing(
+                "runtime_execution",
+                stage_start,
+                breakdown=self._timing_breakdown_without_total(result.timing_profile),
+                metadata={
+                    "step_count": len(result.action_path),
+                    "method_trace_count": len(result.method_trace),
+                    "verification_mode": verification_mode,
+                    "online_domain_source": online_domain.source,
+                    "preferred_unordered_target_ids": list(preferred_unordered_target_ids),
+                    "preferred_method_trace_count": len(preferred_method_trace),
+                    "preferred_action_path_count": len(preferred_action_path),
+                    "runtime_execution_mode": runtime_execution_mode,
+                    "primary_runtime_error": primary_runtime_error or None,
+                    "planner_guidance_active": bool(
+                        preferred_unordered_target_ids or preferred_method_trace or preferred_action_path
+                    ),
+                },
+            )
+            print(f"✓ Jason action steps: {len(result.action_path)}")
+            return result
+        except Exception as exc:
+            self.logger.log_runtime_execution(
+                None,
+                "Failed",
+                error=str(exc),
+                backend="RunLocalMAS",
+                metadata={
+                    "verification_mode": verification_mode,
+                    "online_domain_source": online_domain.source,
+                },
+            )
+            self._record_step_timing("runtime_execution", stage_start)
+            print(f"✗ Runtime execution failed: {exc}")
             return None
+
+    def _infer_unordered_execution_guidance(
+        self,
+        *,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        online_domain: OnlineDomainContext,
+    ) -> Dict[str, Any]:
+        empty_guidance = {
+            "preferred_unordered_target_ids": (),
+            "preferred_method_trace": (),
+            "preferred_action_path": (),
+        }
+        if dfa_result.ordered_subgoal_sequence or self.problem is None or not self.problem_file:
+            return empty_guidance
+        if not self._query_matches_original_problem_root(
+            dfa_result=dfa_result,
+            method_library=method_library,
+        ):
+            return empty_guidance
+
+        try:
+            planner = PANDAPlanner(workspace=str(self.output_dir))
+            if not planner.toolchain_available():
+                return empty_guidance
+            root_tasks = tuple(self.problem.htn_tasks or ())
+            if not root_tasks:
+                return empty_guidance
+            root_task = root_tasks[0]
+            transition_name = f"unordered_guidance_{sanitize_identifier(self.problem.name)}"
+            plan = planner.plan_hddl_files(
+                domain=online_domain.domain,
+                domain_file=online_domain.domain_file,
+                problem_file=str(Path(self.problem_file).resolve()),
+                task_name=str(root_task.task_name),
+                task_args=tuple(str(arg).strip() for arg in (root_task.args or ())),
+                transition_name=transition_name,
+                timeout_seconds=float(self.OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS),
+            )
+            method_trace = tuple(
+                {
+                    "method_name": str((entry or {}).get("method_name") or "").strip(),
+                    "task_args": tuple(
+                        str(arg).strip()
+                        for arg in tuple((entry or {}).get("task_args") or ())
+                        if str(arg).strip()
+                    ),
+                }
+                for entry in planner.extract_method_trace(plan.actual_plan)
+                if str((entry or {}).get("method_name") or "").strip()
+            )
+            planner_steps = tuple(getattr(plan, "steps", ()) or ())
+            action_path = tuple(
+                str(step).strip()
+                for step in tuple(getattr(plan, "action_path", ()) or ())
+                if str(step).strip()
+            )
+            if not action_path and planner_steps:
+                action_path = tuple(
+                    (
+                        f"{step.action_name}({', '.join(step.args)})"
+                        if tuple(getattr(step, "args", ()) or ())
+                        else str(getattr(step, "action_name", "") or "").strip()
+                    )
+                    for step in planner_steps
+                    if str(getattr(step, "action_name", "") or "").strip()
+                )
+            if not action_path:
+                for candidate in tuple(getattr(plan, "solver_candidates", ()) or ()):
+                    if str((candidate or {}).get("status") or "").strip() != "success":
+                        continue
+                    candidate_action_path = tuple(
+                        str(step).strip()
+                        for step in tuple((candidate or {}).get("action_path") or ())
+                        if str(step).strip()
+                    )
+                    if candidate_action_path:
+                        action_path = candidate_action_path
+                        break
+            return {
+                "preferred_unordered_target_ids": self._match_planner_method_trace_to_subgoals(
+                    method_trace=method_trace,
+                    subgoals=dfa_result.subgoals,
+                    method_library=method_library,
+                ),
+                "preferred_method_trace": method_trace,
+                "preferred_action_path": action_path,
+                "preferred_hierarchical_plan_text": str(getattr(plan, "actual_plan", "") or "").strip(),
+            }
+        except Exception:
+            return empty_guidance
+
+    def _infer_unordered_subgoal_execution_order(
+        self,
+        *,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        online_domain: OnlineDomainContext,
+    ) -> Tuple[str, ...]:
+        guidance = self._infer_unordered_execution_guidance(
+            dfa_result=dfa_result,
+            method_library=method_library,
+            online_domain=online_domain,
+        )
+        return tuple(
+            str(target_id).strip()
+            for target_id in (guidance.get("preferred_unordered_target_ids") or ())
+            if str(target_id).strip()
+        )
+
+    def _match_planner_method_trace_to_subgoals(
+        self,
+        *,
+        method_trace: Sequence[Dict[str, Any]],
+        subgoals: Sequence[GroundedSubgoal],
+        method_library: HTNMethodLibrary,
+    ) -> Tuple[str, ...]:
+        matched_ids: List[str] = []
+        matched_set: Set[str] = set()
+        remaining_by_key: Dict[Tuple[str, Tuple[str, ...]], deque[str]] = defaultdict(deque)
+
+        for subgoal in subgoals:
+            source_task_name = self._source_task_name_for_task(
+                subgoal.task_name,
+                method_library,
+            )
+            method_prefix = f"m-{sanitize_identifier(source_task_name)}"
+            remaining_by_key[(method_prefix, tuple(subgoal.args))].append(subgoal.subgoal_id)
+
+        for entry in method_trace or ():
+            method_name = str((entry or {}).get("method_name") or "").strip()
+            task_args = tuple(
+                str(arg).strip()
+                for arg in ((entry or {}).get("task_args") or ())
+                if str(arg).strip()
+            )
+            if not method_name:
+                continue
+            for (method_prefix, expected_args), subgoal_ids in remaining_by_key.items():
+                if task_args != expected_args or not subgoal_ids:
+                    continue
+                if not method_name.startswith(method_prefix):
+                    continue
+                subgoal_id = subgoal_ids.popleft()
+                if subgoal_id in matched_set:
+                    continue
+                matched_set.add(subgoal_id)
+                matched_ids.append(subgoal_id)
+                break
+
+        for subgoal in subgoals:
+            if subgoal.subgoal_id not in matched_set:
+                matched_ids.append(subgoal.subgoal_id)
+        return tuple(matched_ids)
+
+    def _source_task_name_for_task(
+        self,
+        task_name: str,
+        method_library: HTNMethodLibrary,
+    ) -> str:
+        task = method_library.task_for_name(str(task_name).strip())
+        if task is None:
+            return str(task_name).strip()
+        return str(getattr(task, "source_name", None) or getattr(task, "name", "") or "").strip()
+
+    def _determine_verification_problem(
+        self,
+        *,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        online_domain: OnlineDomainContext,
+    ) -> Tuple[Optional[str], str]:
+        if self.problem is None or not self.problem_file:
+            return self.problem_file, "original_problem"
+        if self._query_matches_original_problem_root(
+            dfa_result=dfa_result,
+            method_library=method_library,
+        ):
+            return str(Path(self.problem_file).resolve()), "original_problem"
+        return (
+            str(
+                self._build_query_verification_problem(
+                    dfa_result,
+                    method_library,
+                    online_domain=online_domain,
+                ),
+            ),
+            "query_specific_problem",
+        )
+
+    def _query_matches_original_problem_root(
+        self,
+        *,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+    ) -> bool:
+        if self.problem is None:
+            return False
+        if tuple(self.problem.goal_facts or ()):
+            return False
+        root_tasks = tuple(self.problem.htn_tasks or ())
+        if len(root_tasks) != len(dfa_result.subgoals):
+            return False
+        if bool(self.problem.htn_ordered) != bool(dfa_result.ordered_subgoal_sequence):
+            return False
+        if not dfa_result.ordered_subgoal_sequence and tuple(self.problem.htn_ordering or ()):
+            return False
+        for root_task, subgoal in zip(root_tasks, dfa_result.subgoals):
+            if str(root_task.task_name).strip() != self._source_task_name_for_task(
+                subgoal.task_name,
+                method_library,
+            ):
+                return False
+            if tuple(str(arg).strip() for arg in (root_task.args or ())) != tuple(subgoal.args):
+                return False
+        return True
+
+    def _build_query_verification_problem(
+        self,
+        dfa_result: DFACompilationResult,
+        method_library: HTNMethodLibrary,
+        *,
+        online_domain: OnlineDomainContext,
+    ) -> Path:
+        if self.problem is None:
+            raise ValueError("Query-specific verification problem requires a loaded problem.")
+        problem_builder = PANDAProblemBuilder()
+        problem_objects = tuple(
+            str(object_name).strip()
+            for object_name in (self.problem.objects or ())
+            if str(object_name).strip()
+        )
+        typed_objects = self._typed_object_entries(
+            problem_objects,
+            {
+                str(name).strip(): str(type_name).strip()
+                for name, type_name in dict(getattr(self.problem, "object_types", {}) or {}).items()
+                if str(name).strip() and str(type_name).strip()
+            },
+        )
+        task_network = tuple(
+            (
+                self._source_task_name_for_task(subgoal.task_name, method_library),
+                tuple(subgoal.args),
+            )
+            for subgoal in dfa_result.subgoals
+        )
+        ordering_edges = (
+            tuple(
+                (f"t{index}", f"t{index + 1}")
+                for index in range(1, len(task_network))
+            )
+            if dfa_result.ordered_subgoal_sequence and len(task_network) > 1
+            else ()
+        )
+        initial_facts = tuple(
+            self._render_problem_fact(fact)
+            for fact in (self.problem.init_facts or ())
+        )
+        goal_facts: Tuple[str, ...] = ()
+        primary_task_name, primary_task_args = task_network[0]
+        problem_hddl = problem_builder.build_problem_hddl(
+            domain=online_domain.domain,
+            domain_name=online_domain.domain.name,
+            objects=problem_objects,
+            typed_objects=typed_objects,
+            task_name=primary_task_name,
+            task_args=primary_task_args,
+            task_network=task_network,
+            task_network_ordered=dfa_result.ordered_subgoal_sequence,
+            ordering_edges=ordering_edges,
+            initial_facts=initial_facts,
+            goal_facts=goal_facts,
+        )
+        problem_path = self.output_dir / "ipc_query_verification_problem.hddl"
+        problem_path.write_text(problem_hddl)
+        return problem_path
 
     def _official_problem_root_structure_analysis(self) -> ProblemStructure:
         if self.problem is None:
@@ -1331,7 +1900,11 @@ class DomainCompletePipeline:
         target_root.mkdir(parents=True, exist_ok=True)
         if not source_root.exists():
             return
-        for child in source_root.iterdir():
+        try:
+            source_children = list(source_root.iterdir())
+        except PermissionError:
+            return
+        for child in source_children:
             # Keep the backend_race subtree as the canonical location for bulky planner
             # intermediates. The root log directory only needs the selected plan-solve and
             # official-verification
@@ -1402,39 +1975,41 @@ class DomainCompletePipeline:
             processes[planning_task.task_id] = process
             pending_tasks.add(planning_task.task_id)
 
-        for planning_task in planning_tasks:
-            launch_task(planning_task)
+        try:
+            for planning_task in planning_tasks:
+                launch_task(planning_task)
 
-        deadline = race_start + planning_timeout_seconds + 5.0
-        while pending_tasks:
-            try:
-                wait_seconds = max(min(deadline - time.perf_counter(), 5.0), 0.1)
-                message = result_queue.get(timeout=wait_seconds)
-            except queue.Empty:
-                if time.perf_counter() >= deadline:
-                    break
-                if not any(process.is_alive() for process in processes.values()):
-                    break
-                continue
-
-            attempt = dict(message)
-            attempts.append(attempt)
-            task_id = str(attempt.get("task_id") or "")
-            pending_tasks.discard(task_id)
-            if bool(attempt.get("success")):
-                selected_attempt = dict(attempt)
-                break
-
-        if selected_attempt is not None:
-            for task_id, process in processes.items():
-                if task_id == selected_attempt.get("task_id"):
+            deadline = race_start + planning_timeout_seconds + 5.0
+            while pending_tasks:
+                try:
+                    wait_seconds = max(min(deadline - time.perf_counter(), 5.0), 0.1)
+                    message = result_queue.get(timeout=wait_seconds)
+                except queue.Empty:
+                    if time.perf_counter() >= deadline:
+                        break
+                    if not any(process.is_alive() for process in processes.values()):
+                        break
                     continue
-                self._terminate_official_backend_process(process)
-        for process in processes.values():
-            process.join(timeout=1.0)
-            if process.is_alive():
-                self._terminate_official_backend_process(process)
+
+                attempt = dict(message)
+                attempts.append(attempt)
+                task_id = str(attempt.get("task_id") or "")
+                pending_tasks.discard(task_id)
+                if bool(attempt.get("success")):
+                    selected_attempt = dict(attempt)
+                    break
+        finally:
+            if selected_attempt is not None:
+                for task_id, process in processes.items():
+                    if task_id == selected_attempt.get("task_id"):
+                        continue
+                    self._terminate_official_backend_process(process)
+            for process in processes.values():
                 process.join(timeout=1.0)
+                if process.is_alive():
+                    self._terminate_official_backend_process(process)
+                    process.join(timeout=1.0)
+            self._close_backend_race_queue(result_queue)
 
         if selected_attempt is None:
             selected_attempt = self._select_official_problem_root_backend_attempt(attempts)
@@ -1446,6 +2021,15 @@ class DomainCompletePipeline:
             "representation_build_seconds": representation_build_seconds,
             "race_wallclock_seconds": time.perf_counter() - race_start,
         }
+
+    @staticmethod
+    def _close_backend_race_queue(result_queue: Any) -> None:
+        close_fn = getattr(result_queue, "close", None)
+        if callable(close_fn):
+            close_fn()
+        join_thread_fn = getattr(result_queue, "join_thread", None)
+        if callable(join_thread_fn):
+            join_thread_fn()
 
     @staticmethod
     def _terminate_official_backend_process(process: multiprocessing.Process) -> None:
@@ -1632,115 +2216,23 @@ class DomainCompletePipeline:
             "plan_verification": plan_verification_data,
         }
 
-    def _should_sequence_goal_request(
-        self,
-        planning_request: PlanningRequest,
-    ) -> bool:
-        nodes = tuple(planning_request.goal_request.nodes or ())
-        if len(nodes) <= 1 or len(planning_request.task_network) <= 1:
-            return False
-        if len(nodes) != len(planning_request.task_network):
-            return False
-        node_ids = tuple(str(node.node_id or "").strip() for node in nodes)
-        if any(not node_id for node_id in node_ids):
-            return False
-        expected_edges = tuple(
-            (node_ids[index], node_ids[index + 1])
-            for index in range(len(node_ids) - 1)
-        )
-        return tuple(planning_request.ordering_edges or ()) == expected_edges
-
-    def _solve_ordered_goal_sequence(
-        self,
-        *,
-        planner: PANDAPlanner,
-        method_library: HTNMethodLibrary,
-        planning_request: PlanningRequest,
-        problem_objects: Sequence[str],
-        typed_objects: Sequence[Tuple[str, str]],
-        initial_facts: Sequence[str],
-    ) -> Dict[str, Any]:
-        action_schemas = self._planner_action_schemas()
-        current_facts = tuple(str(fact).strip() for fact in (initial_facts or ()) if str(fact).strip())
-        aggregated_action_path: List[str] = []
-        aggregated_method_trace: List[Dict[str, Any]] = []
-        timing_profile: Dict[str, float] = {}
-
-        for index, (task_name, task_args) in enumerate(planning_request.task_network, start=1):
-            transition_name = (
-                f"teg_request_step_{index:03d}_{sanitize_identifier(str(task_name))}"
-            )
-            plan = planner.plan(
-                domain=self.domain,
-                method_library=method_library,
-                objects=problem_objects,
-                target_literal=None,
-                task_name=str(task_name),
-                transition_name=transition_name,
-                typed_objects=typed_objects,
-                task_args=tuple(task_args),
-                task_network=((str(task_name), tuple(task_args)),),
-                task_network_ordered=True,
-                ordering_edges=(),
-                allow_empty_plan=False,
-                initial_facts=current_facts,
-                timeout_seconds=float(self.config.planning_timeout),
-            )
-            step_action_path = [
-                (
-                    f"{step.action_name}({', '.join(step.args)})"
-                    if step.args
-                    else str(step.action_name)
-                )
-                for step in plan.steps
-            ]
-            replay = self._planner_replay_action_path(
-                action_path=step_action_path,
-                action_schemas=action_schemas,
-                seed_facts=current_facts,
-            )
-            if replay.get("passed") is not True:
-                raise ValueError(
-                    "Sequential plan replay failed after "
-                    f"{task_name}{tuple(task_args)}: {replay.get('message')}",
-                )
-            current_facts = tuple(replay.get("world_facts_hddl") or ())
-            aggregated_action_path.extend(step_action_path)
-            aggregated_method_trace.extend(planner.extract_method_trace(plan.actual_plan))
-            for key, value in dict(plan.timing_profile or {}).items():
-                try:
-                    numeric_value = float(value)
-                except (TypeError, ValueError):
-                    continue
-                timing_profile[key] = timing_profile.get(key, 0.0) + numeric_value
-
-        hierarchical_plan_text = self._render_supported_hierarchical_plan(
-            action_path=aggregated_action_path,
-            method_library=method_library,
-            method_trace=aggregated_method_trace,
-        )
-        return {
-            "planning_mode": "ordered_sequential_node_planning",
-            "action_path": aggregated_action_path,
-            "method_trace": aggregated_method_trace,
-            "hierarchical_plan_text": hierarchical_plan_text,
-            "timing_profile": timing_profile,
-        }
-
     def _render_supported_hierarchical_plan(
         self,
         *,
         action_path: Sequence[str],
         method_library: HTNMethodLibrary,
         method_trace: Sequence[Dict[str, Any]],
+        problem_file: Optional[str | Path] = None,
+        domain_file: Optional[str | Path] = None,
     ) -> Optional[str]:
-        if self.problem_file is None:
+        effective_problem_file = str(Path(problem_file or self.problem_file).resolve()) if (problem_file or self.problem_file) else None
+        if effective_problem_file is None:
             return None
         verifier = IPCPlanVerifier()
         try:
             return verifier._render_supported_hierarchical_plan(
-                domain_file=self.domain_file,
-                problem_file=self.problem_file,
+                domain_file=str(Path(domain_file or self.domain_file).resolve()),
+                problem_file=effective_problem_file,
                 action_path=action_path,
                 method_library=method_library,
                 method_trace=method_trace,
@@ -1749,9 +2241,15 @@ class DomainCompletePipeline:
             return None
 
     def _planner_action_schemas(self) -> Sequence[Dict[str, Any]]:
+        return self._planner_action_schemas_for_domain(self.domain)
+
+    def _planner_action_schemas_for_domain(
+        self,
+        domain: Any,
+    ) -> Sequence[Dict[str, Any]]:
         parser = HDDLConditionParser()
         schemas = []
-        for action in self.domain.actions:
+        for action in getattr(domain, "actions", []):
             parsed = parser.parse_action(action)
             schemas.append(
                 {
@@ -2442,158 +2940,6 @@ class DomainCompletePipeline:
             return -1000
         return score
 
-    def _canonical_task_grounded_formulas(
-        self,
-        query_task_anchors: Sequence[Dict[str, Any]],
-        *,
-        query_object_inventory: Sequence[Dict[str, Any]],
-        ordered_sequence: bool = False,
-    ) -> Tuple[Tuple[str, ...], List[LTLFormula]]:
-        canonical_signatures: List[str] = []
-        query_step_formulas: List[LTLFormula] = []
-        variable_assignments: Dict[str, str] = {}
-        for index, anchor in enumerate(query_task_anchors, start=1):
-            task_name = str(anchor.get("task_name", "")).strip()
-            raw_task_args = tuple(str(arg).strip() for arg in (anchor.get("args") or ()))
-            if not task_name:
-                return (), []
-            task_args = self._ground_query_task_arguments(
-                task_name=task_name,
-                task_args=raw_task_args,
-                query_object_inventory=query_object_inventory,
-                variable_assignments=variable_assignments,
-            )
-            if any(self._is_query_variable_symbol(arg) for arg in task_args):
-                return (), []
-            predicate_name = self._preferred_query_task_headline_predicate(
-                task_name=task_name,
-                task_args=task_args,
-            )
-            if not predicate_name:
-                return (), []
-            signature = self._literal_signature(predicate_name, task_args, True)
-            canonical_signatures.append(signature)
-            query_step_formulas.append(
-                self._query_step_formula(index),
-            )
-        if not query_step_formulas:
-            return tuple(canonical_signatures), []
-        if ordered_sequence:
-            return (
-                tuple(canonical_signatures),
-                self._ordered_query_step_formulas(query_step_formulas),
-            )
-        return (
-            tuple(canonical_signatures),
-            [
-                LTLFormula(
-                    operator=TemporalOperator.FINALLY,
-                    predicate=None,
-                    sub_formulas=[formula],
-                    logical_op=None,
-                )
-                for formula in query_step_formulas
-            ],
-        )
-
-    @staticmethod
-    def _query_requests_ordered_task_sequence(query_text: str) -> bool:
-        lowered = str(query_text or "").lower()
-        return " then " in lowered or ", then " in lowered
-
-    def _ordered_eventual_formula(
-        self,
-        atomic_formulas: Sequence[LTLFormula],
-    ) -> LTLFormula:
-        current = LTLFormula(
-            operator=TemporalOperator.FINALLY,
-            predicate=None,
-            sub_formulas=[atomic_formulas[-1]],
-            logical_op=None,
-        )
-        for atomic_formula in reversed(tuple(atomic_formulas[:-1])):
-            current = LTLFormula(
-                operator=TemporalOperator.FINALLY,
-                predicate=None,
-                sub_formulas=[
-                    LTLFormula(
-                        operator=None,
-                        predicate=None,
-                        sub_formulas=[atomic_formula, current],
-                        logical_op=LogicalOperator.AND,
-                    ),
-                ],
-                logical_op=None,
-            )
-        return current
-
-    @staticmethod
-    def _query_step_formula(index: int) -> LTLFormula:
-        return LTLFormula(
-            operator=None,
-            predicate={f"query_step_{index}": []},
-            sub_formulas=[],
-            logical_op=None,
-        )
-
-    def _ordered_query_step_formulas(
-        self,
-        query_step_formulas: Sequence[LTLFormula],
-    ) -> List[LTLFormula]:
-        if not query_step_formulas:
-            return []
-        if len(query_step_formulas) == 1:
-            return [
-                LTLFormula(
-                    operator=TemporalOperator.FINALLY,
-                    predicate=None,
-                    sub_formulas=[query_step_formulas[0]],
-                    logical_op=None,
-                ),
-            ]
-
-        formulas: List[LTLFormula] = []
-        for current_step, next_step in zip(
-            query_step_formulas,
-            query_step_formulas[1:],
-        ):
-            formulas.append(
-                LTLFormula(
-                    operator=TemporalOperator.UNTIL,
-                    predicate=None,
-                    sub_formulas=[
-                        LTLFormula(
-                            operator=None,
-                            predicate=None,
-                            sub_formulas=[copy.deepcopy(next_step)],
-                            logical_op=LogicalOperator.NOT,
-                        ),
-                        copy.deepcopy(current_step),
-                    ],
-                    logical_op=None,
-                ),
-            )
-        formulas.append(
-            LTLFormula(
-                operator=TemporalOperator.FINALLY,
-                predicate=None,
-                sub_formulas=[copy.deepcopy(query_step_formulas[-1])],
-                logical_op=None,
-            ),
-        )
-        return formulas
-
-    @staticmethod
-    def _conjoin_formulas(formulas: Sequence[LTLFormula]) -> LTLFormula:
-        if len(formulas) == 1:
-            return formulas[0]
-        return LTLFormula(
-            operator=None,
-            predicate=None,
-            sub_formulas=list(formulas),
-            logical_op=LogicalOperator.AND,
-        )
-
     @staticmethod
     def _is_query_variable_symbol(symbol: str) -> bool:
         return str(symbol or "").strip().startswith("?")
@@ -2766,11 +3112,21 @@ class DomainCompletePipeline:
             )
         return tuple(inventory)
 
-    def _synthesise_domain_methods(self):
+    def _synthesise_domain_methods(
+        self,
+        *,
+        synthesis_domain: Optional[Any] = None,
+        source_domain_kind: str = "official",
+        masked_domain_file: Optional[str] = None,
+        original_method_count: Optional[int] = None,
+    ):
         """Synthesise one domain-complete HTN method library."""
         print("\n[METHOD SYNTHESIS]")
         print("-"*80)
         stage_start = time.perf_counter()
+        domain_for_synthesis = synthesis_domain or self.domain
+        method_library = None
+        synthesis_meta: Dict[str, Any] = {}
 
         try:
             synthesizer = HTNMethodSynthesizer(
@@ -2782,7 +3138,7 @@ class DomainCompletePipeline:
             )
             synthesis_start = time.perf_counter()
             method_library, synthesis_meta = synthesizer.synthesize_domain_complete(
-                domain=self.domain,
+                domain=domain_for_synthesis,
             )
             synthesis_seconds = time.perf_counter() - synthesis_start
             validation_start = time.perf_counter()
@@ -2792,6 +3148,12 @@ class DomainCompletePipeline:
                 "used_llm": synthesis_meta["used_llm"],
                 "llm_attempted": synthesis_meta["llm_prompt"] is not None,
                 "llm_finish_reason": synthesis_meta.get("llm_finish_reason"),
+                "llm_request_id": synthesis_meta.get("llm_request_id"),
+                "llm_response_mode": synthesis_meta.get("llm_response_mode"),
+                "llm_first_chunk_seconds": synthesis_meta.get("llm_first_chunk_seconds"),
+                "llm_complete_json_seconds": synthesis_meta.get("llm_complete_json_seconds"),
+                "llm_reasoning_preview": synthesis_meta.get("llm_reasoning_preview"),
+                "llm_reasoning_characters": synthesis_meta.get("llm_reasoning_characters"),
                 "llm_attempts": synthesis_meta.get("llm_attempts"),
                 "llm_response_time_seconds": synthesis_meta.get("llm_response_time_seconds"),
                 "llm_attempt_durations_seconds": synthesis_meta.get(
@@ -2800,11 +3162,24 @@ class DomainCompletePipeline:
                 "domain_task_contracts": synthesis_meta.get("domain_task_contracts", []),
                 "action_analysis": synthesis_meta.get("action_analysis", {}),
                 "derived_analysis": synthesis_meta.get("derived_analysis", {}),
+                "prompt_strategy": synthesis_meta.get("prompt_strategy"),
+                "prompt_declared_task_count": synthesis_meta.get("prompt_declared_task_count"),
+                "prompt_domain_task_contract_count": synthesis_meta.get(
+                    "prompt_domain_task_contract_count",
+                ),
+                "prompt_reusable_dynamic_resource_count": synthesis_meta.get(
+                    "prompt_reusable_dynamic_resource_count",
+                ),
+                "llm_request_count": synthesis_meta.get("llm_request_count"),
                 "failure_class": synthesis_meta.get("failure_class"),
                 "declared_compound_tasks": synthesis_meta.get("declared_compound_tasks", []),
                 "compound_tasks": synthesis_meta["compound_tasks"],
                 "primitive_tasks": synthesis_meta["primitive_tasks"],
                 "methods": synthesis_meta["methods"],
+                "source_domain_kind": source_domain_kind,
+                "masked_domain_file": masked_domain_file,
+                "original_method_count": original_method_count,
+                "synthesis_domain_name": getattr(domain_for_synthesis, "name", self.domain.name),
             }
             self._latest_transition_prompt_analysis = {}
             self._record_step_timing(
@@ -2819,6 +3194,7 @@ class DomainCompletePipeline:
                     "used_llm": synthesis_meta.get("used_llm"),
                     "llm_attempted": synthesis_meta.get("llm_prompt") is not None,
                     "domain_complete": True,
+                    "source_domain_kind": source_domain_kind,
                 },
             )
             self.logger.log_method_synthesis(
@@ -2843,14 +3219,15 @@ class DomainCompletePipeline:
             self._latest_transition_specs = ()
             self._latest_transition_prompt_analysis = {}
             self._record_step_timing("method_synthesis", stage_start)
+            error_metadata = dict(getattr(e, "metadata", None) or synthesis_meta or {})
             self.logger.log_method_synthesis(
-                None,
+                method_library.to_dict() if method_library is not None else None,
                 "Failed",
                 error=str(e),
-                model=getattr(e, "model", None),
-                llm_prompt=getattr(e, "llm_prompt", None),
-                llm_response=getattr(e, "llm_response", None),
-                metadata=getattr(e, "metadata", None),
+                model=getattr(e, "model", None) or error_metadata.get("model"),
+                llm_prompt=getattr(e, "llm_prompt", None) or error_metadata.get("llm_prompt"),
+                llm_response=getattr(e, "llm_response", None) or error_metadata.get("llm_response"),
+                metadata=error_metadata or None,
             )
             print(f"✗ Method synthesis failed: {e}")
             import traceback
@@ -2875,7 +3252,21 @@ class DomainCompletePipeline:
                 for task in getattr(method_library, "compound_tasks", ())
                 if str(getattr(task, "name", "")).strip()
             }
-            missing_tasks = sorted(declared_compound_names - library_compound_names)
+            library_task_name_aliases = self._method_library_source_task_name_map(method_library)
+            normalized_library_names = {
+                *library_compound_names,
+                *library_task_name_aliases.keys(),
+                *library_task_name_aliases.values(),
+                *(self._sanitize_name(name) for name in library_compound_names),
+                *(self._sanitize_name(name) for name in library_task_name_aliases.keys()),
+                *(self._sanitize_name(name) for name in library_task_name_aliases.values()),
+            }
+            missing_tasks = sorted(
+                task_name
+                for task_name in declared_compound_names
+                if task_name not in normalized_library_names
+                and self._sanitize_name(task_name) not in normalized_library_names
+            )
             if missing_tasks:
                 raise ValueError(
                     "Domain gate missing declared compound tasks: "
@@ -2894,7 +3285,8 @@ class DomainCompletePipeline:
             undefined_child_names = sorted(
                 child_name
                 for child_name in referenced_child_names
-                if child_name not in library_compound_names
+                if child_name not in normalized_library_names
+                and self._sanitize_name(child_name) not in normalized_library_names
             )
             if undefined_child_names:
                 raise ValueError(
@@ -3518,9 +3910,15 @@ class DomainCompletePipeline:
         return tuple((obj, object_types[obj]) for obj in object_pool)
 
     def _build_type_parent_map(self) -> Dict[str, Optional[str]]:
+        return self._build_type_parent_map_for_domain(self.domain)
+
+    def _build_type_parent_map_for_domain(
+        self,
+        domain: Any,
+    ) -> Dict[str, Optional[str]]:
         tokens = [
             token.strip()
-            for token in (getattr(self.domain, "types", []) or [])
+            for token in (getattr(domain, "types", []) or [])
             if token and token.strip()
         ]
         if not tokens:
@@ -3597,33 +3995,54 @@ class DomainCompletePipeline:
         type_name = parameter.split("-", 1)[1].strip()
         return type_name or "object"
 
-    def _require_known_type(self, type_name: str, source: str) -> str:
-        if type_name in self.domain_type_names:
+    @staticmethod
+    def _require_known_type(
+        type_name: str,
+        source: str,
+        domain_type_names: Set[str],
+    ) -> str:
+        if type_name in domain_type_names:
             return type_name
         raise TypeResolutionError(
             f"{source} references unknown type '{type_name}'. "
-            f"Known types: {sorted(self.domain_type_names)}",
+            f"Known types: {sorted(domain_type_names)}",
         )
 
     def _predicate_type_map(self) -> Dict[str, Tuple[str, ...]]:
+        return self._predicate_type_map_for_domain(self.domain, self.domain_type_names)
+
+    def _predicate_type_map_for_domain(
+        self,
+        domain: Any,
+        domain_type_names: Set[str],
+    ) -> Dict[str, Tuple[str, ...]]:
         mapping: Dict[str, Tuple[str, ...]] = {}
-        for predicate in getattr(self.domain, "predicates", []):
+        for predicate in getattr(domain, "predicates", []):
             mapping[predicate.name] = tuple(
                 self._require_known_type(
                     self._parameter_type(parameter),
                     f"Predicate '{predicate.name}'",
+                    domain_type_names,
                 )
                 for parameter in predicate.parameters
             )
         return mapping
 
     def _action_type_map(self) -> Dict[str, Tuple[str, ...]]:
+        return self._action_type_map_for_domain(self.domain, self.domain_type_names)
+
+    def _action_type_map_for_domain(
+        self,
+        domain: Any,
+        domain_type_names: Set[str],
+    ) -> Dict[str, Tuple[str, ...]]:
         mapping: Dict[str, Tuple[str, ...]] = {}
-        for action in getattr(self.domain, "actions", []):
+        for action in getattr(domain, "actions", []):
             type_signature = tuple(
                 self._require_known_type(
                     self._parameter_type(parameter),
                     f"Action '{action.name}'",
+                    domain_type_names,
                 )
                 for parameter in action.parameters
             )
@@ -3632,15 +4051,25 @@ class DomainCompletePipeline:
         return mapping
 
     def _task_type_map(self) -> Dict[str, Tuple[str, ...]]:
+        return self._task_type_map_for_domain(self.domain, self.domain_type_names)
+
+    def _task_type_map_for_domain(
+        self,
+        domain: Any,
+        domain_type_names: Set[str],
+    ) -> Dict[str, Tuple[str, ...]]:
         mapping: Dict[str, Tuple[str, ...]] = {}
-        for task in getattr(self.domain, "tasks", []):
-            mapping[task.name] = tuple(
+        for task in getattr(domain, "tasks", []):
+            type_signature = tuple(
                 self._require_known_type(
                     self._parameter_type(parameter),
                     f"Task '{task.name}'",
+                    domain_type_names,
                 )
                 for parameter in task.parameters
             )
+            mapping[task.name] = type_signature
+            mapping[self._sanitize_name(task.name)] = type_signature
         return mapping
 
     def _validate_problem_domain_compatibility(self) -> None:
@@ -4891,7 +5320,14 @@ class DomainCompletePipeline:
 
 
 
-    def _verify_plan_officially(self, ltl_spec, method_library, plan_solve_data):
+    def _verify_plan_officially(
+        self,
+        ltl_spec,
+        method_library,
+        plan_solve_data,
+        *,
+        online_domain: OnlineDomainContext,
+    ):
         """Verify the generated hierarchical plan with the official IPC verifier."""
         print("\n[OFFICIAL VERIFICATION]")
         print("-"*80)
@@ -4948,11 +5384,29 @@ class DomainCompletePipeline:
                 stage_start=stage_start,
             )
 
-        if planning_mode != "official_problem_root":
-            domain_build_start = time.perf_counter()
-            verification_domain_file = self._build_verification_domain(method_library)
-            domain_build_seconds = time.perf_counter() - domain_build_start
+        verification_problem_file = str(
+            plan_solve_artifacts.get("verification_problem_file")
+            or Path(self.problem_file).resolve()
+        )
+        verification_mode = str(
+            plan_solve_artifacts.get("verification_mode") or "original_problem"
+        )
         guided_plan_text = plan_solve_artifacts.get("guided_hierarchical_plan_text")
+        domain_build_seconds = 0.0
+        if planning_mode != "official_problem_root":
+            if (
+                guided_plan_text
+                and verification_mode == "original_problem"
+                and online_domain.source == ONLINE_DOMAIN_SOURCE_BENCHMARK
+            ):
+                verification_domain_file = Path(online_domain.domain_file).resolve()
+            else:
+                domain_build_start = time.perf_counter()
+                verification_domain_file = self._build_verification_domain(
+                    method_library,
+                    online_domain=online_domain,
+                )
+                domain_build_seconds = time.perf_counter() - domain_build_start
         verifier_start = time.perf_counter()
         if guided_plan_text:
             guided_plan_text = self._rewrite_guided_plan_source_names(
@@ -4961,7 +5415,7 @@ class DomainCompletePipeline:
             )
             verifier_result = verifier.verify_plan_text(
                 domain_file=verification_domain_file,
-                problem_file=self.problem_file,
+                problem_file=verification_problem_file,
                 plan_text=guided_plan_text,
                 output_dir=self.output_dir,
                 plan_kind="hierarchical",
@@ -4970,7 +5424,7 @@ class DomainCompletePipeline:
         else:
             verifier_result = verifier.verify_plan(
                 domain_file=verification_domain_file,
-                problem_file=self.problem_file,
+                problem_file=verification_problem_file,
                 action_path=plan_solve_artifacts.get("action_path") or [],
                 method_library=method_library,
                 method_trace=plan_solve_artifacts.get("method_trace") or [],
@@ -4987,8 +5441,11 @@ class DomainCompletePipeline:
             "primitive_plan_executable": verifier_result.primitive_plan_executable,
             "reached_goal_state": verifier_result.reached_goal_state,
             "build_warning": verifier_result.build_warning,
+            "verification_mode": verification_mode,
+            "online_domain_source": online_domain.source,
+            "online_domain_file": online_domain.domain_file,
             "verification_domain_file": str(verification_domain_file),
-            "verification_problem_file": str(Path(self.problem_file).resolve()),
+            "verification_problem_file": verification_problem_file,
         }
 
         if (
@@ -5354,12 +5811,17 @@ class DomainCompletePipeline:
             rewritten += "\n"
         return rewritten
 
-    def _build_verification_domain(self, method_library):
+    def _build_verification_domain(
+        self,
+        method_library,
+        *,
+        online_domain: OnlineDomainContext,
+    ):
         planner = PANDAPlanner()
         verification_domain_hddl = planner._build_domain_hddl(
-            self.domain,
+            online_domain.domain,
             method_library,
-            self.domain.name,
+            online_domain.domain.name,
             export_source_names=True,
         )
         verification_domain_path = self.output_dir / "ipc_verification_domain.hddl"

@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from domain_build.method_synthesis.schema import HTNLiteral
+from offline_method_generation.method_synthesis.schema import HTNLiteral
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,12 @@ class PANDAPlanResult:
 	grounder_stderr: str = ""
 	engine_stdout: str = ""
 	engine_stderr: str = ""
+	parser_stdout_path: Optional[str] = None
+	parser_stderr_path: Optional[str] = None
+	grounder_stdout_path: Optional[str] = None
+	grounder_stderr_path: Optional[str] = None
+	engine_stdout_path: Optional[str] = None
+	engine_stderr_path: Optional[str] = None
 	raw_plan: str = ""
 	actual_plan: str = ""
 	work_dir: Optional[str] = None
@@ -68,6 +74,12 @@ class PANDAPlanResult:
 			"grounder_stderr": self.grounder_stderr,
 			"engine_stdout": self.engine_stdout,
 			"engine_stderr": self.engine_stderr,
+			"parser_stdout_path": self.parser_stdout_path,
+			"parser_stderr_path": self.parser_stderr_path,
+			"grounder_stdout_path": self.grounder_stdout_path,
+			"grounder_stderr_path": self.grounder_stderr_path,
+			"engine_stdout_path": self.engine_stdout_path,
+			"engine_stderr_path": self.engine_stderr_path,
 			"raw_plan": self.raw_plan,
 			"actual_plan": self.actual_plan,
 			"work_dir": self.work_dir,

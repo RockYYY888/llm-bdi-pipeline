@@ -24,19 +24,21 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     monkeypatch.setenv("PLANNING_TIMEOUT", "900")
     monkeypatch.setenv("GOAL_GROUNDING_MAX_TOKENS", "2048")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("ONLINE_DOMAIN_SOURCE", "generated")
 
     config = Config()
 
     assert config.openai_api_key == "sk-shared"
     assert config.openai_model == "deepseek-chat"
     assert config.goal_grounding_model == "deepseek/deepseek-chat-v3-0324"
-    assert config.method_synthesis_model == "minimax/minimax-m2"
+    assert config.method_synthesis_model == "minimax/minimax-m2.7"
     assert config.openai_timeout == 120
     assert config.method_synthesis_timeout == 240
     assert config.method_synthesis_max_tokens == 4096
     assert config.planning_timeout == 900
     assert config.goal_grounding_max_tokens == 2048
     assert config.openai_base_url == "https://api.deepseek.com"
+    assert config.online_domain_source == "generated"
 
 
 def test_method_synthesis_max_tokens_defaults_to_one_shot_library_budget(monkeypatch):
@@ -83,7 +85,7 @@ def test_method_synthesis_model_defaults_to_pinned_minimax_chat(monkeypatch):
 
     config = Config()
 
-    assert config.method_synthesis_model == "minimax/minimax-m2"
+    assert config.method_synthesis_model == "minimax/minimax-m2.7"
 
 
 def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
@@ -103,4 +105,26 @@ def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
 
     assert config.openai_model == "shell-model"
     assert config.goal_grounding_model == "shell-goal-grounding-model"
-    assert config.method_synthesis_model == "shell-method-synthesis-model"
+    assert config.method_synthesis_model == "minimax/minimax-m2.7"
+
+
+def test_method_synthesis_model_is_pinned_even_when_dotenv_sets_legacy_m2(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+
+    config = Config()
+    config._merge_env_lines(
+        [
+            "METHOD_SYNTHESIS_MODEL=minimax/minimax-m2",
+        ]
+    )
+
+    assert config.method_synthesis_model == "minimax/minimax-m2.7"
+
+
+def test_online_domain_source_defaults_to_benchmark(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("ONLINE_DOMAIN_SOURCE", raising=False)
+
+    config = Config()
+
+    assert config.online_domain_source == "benchmark"

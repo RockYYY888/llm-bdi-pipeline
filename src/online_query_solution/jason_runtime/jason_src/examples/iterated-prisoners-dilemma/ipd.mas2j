@@ -1,0 +1,6 @@
+/* Jason Project */
+
+MAS ipd {
+
+    agents: arbitrer; playerTFT #3; playerAllD #3; playerAllC #3;
+}
