@@ -36,6 +36,11 @@ class MethodSynthesisLibraryPostprocessMixin:
 	) -> HTNMethodLibrary:
 		_ = prompt_analysis
 		action_schemas = self._action_schema_map(domain)
+		domain_predicate_names = {
+			str(getattr(predicate, "name", "") or "").strip()
+			for predicate in getattr(domain, "predicates", [])
+			if str(getattr(predicate, "name", "") or "").strip()
+		}
 		raw_task_to_alias, alias_to_raw_task = self._declared_task_alias_maps(domain)
 		domain_task_defaults = {
 			self._sanitize_name(str(getattr(task, "name", "")).strip()): tuple(
@@ -191,6 +196,10 @@ class MethodSynthesisLibraryPostprocessMixin:
 					),
 				)
 			)
+			methods[-1] = self._normalise_method_negation_literals(
+				methods[-1],
+				domain_predicate_names=domain_predicate_names,
+			)
 		methods = self._deduplicate_method_identifiers(methods)
 		return HTNMethodLibrary(
 			compound_tasks=compound_tasks,
@@ -199,6 +208,88 @@ class MethodSynthesisLibraryPostprocessMixin:
 			target_literals=[],
 			target_task_bindings=[],
 		)
+
+	def _normalise_method_negation_literals(
+		self,
+		method: HTNMethod,
+		*,
+		domain_predicate_names: set[str],
+	) -> HTNMethod:
+		return HTNMethod(
+			method_name=method.method_name,
+			task_name=method.task_name,
+			parameters=method.parameters,
+			task_args=method.task_args,
+			context=tuple(
+				self._normalise_literal_negation_form(
+					literal,
+					domain_predicate_names=domain_predicate_names,
+				)
+				for literal in method.context
+			),
+			subtasks=tuple(
+				HTNMethodStep(
+					step_id=step.step_id,
+					task_name=step.task_name,
+					args=step.args,
+					kind=step.kind,
+					action_name=step.action_name,
+					literal=(
+						self._normalise_literal_negation_form(
+							step.literal,
+							domain_predicate_names=domain_predicate_names,
+						)
+						if step.literal is not None
+						else None
+					),
+					preconditions=tuple(
+						self._normalise_literal_negation_form(
+							literal,
+							domain_predicate_names=domain_predicate_names,
+						)
+						for literal in step.preconditions
+					),
+					effects=tuple(
+						self._normalise_literal_negation_form(
+							literal,
+							domain_predicate_names=domain_predicate_names,
+						)
+						for literal in step.effects
+					),
+				)
+				for step in method.subtasks
+			),
+			ordering=method.ordering,
+			origin=method.origin,
+			source_method_name=method.source_method_name,
+		)
+
+	@staticmethod
+	def _normalise_literal_negation_form(
+		literal: HTNLiteral,
+		*,
+		domain_predicate_names: set[str],
+	) -> HTNLiteral:
+		predicate_text = str(getattr(literal, "predicate", "") or "").strip()
+		if not predicate_text or not literal.is_positive:
+			return literal
+		lowered_predicate = predicate_text.lower()
+		if not lowered_predicate.startswith("not"):
+			return literal
+		for candidate in sorted(domain_predicate_names, key=len, reverse=True):
+			candidate_text = str(candidate or "").strip()
+			if not candidate_text:
+				continue
+			lowered_candidate = candidate_text.lower()
+			if lowered_predicate == f"not{lowered_candidate}":
+				return HTNLiteral(
+					predicate=candidate_text,
+					args=literal.args,
+					is_positive=False,
+					source_symbol=literal.source_symbol,
+					negation_mode=literal.negation_mode,
+				)
+		return literal
 
 	def _coerce_step_kind(
 		self,

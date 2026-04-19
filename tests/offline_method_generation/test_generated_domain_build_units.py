@@ -13,7 +13,8 @@ if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
 from offline_method_generation.method_synthesis.domain_materialization import write_masked_domain_file
-from offline_method_generation.method_synthesis.errors import LLMStreamingResponseError
+from offline_method_generation.method_synthesis.errors import HTNSynthesisError, LLMStreamingResponseError
+from offline_method_generation.domain_gate.validator import OfflineDomainGateValidator
 from offline_method_generation.method_synthesis.minimal_validation import validate_domain_complete_coverage
 from offline_method_generation.method_synthesis.prompts import (
 	build_domain_htn_system_prompt,
@@ -23,10 +24,14 @@ from offline_method_generation.method_synthesis.prompts import (
 from offline_method_generation.method_synthesis.domain_prompts import _render_method_blueprint_blocks
 from offline_method_generation.method_synthesis.schema import HTNLiteral, HTNMethodLibrary, HTNMethodStep
 from offline_method_generation.method_synthesis.synthesizer import HTNMethodSynthesizer
+from offline_method_generation.pipeline import OfflineMethodGenerationPipeline
 from offline_method_generation.artifacts import DomainLibraryArtifact, load_domain_library_artifact, persist_domain_library_artifact
 from pipeline.domain_complete_pipeline import DomainCompletePipeline
 from pipeline.execution_logger import ExecutionLogger
-from tests.support.ground_truth_baseline_support import DOMAIN_FILES, build_method_library_from_domain_file
+from tests.support.offline_generation_support import (
+	DOMAIN_FILES,
+	build_method_library_from_domain_file,
+)
 from utils.hddl_parser import HDDLParser
 
 
@@ -315,27 +320,36 @@ def test_method_synthesis_transport_omits_minimax_completion_ceiling() -> None:
 	synthesizer = HTNMethodSynthesizer(model="minimax/minimax-m2.7")
 
 	assert synthesizer._apply_method_synthesis_provider_token_ceiling(48000) is None
-	assert synthesizer._method_synthesis_attempt_max_tokens(None, attempt_index=1) is None
-	assert synthesizer._method_synthesis_attempt_max_tokens(None, attempt_index=2) is None
-	assert synthesizer._method_synthesis_attempt_max_tokens(None, attempt_index=3) is None
 
 
-def test_method_synthesis_request_profiles_reduce_reasoning_budget_across_attempts() -> None:
-	synthesizer = HTNMethodSynthesizer(model="minimax/minimax-m2.7")
+def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
+	synthesizer = HTNMethodSynthesizer(
+		model="minimax/minimax-m2.7",
+		base_url="https://openrouter.ai/api/v1",
+	)
+	prompt = {
+		"system": "abcd",
+		"user": "efgh",
+	}
 
-	attempt_1 = synthesizer._method_synthesis_request_profile(attempt_index=1)
-	attempt_2 = synthesizer._method_synthesis_request_profile(attempt_index=2)
-	attempt_3 = synthesizer._method_synthesis_request_profile(attempt_index=3)
+	profile = synthesizer._method_synthesis_request_profile(prompt=prompt)
+	expected_prompt_tokens = synthesizer._estimate_method_synthesis_prompt_token_budget(prompt)
 
-	assert attempt_1["name"] == "minimax_stream_reasoning1"
-	assert attempt_1["reasoning_max_tokens"] == 1
-	assert attempt_1["first_chunk_timeout_seconds"] == 180.0
-	assert attempt_2["name"] == "minimax_stream_no_reasoning"
-	assert attempt_2["reasoning_max_tokens"] == 0
-	assert attempt_2["first_chunk_timeout_seconds"] == 180.0
-	assert attempt_3["name"] == "minimax_stream_no_reasoning_relaxed"
-	assert attempt_3["reasoning_max_tokens"] == 0
-	assert attempt_3["first_chunk_timeout_seconds"] == 240.0
+	assert profile["name"] == "minimax_stream_single_pass"
+	assert profile["context_window_tokens"] == 196608
+	assert profile["prompt_token_estimate"] == expected_prompt_tokens
+	assert profile["answer_token_reserve"] == 5805
+	assert profile["context_margin_tokens"] == 19661
+	assert profile["reasoning_headroom_tokens"] == (
+		196608 - 19661 - 5805 - 2048 - expected_prompt_tokens
+	)
+	assert profile["reasoning_headroom_ratio"] == 0.70
+	assert profile["transport_overhead_tokens"] == 2048
+	assert profile["reasoning_max_tokens"] == int(
+		(196608 - 19661 - 5805 - 2048 - expected_prompt_tokens) * 0.70,
+	)
+	assert profile["first_chunk_timeout_seconds"] == 300.0
+	assert profile["session_id"] == "offline-method-generation"
 
 
 def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() -> None:
@@ -346,10 +360,10 @@ def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() 
 
 	extra_body = synthesizer._openrouter_provider_routing_body(
 		request_profile={
-			"name": "minimax_stream_no_reasoning",
+			"name": "minimax_stream_single_pass",
 			"stream_response": True,
 			"reasoning_max_tokens": 0,
-			"first_chunk_timeout_seconds": 180.0,
+			"first_chunk_timeout_seconds": 300.0,
 		},
 	)
 
@@ -358,6 +372,7 @@ def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() 
 			"only": ["minimax"],
 			"allow_fallbacks": False,
 		},
+		"session_id": "offline-method-generation",
 	}
 
 
@@ -423,6 +438,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 	assert captured_request["request_kwargs"]["stream"] is True
 	assert "response_format" not in captured_request["request_kwargs"]
 	assert captured_request["request_timeout_seconds"] == 90.0
+	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
 
 
 def test_method_synthesis_transport_omits_max_tokens_for_minimax_requests() -> None:
@@ -450,15 +466,16 @@ def test_method_synthesis_transport_omits_max_tokens_for_minimax_requests() -> N
 		{"system": "x", "user": "y"},
 		max_tokens=None,
 		request_profile={
-			"name": "minimax_stream_no_reasoning",
+			"name": "minimax_stream_single_pass",
 			"stream_response": True,
 			"reasoning_max_tokens": 0,
-			"first_chunk_timeout_seconds": 180.0,
+			"first_chunk_timeout_seconds": 300.0,
 		},
-		request_timeout_seconds=180.0,
+		request_timeout_seconds=300.0,
 	)
 
 	assert "max_tokens" not in captured_request["request_kwargs"]
+	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
 
 
 def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
@@ -523,9 +540,17 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 	assert getattr(exc_info.value, "transport_metadata", {}) == {
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "streaming",
-		"llm_request_profile": "minimax_stream_reasoning1",
-		"llm_reasoning_budget": 1,
-		"llm_first_chunk_timeout_seconds": 180.0,
+		"llm_request_profile": "minimax_stream_single_pass",
+		"llm_reasoning_budget": 123526,
+		"llm_first_chunk_timeout_seconds": 300.0,
+		"llm_context_window_tokens": 204800,
+		"llm_prompt_token_estimate": 1,
+		"llm_answer_token_reserve": 5805,
+		"llm_context_margin_tokens": 20480,
+		"llm_reasoning_headroom_tokens": 176466,
+		"llm_reasoning_headroom_ratio": 0.70,
+		"llm_transport_overhead_tokens": 2048,
+		"llm_session_id": "offline-method-generation",
 		"llm_request_timeout_seconds": 0.01,
 	}
 
@@ -598,65 +623,39 @@ def test_method_synthesis_transport_enforces_first_chunk_deadline_during_stream_
 	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
 
-def test_method_synthesis_retries_no_content_stream_failures_for_minimax() -> None:
-	class RetrySynthesizer(HTNMethodSynthesizer):
+def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
+	class SinglePassSynthesizer(HTNMethodSynthesizer):
 		def __init__(self):
 			super().__init__(model="minimax/minimax-m2.7")
 			self.call_count = 0
 
-		def _call_llm(self, prompt, *, max_tokens=None, attempt_index=1):
+		def _call_llm(self, prompt, *, max_tokens=None):
 			self.call_count += 1
-			if self.call_count == 1:
-				error = LLMStreamingResponseError(
-					"LLM response did not contain usable textual JSON content. finish_reason='length'",
-					finish_reason="length",
-				)
-				error.transport_metadata = {
-					"llm_request_id": "req_retry_1",
-					"llm_response_mode": "streaming",
-					"llm_request_profile": "minimax_stream_reasoning8",
-				}
-				raise error
-			return (
-				'{"compound_tasks":[],"methods":[]}',
-				"stop",
-				{
-					"llm_request_id": "req_retry_2",
-					"llm_response_mode": "streaming",
-					"llm_request_profile": "minimax_stream_reasoning4",
-					"llm_first_chunk_seconds": 1.0,
-					"llm_complete_json_seconds": 2.0,
-				},
+			error = LLMStreamingResponseError(
+				"LLM response did not contain usable textual JSON content. finish_reason='length'",
+				finish_reason="length",
 			)
+			error.transport_metadata = {
+				"llm_request_id": "req_retry_1",
+				"llm_response_mode": "streaming",
+				"llm_request_profile": "minimax_stream_single_pass",
+			}
+			raise error
 
-		def _parse_llm_library(self, response_text, *, ast_compiler_defaults=None):
-			return HTNMethodLibrary.from_dict(
-				{"compound_tasks": [], "primitive_tasks": [], "methods": []},
-			)
-
-		def _normalise_llm_library(self, library, domain, *, prompt_analysis=None):
-			return library
-
-	synthesizer = RetrySynthesizer()
+	synthesizer = SinglePassSynthesizer()
 	metadata = {}
-	library, response_text, finish_reason = synthesizer._request_complete_llm_library(
-		{"system": "x", "user": "y"},
-		domain=type("FakeDomain", (), {"actions": [], "tasks": [], "predicates": []})(),
-		metadata=metadata,
-		max_tokens=256,
-	)
+	with pytest.raises(HTNSynthesisError, match="LLM request failed"):
+		synthesizer._request_complete_llm_library(
+			{"system": "x", "user": "y"},
+			domain=type("FakeDomain", (), {"actions": [], "tasks": [], "predicates": []})(),
+			metadata=metadata,
+			max_tokens=256,
+		)
 
-	assert synthesizer.call_count == 2
-	assert response_text == '{"compound_tasks":[],"methods":[]}'
-	assert finish_reason == "stop"
-	assert isinstance(library, HTNMethodLibrary)
-	assert metadata["llm_attempts"] == 2
-	assert metadata["llm_attempt_trace"][0]["request_max_tokens"] == 256
-	assert metadata["llm_attempt_trace"][1]["request_max_tokens"] == 256
+	assert synthesizer.call_count == 1
+	assert metadata["llm_attempts"] == 1
 	assert metadata["llm_attempt_trace"][0]["request_id"] == "req_retry_1"
-	assert metadata["llm_attempt_trace"][0]["request_profile"] == "minimax_stream_reasoning8"
-	assert metadata["llm_attempt_trace"][1]["request_id"] == "req_retry_2"
-	assert metadata["llm_attempt_trace"][1]["request_profile"] == "minimax_stream_reasoning4"
+	assert metadata["llm_attempt_trace"][0]["request_profile"] == "minimax_stream_single_pass"
 
 
 def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arrives() -> None:
@@ -889,6 +888,28 @@ def test_parse_llm_library_splits_top_level_conjunction_context_strings() -> Non
 	]
 
 
+def test_library_postprocess_normalises_fused_negation_predicates_to_negative_literals() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"do_move","parameters":["?x:block","?y:block"]}],'
+		'"methods":[{"method_name":"m_do_move_direct","task_name":"do_move",'
+		'"parameters":["?x:block","?y:block"],"task_args":["?x","?y"],'
+		'"context":["noton(?x,?y)","clear(?x)","ontable(?x)","handempty"],'
+		'"subtasks":[{"step_id":"s1","task_name":"pick-up","args":["?x"],"kind":"primitive"}],'
+		'"ordering":[]}]}'
+	)
+
+	normalised = synthesizer._normalise_llm_library(library, domain)
+
+	assert [literal.to_signature() for literal in normalised.methods[0].context] == [
+		"!on(?x, ?y)",
+		"clear(?x)",
+		"ontable(?x)",
+		"handempty",
+	]
+
+
 def test_parse_llm_library_salvages_domain_task_payload_with_extra_closers() -> None:
 	synthesizer = HTNMethodSynthesizer()
 	response_text = (
@@ -1030,8 +1051,9 @@ def test_build_domain_library_synthesizes_from_masked_domain_only(tmp_path: Path
 			"model": None,
 		}
 
-	pipeline._synthesise_domain_methods = fake_synthesise_domain_methods  # type: ignore[method-assign]
-	pipeline._validate_domain_library = lambda method_library: {  # type: ignore[method-assign]
+	orchestrator = pipeline._offline_orchestrator()
+	orchestrator.synthesise_domain_methods = fake_synthesise_domain_methods  # type: ignore[method-assign]
+	orchestrator.validate_domain_library = lambda method_library: {  # type: ignore[method-assign]
 		"validated_task_count": len(method_library.compound_tasks),
 	}
 
@@ -1043,6 +1065,96 @@ def test_build_domain_library_synthesizes_from_masked_domain_only(tmp_path: Path
 	assert int(captured["original_method_count"]) > 0
 	assert Path(result["artifact_paths"]["masked_domain"]).exists()
 	assert Path(result["artifact_paths"]["generated_domain"]).exists()
+
+
+def test_domain_complete_pipeline_build_domain_library_delegates_to_offline_orchestrator() -> None:
+	pipeline = DomainCompletePipeline(domain_file=DOMAIN_FILES["blocksworld"])
+
+	class FakeOrchestrator:
+		def build_domain_library(self, *, output_root=None):
+			return {"success": True, "output_root": output_root}
+
+	pipeline._offline_orchestrator_instance = FakeOrchestrator()  # type: ignore[assignment]
+
+	result = pipeline.build_domain_library(output_root="/tmp/offline-artifact-root")
+
+	assert result == {"success": True, "output_root": "/tmp/offline-artifact-root"}
+
+
+def test_offline_domain_gate_is_legality_only_and_does_not_plan() -> None:
+	class FakeContext:
+		def __init__(self, domain):
+			self.domain = domain
+			self.output_dir = PROJECT_ROOT / "tests" / "generated" / "tmp_gate"
+			self.domain_type_names = {"block", "object"}
+			self.type_parent_map = {"block": "object", "object": None}
+			self.logger = type(
+				"FakeLogger",
+				(),
+				{
+					"log_domain_gate": staticmethod(lambda *args, **kwargs: None),
+				},
+			)()
+
+		@staticmethod
+		def _sanitize_name(value: str) -> str:
+			return str(value).strip().replace("-", "_")
+
+		@staticmethod
+		def _emit_domain_gate_progress(message: str) -> None:
+			_ = message
+
+		@staticmethod
+		def _record_step_timing(step: str, stage_start: float, breakdown=None, metadata=None) -> None:
+			_ = (step, stage_start, breakdown, metadata)
+
+		def _task_type_signature(self, task_name, method_library):
+			_ = method_library
+			for task in getattr(self.domain, "tasks", ()):
+				if getattr(task, "name", None) == task_name:
+					return tuple(
+						self._parse_parameter_type(parameter)
+						for parameter in getattr(task, "parameters", ())
+					)
+			return ()
+
+		@staticmethod
+		def _parse_parameter_type(parameter: str) -> str:
+			text = str(parameter or "")
+			if ":" in text:
+				return text.split(":", 1)[1].strip()
+			return "object"
+
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
+	method_library = build_method_library_from_domain_file(DOMAIN_FILES["blocksworld"])
+	validator = OfflineDomainGateValidator(FakeContext(domain))
+
+	summary = validator.validate(method_library)
+
+	assert summary["gate_profile"] == "legality_only"
+	assert summary["validated_task_count"] == len(method_library.compound_tasks)
+	assert all(record["validation_mode"] == "legality_only" for record in summary["task_validations"])
+	assert all("plan" not in record for record in summary["task_validations"])
+
+
+def test_offline_method_generation_pipeline_uses_dedicated_offline_orchestrator() -> None:
+	pipeline = OfflineMethodGenerationPipeline(domain_file=DOMAIN_FILES["blocksworld"])
+
+	class FakeOrchestrator:
+		def __init__(self) -> None:
+			self.calls: list[object] = []
+
+		def build_domain_library(self, *, output_root=None):
+			self.calls.append(output_root)
+			return {"success": True, "output_root": output_root}
+
+	fake_orchestrator = FakeOrchestrator()
+	pipeline._orchestrator = fake_orchestrator  # type: ignore[assignment]
+
+	result = pipeline.build_domain_library(output_root="/tmp/generated-domain")
+
+	assert result == {"success": True, "output_root": "/tmp/generated-domain"}
+	assert fake_orchestrator.calls == ["/tmp/generated-domain"]
 
 
 def test_domain_complete_coverage_requires_executable_method_for_each_declared_task() -> None:
