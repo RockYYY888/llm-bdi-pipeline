@@ -126,6 +126,7 @@ def run_online_query_case(
 	query_id: str,
 	*,
 	library_source: str = ONLINE_BENCHMARK_LIBRARY_SOURCE,
+	logs_root: str | Path | None = None,
 ) -> Dict[str, Any]:
 	apply_online_query_runtime_defaults()
 	query_cases = load_domain_query_cases(domain_key)
@@ -141,7 +142,12 @@ def run_online_query_case(
 		problem_file=str(case["problem_file"]),
 		online_domain_source=ONLINE_BENCHMARK_DOMAIN_SOURCE,
 	)
-	pipeline.pipeline.logger = ExecutionLogger(logs_dir=str(GENERATED_LOGS_DIR), run_origin="tests")
+	resolved_logs_root = (
+		Path(logs_root).resolve()
+		if logs_root is not None
+		else GENERATED_LOGS_DIR
+	)
+	pipeline.pipeline.logger = ExecutionLogger(logs_dir=str(resolved_logs_root), run_origin="tests")
 	result = pipeline.execute_query_with_library(
 		case["instruction"],
 		library_artifact=method_library_input,
@@ -164,6 +170,7 @@ def run_online_query_case(
 	return {
 		"query_id": query_id,
 		"case": case,
+		"problem_file": str(case["problem_file"]),
 		"library_source": library_source,
 		"success": bool(result.get("success")),
 		"result": result,
@@ -174,37 +181,84 @@ def run_online_query_case(
 	}
 
 
-def run_online_query_solution_benchmark_for_domain(
+def _domain_output_root(
+	output_root: str | Path | None,
 	domain_key: str,
-	*,
-	query_ids: Optional[Sequence[str]] = None,
-	library_source: str = ONLINE_BENCHMARK_LIBRARY_SOURCE,
-) -> Dict[str, Any]:
-	normalized_library_source = str(library_source or ONLINE_BENCHMARK_LIBRARY_SOURCE).strip().lower()
-	if normalized_library_source == "generated":
-		library_artifact_ref: str | None = str(ensure_online_domain_library_artifact(domain_key))
-	else:
-		library_artifact_ref = None
-	query_cases = load_domain_query_cases(domain_key)
-	selected_query_ids = (
-		tuple(sorted(query_ids, key=query_id_sort_key))
-		if query_ids
-		else tuple(sorted(query_cases, key=query_id_sort_key))
-	)
-	missing_query_ids = [query_id for query_id in selected_query_ids if query_id not in query_cases]
-	if missing_query_ids:
-		raise KeyError(
-			f"Unknown query ids for domain '{domain_key}': {', '.join(missing_query_ids)}",
-		)
+) -> Path:
+	if output_root is None:
+		return (ONLINE_BENCHMARK_RESULTS_DIR / domain_key).resolve()
+	return (Path(output_root).resolve() / domain_key).resolve()
 
-	query_reports = [
-		run_online_query_case(
-			domain_key,
-			query_id,
-			library_source=normalized_library_source,
-		)
-		for query_id in selected_query_ids
-	]
+
+def _query_results_root(domain_output_root: Path) -> Path:
+	return domain_output_root / "query_results"
+
+
+def _query_result_path(domain_output_root: Path, query_id: str) -> Path:
+	return _query_results_root(domain_output_root) / f"{query_id}.json"
+
+
+def _domain_state_path(domain_output_root: Path) -> Path:
+	return domain_output_root / "state.json"
+
+
+def _domain_summary_path(domain_output_root: Path) -> Path:
+	return domain_output_root / "summary.json"
+
+
+def _top_level_domain_summary_path(
+	output_root: str | Path | None,
+	domain_key: str,
+) -> Path:
+	if output_root is None:
+		return _domain_summary_path(_domain_output_root(output_root, domain_key))
+	return Path(output_root).resolve() / f"{domain_key}.summary.json"
+
+
+def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
+	problem_file = str(
+		report.get("problem_file")
+		or ((report.get("case") or {}).get("problem_file") or ""),
+	)
+	log_dir = report.get("log_dir")
+	return {
+		"query_id": str(report.get("query_id") or ""),
+		"problem_file": problem_file,
+		"library_source": str(report.get("library_source") or ""),
+		"success": bool(report.get("success")),
+		"result": dict(report.get("result") or {}),
+		"outcome_bucket": str(report.get("outcome_bucket") or "unknown_failure"),
+		"log_dir": str(log_dir) if log_dir else None,
+		"execution": dict(report.get("execution") or {}),
+		"online_domain_source": str(report.get("online_domain_source") or ""),
+	}
+
+
+def _load_query_report_checkpoint(
+	query_result_path: Path,
+	*,
+	query_id: str,
+	library_source: str,
+) -> Optional[Dict[str, Any]]:
+	if not query_result_path.exists():
+		return None
+	try:
+		payload = json.loads(query_result_path.read_text())
+	except json.JSONDecodeError:
+		return None
+	if str(payload.get("query_id") or "") != query_id:
+		return None
+	if str(payload.get("library_source") or "") != library_source:
+		return None
+	if (
+		str(payload.get("online_domain_source") or "").strip().lower()
+		!= ONLINE_BENCHMARK_DOMAIN_SOURCE
+	):
+		return None
+	return _serialize_query_report(payload)
+
+
+def _count_query_outcomes(query_reports: Sequence[Dict[str, Any]]) -> Dict[str, int]:
 	counts = {
 		"hierarchical_plan_verified": 0,
 		"goal_grounding_failed": 0,
@@ -218,15 +272,48 @@ def run_online_query_solution_benchmark_for_domain(
 	for report in query_reports:
 		bucket = str(report.get("outcome_bucket") or "unknown_failure")
 		counts[bucket] = counts.get(bucket, 0) + 1
+	return counts
 
+
+def _build_domain_summary(
+	*,
+	domain_key: str,
+	run_id: str | None,
+	output_root: str | Path | None,
+	domain_output_root: Path,
+	selected_query_ids: Sequence[str],
+	query_reports: Sequence[Dict[str, Any]],
+	library_source: str,
+	library_artifact_ref: str | None,
+	resume: bool,
+	resumed_query_ids: Sequence[str],
+) -> Dict[str, Any]:
+	counts = _count_query_outcomes(query_reports)
+	completed_query_ids = [str(report.get("query_id") or "") for report in query_reports]
+	completed_query_id_set = set(completed_query_ids)
+	remaining_query_ids = [
+		query_id
+		for query_id in selected_query_ids
+		if query_id not in completed_query_id_set
+	]
 	summary = {
+		"run_id": run_id,
 		"domain_key": domain_key,
 		"online_domain_source": ONLINE_BENCHMARK_DOMAIN_SOURCE,
-		"library_source": normalized_library_source,
+		"library_source": library_source,
 		"domain_file": DOMAIN_FILES[domain_key],
 		"library_artifact_root": library_artifact_ref,
-		"total_queries": len(query_reports),
+		"output_root": str(Path(output_root).resolve()) if output_root is not None else None,
+		"domain_output_root": str(domain_output_root),
+		"query_results_root": str(_query_results_root(domain_output_root)),
+		"logs_root": str((domain_output_root / "logs").resolve()),
+		"total_queries": len(selected_query_ids),
 		"selected_query_ids": list(selected_query_ids),
+		"completed_query_ids": completed_query_ids,
+		"remaining_query_ids": remaining_query_ids,
+		"resumed_query_ids": list(resumed_query_ids),
+		"resume_enabled": bool(resume),
+		"complete": not remaining_query_ids,
 		"verified_successes": counts.get("hierarchical_plan_verified", 0),
 		"goal_grounding_failures": counts.get("goal_grounding_failed", 0),
 		"temporal_compilation_failures": counts.get("temporal_compilation_failed", 0),
@@ -237,11 +324,17 @@ def run_online_query_solution_benchmark_for_domain(
 		"unknown_failures": counts.get("unknown_failure", 0),
 		"query_results": [
 			{
-				"query_id": report["query_id"],
-				"problem_file": str(report["case"]["problem_file"]),
-				"log_dir": str(report["log_dir"]),
-				"success": bool(report["success"]),
-				"outcome_bucket": report["outcome_bucket"],
+				"query_id": str(report.get("query_id") or ""),
+				"problem_file": str(report.get("problem_file") or ""),
+				"log_dir": str(report.get("log_dir") or ""),
+				"query_result_path": str(
+					_query_result_path(
+						domain_output_root,
+						str(report.get("query_id") or ""),
+					).resolve(),
+				),
+				"success": bool(report.get("success")),
+				"outcome_bucket": str(report.get("outcome_bucket") or ""),
 				"step": str((report.get("result") or {}).get("step") or ""),
 				"verification_mode": str(
 					(((report.get("execution") or {}).get("runtime_execution") or {}).get("metadata") or {}).get(
@@ -255,9 +348,131 @@ def run_online_query_solution_benchmark_for_domain(
 			for report in query_reports
 		],
 	}
-	output_root = ONLINE_BENCHMARK_RESULTS_DIR / domain_key
-	output_root.mkdir(parents=True, exist_ok=True)
-	(output_root / "summary.json").write_text(json.dumps(summary, indent=2))
+	return summary
+
+
+def _write_domain_summary_artifacts(
+	*,
+	output_root: str | Path | None,
+	domain_key: str,
+	domain_output_root: Path,
+	summary: Dict[str, Any],
+) -> None:
+	domain_output_root.mkdir(parents=True, exist_ok=True)
+	_query_results_root(domain_output_root).mkdir(parents=True, exist_ok=True)
+	(domain_output_root / "logs").mkdir(parents=True, exist_ok=True)
+	_domain_state_path(domain_output_root).write_text(json.dumps(summary, indent=2))
+	_domain_summary_path(domain_output_root).write_text(json.dumps(summary, indent=2))
+	top_level_summary_path = _top_level_domain_summary_path(output_root, domain_key)
+	if top_level_summary_path != _domain_summary_path(domain_output_root):
+		top_level_summary_path.write_text(json.dumps(summary, indent=2))
+
+
+def run_online_query_solution_benchmark_for_domain(
+	domain_key: str,
+	*,
+	query_ids: Optional[Sequence[str]] = None,
+	library_source: str = ONLINE_BENCHMARK_LIBRARY_SOURCE,
+	output_root: str | Path | None = None,
+	run_id: str | None = None,
+	resume: bool = False,
+) -> Dict[str, Any]:
+	normalized_library_source = str(library_source or ONLINE_BENCHMARK_LIBRARY_SOURCE).strip().lower()
+	if normalized_library_source == "generated":
+		library_artifact_ref: str | None = str(ensure_online_domain_library_artifact(domain_key))
+	else:
+		library_artifact_ref = None
+	domain_output_root = _domain_output_root(output_root, domain_key)
+	domain_output_root.mkdir(parents=True, exist_ok=True)
+	_query_results_root(domain_output_root).mkdir(parents=True, exist_ok=True)
+	(domain_output_root / "logs").mkdir(parents=True, exist_ok=True)
+	query_cases = load_domain_query_cases(domain_key)
+	selected_query_ids = (
+		tuple(sorted(query_ids, key=query_id_sort_key))
+		if query_ids
+		else tuple(sorted(query_cases, key=query_id_sort_key))
+	)
+	missing_query_ids = [query_id for query_id in selected_query_ids if query_id not in query_cases]
+	if missing_query_ids:
+		raise KeyError(
+			f"Unknown query ids for domain '{domain_key}': {', '.join(missing_query_ids)}",
+		)
+	query_reports_by_id: Dict[str, Dict[str, Any]] = {}
+	resumed_query_ids: list[str] = []
+	if resume:
+		for query_id in selected_query_ids:
+			cached_report = _load_query_report_checkpoint(
+				_query_result_path(domain_output_root, query_id),
+				query_id=query_id,
+				library_source=normalized_library_source,
+			)
+			if cached_report is None:
+				continue
+			query_reports_by_id[query_id] = cached_report
+			resumed_query_ids.append(query_id)
+
+	for query_id in selected_query_ids:
+		if query_id in query_reports_by_id:
+			continue
+		query_report = _serialize_query_report(
+			run_online_query_case(
+				domain_key,
+				query_id,
+				library_source=normalized_library_source,
+				logs_root=domain_output_root / "logs",
+			),
+		)
+		query_reports_by_id[query_id] = query_report
+		_query_result_path(domain_output_root, query_id).write_text(
+			json.dumps(query_report, indent=2),
+		)
+		partial_reports = [
+			query_reports_by_id[current_query_id]
+			for current_query_id in selected_query_ids
+			if current_query_id in query_reports_by_id
+		]
+		partial_summary = _build_domain_summary(
+			domain_key=domain_key,
+			run_id=run_id,
+			output_root=output_root,
+			domain_output_root=domain_output_root,
+			selected_query_ids=selected_query_ids,
+			query_reports=partial_reports,
+			library_source=normalized_library_source,
+			library_artifact_ref=library_artifact_ref,
+			resume=resume,
+			resumed_query_ids=resumed_query_ids,
+		)
+		_write_domain_summary_artifacts(
+			output_root=output_root,
+			domain_key=domain_key,
+			domain_output_root=domain_output_root,
+			summary=partial_summary,
+		)
+
+	query_reports = [
+		query_reports_by_id[query_id]
+		for query_id in selected_query_ids
+		if query_id in query_reports_by_id
+	]
+	summary = _build_domain_summary(
+		domain_key=domain_key,
+		run_id=run_id,
+		output_root=output_root,
+		domain_output_root=domain_output_root,
+		selected_query_ids=selected_query_ids,
+		query_reports=query_reports,
+		library_source=normalized_library_source,
+		library_artifact_ref=library_artifact_ref,
+		resume=resume,
+		resumed_query_ids=resumed_query_ids,
+	)
+	_write_domain_summary_artifacts(
+		output_root=output_root,
+		domain_key=domain_key,
+		domain_output_root=domain_output_root,
+		summary=summary,
+	)
 	return summary
 
 

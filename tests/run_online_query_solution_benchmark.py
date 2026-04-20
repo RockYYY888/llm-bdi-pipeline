@@ -58,6 +58,8 @@ def _start_domain_run(run_dir: Path, domain_key: str, env: Dict[str, str]) -> Do
 		"--run-dir",
 		str(run_dir),
 	]
+	if _RUN_RESUME:
+		command.append("--resume")
 	output_handle = output_path.open("w")
 	process = subprocess.Popen(
 		command,
@@ -106,6 +108,21 @@ def _collect_domain_run_result(
 		internal_failures.append(run.name)
 		return
 	domain_summaries[run.name] = json.loads(run.summary_path.read_text())
+
+
+def _load_existing_domain_summaries(run_dir: Path) -> Dict[str, Dict[str, object]]:
+	domain_summaries: Dict[str, Dict[str, object]] = {}
+	for domain_key in DOMAIN_KEYS:
+		summary_path = run_dir / f"{domain_key}.summary.json"
+		if not summary_path.exists():
+			continue
+		try:
+			summary = json.loads(summary_path.read_text())
+		except json.JSONDecodeError:
+			continue
+		if summary.get("complete", True):
+			domain_summaries[domain_key] = summary
+	return domain_summaries
 
 
 def _aggregate_domain_summaries(
@@ -184,6 +201,7 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 
 def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> None:
 	latest_manifest = {
+		"run_id": summary.get("run_id"),
 		"run_dir": str(run_dir),
 		"summary_json": str(run_dir / "summary.json"),
 		"summary_txt": str(run_dir / "summary.txt"),
@@ -202,7 +220,33 @@ def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> Non
 		(RUNS_ROOT / "latest_summary.txt").write_text(summary_text_path.read_text())
 
 
-def _run_single_domain(domain_key: str, run_dir: Path) -> int:
+def _write_run_summary_snapshot(
+	*,
+	run_dir: Path,
+	run_id: str,
+	domain_summaries: Dict[str, Dict[str, object]],
+	internal_failures: List[str],
+	max_concurrent_domains: int,
+) -> Dict[str, object]:
+	run_dir.mkdir(parents=True, exist_ok=True)
+	summary = _aggregate_domain_summaries(run_dir, domain_summaries)
+	summary["run_id"] = run_id
+	summary["max_concurrent_domains"] = max_concurrent_domains
+	summary["internal_failures"] = list(internal_failures)
+	summary["completed_domains"] = sorted(domain_summaries)
+	summary["pending_domains"] = [
+		domain_key
+		for domain_key in DOMAIN_KEYS
+		if domain_key not in domain_summaries
+	]
+	summary["complete"] = len(domain_summaries) == len(DOMAIN_KEYS) and not internal_failures
+	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+	_write_human_summary(run_dir, summary)
+	_write_latest_run_manifest(run_dir, summary)
+	return summary
+
+
+def _run_single_domain(domain_key: str, run_dir: Path, *, resume: bool = False) -> int:
 	from tests.support.online_query_solution_benchmark_support import (
 		run_online_query_solution_benchmark_for_domain,
 	)
@@ -211,6 +255,9 @@ def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 		domain_key,
 		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else None,
 		library_source=_RUN_LIBRARY_SOURCE,
+		output_root=run_dir,
+		run_id=run_dir.name,
+		resume=resume,
 	)
 	summary_path = run_dir / f"{domain_key}.summary.json"
 	summary_path.write_text(json.dumps(summary, indent=2))
@@ -218,17 +265,34 @@ def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 	return 0
 
 
-def _run_full_benchmark(*, max_concurrent_domains: int = 1) -> int:
+def _run_full_benchmark(*, max_concurrent_domains: int = 1, run_id: str | None = None) -> int:
 	if max_concurrent_domains < 1:
 		raise ValueError("max_concurrent_domains must be at least 1")
-	run_dir = RUNS_ROOT / _timestamp()
+	resolved_run_id = run_id or _timestamp()
+	run_dir = RUNS_ROOT / resolved_run_id
+	if not _RUN_RESUME and run_dir.exists() and any(run_dir.iterdir()):
+		raise ValueError(
+			f"Run directory already exists for run id '{resolved_run_id}'. "
+			"Use --resume-run-id to continue it.",
+		)
 	run_dir.mkdir(parents=True, exist_ok=True)
 	env = _build_env()
 	launch_path = run_dir / "launch.json"
-	pending_domains = list(DOMAIN_KEYS)
+	domain_summaries = _load_existing_domain_summaries(run_dir) if _RUN_RESUME else {}
+	pending_domains = [
+		domain_key
+		for domain_key in DOMAIN_KEYS
+		if domain_key not in domain_summaries
+	]
 	active_runs: List[DomainRun] = []
-	domain_summaries: Dict[str, Dict[str, object]] = {}
 	internal_failures: List[str] = []
+	_write_run_summary_snapshot(
+		run_dir=run_dir,
+		run_id=resolved_run_id,
+		domain_summaries=domain_summaries,
+		internal_failures=internal_failures,
+		max_concurrent_domains=max_concurrent_domains,
+	)
 
 	while pending_domains or active_runs:
 		while pending_domains and len(active_runs) < max_concurrent_domains:
@@ -239,26 +303,35 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1) -> int:
 			continue
 		run = active_runs.pop(0)
 		_collect_domain_run_result(run, domain_summaries, internal_failures)
-
-	summary = _aggregate_domain_summaries(run_dir, domain_summaries)
-	summary["max_concurrent_domains"] = max_concurrent_domains
-	summary["internal_failures"] = internal_failures
-	summary["completed_domains"] = sorted(domain_summaries)
-	summary["complete"] = len(domain_summaries) == len(DOMAIN_KEYS) and not internal_failures
-	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-	_write_human_summary(run_dir, summary)
-	_write_latest_run_manifest(run_dir, summary)
+		_write_run_summary_snapshot(
+			run_dir=run_dir,
+			run_id=resolved_run_id,
+			domain_summaries=domain_summaries,
+			internal_failures=internal_failures,
+			max_concurrent_domains=max_concurrent_domains,
+		)
+	summary = _write_run_summary_snapshot(
+		run_dir=run_dir,
+		run_id=resolved_run_id,
+		domain_summaries=domain_summaries,
+		internal_failures=internal_failures,
+		max_concurrent_domains=max_concurrent_domains,
+	)
 	return 0 if summary["complete"] else 1
 
 
 _RUN_QUERY_IDS: List[str] = []
 _RUN_LIBRARY_SOURCE = "benchmark"
+_RUN_RESUME = False
 
 
 def main() -> int:
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--domain", choices=DOMAIN_KEYS)
 	parser.add_argument("--run-dir")
+	parser.add_argument("--run-id")
+	parser.add_argument("--resume-run-id")
+	parser.add_argument("--resume", action="store_true")
 	parser.add_argument("--query-id", action="append", default=[])
 	parser.add_argument("--max-concurrent-domains", type=int, default=1)
 	parser.add_argument(
@@ -267,18 +340,26 @@ def main() -> int:
 		default="benchmark",
 	)
 	args = parser.parse_args()
-	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE
+	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE, _RUN_RESUME
 	_RUN_QUERY_IDS = list(args.query_id or [])
 	_RUN_LIBRARY_SOURCE = str(args.library_source)
+	_RUN_RESUME = bool(args.resume or args.resume_run_id)
+	resolved_run_id = str(args.resume_run_id or args.run_id or "").strip() or None
 
 	if args.domain:
-		if not args.run_dir:
-			raise SystemExit("--run-dir is required when --domain is set")
-		run_dir = Path(args.run_dir).resolve()
+		if args.run_dir:
+			run_dir = Path(args.run_dir).resolve()
+		elif resolved_run_id:
+			run_dir = (RUNS_ROOT / resolved_run_id).resolve()
+		else:
+			raise SystemExit("--run-dir or --run-id is required when --domain is set")
 		run_dir.mkdir(parents=True, exist_ok=True)
-		return _run_single_domain(args.domain, run_dir)
+		return _run_single_domain(args.domain, run_dir, resume=_RUN_RESUME)
 
-	return _run_full_benchmark(max_concurrent_domains=args.max_concurrent_domains)
+	return _run_full_benchmark(
+		max_concurrent_domains=args.max_concurrent_domains,
+		run_id=resolved_run_id,
+	)
 
 
 if __name__ == "__main__":

@@ -779,12 +779,4 @@ class OnlineQuerySolutionOrchestrator:
 
 	@staticmethod
 	def _jason_runtime_timeout_seconds(*, subgoal_count: int) -> int:
-		if subgoal_count >= 1000:
-			return 480
-		if subgoal_count >= 800:
-			return 360
-		if subgoal_count >= 600:
-			return 240
-		if subgoal_count >= 400:
-			return 180
-		return 120
+		return 1800

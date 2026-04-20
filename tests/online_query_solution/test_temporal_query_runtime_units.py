@@ -823,12 +823,10 @@ def test_online_domain_source_materializes_generated_domain_for_legacy_artifact(
 	assert Path(artifact_root / "generated_domain.hddl").exists()
 
 
-def test_online_orchestrator_scales_jason_runtime_timeout_with_subgoal_count() -> None:
-	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=10) == 120
-	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=450) == 180
-	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=650) == 240
-	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=850) == 360
-	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=1000) == 480
+def test_online_orchestrator_uses_fixed_jason_runtime_timeout_budget() -> None:
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=10) == 1800
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=450) == 1800
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=1000) == 1800
 
 
 def test_jason_runner_execute_entry_perceives_initial_world() -> None:
