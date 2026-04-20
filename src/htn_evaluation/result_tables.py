@@ -83,6 +83,15 @@ def empty_bucket_counts() -> Dict[str, int]:
 	return {bucket: 0 for bucket in HTN_OUTCOME_BUCKETS}
 
 
+def _coerce_float(value: Any) -> Optional[float]:
+	try:
+		if value is None:
+			return None
+		return float(value)
+	except (TypeError, ValueError):
+		return None
+
+
 def build_problem_result_row(
 	*,
 	domain_key: str,
@@ -103,6 +112,14 @@ def build_problem_result_row(
 	plan_solve_summary = dict(plan_solve.get("summary") or {})
 	plan_verification_summary = dict(plan_verification.get("summary") or {})
 	plan_verification_artifacts = dict(plan_verification.get("artifacts") or {})
+	execution = dict(report.get("execution") or {})
+	timings = dict(execution.get("timings") or {})
+	plan_solve_timing = dict(timings.get("plan_solve") or {})
+	plan_verification_timing = dict(timings.get("plan_verification") or {})
+	plan_solve_timing_metadata = dict(plan_solve_timing.get("metadata") or {})
+	plan_verification_timing_metadata = dict(
+		plan_verification_timing.get("metadata") or {},
+	)
 	outcome_bucket = str(report.get("outcome_bucket") or "unknown_failure")
 	if outcome_bucket not in HTN_OUTCOME_BUCKETS:
 		outcome_bucket = "unknown_failure"
@@ -118,6 +135,18 @@ def build_problem_result_row(
 		"ipc_verified_success": bool(report.get("success")),
 		"outcome_bucket": outcome_bucket,
 		"log_dir": str(report.get("log_dir") or ""),
+		"execution_time_seconds": _coerce_float(execution.get("execution_time_seconds")),
+		"plan_solve_time_seconds": _coerce_float(plan_solve_timing.get("total_seconds")),
+		"plan_verification_time_seconds": _coerce_float(
+			plan_verification_timing.get("total_seconds"),
+		),
+		"representation_build_seconds": _coerce_float(
+			plan_solve_timing_metadata.get("representation_build_seconds"),
+		),
+		"solver_race_wallclock_seconds": _coerce_float(
+			plan_solve_timing_metadata.get("race_wallclock_seconds")
+			or plan_verification_timing_metadata.get("race_wallclock_seconds"),
+		),
 		"plan_solve_status": plan_solve_summary.get("status"),
 		"plan_verification_status": plan_verification_summary.get("status"),
 		"selected_solver_id": plan_verification_artifacts.get("selected_solver_id"),
@@ -143,11 +172,31 @@ def build_domain_summary(
 		planner_id=normalized_planner_id,
 	)
 	counts = empty_bucket_counts()
+	execution_time_seconds_total = 0.0
+	plan_solve_time_seconds_total = 0.0
+	plan_verification_time_seconds_total = 0.0
+	execution_time_case_count = 0
+	plan_solve_time_case_count = 0
+	plan_verification_time_case_count = 0
 	for row in problem_rows:
 		bucket = str(row.get("outcome_bucket") or "unknown_failure")
 		if bucket not in counts:
 			bucket = "unknown_failure"
 		counts[bucket] += 1
+		execution_time_seconds = _coerce_float(row.get("execution_time_seconds"))
+		if execution_time_seconds is not None:
+			execution_time_seconds_total += execution_time_seconds
+			execution_time_case_count += 1
+		plan_solve_time_seconds = _coerce_float(row.get("plan_solve_time_seconds"))
+		if plan_solve_time_seconds is not None:
+			plan_solve_time_seconds_total += plan_solve_time_seconds
+			plan_solve_time_case_count += 1
+		plan_verification_time_seconds = _coerce_float(
+			row.get("plan_verification_time_seconds"),
+		)
+		if plan_verification_time_seconds is not None:
+			plan_verification_time_seconds_total += plan_verification_time_seconds
+			plan_verification_time_case_count += 1
 
 	summary = {
 		"domain_key": domain_key,
@@ -155,6 +204,24 @@ def build_domain_summary(
 		"requested_planner_id": normalized_planner_id,
 		"track_id": track_id,
 		"attempted_problem_count": len(problem_rows),
+		"execution_time_seconds_total": execution_time_seconds_total,
+		"execution_time_seconds_average": (
+			execution_time_seconds_total / execution_time_case_count
+			if execution_time_case_count > 0
+			else None
+		),
+		"plan_solve_time_seconds_total": plan_solve_time_seconds_total,
+		"plan_solve_time_seconds_average": (
+			plan_solve_time_seconds_total / plan_solve_time_case_count
+			if plan_solve_time_case_count > 0
+			else None
+		),
+		"plan_verification_time_seconds_total": plan_verification_time_seconds_total,
+		"plan_verification_time_seconds_average": (
+			plan_verification_time_seconds_total / plan_verification_time_case_count
+			if plan_verification_time_case_count > 0
+			else None
+		),
 		"selected_query_ids": [
 			str(row.get("query_id") or "")
 			for row in problem_rows
@@ -169,6 +236,11 @@ def build_domain_summary(
 				"log_dir": str(row.get("log_dir") or ""),
 				"success": bool(row.get("ipc_verified_success")),
 				"outcome_bucket": str(row.get("outcome_bucket") or "unknown_failure"),
+				"execution_time_seconds": row.get("execution_time_seconds"),
+				"plan_solve_time_seconds": row.get("plan_solve_time_seconds"),
+				"plan_verification_time_seconds": row.get("plan_verification_time_seconds"),
+				"representation_build_seconds": row.get("representation_build_seconds"),
+				"solver_race_wallclock_seconds": row.get("solver_race_wallclock_seconds"),
 				"plan_solve_status": row.get("plan_solve_status"),
 				"plan_verification_status": row.get("plan_verification_status"),
 				"selected_solver_id": row.get("selected_solver_id"),
@@ -224,8 +296,20 @@ def build_track_summary(
 	)
 	counts = empty_bucket_counts()
 	total_queries = 0
+	execution_time_seconds_total = 0.0
+	plan_solve_time_seconds_total = 0.0
+	plan_verification_time_seconds_total = 0.0
 	for domain_summary in domain_summaries.values():
 		total_queries += int(domain_summary.get("attempted_problem_count") or 0)
+		execution_time_seconds_total += float(
+			domain_summary.get("execution_time_seconds_total") or 0.0,
+		)
+		plan_solve_time_seconds_total += float(
+			domain_summary.get("plan_solve_time_seconds_total") or 0.0,
+		)
+		plan_verification_time_seconds_total += float(
+			domain_summary.get("plan_verification_time_seconds_total") or 0.0,
+		)
 		bucket_counts = dict(domain_summary.get("bucket_counts") or {})
 		for bucket in HTN_OUTCOME_BUCKETS:
 			counts[bucket] += int(bucket_counts.get(bucket, 0))
@@ -236,6 +320,9 @@ def build_track_summary(
 		"evaluation_mode": mode,
 		"requested_planner_id": normalized_planner_id,
 		"attempted_problem_count": total_queries,
+		"execution_time_seconds_total": execution_time_seconds_total,
+		"plan_solve_time_seconds_total": plan_solve_time_seconds_total,
+		"plan_verification_time_seconds_total": plan_verification_time_seconds_total,
 		"bucket_counts": counts,
 		"verified_success_count": counts["hierarchical_plan_verified"],
 		"domains": dict(domain_summaries),
@@ -265,6 +352,24 @@ def build_planner_capability_rows(
 				"attempted_problem_count": int(
 					domain_summary.get("attempted_problem_count") or 0,
 				),
+				"execution_time_seconds_total": float(
+					domain_summary.get("execution_time_seconds_total") or 0.0,
+				),
+				"execution_time_seconds_average": _coerce_float(
+					domain_summary.get("execution_time_seconds_average"),
+				),
+				"plan_solve_time_seconds_total": float(
+					domain_summary.get("plan_solve_time_seconds_total") or 0.0,
+				),
+				"plan_solve_time_seconds_average": _coerce_float(
+					domain_summary.get("plan_solve_time_seconds_average"),
+				),
+				"plan_verification_time_seconds_total": float(
+					domain_summary.get("plan_verification_time_seconds_total") or 0.0,
+				),
+				"plan_verification_time_seconds_average": _coerce_float(
+					domain_summary.get("plan_verification_time_seconds_average"),
+				),
 				"verified_success_count": int(
 					domain_summary.get("verified_success_count")
 					or domain_summary.get("verified_successes")
@@ -293,6 +398,12 @@ def write_planner_capability_matrix(
 		"requested_planner_id",
 		"domain_key",
 		"attempted_problem_count",
+		"execution_time_seconds_total",
+		"execution_time_seconds_average",
+		"plan_solve_time_seconds_total",
+		"plan_solve_time_seconds_average",
+		"plan_verification_time_seconds_total",
+		"plan_verification_time_seconds_average",
 		"verified_success_count",
 		*HTN_OUTCOME_BUCKETS,
 	]
@@ -305,4 +416,3 @@ def write_planner_capability_matrix(
 		"planner_capability_matrix_json": str(json_path),
 		"planner_capability_matrix_csv": str(csv_path),
 	}
-

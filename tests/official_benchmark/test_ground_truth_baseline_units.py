@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -356,6 +357,24 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 				"log_dir": Path("/tmp/query-01"),
 				"success": True,
 				"outcome_bucket": "hierarchical_plan_verified",
+				"execution": {
+					"execution_time_seconds": 12.5,
+					"timings": {
+						"plan_solve": {
+							"total_seconds": 10.0,
+							"metadata": {
+								"representation_build_seconds": 1.25,
+								"race_wallclock_seconds": 11.0,
+							},
+						},
+						"plan_verification": {
+							"total_seconds": 2.0,
+							"metadata": {
+								"race_wallclock_seconds": 11.0,
+							},
+						},
+					},
+				},
 				"plan_solve": {"summary": {"status": "success"}},
 				"plan_verification": {
 					"summary": {"status": "success"},
@@ -372,6 +391,24 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 				"log_dir": Path("/tmp/query-02"),
 				"success": False,
 				"outcome_bucket": "no_plan_from_solver",
+				"execution": {
+					"execution_time_seconds": 20.0,
+					"timings": {
+						"plan_solve": {
+							"total_seconds": 19.0,
+							"metadata": {
+								"representation_build_seconds": 0.5,
+								"race_wallclock_seconds": 19.0,
+							},
+						},
+						"plan_verification": {
+							"total_seconds": 0.5,
+							"metadata": {
+								"race_wallclock_seconds": 19.0,
+							},
+						},
+					},
+				},
 				"plan_solve": {"summary": {"status": "failed"}},
 				"plan_verification": {"summary": {"status": "failed"}, "artifacts": {}},
 			},
@@ -411,11 +448,20 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 	assert summary["requested_planner_id"] == "lifted_panda_sat"
 	assert summary["verified_success_count"] == 1
 	assert summary["bucket_counts"]["no_plan_from_solver"] == 1
+	assert summary["execution_time_seconds_total"] == 32.5
+	assert summary["plan_solve_time_seconds_total"] == 29.0
+	assert summary["plan_verification_time_seconds_total"] == 2.5
 	problem_results_path = Path(summary["output_paths"]["problem_results"])
 	domain_summary_path = Path(summary["output_paths"]["domain_summary"])
 	assert problem_results_path.exists()
 	assert domain_summary_path.exists()
 	assert problem_results_path.parent == tmp_path / "lifted_panda_sat" / "transport"
+	problem_rows = json.loads(problem_results_path.read_text())
+	assert problem_rows[0]["execution_time_seconds"] == 12.5
+	assert problem_rows[0]["plan_solve_time_seconds"] == 10.0
+	assert problem_rows[0]["plan_verification_time_seconds"] == 2.0
+	assert problem_rows[0]["representation_build_seconds"] == 1.25
+	assert problem_rows[0]["solver_race_wallclock_seconds"] == 11.0
 
 
 def test_result_tables_build_planner_capability_matrix_rows_and_csv(
@@ -429,6 +475,22 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 			"success": True,
 			"outcome_bucket": "hierarchical_plan_verified",
 			"log_dir": Path("/tmp/log"),
+			"execution": {
+				"execution_time_seconds": 17.0,
+				"timings": {
+					"plan_solve": {
+						"total_seconds": 12.0,
+						"metadata": {
+							"representation_build_seconds": 0.7,
+							"race_wallclock_seconds": 13.5,
+						},
+					},
+					"plan_verification": {
+						"total_seconds": 5.0,
+						"metadata": {"race_wallclock_seconds": 13.5},
+					},
+				},
+			},
 			"plan_solve": {"summary": {"status": "success"}},
 			"plan_verification": {
 				"summary": {"status": "success"},
@@ -447,6 +509,12 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 		domain_summaries={
 			"blocksworld": {
 				"attempted_problem_count": 1,
+				"execution_time_seconds_total": 17.0,
+				"execution_time_seconds_average": 17.0,
+				"plan_solve_time_seconds_total": 12.0,
+				"plan_solve_time_seconds_average": 12.0,
+				"plan_verification_time_seconds_total": 5.0,
+				"plan_verification_time_seconds_average": 5.0,
 				"verified_success_count": 1,
 				"bucket_counts": {
 					"hierarchical_plan_verified": 1,
@@ -464,7 +532,11 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	paths = write_planner_capability_matrix(tmp_path, rows=rows)
 
 	assert problem_row["selected_backend_name"] == "lifted_panda_sat"
+	assert problem_row["execution_time_seconds"] == 17.0
 	assert rows[0]["track_id"] == PLANNER_OR_RACE_MODE
+	assert rows[0]["execution_time_seconds_total"] == 17.0
+	assert rows[0]["plan_solve_time_seconds_total"] == 12.0
+	assert rows[0]["plan_verification_time_seconds_total"] == 5.0
 	assert rows[0]["verified_success_count"] == 1
 	assert Path(paths["planner_capability_matrix_json"]).exists()
 	assert Path(paths["planner_capability_matrix_csv"]).exists()
