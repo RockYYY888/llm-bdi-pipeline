@@ -14,6 +14,15 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from pipeline.execution_logger import ExecutionLogger
 from htn_evaluation.pipeline import HTNEvaluationPipeline
+from htn_evaluation.result_tables import (
+	PLANNER_OR_RACE_MODE,
+	build_domain_summary,
+	build_problem_result_row,
+	planner_track_id,
+	validate_evaluation_mode,
+	validate_planner_id,
+	write_domain_results,
+)
 
 from tests.support.offline_generation_support import (
 	DOMAIN_FILES,
@@ -29,7 +38,18 @@ from tests.support.offline_generation_support import (
 from tests.support.offline_domain_gate_support import run_official_domain_gate_preflight
 
 
-def run_domain_problem_root_case(domain_key: str, query_id: str) -> Dict[str, Any]:
+def run_domain_problem_root_case(
+	domain_key: str,
+	query_id: str,
+	*,
+	evaluation_mode: str = PLANNER_OR_RACE_MODE,
+	planner_id: Optional[str] = None,
+) -> Dict[str, Any]:
+	mode = validate_evaluation_mode(evaluation_mode)
+	normalized_planner_id = validate_planner_id(
+		planner_id,
+		evaluation_mode=mode,
+	)
 	query_cases = load_domain_query_cases(domain_key)
 	case = query_cases[query_id]
 	domain_file = DOMAIN_FILES[domain_key]
@@ -53,7 +73,11 @@ def run_domain_problem_root_case(domain_key: str, query_id: str) -> Dict[str, An
 		pipeline.logger._save_current_state()
 
 	method_library = build_official_method_library(domain_file)
-	race_result = pipeline._execute_official_problem_root_parallel_solver_race(method_library)
+	race_result = pipeline.execute_problem_root_evaluation(
+		method_library=method_library,
+		evaluation_mode=mode,
+		planner_id=normalized_planner_id,
+	)
 	plan_solve = dict(race_result.get("plan_solve") or {})
 	plan_verification = dict(race_result.get("plan_verification") or {})
 	success = (
@@ -74,6 +98,8 @@ def run_domain_problem_root_case(domain_key: str, query_id: str) -> Dict[str, An
 	return {
 		"query_id": query_id,
 		"case": case,
+		"evaluation_mode": mode,
+		"requested_planner_id": normalized_planner_id,
 		"success": success,
 		"outcome_bucket": outcome_bucket,
 		"log_dir": log_dir,
@@ -87,7 +113,14 @@ def run_official_problem_root_baseline_for_domain(
 	domain_key: str,
 	*,
 	query_ids: Optional[Sequence[str]] = None,
+	evaluation_mode: str = PLANNER_OR_RACE_MODE,
+	planner_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+	mode = validate_evaluation_mode(evaluation_mode)
+	normalized_planner_id = validate_planner_id(
+		planner_id,
+		evaluation_mode=mode,
+	)
 	query_cases = load_domain_query_cases(domain_key)
 	selected_query_ids = (
 		tuple(sorted(query_ids, key=query_id_sort_key))
@@ -100,66 +133,52 @@ def run_official_problem_root_baseline_for_domain(
 			f"Unknown query ids for domain '{domain_key}': {', '.join(missing_query_ids)}",
 		)
 	query_reports = [
-		run_domain_problem_root_case(domain_key, query_id)
+		run_domain_problem_root_case(
+			domain_key,
+			query_id,
+			evaluation_mode=mode,
+			planner_id=normalized_planner_id,
+		)
 		for query_id in selected_query_ids
 	]
-	counts = {
-		"hierarchical_plan_verified": 0,
-		"primitive_plan_valid_but_hierarchical_rejected": 0,
-		"primitive_plan_invalid": 0,
-		"no_plan_from_solver": 0,
-		"unknown_failure": 0,
-	}
-	for report in query_reports:
-		bucket = str(report.get("outcome_bucket") or "unknown_failure")
-		counts[bucket] = counts.get(bucket, 0) + 1
-
 	domain_gate_report = run_official_domain_gate_preflight(domain_key)
-	summary = {
-		"domain_key": domain_key,
-		"domain_gate_preflight": {
-			"success": bool(domain_gate_report.get("success")),
-			"log_dir": str(domain_gate_report.get("log_dir")),
-			"artifact_root": str(domain_gate_report.get("artifact_root")),
-			"validated_task_count": (
-				(domain_gate_report.get("domain_gate") or {}).get("validated_task_count")
-			),
-		},
-		"total_queries": len(query_reports),
-		"selected_query_ids": list(selected_query_ids),
-		"verified_successes": counts.get("hierarchical_plan_verified", 0),
-		"hierarchical_rejection_failures": counts.get(
-			"primitive_plan_valid_but_hierarchical_rejected",
-			0,
+	domain_gate_preflight = {
+		"success": bool(domain_gate_report.get("success")),
+		"log_dir": str(domain_gate_report.get("log_dir")),
+		"artifact_root": str(domain_gate_report.get("artifact_root")),
+		"validated_task_count": (
+			(domain_gate_report.get("domain_gate") or {}).get("validated_task_count")
 		),
-		"primitive_invalid_failures": counts.get("primitive_plan_invalid", 0),
-		"solver_no_plan_failures": counts.get("no_plan_from_solver", 0),
-		"unknown_failures": counts.get("unknown_failure", 0),
-		"query_results": [
-			{
-				"query_id": report["query_id"],
-				"problem_file": str(report["case"]["problem_file"]),
-				"log_dir": str(report["log_dir"]),
-				"success": bool(report["success"]),
-				"outcome_bucket": report["outcome_bucket"],
-				"plan_solve_status": (
-					(report.get("plan_solve", {}).get("summary", {}) or {}).get("status")
-				),
-				"plan_verification_status": (
-					(report.get("plan_verification", {}).get("summary", {}) or {}).get("status")
-				),
-				"selected_solver_id": (
-					(report.get("plan_verification", {}).get("artifacts", {}) or {}).get(
-						"selected_solver_id"
-					)
-				),
-			}
-			for report in query_reports
-		],
 	}
-	output_root = GENERATED_BASELINE_DIR / domain_key
-	output_root.mkdir(parents=True, exist_ok=True)
-	(output_root / "summary.json").write_text(json.dumps(summary, indent=2))
+	problem_rows = [
+		build_problem_result_row(
+			domain_key=domain_key,
+			query_id=str(report["query_id"]),
+			case=report["case"],
+			report=report,
+			evaluation_mode=mode,
+			planner_id=normalized_planner_id,
+		)
+		for report in query_reports
+	]
+	summary = build_domain_summary(
+		domain_key=domain_key,
+		problem_rows=problem_rows,
+		evaluation_mode=mode,
+		planner_id=normalized_planner_id,
+		domain_gate_preflight=domain_gate_preflight,
+	)
+	output_root = (
+		GENERATED_BASELINE_DIR
+		/ planner_track_id(evaluation_mode=mode, planner_id=normalized_planner_id)
+		/ domain_key
+	)
+	output_paths = write_domain_results(
+		output_root,
+		problem_rows=problem_rows,
+		domain_summary=summary,
+	)
+	summary["output_paths"] = output_paths
 	return summary
 
 

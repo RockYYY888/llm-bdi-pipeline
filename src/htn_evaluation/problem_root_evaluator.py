@@ -20,6 +20,11 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
 from planning.official_benchmark import OFFICIAL_BACKEND_SELECTION_RULE
 from .problem_root_runtime import official_problem_root_planning_task_worker
+from .result_tables import (
+	PLANNER_OR_RACE_MODE,
+	validate_evaluation_mode,
+	validate_planner_id,
+)
 
 
 BACKEND_RESULT_MESSAGE = "backend_attempt"
@@ -34,23 +39,43 @@ class HTNProblemRootEvaluator:
 	def planning_tasks(
 		self,
 		timeout_seconds: Optional[float] = None,
+		*,
+		planner_id: Optional[str] = None,
 	) -> tuple[PlanningBackendTask, ...]:
 		build_result = self.context._build_problem_representations(
 			timeout_seconds=timeout_seconds,
 		)
+		selected_backends = tuple(
+			backend
+			for backend in default_official_backends(workspace=str(self.context.output_dir))
+			if planner_id is None or backend.backend_name == planner_id
+		)
+		if planner_id is not None and not selected_backends:
+			raise ValueError(f"Unknown official planning backend '{planner_id}'.")
 		return expand_backend_tasks_for_representations(
 			representations=build_result.representations,
-			backends=default_official_backends(workspace=str(self.context.output_dir)),
+			backends=selected_backends,
 		)
 
-	def run_backend_race(self) -> Dict[str, Any]:
+	def run_backend_evaluation(
+		self,
+		*,
+		evaluation_mode: str = PLANNER_OR_RACE_MODE,
+		planner_id: Optional[str] = None,
+	) -> Dict[str, Any]:
 		if self.context.output_dir is None:
 			raise ValueError("Official problem-root backend race requires an output directory.")
 
+		mode = validate_evaluation_mode(evaluation_mode)
+		normalized_planner_id = validate_planner_id(
+			planner_id,
+			evaluation_mode=mode,
+		)
 		planning_timeout_seconds = self.context._official_problem_root_planning_timeout_seconds()
 		representation_build_start = time.perf_counter()
 		planning_tasks = self.planning_tasks(
 			timeout_seconds=planning_timeout_seconds,
+			planner_id=normalized_planner_id,
 		)
 		representation_build_seconds = time.perf_counter() - representation_build_start
 		backend_root = Path(self.context.output_dir) / "backend_race"
@@ -62,6 +87,11 @@ class HTNProblemRootEvaluator:
 		race_start = time.perf_counter()
 		selected_attempt: Optional[Dict[str, Any]] = None
 		pending_tasks: Set[str] = set()
+		planning_task_by_id = {
+			task.task_id: task
+			for task in planning_tasks
+		}
+		stop_on_success = mode == PLANNER_OR_RACE_MODE
 
 		def launch_task(planning_task: PlanningBackendTask) -> None:
 			remaining_timeout = max(
@@ -105,7 +135,7 @@ class HTNProblemRootEvaluator:
 				attempts.append(attempt)
 				task_id = str(attempt.get("task_id") or "")
 				pending_tasks.discard(task_id)
-				if bool(attempt.get("success")):
+				if stop_on_success and bool(attempt.get("success")):
 					selected_attempt = dict(attempt)
 					break
 		finally:
@@ -121,10 +151,65 @@ class HTNProblemRootEvaluator:
 					process.join(timeout=1.0)
 			self.close_backend_race_queue(result_queue)
 
+		for task_id in sorted(pending_tasks):
+			planning_task = planning_task_by_id.get(task_id)
+			if planning_task is None:
+				continue
+			attempts.append(
+				{
+					"message_type": BACKEND_RESULT_MESSAGE,
+					"backend_name": planning_task.backend_name,
+					"task_id": planning_task.task_id,
+					"representation_id": planning_task.representation.representation_id,
+					"output_dir": str((backend_root / planning_task.task_id).resolve()),
+					"plan_solve_data": {
+						"summary": {
+							"backend": planning_task.backend_name,
+							"status": "failed",
+							"planning_mode": "official_problem_root",
+							"failure_bucket": "no_plan_from_solver",
+							"representation_id": planning_task.representation.representation_id,
+						},
+						"artifacts": {
+							"backend": planning_task.backend_name,
+							"status": "failed",
+							"planning_mode": "official_problem_root",
+							"failure_bucket": "no_plan_from_solver",
+							"planning_representation": planning_task.representation.to_dict(),
+							"failure_reason": "backend_attempt_incomplete_before_deadline",
+						},
+					},
+					"plan_verification_data": {
+						"summary": {
+							"backend": "pandaPIparser",
+							"status": "failed",
+							"selection_rule": "first_hierarchical_verification_success",
+							"failure_bucket": "no_plan_from_solver",
+						},
+						"artifacts": {
+							"backend": planning_task.backend_name,
+							"status": "failed",
+							"selection_rule": "first_hierarchical_verification_success",
+							"failure_bucket": "no_plan_from_solver",
+							"failure_reason": "backend_attempt_incomplete_before_deadline",
+						},
+					},
+					"plan_solve_seconds": None,
+					"plan_verification_seconds": None,
+					"total_seconds": planning_timeout_seconds,
+					"success": False,
+					"selected_bucket": "no_plan_from_solver",
+					"stdout": "",
+					"stderr": "",
+				},
+			)
+
 		if selected_attempt is None:
 			selected_attempt = self.select_backend_attempt(attempts)
 
 		return {
+			"evaluation_mode": mode,
+			"requested_planner_id": normalized_planner_id,
 			"planning_tasks": [task.to_dict() for task in planning_tasks],
 			"attempts": attempts,
 			"selected_attempt": selected_attempt,
@@ -132,13 +217,30 @@ class HTNProblemRootEvaluator:
 			"race_wallclock_seconds": time.perf_counter() - race_start,
 		}
 
-	def execute_parallel_solver_race(
+	def run_backend_race(self) -> Dict[str, Any]:
+		return self.run_backend_evaluation(
+			evaluation_mode=PLANNER_OR_RACE_MODE,
+			planner_id=None,
+		)
+
+	def execute_problem_root_evaluation(
 		self,
 		method_library=None,
+		*,
+		evaluation_mode: str = PLANNER_OR_RACE_MODE,
+		planner_id: Optional[str] = None,
 	) -> Dict[str, Any]:
+		mode = validate_evaluation_mode(evaluation_mode)
+		normalized_planner_id = validate_planner_id(
+			planner_id,
+			evaluation_mode=mode,
+		)
 		print("\n[PLAN SOLVE]")
 		print("-" * 80)
-		race_result = self.run_backend_race()
+		race_result = self.run_backend_evaluation(
+			evaluation_mode=mode,
+			planner_id=normalized_planner_id,
+		)
 		planning_tasks = list(race_result.get("planning_tasks") or ())
 		task_labels = [
 			(
@@ -188,7 +290,13 @@ class HTNProblemRootEvaluator:
 		plan_verification_artifacts = dict((plan_verification_data.get("artifacts") or {}))
 		plan_solve_summary.update(
 			{
-				"solver_race_strategy": OFFICIAL_BACKEND_SELECTION_RULE,
+				"solver_race_strategy": (
+					OFFICIAL_BACKEND_SELECTION_RULE
+					if mode == PLANNER_OR_RACE_MODE
+					else "single_planner_best_attempt"
+				),
+				"evaluation_mode": mode,
+				"requested_planner_id": normalized_planner_id,
 				"solver_attempts": attempt_summaries,
 				"selected_solver_id": str(plan_solve_summary.get("solver_id") or selected_attempt.get("backend_name") or "unknown"),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
@@ -199,7 +307,13 @@ class HTNProblemRootEvaluator:
 		)
 		plan_solve_artifacts.update(
 			{
-				"solver_race_strategy": OFFICIAL_BACKEND_SELECTION_RULE,
+				"solver_race_strategy": (
+					OFFICIAL_BACKEND_SELECTION_RULE
+					if mode == PLANNER_OR_RACE_MODE
+					else "single_planner_best_attempt"
+				),
+				"evaluation_mode": mode,
+				"requested_planner_id": normalized_planner_id,
 				"solver_attempts": attempt_summaries,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
@@ -209,7 +323,13 @@ class HTNProblemRootEvaluator:
 		)
 		plan_verification_summary.update(
 			{
-				"selection_rule": OFFICIAL_BACKEND_SELECTION_RULE,
+				"selection_rule": (
+					OFFICIAL_BACKEND_SELECTION_RULE
+					if mode == PLANNER_OR_RACE_MODE
+					else "single_planner_best_attempt"
+				),
+				"evaluation_mode": mode,
+				"requested_planner_id": normalized_planner_id,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
@@ -219,7 +339,13 @@ class HTNProblemRootEvaluator:
 		)
 		plan_verification_artifacts.update(
 			{
-				"selection_rule": OFFICIAL_BACKEND_SELECTION_RULE,
+				"selection_rule": (
+					OFFICIAL_BACKEND_SELECTION_RULE
+					if mode == PLANNER_OR_RACE_MODE
+					else "single_planner_best_attempt"
+				),
+				"evaluation_mode": mode,
+				"requested_planner_id": normalized_planner_id,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
@@ -323,6 +449,16 @@ class HTNProblemRootEvaluator:
 			"plan_solve": plan_solve_data,
 			"plan_verification": plan_verification_data,
 		}
+
+	def execute_parallel_solver_race(
+		self,
+		method_library=None,
+	) -> Dict[str, Any]:
+		return self.execute_problem_root_evaluation(
+			method_library=method_library,
+			evaluation_mode=PLANNER_OR_RACE_MODE,
+			planner_id=None,
+		)
 
 	@staticmethod
 	def official_problem_root_failure_rank(attempt: Dict[str, Any]) -> tuple[int, float]:

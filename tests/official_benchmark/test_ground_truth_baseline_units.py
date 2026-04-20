@@ -20,6 +20,16 @@ from planning.process_capture import (
 )
 from planning.representations import PlanningRepresentation
 from htn_evaluation.pipeline import HTNEvaluationPipeline
+from htn_evaluation.problem_root_evaluator import HTNProblemRootEvaluator
+from htn_evaluation.result_tables import (
+	HTN_PLANNER_IDS,
+	PLANNER_OR_RACE_MODE,
+	SINGLE_PLANNER_MODE,
+	build_planner_capability_rows,
+	build_problem_result_row,
+	build_track_summary,
+	write_planner_capability_matrix,
+)
 
 import tests.support.htn_evaluation_support as baseline_support
 from tests.support.offline_generation_support import DOMAIN_FILES, build_official_method_library
@@ -234,10 +244,22 @@ def test_parallel_solver_race_delegates_to_hierarchical_task_network_evaluator()
 
 	class FakeEvaluator:
 		def __init__(self) -> None:
-			self.method_libraries: list[object] = []
+			self.calls: list[dict[str, object]] = []
 
-		def execute_parallel_solver_race(self, *, method_library=None):
-			self.method_libraries.append(method_library)
+		def execute_problem_root_evaluation(
+			self,
+			*,
+			method_library=None,
+			evaluation_mode: str,
+			planner_id: str | None,
+		):
+			self.calls.append(
+				{
+					"method_library": method_library,
+					"evaluation_mode": evaluation_mode,
+					"planner_id": planner_id,
+				},
+			)
 			return {"plan_solve": {"summary": {"status": "success"}}, "plan_verification": {"summary": {"status": "success"}}}
 
 	fake_evaluator = FakeEvaluator()
@@ -246,7 +268,215 @@ def test_parallel_solver_race_delegates_to_hierarchical_task_network_evaluator()
 	result = pipeline._execute_official_problem_root_parallel_solver_race(method_library="sentinel")
 
 	assert result["plan_solve"]["summary"]["status"] == "success"
-	assert fake_evaluator.method_libraries == ["sentinel"]
+	assert fake_evaluator.calls == [
+		{
+			"method_library": "sentinel",
+			"evaluation_mode": PLANNER_OR_RACE_MODE,
+			"planner_id": None,
+		},
+	]
+
+
+def test_problem_root_evaluation_delegates_mode_and_planner_id() -> None:
+	pipeline = HTNEvaluationPipeline(
+		domain_file=DOMAIN_FILES["blocksworld"],
+		problem_file=str(
+			(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl").resolve()
+		),
+	)
+
+	class FakeEvaluator:
+		def __init__(self) -> None:
+			self.calls: list[dict[str, object]] = []
+
+		def execute_problem_root_evaluation(
+			self,
+			*,
+			method_library=None,
+			evaluation_mode: str,
+			planner_id: str | None,
+		):
+			self.calls.append(
+				{
+					"method_library": method_library,
+					"evaluation_mode": evaluation_mode,
+					"planner_id": planner_id,
+				},
+			)
+			return {"plan_solve": {"summary": {"status": "success"}}}
+
+	fake_evaluator = FakeEvaluator()
+	pipeline._htn_problem_root_evaluator_instance = fake_evaluator  # type: ignore[assignment]
+
+	pipeline.execute_problem_root_evaluation(
+		method_library="sentinel",
+		evaluation_mode=SINGLE_PLANNER_MODE,
+		planner_id="lifted_panda_sat",
+	)
+
+	assert fake_evaluator.calls == [
+		{
+			"method_library": "sentinel",
+			"evaluation_mode": SINGLE_PLANNER_MODE,
+			"planner_id": "lifted_panda_sat",
+		},
+	]
+
+
+def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_result_tables(
+	tmp_path: Path,
+) -> None:
+	load_cases = Mock(
+		return_value={
+			"query_01": {"problem_file": "pfile01.hddl", "instruction": "q1"},
+			"query_02": {"problem_file": "pfile02.hddl", "instruction": "q2"},
+		},
+	)
+	run_case = Mock(
+		side_effect=[
+			{
+				"query_id": "query_01",
+				"case": {"problem_file": "pfile01.hddl", "instruction": "q1"},
+				"log_dir": Path("/tmp/query-01"),
+				"success": True,
+				"outcome_bucket": "hierarchical_plan_verified",
+				"plan_solve": {"summary": {"status": "success"}},
+				"plan_verification": {
+					"summary": {"status": "success"},
+					"artifacts": {
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				},
+			},
+			{
+				"query_id": "query_02",
+				"case": {"problem_file": "pfile02.hddl", "instruction": "q2"},
+				"log_dir": Path("/tmp/query-02"),
+				"success": False,
+				"outcome_bucket": "no_plan_from_solver",
+				"plan_solve": {"summary": {"status": "failed"}},
+				"plan_verification": {"summary": {"status": "failed"}, "artifacts": {}},
+			},
+		],
+	)
+	run_gate = Mock(
+		return_value={
+			"success": True,
+			"log_dir": Path("/tmp/domain-gate"),
+			"artifact_root": Path("/tmp/domain-gate-artifacts"),
+			"domain_gate": {"validated_task_count": 3},
+		},
+	)
+
+	original_load = baseline_support.load_domain_query_cases
+	original_run_case = baseline_support.run_domain_problem_root_case
+	original_run_gate = baseline_support.run_official_domain_gate_preflight
+	original_generated_baseline_dir = baseline_support.GENERATED_BASELINE_DIR
+	try:
+		baseline_support.load_domain_query_cases = load_cases
+		baseline_support.run_domain_problem_root_case = run_case
+		baseline_support.run_official_domain_gate_preflight = run_gate
+		baseline_support.GENERATED_BASELINE_DIR = tmp_path
+		summary = baseline_support.run_official_problem_root_baseline_for_domain(
+			"transport",
+			query_ids=("query_01", "query_02"),
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id="lifted_panda_sat",
+		)
+	finally:
+		baseline_support.load_domain_query_cases = original_load
+		baseline_support.run_domain_problem_root_case = original_run_case
+		baseline_support.run_official_domain_gate_preflight = original_run_gate
+		baseline_support.GENERATED_BASELINE_DIR = original_generated_baseline_dir
+
+	assert summary["evaluation_mode"] == SINGLE_PLANNER_MODE
+	assert summary["requested_planner_id"] == "lifted_panda_sat"
+	assert summary["verified_success_count"] == 1
+	assert summary["bucket_counts"]["no_plan_from_solver"] == 1
+	problem_results_path = Path(summary["output_paths"]["problem_results"])
+	domain_summary_path = Path(summary["output_paths"]["domain_summary"])
+	assert problem_results_path.exists()
+	assert domain_summary_path.exists()
+	assert problem_results_path.parent == tmp_path / "lifted_panda_sat" / "transport"
+
+
+def test_result_tables_build_planner_capability_matrix_rows_and_csv(
+	tmp_path: Path,
+) -> None:
+	problem_row = build_problem_result_row(
+		domain_key="blocksworld",
+		query_id="query_01",
+		case={"problem_file": "p01.hddl", "instruction": "move"},
+		report={
+			"success": True,
+			"outcome_bucket": "hierarchical_plan_verified",
+			"log_dir": Path("/tmp/log"),
+			"plan_solve": {"summary": {"status": "success"}},
+			"plan_verification": {
+				"summary": {"status": "success"},
+				"artifacts": {
+					"selected_solver_id": "sat",
+					"selected_backend_name": "lifted_panda_sat",
+					"selected_representation_id": "linearized_total_order",
+				},
+			},
+		},
+		evaluation_mode=PLANNER_OR_RACE_MODE,
+		planner_id=None,
+	)
+	track_summary = build_track_summary(
+		run_dir=tmp_path,
+		domain_summaries={
+			"blocksworld": {
+				"attempted_problem_count": 1,
+				"verified_success_count": 1,
+				"bucket_counts": {
+					"hierarchical_plan_verified": 1,
+					"primitive_plan_valid_but_hierarchical_rejected": 0,
+					"primitive_plan_invalid": 0,
+					"no_plan_from_solver": 0,
+					"unknown_failure": 0,
+				},
+			},
+		},
+		evaluation_mode=PLANNER_OR_RACE_MODE,
+		planner_id=None,
+	)
+	rows = build_planner_capability_rows((track_summary,))
+	paths = write_planner_capability_matrix(tmp_path, rows=rows)
+
+	assert problem_row["selected_backend_name"] == "lifted_panda_sat"
+	assert rows[0]["track_id"] == PLANNER_OR_RACE_MODE
+	assert rows[0]["verified_success_count"] == 1
+	assert Path(paths["planner_capability_matrix_json"]).exists()
+	assert Path(paths["planner_capability_matrix_csv"]).exists()
+	assert "domain_key" in Path(paths["planner_capability_matrix_csv"]).read_text()
+
+
+def test_supported_planner_ids_are_stable() -> None:
+	assert HTN_PLANNER_IDS == (
+		"panda_pi_portfolio",
+		"pandadealer_agile_lama",
+		"lifted_panda_sat",
+	)
+
+
+def test_planning_tasks_can_filter_to_one_requested_planner() -> None:
+	pipeline = HTNEvaluationPipeline(
+		domain_file=DOMAIN_FILES["transport"],
+		problem_file=str(
+			(PROJECT_ROOT / "src" / "domains" / "transport" / "problems" / "pfile01.hddl").resolve()
+		),
+	)
+	pipeline.output_dir = str(PROJECT_ROOT / "tests" / "generated" / "tmp-planning-tasks")
+	evaluator = HTNProblemRootEvaluator(pipeline.context)
+
+	tasks = evaluator.planning_tasks(planner_id="lifted_panda_sat")
+
+	assert tasks
+	assert all(task.backend_name == "lifted_panda_sat" for task in tasks)
 
 
 def test_run_subprocess_to_files_spools_large_outputs_without_returning_full_payload(

@@ -88,12 +88,29 @@ class HTNEvaluationPipeline:
 		self,
 		method_library: Any = None,
 	) -> Dict[str, Any]:
+		return self.execute_problem_root_evaluation(
+			method_library=method_library,
+			evaluation_mode="planner_or_race",
+			planner_id=None,
+		)
+
+	def execute_problem_root_evaluation(
+		self,
+		*,
+		method_library: Any = None,
+		evaluation_mode: str = "planner_or_race",
+		planner_id: Optional[str] = None,
+	) -> Dict[str, Any]:
 		_ = method_library
 		evaluator = self._htn_problem_root_evaluator_instance
 		if evaluator is None:
 			evaluator = HTNProblemRootEvaluator(self._context)
 			self._htn_problem_root_evaluator_instance = evaluator
-		return evaluator.execute_parallel_solver_race(method_library=method_library)
+		return evaluator.execute_problem_root_evaluation(
+			method_library=method_library,
+			evaluation_mode=evaluation_mode,
+			planner_id=planner_id,
+		)
 
 	@staticmethod
 	def _close_backend_race_queue(result_queue: Any) -> None:
