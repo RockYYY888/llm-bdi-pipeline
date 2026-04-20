@@ -673,7 +673,7 @@ dfa_edge_label(dfa_t2, "subgoal_2").
 	assert "!run_dfa" in execute_section
 
 
-def test_jason_runner_accepting_state_execution_does_not_use_guided_replay() -> None:
+def test_jason_runner_accepting_state_execution_is_direct() -> None:
 	runner = JasonRunner()
 	runtime_program = runner._build_runner_asl(
 		agentspeak_code="""
@@ -705,27 +705,6 @@ accepting_state(q0).
 	assert "!run_dfa" in execute_section
 	assert '.print("execute success")' in execute_section
 	assert "!guided_replay_1" not in execute_section
-
-
-def test_jason_runner_guided_replay_quotes_uppercase_constants() -> None:
-	runner = JasonRunner()
-	runtime_program = runner._build_guided_runner_asl(
-		"""
-/* Initial Beliefs */
-
-/* Primitive Action Plans */
-
-/* HTN Method Plans */
-
-/* DFA Transition Wrappers */
-""".strip(),
-		method_library=_sample_method_library(),
-		ordered_query_sequence=False,
-		guided_action_path=("turn_to(satellite1, GroundStation1, Phenomenon7)",),
-		guided_method_trace=(),
-	)
-
-	assert '!turn_to(satellite1, "GroundStation1", "Phenomenon7")' in runtime_program
 
 
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
@@ -784,7 +763,6 @@ accepting_state(q0).
 	monkeypatch.setattr(runner, "_extract_action_path", lambda stdout: [])
 	monkeypatch.setattr(runner, "_extract_method_trace", lambda output: [])
 	monkeypatch.setattr(runner, "_run_consistency_checks", lambda **kwargs: {})
-	monkeypatch.setattr(runner, "_is_successful_run", lambda **kwargs: True)
 	monkeypatch.setattr("online_query_solution.jason_runtime.runner.subprocess.run", lambda *args, **kwargs: FakeCompletedProcess())
 
 	runner.validate(
@@ -827,6 +805,94 @@ accepting_state(q0).
 	assert captured["agentspeak_code"].index("m-navigate_abs-1") < captured["agentspeak_code"].index(
 		"m-navigate_abs-3"
 	)
+
+
+def test_jason_runner_validate_downgrades_consistency_check_failures_to_diagnostics(
+	monkeypatch: pytest.MonkeyPatch,
+	tmp_path: Path,
+) -> None:
+	runner = JasonRunner(runtime_dir=tmp_path)
+	jason_jar = tmp_path / "jason.jar"
+	log_conf = tmp_path / "logging.properties"
+	jason_jar.write_text("")
+	log_conf.write_text("")
+
+	def fake_compile_environment_java(**kwargs) -> None:
+		env_java_path = Path(str(kwargs["env_java_path"]))
+		output_path = Path(str(kwargs["output_path"]))
+		env_java_path.write_text("class JasonPipelineEnvironment {}")
+		(output_path / f"{runner.environment_class_name}.class").write_text("")
+
+	class FakeCompletedProcess:
+		returncode = 0
+		stdout = "runtime env ready\nexecute success\n"
+		stderr = ""
+
+	monkeypatch.setattr(runner, "_select_java_binary", lambda: ("java", 17))
+	monkeypatch.setattr(runner, "_select_javac_binary", lambda java_bin: "javac")
+	monkeypatch.setattr(runner, "_ensure_jason_jar", lambda java_bin: jason_jar)
+	monkeypatch.setattr(runner, "_resolve_log_config", lambda: log_conf)
+	monkeypatch.setattr(
+		runner,
+		"_compile_environment_java",
+		fake_compile_environment_java,
+	)
+	monkeypatch.setattr(
+		runner.environment_adapter,
+		"validate",
+		lambda *, stdout, stderr: EnvironmentAdapterResult(
+			success=True,
+			adapter_name="fake",
+			mode="test",
+			details={},
+		),
+	)
+	monkeypatch.setattr(runner, "_extract_action_path", lambda stdout: [])
+	monkeypatch.setattr(runner, "_extract_method_trace", lambda output: [])
+	monkeypatch.setattr(
+		runner,
+		"_run_consistency_checks",
+		lambda **kwargs: (_ for _ in ()).throw(RuntimeError("diagnostic boom")),
+	)
+	monkeypatch.setattr(
+		"online_query_solution.jason_runtime.runner.subprocess.run",
+		lambda *args, **kwargs: FakeCompletedProcess(),
+	)
+
+	result = runner.validate(
+		agentspeak_code="""
+/* Initial Beliefs */
+dfa_state(q0).
+accepting_state(q0).
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
+
+/* DFA Transition Wrappers */
+
+/* DFA Control Plans */
++!run_dfa : true <-
+	true.
+""".strip(),
+		target_literals=(),
+		protected_target_literals=(),
+		method_library=_sample_method_library(),
+		action_schemas=[{"name": "noop"}],
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		domain_name="blocks",
+		problem_file=None,
+		output_dir=tmp_path,
+		completion_mode="accepting_state",
+	)
+
+	assert result.status == "success"
+	assert result.consistency_checks["diagnostics_only"] is True
+	assert result.consistency_checks["failure_class"] == "consistency_diagnostics_exception"
+	assert result.consistency_checks["message"] == "diagnostic boom"
 
 
 def test_goal_grounding_raises_immediately_after_invalid_json_without_retry() -> None:
