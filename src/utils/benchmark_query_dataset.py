@@ -116,7 +116,15 @@ def typed_object_phrase_for_objects(problem: Any, objects: List[str]) -> str:
 	return f"Using {serialise_nl_list(group_phrases)}"
 
 
-def build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
+def build_stored_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
+	"""
+	Build one explicit benchmark-query record for offline dataset maintenance.
+
+	This helper is not part of the runtime loading path. Runtime benchmark query
+	resolution must consume the stored JSON directly rather than reconstructing
+	cases from problem files on the fly.
+	"""
+
 	problem = HDDLParser.parse_problem(str(problem_path))
 	task_clauses = [
 		task_invocation_to_query_clause(invocation.task_name, invocation.args)
@@ -131,29 +139,29 @@ def build_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 			f"{typed_object_phrase_for_objects(problem, query_objects)}, complete the tasks "
 			f"{serialise_task_clause_sequence(task_clauses, ordered=problem.htn_ordered)}."
 		),
-		"required_task_clauses": task_clauses,
-		"problem_file": str(problem_path.resolve()),
-		"minimum_action_count": 1,
-		"description": f"Auto-generated from {problem_path.name} ({problem.name})",
+		"problem_file": problem_path.name,
 	}
 
 
 def build_benchmark_query_dataset() -> Dict[str, Any]:
 	dataset: Dict[str, Any] = {
-		"version": 4,
+		"version": 5,
 		"dataset_kind": "stored_benchmark_queries",
 		"query_protocol_document": "docs/query_protocol.md",
-		"generator": "canonical_root_task_query_v2",
+		"generator": "canonical_root_task_query_v3",
 		"domains": {},
 	}
 	for domain_key, problem_dir in DEFAULT_BENCHMARK_QUERY_DOMAIN_PROBLEM_DIRS.items():
 		pattern = DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS[domain_key]
-		cases: Dict[str, str] = {}
+		cases: Dict[str, Dict[str, str]] = {}
 		for index, problem_path in enumerate(sorted(problem_dir.glob(pattern)), start=1):
-			case = build_case_from_problem(problem_path)
+			case = build_stored_case_from_problem(problem_path)
 			if case is None:
 				continue
-			cases[f"query_{index}"] = str(case["instruction"])
+			cases[f"query_{index}"] = {
+				"instruction": str(case["instruction"]),
+				"problem_file": str(case["problem_file"]),
+			}
 		dataset["domains"][domain_key] = {"cases": cases}
 	return dataset
 
@@ -176,8 +184,7 @@ def load_benchmark_query_dataset(
 	target_path = dataset_path or DEFAULT_BENCHMARK_QUERY_DATASET_PATH
 	if not target_path.exists():
 		raise FileNotFoundError(
-			f"Missing benchmark query dataset: {target_path}. "
-			"Regenerate it with utils.benchmark_query_dataset.write_benchmark_query_dataset().",
+			f"Missing benchmark query dataset: {target_path}.",
 		)
 	return json.loads(target_path.read_text(encoding="utf-8"))
 
@@ -197,6 +204,7 @@ def load_problem_query_cases(
 	pattern: str = "p*.hddl",
 	dataset_path: Path | None = None,
 ) -> Dict[str, Dict[str, Any]]:
+	del pattern
 	domain_key = _infer_domain_key_from_problem_dir(problem_dir)
 	dataset = load_benchmark_query_dataset(dataset_path)
 	domain_record = dataset["domains"].get(domain_key, {})
@@ -204,33 +212,60 @@ def load_problem_query_cases(
 	if limit > 0:
 		case_items = case_items[:limit]
 
-	problem_pattern = DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS.get(domain_key, pattern)
-	problem_paths = [
-		path
-		for path in sorted(problem_dir.glob(problem_pattern))
-		if build_case_from_problem(path) is not None
-	]
-
 	normalised_cases: Dict[str, Dict[str, Any]] = {}
 	for query_id, stored_case in case_items:
-		case_index = int(str(query_id).split("_", 1)[1]) - 1
-		if case_index < 0 or case_index >= len(problem_paths):
-			raise IndexError(
-				f"Stored benchmark query id '{query_id}' has no matching problem file in {problem_dir}.",
-			)
-		problem_path = problem_paths[case_index]
-		canonical_case = build_case_from_problem(problem_path)
-		if canonical_case is None:
-			raise ValueError(
-				f"Problem file '{problem_path}' does not produce a benchmark query case.",
-			)
-		stored_instruction = (
-			str(stored_case)
-			if isinstance(stored_case, str)
-			else str((stored_case or {}).get("instruction", "")).strip()
+		normalised_cases[query_id] = _normalise_stored_query_case(
+			query_id=query_id,
+			stored_case=stored_case,
+			problem_dir=problem_dir,
 		)
-		case = dict(canonical_case)
-		case["instruction"] = stored_instruction or canonical_case["instruction"]
-		case["problem_file"] = str(problem_path.resolve())
-		normalised_cases[query_id] = case
 	return normalised_cases
+
+
+def _normalise_stored_query_case(
+	*,
+	query_id: str,
+	stored_case: Any,
+	problem_dir: Path,
+) -> Dict[str, Any]:
+	if not isinstance(stored_case, dict):
+		raise ValueError(
+			f"Benchmark query '{query_id}' must be an object record with "
+			'"instruction" and "problem_file".',
+		)
+
+	instruction = str(stored_case.get("instruction") or "").strip()
+	if not instruction:
+		raise ValueError(f'Benchmark query "{query_id}" is missing a non-empty "instruction".')
+
+	raw_problem_file = str(stored_case.get("problem_file") or "").strip()
+	if not raw_problem_file:
+		raise ValueError(f'Benchmark query "{query_id}" is missing a non-empty "problem_file".')
+
+	problem_reference = Path(raw_problem_file)
+	if problem_reference.is_absolute():
+		raise ValueError(
+			f'Benchmark query "{query_id}" must use a domain-local relative "problem_file", '
+			f"got absolute path '{raw_problem_file}'.",
+		)
+
+	resolved_problem_dir = problem_dir.resolve()
+	resolved_problem_file = (resolved_problem_dir / problem_reference).resolve()
+	try:
+		resolved_problem_file.relative_to(resolved_problem_dir)
+	except ValueError as exc:
+		raise ValueError(
+			f'Benchmark query "{query_id}" uses illegal "problem_file" path '
+			f"'{raw_problem_file}'.",
+		) from exc
+
+	if not resolved_problem_file.exists() or not resolved_problem_file.is_file():
+		raise FileNotFoundError(
+			f'Benchmark query "{query_id}" references missing problem file '
+			f"'{raw_problem_file}'.",
+		)
+
+	return {
+		"instruction": instruction,
+		"problem_file": str(resolved_problem_file),
+	}

@@ -230,11 +230,13 @@ def test_goal_grounding_prompt_requires_explicit_order_preservation() -> None:
 	assert "Do not collapse an explicitly ordered task list" in system_prompt
 	assert "treat that inventory as context only" in system_prompt
 	assert "Avoid deeply nested eventuality chains" in system_prompt
-	assert "X F(do_put_on(b1, b4))" in system_prompt
+	assert "shallow adjacent strict-precedence encoding" in system_prompt
+	assert "(!B U (A & !B))" in system_prompt
 	assert "do_put_on__e1(b8, b9)" in system_prompt
 	assert "final JSON answer must appear in the completion response content itself" in system_prompt
 	assert "MUST NOT leave the final answer only in hidden reasoning content" in system_prompt
 	assert "MUST NOT return an empty completion response" in system_prompt
+	assert "goal_facts" not in system_prompt
 
 
 def test_goal_grounding_requires_llm_for_benchmark_style_query() -> None:
@@ -1204,8 +1206,8 @@ def test_goal_grounding_prompts_treat_complete_the_tasks_lists_as_ordered_by_def
 	assert "Do not use unsupported past-time operators" in system_prompt
 	assert "Avoid deeply nested eventuality chains" in system_prompt
 	assert "F(A & F(B & F(C)))" in system_prompt
-	assert "(!B U (A & !B & X F(B)))" in system_prompt
-	assert "X F(do_put_on(b1, b4))" in system_prompt
+	assert "(!B U (A & !B))" in system_prompt
+	assert "X F(do_put_on(b1, b4))" not in system_prompt
 	assert "F(do_put_on(b4, b2) & F(do_put_on(b1, b4)" not in system_prompt
 
 

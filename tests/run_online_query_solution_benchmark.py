@@ -214,6 +214,7 @@ def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> Non
 		"internal_failures": list(summary.get("internal_failures") or []),
 		"complete": bool(summary.get("complete")),
 	}
+	RUNS_ROOT.mkdir(parents=True, exist_ok=True)
 	(RUNS_ROOT / "latest.json").write_text(json.dumps(latest_manifest, indent=2))
 	(RUNS_ROOT / "latest_summary.json").write_text(json.dumps(summary, indent=2))
 	summary_text_path = run_dir / "summary.txt"

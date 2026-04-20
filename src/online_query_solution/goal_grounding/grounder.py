@@ -354,8 +354,8 @@ class NLToLTLfGenerator:
 				"- Supported constants and position predicates: true, false, last",
 				"- Do not use unsupported past-time operators such as Y, WY, O, S, P, or H.",
 				"- Avoid deeply nested eventuality chains such as F(A & F(B & F(C))).",
-				"- For explicit total-order sequences, prefer a shallow strict-precedence encoding.",
-				"- For 'A then B', use F(A) & F(B) & (!B U (A & !B & X F(B))).",
+				"- For explicit total-order sequences, prefer a shallow adjacent strict-precedence encoding.",
+				"- For 'A then B', use F(A) & F(B) & (!B U (A & !B)).",
 				"- For 'A then B then C', add one such adjacent precedence constraint for A before B and one for B before C.",
 				"- This encoding permits unrelated actions between ordered task events but forbids the later task event before or at the same position as the earlier event.",
 				"- Use a plain conjunction of eventualities only when the query does not impose an order.",
@@ -376,10 +376,8 @@ class NLToLTLfGenerator:
 						"ltlf_formula": (
 							"F(do_put_on(b4, b2)) & F(do_put_on(b1, b4)) & "
 							"F(do_put_on(b3, b1)) & "
-							"(!do_put_on(b1, b4) U (do_put_on(b4, b2) & "
-							"!do_put_on(b1, b4) & X F(do_put_on(b1, b4)))) & "
-							"(!do_put_on(b3, b1) U (do_put_on(b1, b4) & "
-							"!do_put_on(b3, b1) & X F(do_put_on(b3, b1))))"
+							"(!do_put_on(b1, b4) U (do_put_on(b4, b2) & !do_put_on(b1, b4))) & "
+							"(!do_put_on(b3, b1) U (do_put_on(b1, b4) & !do_put_on(b3, b1)))"
 						),
 					},
 					ensure_ascii=False,
@@ -390,8 +388,7 @@ class NLToLTLfGenerator:
 					{
 						"ltlf_formula": (
 							"F(do_put_on__e1(b8, b9)) & F(do_put_on__e2(b8, b9)) & "
-							"(!do_put_on__e2(b8, b9) U (do_put_on__e1(b8, b9) & "
-							"!do_put_on__e2(b8, b9) & X F(do_put_on__e2(b8, b9))))"
+							"(!do_put_on__e2(b8, b9) U (do_put_on__e1(b8, b9) & !do_put_on__e2(b8, b9)))"
 						),
 					},
 					ensure_ascii=False,
