@@ -654,6 +654,157 @@ def test_sequential_full_baseline_writes_incremental_track_outputs(
 	assert problem_rows[0]["plan_verification_time_seconds"] == 3.0
 
 
+def test_sequential_full_baseline_resumes_from_existing_domain_summaries(
+	tmp_path: Path,
+) -> None:
+	original_domain_keys = baseline_runner.DOMAIN_KEYS
+	baseline_runner.DOMAIN_KEYS = ("blocksworld", "transport")
+	(tmp_path / "blocksworld.summary.json").write_text(
+		json.dumps(
+			{
+				"domain_key": "blocksworld",
+				"attempted_problem_count": 1,
+				"execution_time_seconds_total": 5.0,
+				"execution_time_seconds_average": 5.0,
+				"plan_solve_time_seconds_total": 4.0,
+				"plan_solve_time_seconds_average": 4.0,
+				"plan_verification_time_seconds_total": 1.0,
+				"plan_verification_time_seconds_average": 1.0,
+				"verified_success_count": 1,
+				"verified_successes": 1,
+				"hierarchical_rejection_failures": 0,
+				"primitive_invalid_failures": 0,
+				"solver_no_plan_failures": 0,
+				"unknown_failures": 0,
+				"bucket_counts": {
+					"hierarchical_plan_verified": 1,
+					"primitive_plan_valid_but_hierarchical_rejected": 0,
+					"primitive_plan_invalid": 0,
+					"no_plan_from_solver": 0,
+					"unknown_failure": 0,
+				},
+				"query_results": [
+					{
+						"query_id": "blocksworld_query_01",
+						"problem_file": "blocksworld.hddl",
+						"log_dir": "/tmp/blocksworld",
+						"success": True,
+						"outcome_bucket": "hierarchical_plan_verified",
+						"execution_time_seconds": 5.0,
+						"plan_solve_time_seconds": 4.0,
+						"plan_verification_time_seconds": 1.0,
+						"representation_build_seconds": 0.2,
+						"solver_race_wallclock_seconds": 4.5,
+						"plan_solve_status": "success",
+						"plan_verification_status": "success",
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				],
+			},
+			indent=2,
+		),
+	)
+	calls: list[str] = []
+	try:
+		def fake_domain_runner(
+			domain_key: str,
+			evaluation_mode: str,
+			planner_id: str | None,
+		) -> dict[str, object]:
+			calls.append(domain_key)
+			return {
+				"domain_key": domain_key,
+				"evaluation_mode": evaluation_mode,
+				"requested_planner_id": planner_id,
+				"attempted_problem_count": 1,
+				"execution_time_seconds_total": 12.0,
+				"execution_time_seconds_average": 12.0,
+				"plan_solve_time_seconds_total": 9.0,
+				"plan_solve_time_seconds_average": 9.0,
+				"plan_verification_time_seconds_total": 3.0,
+				"plan_verification_time_seconds_average": 3.0,
+				"verified_success_count": 1,
+				"verified_successes": 1,
+				"hierarchical_rejection_failures": 0,
+				"primitive_invalid_failures": 0,
+				"solver_no_plan_failures": 0,
+				"unknown_failures": 0,
+				"bucket_counts": {
+					"hierarchical_plan_verified": 1,
+					"primitive_plan_valid_but_hierarchical_rejected": 0,
+					"primitive_plan_invalid": 0,
+					"no_plan_from_solver": 0,
+					"unknown_failure": 0,
+				},
+				"query_results": [
+					{
+						"query_id": f"{domain_key}_query_01",
+						"problem_file": f"{domain_key}.hddl",
+						"log_dir": f"/tmp/{domain_key}",
+						"success": True,
+						"outcome_bucket": "hierarchical_plan_verified",
+						"execution_time_seconds": 12.0,
+						"plan_solve_time_seconds": 9.0,
+						"plan_verification_time_seconds": 3.0,
+						"representation_build_seconds": 0.5,
+						"solver_race_wallclock_seconds": 10.5,
+						"plan_solve_status": "success",
+						"plan_verification_status": "success",
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				],
+			}
+
+		summary = baseline_runner._run_sequential_full_baseline(
+			run_dir=tmp_path,
+			evaluation_mode=PLANNER_OR_RACE_MODE,
+			planner_id=None,
+			track_id=PLANNER_OR_RACE_MODE,
+			domain_runner=fake_domain_runner,
+		)
+	finally:
+		baseline_runner.DOMAIN_KEYS = original_domain_keys
+
+	assert calls == ["transport"]
+	assert summary["complete"] is True
+	assert "blocksworld" in summary["completed_domains"]
+	assert "transport" in summary["completed_domains"]
+
+
+def test_track_pass_matrix_writes_compact_pass_status(
+	tmp_path: Path,
+) -> None:
+	paths = baseline_runner._write_track_pass_matrix(
+		tmp_path,
+		{
+			"planner_or_race": {
+				"evaluation_mode": "planner_or_race",
+				"requested_planner_id": None,
+				"complete": True,
+				"completed_domains": ["blocksworld", "marsrover", "satellite", "transport"],
+				"track_summary": {"verified_success_count": 115},
+			},
+			"panda_pi_portfolio": {
+				"evaluation_mode": "single_planner",
+				"requested_planner_id": "panda_pi_portfolio",
+				"complete": False,
+				"completed_domains": ["blocksworld"],
+				"track_summary": {"verified_success_count": 27},
+			},
+		},
+	)
+	rows = json.loads(Path(paths["track_pass_matrix_json"]).read_text())
+	assert rows[0]["track_id"] == "planner_or_race"
+	assert rows[0]["pass"] is True
+	assert rows[1]["track_id"] == "panda_pi_portfolio"
+	assert rows[1]["pass"] is False
+	assert "verified_success_count" in Path(paths["track_pass_matrix_csv"]).read_text()
+
+
 def test_supported_planner_ids_are_stable() -> None:
 	assert HTN_PLANNER_IDS == (
 		"panda_pi_portfolio",
