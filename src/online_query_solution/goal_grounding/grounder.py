@@ -34,6 +34,7 @@ GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
 	"exceeded the configured first-chunk deadline before any streaming content arrived",
 	"llm response did not include any choices",
 	"llm response choice did not include a message payload",
+	"llm response did not contain usable textual json content",
 )
 GOAL_GROUNDING_RETRYABLE_ERROR_CLASS_NAMES = {
 	"timeouterror",

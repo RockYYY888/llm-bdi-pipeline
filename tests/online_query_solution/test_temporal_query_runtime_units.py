@@ -315,7 +315,7 @@ def test_goal_grounding_prompt_ignores_setup_inventory_and_requires_strict_json(
 	assert "do_put_on__e2(b8, b9)" in system_prompt
 
 
-def test_goal_grounding_generate_does_not_retry_after_invalid_response_extraction() -> None:
+def test_goal_grounding_generate_does_not_retry_after_nontransport_response_extraction_error() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(domain_file=domain_file)
 	generator.client = object()
@@ -331,11 +331,11 @@ def test_goal_grounding_generate_does_not_retry_after_invalid_response_extractio
 		NLToLTLfGenerator,
 		"_extract_response_text",
 		lambda self, response: (_ for _ in ()).throw(
-			RuntimeError("LLM response did not contain usable textual JSON content."),
+			RuntimeError("Synthetic extraction failure."),
 		),
 	)
 	try:
-		with pytest.raises(RuntimeError, match="usable textual JSON content"):
+		with pytest.raises(RuntimeError, match="Synthetic extraction failure"):
 			generator.generate(
 				"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
 				method_library=_sample_method_library(),
@@ -347,6 +347,45 @@ def test_goal_grounding_generate_does_not_retry_after_invalid_response_extractio
 		monkeypatch.undo()
 
 	assert call_count["create"] == 1
+
+
+def test_goal_grounding_retries_after_empty_response_extraction_and_then_succeeds() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+	generator.client = object()
+	call_count = {"create": 0, "extract": 0}
+
+	def fake_create(self, messages, **_kwargs):
+		del messages
+		call_count["create"] += 1
+		return {"raw": "response"}
+
+	def fake_extract(self, response):
+		del response
+		call_count["extract"] += 1
+		if call_count["extract"] < 3:
+			raise RuntimeError("LLM response did not contain usable textual JSON content.")
+		return '{"ltlf_formula":"F(do_put_on(b1, b2))"}'
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(NLToLTLfGenerator, "_create_chat_completion", fake_create)
+	monkeypatch.setattr(NLToLTLfGenerator, "_extract_response_text", fake_extract)
+	try:
+		result, _, _ = generator.generate(
+			"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
+			method_library=_sample_method_library(),
+			typed_objects={"b1": "block", "b2": "block"},
+			task_type_map={"do_put_on": ("block", "block")},
+			type_parent_map={"block": "object", "object": None},
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert result.ltlf_formula == "F(do_put_on(b1, b2))"
+	assert call_count["create"] == 3
+	assert call_count["extract"] == 3
+	assert generator.last_generation_metadata["attempt_count"] == 3
+	assert len(generator.last_generation_metadata["attempt_errors"]) == 2
 
 
 def test_goal_grounding_retries_timeout_before_first_chunk_and_then_succeeds() -> None:
