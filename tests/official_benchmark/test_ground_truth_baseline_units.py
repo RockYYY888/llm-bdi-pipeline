@@ -805,6 +805,105 @@ def test_track_pass_matrix_writes_compact_pass_status(
 	assert "verified_success_count" in Path(paths["track_pass_matrix_csv"]).read_text()
 
 
+def test_cleanup_reclaims_only_live_project_planning_processes() -> None:
+	mock_result = SimpleNamespace(
+		stdout="\n".join(
+			[
+				f"101 1 4096 {PROJECT_ROOT}/.local/pandaPI-full/bin/pandaPIengine {PROJECT_ROOT}/tests/generated/logs/x",
+				f"102 1 0 {PROJECT_ROOT}/.local/pandaPI-full/bin/pandaPIengine {PROJECT_ROOT}/tests/generated/logs/y",
+				f"103 1 2048 /usr/bin/python unrelated.py",
+				f"104 1 1024 {PROJECT_ROOT}/tests/run_official_problem_root_baseline.py --all-tracks",
+				f"105 1 1024 {PROJECT_ROOT}/.venv/bin/python -c from multiprocessing.spawn import spawn_main",
+			],
+		),
+	)
+	killed: list[int] = []
+	with patch.object(baseline_runner.subprocess, "run", return_value=mock_result), patch.object(
+		baseline_runner.os,
+		"getpid",
+		return_value=104,
+	), patch.object(baseline_runner.os, "kill", side_effect=lambda pid, _sig: killed.append(pid)):
+		baseline_runner._cleanup_htn_evaluation_resources()
+
+	assert killed == [101, 105]
+
+
+def test_sequential_full_baseline_cleans_resources_between_domains(
+	tmp_path: Path,
+) -> None:
+	original_domain_keys = baseline_runner.DOMAIN_KEYS
+	baseline_runner.DOMAIN_KEYS = ("blocksworld", "transport")
+	cleanup_calls: list[str] = []
+	try:
+		def fake_domain_runner(
+			domain_key: str,
+			evaluation_mode: str,
+			planner_id: str | None,
+		) -> dict[str, object]:
+			return {
+				"domain_key": domain_key,
+				"evaluation_mode": evaluation_mode,
+				"requested_planner_id": planner_id,
+				"attempted_problem_count": 1,
+				"execution_time_seconds_total": 12.0,
+				"execution_time_seconds_average": 12.0,
+				"plan_solve_time_seconds_total": 9.0,
+				"plan_solve_time_seconds_average": 9.0,
+				"plan_verification_time_seconds_total": 3.0,
+				"plan_verification_time_seconds_average": 3.0,
+				"verified_success_count": 1,
+				"verified_successes": 1,
+				"hierarchical_rejection_failures": 0,
+				"primitive_invalid_failures": 0,
+				"solver_no_plan_failures": 0,
+				"unknown_failures": 0,
+				"bucket_counts": {
+					"hierarchical_plan_verified": 1,
+					"primitive_plan_valid_but_hierarchical_rejected": 0,
+					"primitive_plan_invalid": 0,
+					"no_plan_from_solver": 0,
+					"unknown_failure": 0,
+				},
+				"query_results": [
+					{
+						"query_id": f"{domain_key}_query_01",
+						"problem_file": f"{domain_key}.hddl",
+						"log_dir": f"/tmp/{domain_key}",
+						"success": True,
+						"outcome_bucket": "hierarchical_plan_verified",
+						"execution_time_seconds": 12.0,
+						"plan_solve_time_seconds": 9.0,
+						"plan_verification_time_seconds": 3.0,
+						"representation_build_seconds": 0.5,
+						"solver_race_wallclock_seconds": 10.5,
+						"plan_solve_status": "success",
+						"plan_verification_status": "success",
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				],
+			}
+
+		with patch.object(
+			baseline_runner,
+			"_cleanup_htn_evaluation_resources",
+			side_effect=lambda: cleanup_calls.append("cleanup"),
+		):
+			summary = baseline_runner._run_sequential_full_baseline(
+				run_dir=tmp_path,
+				evaluation_mode=PLANNER_OR_RACE_MODE,
+				planner_id=None,
+				track_id=PLANNER_OR_RACE_MODE,
+				domain_runner=fake_domain_runner,
+			)
+	finally:
+		baseline_runner.DOMAIN_KEYS = original_domain_keys
+
+	assert summary["complete"] is True
+	assert len(cleanup_calls) == 6
+
+
 def test_supported_planner_ids_are_stable() -> None:
 	assert HTN_PLANNER_IDS == (
 		"panda_pi_portfolio",

@@ -137,22 +137,31 @@ def _cleanup_htn_evaluation_resources() -> None:
 		[
 			"ps",
 			"-Ao",
-			"pid=,ppid=,command=",
+			"pid=,ppid=,rss=,command=",
 		],
 		capture_output=True,
 		text=True,
 		check=False,
 	)
+	current_pid = os.getpid()
 	for line in result.stdout.splitlines():
-		parts = line.strip().split(None, 2)
-		if len(parts) < 3:
+		parts = line.strip().split(None, 3)
+		if len(parts) < 4:
 			continue
-		pid_text, ppid_text, command = parts
-		if ppid_text != "1":
+		pid_text, _ppid_text, rss_text, command = parts
+		try:
+			pid = int(pid_text)
+		except ValueError:
+			continue
+		if pid == current_pid:
+			continue
+		try:
+			rss = int(rss_text)
+		except ValueError:
+			rss = 0
+		if rss <= 0:
 			continue
 		if str(PROJECT_ROOT) not in command:
-			continue
-		if "run_official_problem_root_baseline.py" in command:
 			continue
 		if not any(
 			marker in command
@@ -160,12 +169,13 @@ def _cleanup_htn_evaluation_resources() -> None:
 				"pandaPIengine",
 				"pandadealer",
 				"spawn_main",
+				"run_official_problem_root_baseline.py",
 			)
 		):
 			continue
 		try:
-			os.kill(int(pid_text), signal.SIGKILL)
-		except (OSError, ValueError):
+			os.kill(pid, signal.SIGKILL)
+		except OSError:
 			continue
 
 
@@ -250,6 +260,7 @@ def _run_sequential_full_baseline(
 	)
 
 	run_dir.mkdir(parents=True, exist_ok=True)
+	_cleanup_htn_evaluation_resources()
 	runner = domain_runner or (
 		lambda domain_key, mode, normalized_planner_id: (
 			run_official_problem_root_baseline_for_domain(
@@ -274,6 +285,7 @@ def _run_sequential_full_baseline(
 		if domain_key in domain_summaries:
 			print(f"[TRACK] resume skip domain={domain_key}", flush=True)
 			continue
+		_cleanup_htn_evaluation_resources()
 		print(f"[TRACK] starting domain={domain_key}", flush=True)
 		try:
 			domain_summary = runner(domain_key, evaluation_mode, planner_id)
@@ -284,6 +296,7 @@ def _run_sequential_full_baseline(
 					"traceback": traceback.format_exc(),
 				},
 			)
+			_cleanup_htn_evaluation_resources()
 			break
 		domain_summaries[domain_key] = domain_summary
 		(run_dir / f"{domain_key}.summary.json").write_text(
@@ -298,6 +311,8 @@ def _run_sequential_full_baseline(
 			internal_failures=internal_failures,
 		)
 		print(f"[TRACK] finished domain={domain_key}", flush=True)
+		_cleanup_htn_evaluation_resources()
+	_cleanup_htn_evaluation_resources()
 	return _write_track_outputs(
 		run_dir=run_dir,
 		domain_summaries=domain_summaries,
