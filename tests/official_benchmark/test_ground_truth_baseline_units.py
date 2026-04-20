@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -828,6 +829,79 @@ def test_cleanup_reclaims_only_live_project_planning_processes() -> None:
 		baseline_runner._cleanup_htn_evaluation_resources()
 
 	assert killed == [101, 105]
+
+
+def test_launch_detached_controller_spawns_new_session_and_writes_state(
+	tmp_path: Path,
+) -> None:
+	process = SimpleNamespace(pid=43210)
+	with patch.object(
+		baseline_runner.subprocess,
+		"Popen",
+		return_value=process,
+	) as popen, patch.object(
+		baseline_runner,
+		"_timestamp",
+		return_value="20260420_200000",
+	):
+		state = baseline_runner._launch_detached_controller(
+			run_dir=tmp_path,
+			all_tracks=True,
+			domain=None,
+			query_ids=("query_1", "query_2"),
+			evaluation_mode=PLANNER_OR_RACE_MODE,
+			planner_id=None,
+		)
+
+	assert state["status"] == "launched"
+	assert state["pid"] == 43210
+	assert Path(state["log_file"]).name == "controller_20260420_200000.out"
+	assert (tmp_path / "controller.pid").read_text().strip() == "43210"
+	written_state = json.loads((tmp_path / "controller_state.json").read_text())
+	assert written_state["pid"] == 43210
+	assert written_state["all_tracks"] is True
+	assert written_state["query_ids"] == ["query_1", "query_2"]
+	popen.assert_called_once()
+	assert popen.call_args.kwargs["start_new_session"] is True
+	assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
+	command = popen.call_args.args[0]
+	assert command[:3] == [sys.executable, "-u", str((PROJECT_ROOT / "tests" / "run_official_problem_root_baseline.py").resolve())]
+	assert "--all-tracks" in command
+
+
+def test_launch_detached_controller_reuses_existing_live_controller(
+	tmp_path: Path,
+) -> None:
+	(tmp_path / "controller_state.json").write_text(
+		json.dumps(
+			{
+				"pid": 55555,
+				"log_file": str(tmp_path / "existing.out"),
+				"run_dir": str(tmp_path),
+			},
+			indent=2,
+		),
+	)
+	with patch.object(
+		baseline_runner,
+		"_pid_is_alive",
+		return_value=True,
+	), patch.object(
+		baseline_runner.subprocess,
+		"Popen",
+	) as popen:
+		state = baseline_runner._launch_detached_controller(
+			run_dir=tmp_path,
+			all_tracks=True,
+			domain=None,
+			query_ids=(),
+			evaluation_mode=PLANNER_OR_RACE_MODE,
+			planner_id=None,
+		)
+
+	assert state["status"] == "already_running"
+	assert state["pid"] == 55555
+	popen.assert_not_called()
 
 
 def test_sequential_full_baseline_cleans_resources_between_domains(

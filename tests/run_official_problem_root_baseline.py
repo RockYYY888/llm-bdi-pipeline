@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import json
 import os
@@ -23,6 +24,181 @@ DOMAIN_KEYS = ("blocksworld", "marsrover", "satellite", "transport")
 
 def _timestamp() -> str:
 	return time.strftime("%Y%m%d_%H%M%S", time.localtime())
+
+
+def _pid_is_alive(pid: int) -> bool:
+	try:
+		os.kill(pid, 0)
+	except OSError:
+		return False
+	return True
+
+
+def _controller_pid_path(run_dir: Path) -> Path:
+	return run_dir / "controller.pid"
+
+
+def _controller_state_path(run_dir: Path) -> Path:
+	return run_dir / "controller_state.json"
+
+
+def _controller_log_path(run_dir: Path) -> Path:
+	return run_dir / f"controller_{_timestamp()}.out"
+
+
+def _build_controller_command(
+	*,
+	run_dir: Path,
+	all_tracks: bool,
+	domain: Optional[str],
+	query_ids: Sequence[str],
+	evaluation_mode: str,
+	planner_id: Optional[str],
+) -> List[str]:
+	command = [
+		sys.executable,
+		"-u",
+		str(Path(__file__).resolve()),
+		"--run-dir",
+		str(run_dir),
+		"--evaluation-mode",
+		evaluation_mode,
+	]
+	if all_tracks:
+		command.append("--all-tracks")
+	if domain:
+		command.extend(["--domain", domain])
+	if planner_id:
+		command.extend(["--planner-id", planner_id])
+	for query_id in query_ids:
+		command.extend(["--query-id", query_id])
+	return command
+
+
+def _write_controller_state(
+	run_dir: Path,
+	*,
+	pid: int,
+	log_file: Path,
+	command: Sequence[str],
+	all_tracks: bool,
+	domain: Optional[str],
+	evaluation_mode: str,
+	planner_id: Optional[str],
+	query_ids: Sequence[str],
+) -> Dict[str, Any]:
+	state = {
+		"pid": pid,
+		"log_file": str(log_file),
+		"command": list(command),
+		"all_tracks": all_tracks,
+		"domain": domain,
+		"evaluation_mode": evaluation_mode,
+		"planner_id": planner_id,
+		"query_ids": list(query_ids),
+		"run_dir": str(run_dir),
+	}
+	_controller_pid_path(run_dir).write_text(f"{pid}\n")
+	_controller_state_path(run_dir).write_text(json.dumps(state, indent=2))
+	return state
+
+
+def _read_controller_state(run_dir: Path) -> Optional[Dict[str, Any]]:
+	state_path = _controller_state_path(run_dir)
+	if not state_path.exists():
+		return None
+	try:
+		return dict(json.loads(state_path.read_text()))
+	except Exception:
+		return None
+
+
+def _register_controller_runtime(run_dir: Path) -> None:
+	pid_path = _controller_pid_path(run_dir)
+	state_path = _controller_state_path(run_dir)
+	pid_path.write_text(f"{os.getpid()}\n")
+
+	def _cleanup_controller_files() -> None:
+		try:
+			if pid_path.exists():
+				pid_path.unlink()
+		except OSError:
+			pass
+		try:
+			state = _read_controller_state(run_dir)
+			if state is not None:
+				state["last_exit_pid"] = os.getpid()
+				state["active"] = False
+				state_path.write_text(json.dumps(state, indent=2))
+		except Exception:
+			pass
+
+	atexit.register(_cleanup_controller_files)
+
+
+def _launch_detached_controller(
+	*,
+	run_dir: Path,
+	all_tracks: bool,
+	domain: Optional[str],
+	query_ids: Sequence[str],
+	evaluation_mode: str,
+	planner_id: Optional[str],
+) -> Dict[str, Any]:
+	run_dir.mkdir(parents=True, exist_ok=True)
+	existing_state = _read_controller_state(run_dir)
+	if existing_state is not None:
+		try:
+			existing_pid = int(existing_state.get("pid") or 0)
+		except (TypeError, ValueError):
+			existing_pid = 0
+		if existing_pid > 0 and _pid_is_alive(existing_pid):
+			return {
+				"status": "already_running",
+				**existing_state,
+			}
+
+	command = _build_controller_command(
+		run_dir=run_dir,
+		all_tracks=all_tracks,
+		domain=domain,
+		query_ids=query_ids,
+		evaluation_mode=evaluation_mode,
+		planner_id=planner_id,
+	)
+	log_file = _controller_log_path(run_dir)
+	env = dict(os.environ)
+	required_paths = [str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)]
+	existing_pythonpath = env.get("PYTHONPATH", "")
+	pythonpath_parts = [part for part in existing_pythonpath.split(os.pathsep) if part]
+	for required_path in reversed(required_paths):
+		if required_path not in pythonpath_parts:
+			pythonpath_parts.insert(0, required_path)
+	env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+	with log_file.open("a") as log_handle:
+		process = subprocess.Popen(
+			command,
+			cwd=PROJECT_ROOT,
+			env=env,
+			stdin=subprocess.DEVNULL,
+			stdout=log_handle,
+			stderr=log_handle,
+			start_new_session=True,
+			close_fds=True,
+		)
+	state = _write_controller_state(
+		run_dir,
+		pid=process.pid,
+		log_file=log_file,
+		command=command,
+		all_tracks=all_tracks,
+		domain=domain,
+		evaluation_mode=evaluation_mode,
+		planner_id=planner_id,
+		query_ids=query_ids,
+	)
+	state["status"] = "launched"
+	return state
 
 
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
@@ -421,6 +597,7 @@ def main() -> int:
 	)
 	parser.add_argument("--planner-id")
 	parser.add_argument("--all-tracks", action="store_true")
+	parser.add_argument("--launch-detached", action="store_true")
 	args = parser.parse_args()
 	global _RUN_EVALUATION_MODE, _RUN_PLANNER_ID, _RUN_QUERY_IDS
 	_RUN_QUERY_IDS = list(args.query_id or [])
@@ -430,8 +607,30 @@ def main() -> int:
 		evaluation_mode=_RUN_EVALUATION_MODE,
 	)
 
+	if args.launch_detached:
+		if args.domain:
+			if not args.run_dir:
+				raise SystemExit("--run-dir is required when --domain is set")
+			detached_run_dir = Path(args.run_dir).resolve()
+		elif args.all_tracks:
+			detached_run_dir = Path(args.run_dir).resolve() if args.run_dir else (RUNS_ROOT / _timestamp())
+		else:
+			detached_run_dir = Path(args.run_dir).resolve() if args.run_dir else (RUNS_ROOT / _timestamp())
+		state = _launch_detached_controller(
+			run_dir=detached_run_dir,
+			all_tracks=bool(args.all_tracks),
+			domain=args.domain,
+			query_ids=tuple(_RUN_QUERY_IDS),
+			evaluation_mode=_RUN_EVALUATION_MODE,
+			planner_id=_RUN_PLANNER_ID,
+		)
+		print(json.dumps(state, indent=2))
+		return 0
+
 	if args.all_tracks:
 		root_run_dir = Path(args.run_dir).resolve() if args.run_dir else None
+		if root_run_dir is not None:
+			_register_controller_runtime(root_run_dir)
 		return _run_all_tracks(run_dir=root_run_dir)
 
 	if args.domain:
@@ -439,9 +638,11 @@ def main() -> int:
 			raise SystemExit("--run-dir is required when --domain is set")
 		run_dir = Path(args.run_dir).resolve()
 		run_dir.mkdir(parents=True, exist_ok=True)
+		_register_controller_runtime(run_dir)
 		return _run_single_domain(args.domain, run_dir)
 
 	run_dir = Path(args.run_dir).resolve() if args.run_dir else (RUNS_ROOT / _timestamp())
+	_register_controller_runtime(run_dir)
 	track_id = planner_track_id(
 		evaluation_mode=_RUN_EVALUATION_MODE,
 		planner_id=_RUN_PLANNER_ID,
