@@ -573,6 +573,104 @@ def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries
 	assert [row["query_id"] for row in problem_rows] == ["query_01", "query_02"]
 
 
+def test_run_official_problem_root_baseline_for_domain_preserves_unselected_existing_query_rows(
+	tmp_path: Path,
+) -> None:
+	output_root = tmp_path / "planner_or_race" / "transport"
+	output_root.mkdir(parents=True, exist_ok=True)
+	(output_root / "problem_results.json").write_text(
+		json.dumps(
+			[
+				{
+					"domain_key": "transport",
+					"query_id": "query_01",
+					"problem_file": "pfile01.hddl",
+					"instruction": "q1",
+					"evaluation_mode": PLANNER_OR_RACE_MODE,
+					"requested_planner_id": None,
+					"track_id": PLANNER_OR_RACE_MODE,
+					"ipc_verified_success": True,
+					"outcome_bucket": "hierarchical_plan_verified",
+					"log_dir": "/tmp/query-01",
+					"execution_time_seconds": 10.0,
+					"plan_solve_time_seconds": 8.0,
+					"plan_verification_time_seconds": 2.0,
+					"representation_build_seconds": 0.5,
+					"solver_race_wallclock_seconds": 9.0,
+					"plan_solve_status": "success",
+					"plan_verification_status": "success",
+					"selected_solver_id": "sat",
+					"selected_backend_name": "lifted_panda_sat",
+					"selected_representation_id": "linearized_total_order",
+				},
+			],
+			indent=2,
+		),
+	)
+	(output_root / "domain_summary.json").write_text(
+		json.dumps({"domain_gate_preflight": {"success": True}}, indent=2),
+	)
+
+	load_cases = Mock(
+		return_value={
+			"query_01": {"problem_file": "pfile01.hddl", "instruction": "q1"},
+			"query_10": {"problem_file": "pfile10.hddl", "instruction": "q10"},
+		},
+	)
+	run_case = Mock(
+		return_value={
+			"query_id": "query_10",
+			"case": {"problem_file": "pfile10.hddl", "instruction": "q10"},
+			"log_dir": Path("/tmp/query-10"),
+			"success": True,
+			"outcome_bucket": "hierarchical_plan_verified",
+			"execution": {
+				"execution_time_seconds": 12.5,
+				"timings": {
+					"plan_solve": {
+						"total_seconds": 10.0,
+						"metadata": {
+							"representation_build_seconds": 1.25,
+							"race_wallclock_seconds": 11.0,
+						},
+					},
+					"plan_verification": {
+						"total_seconds": 2.0,
+						"metadata": {"race_wallclock_seconds": 11.0},
+					},
+				},
+			},
+			"plan_solve": {"summary": {"status": "success"}},
+			"plan_verification": {
+				"summary": {"status": "success"},
+				"artifacts": {
+					"selected_solver_id": "sat",
+					"selected_backend_name": "lifted_panda_sat",
+					"selected_representation_id": "linearized_total_order",
+				},
+			},
+		},
+	)
+
+	original_load = baseline_support.load_domain_query_cases
+	original_run_case = baseline_support.run_domain_problem_root_case
+	try:
+		baseline_support.load_domain_query_cases = load_cases
+		baseline_support.run_domain_problem_root_case = run_case
+		summary = baseline_support.run_official_problem_root_baseline_for_domain(
+			"transport",
+			query_ids=("query_10",),
+			output_root=output_root,
+		)
+	finally:
+		baseline_support.load_domain_query_cases = original_load
+		baseline_support.run_domain_problem_root_case = original_run_case
+
+	assert summary["attempted_problem_count"] == 2
+	problem_rows = json.loads((output_root / "problem_results.json").read_text())
+	assert [row["query_id"] for row in problem_rows] == ["query_01", "query_10"]
+
+
 def test_run_official_problem_root_baseline_for_domain_persists_partial_query_checkpoint_before_failure(
 	tmp_path: Path,
 ) -> None:

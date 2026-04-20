@@ -40,8 +40,6 @@ from tests.support.offline_domain_gate_support import run_official_domain_gate_p
 
 def _load_existing_problem_rows(
 	output_root: Path,
-	*,
-	selected_query_ids: Sequence[str],
 ) -> Dict[str, Dict[str, Any]]:
 	problem_results_path = output_root / "problem_results.json"
 	if not problem_results_path.exists():
@@ -52,13 +50,12 @@ def _load_existing_problem_rows(
 		return {}
 	if not isinstance(rows, list):
 		return {}
-	selected = set(selected_query_ids)
 	row_map: Dict[str, Dict[str, Any]] = {}
 	for row in rows:
 		if not isinstance(row, dict):
 			continue
 		query_id = str(row.get("query_id") or "").strip()
-		if not query_id or query_id not in selected:
+		if not query_id:
 			continue
 		row_map[query_id] = dict(row)
 	return row_map
@@ -187,10 +184,7 @@ def run_official_problem_root_baseline_for_domain(
 			/ domain_key
 		).resolve()
 	)
-	existing_problem_rows = _load_existing_problem_rows(
-		output_root,
-		selected_query_ids=selected_query_ids,
-	)
+	existing_problem_rows = _load_existing_problem_rows(output_root)
 	domain_gate_preflight = _load_domain_gate_preflight_from_existing_summary(output_root)
 	if domain_gate_preflight is None:
 		domain_gate_report = run_official_domain_gate_preflight(domain_key)
@@ -206,8 +200,7 @@ def run_official_problem_root_baseline_for_domain(
 	def ordered_problem_rows() -> list[Dict[str, Any]]:
 		return [
 			dict(existing_problem_rows[query_id])
-			for query_id in selected_query_ids
-			if query_id in existing_problem_rows
+			for query_id in sorted(existing_problem_rows, key=query_id_sort_key)
 		]
 
 	for query_id in selected_query_ids:
