@@ -15,13 +15,18 @@ if str(SRC_ROOT) not in sys.path:
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary, HTNTask
 from offline_method_generation.artifacts import DomainLibraryArtifact
 from online_query_solution.artifacts import DFACompilationResult, GroundedSubgoal
-from online_query_solution.agentspeak import AgentSpeakRenderer
+from online_query_solution.agentspeak import (
+	AgentSpeakRenderer,
+	build_agentspeak_transition_specs,
+)
 from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
+from online_query_solution.goal_grounding.grounding_map import GroundingMap
 from online_query_solution.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from online_query_solution.jason_runtime.runner import JasonRunner, JasonValidationResult
 from online_query_solution.official_verification import resolve_verification_domain_file
 from online_query_solution.orchestrator import OnlineQuerySolutionOrchestrator
 from online_query_solution.temporal_compilation import dfa_builder
+from online_query_solution.temporal_compilation import ltlf_to_dfa as ltlf_to_dfa_module
 from pipeline.artifacts import TemporalGroundingResult
 from utils.hddl_parser import HDDLParser
 from verification.official_plan_verifier import IPCPrimitivePlanVerificationResult
@@ -566,6 +571,137 @@ def test_agentspeak_renderer_emits_subgoal_runtime_without_query_step() -> None:
 	assert "query_step" not in asl
 	assert "subgoal_cursor(1)." not in asl
 	assert 'dfa_edge_label(dfa_t1, "subgoal_1").' in asl
+
+
+def test_build_agentspeak_transition_specs_materialises_guard_groups() -> None:
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("task_a", "stack", ["b", "a"])
+	grounding_map.add_atom("task_b", "do_put_on", ["b", "a"])
+
+	specs = build_agentspeak_transition_specs(
+		dfa_result={
+			"guarded_transitions": [
+				{
+					"source_state": "1",
+					"target_state": "2",
+					"guards": ["0X"],
+					"raw_label": "guard_group_9",
+				},
+			],
+			"free_variables": ["task_a", "task_b"],
+			"alphabet": ["task_a", "task_b"],
+			"initial_state": "1",
+			"accepting_states": ["2"],
+		},
+		grounding_map=grounding_map,
+	)
+
+	assert [spec["task_event_symbol"] for spec in specs] == ["task_b", None]
+	assert specs[0]["task_name"] == "do_put_on"
+	assert specs[0]["task_args"] == ["b", "a"]
+	assert specs[1]["is_epsilon_transition"] is True
+	assert all(spec["raw_label"] == "guard_group_9" for spec in specs)
+
+
+def test_build_agentspeak_transition_specs_supports_boolean_raw_labels() -> None:
+	grounding_map = GroundingMap()
+	grounding_map.add_atom("task_a", "stack", ["b", "a"])
+	grounding_map.add_atom("task_b", "do_put_on", ["b", "a"])
+
+	specs = build_agentspeak_transition_specs(
+		dfa_result={
+			"dfa_dot": (
+				"digraph MONA_DFA {\n"
+				" node [shape = doublecircle]; 2;\n"
+				" node [shape = circle]; 1;\n"
+				' init [shape = plaintext, label = ""];\n'
+				" init -> 1;\n"
+				' 1 -> 2 [label="(~task_a & task_b)"];\n'
+				"}"
+			),
+			"alphabet": ["task_a", "task_b"],
+		},
+		grounding_map=grounding_map,
+	)
+
+	assert len(specs) == 1
+	assert specs[0]["task_event_symbol"] == "task_b"
+	assert specs[0]["task_name"] == "do_put_on"
+	assert specs[0]["task_args"] == ["b", "a"]
+
+
+def test_ltlf_to_dfa_invokes_mona_with_session_and_memory_limit(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	converter = ltlf_to_dfa_module.LTLfToDFA()
+	monkeypatch.setenv("ONLINE_MONA_MEMORY_LIMIT_MIB", "4321")
+	monkeypatch.setattr(converter, "_render_mona_program", lambda _formula: "ws1s;")
+	monkeypatch.setattr(converter, "_resolve_mona_runtime", lambda: ("mona", {}))
+
+	captured: dict[str, object] = {}
+
+	class FakeProcess:
+		def __init__(self, *args, **kwargs) -> None:
+			captured["args"] = args
+			captured["kwargs"] = kwargs
+			self.pid = 1234
+			self.returncode = 0
+			stdout_handle = kwargs["stdout"]
+			stdout_handle.write("digraph G {}")
+			stdout_handle.flush()
+
+		def communicate(self, timeout=None):
+			captured["timeout"] = timeout
+			return ("", "")
+
+	monkeypatch.setattr(ltlf_to_dfa_module.subprocess, "Popen", FakeProcess)
+
+	result = converter._invoke_mona_directly(object())
+
+	assert result == "digraph G {}"
+	assert captured["timeout"] == converter.MONA_TIMEOUT_SECONDS
+	assert captured["kwargs"]["start_new_session"] is True
+	assert callable(captured["kwargs"]["preexec_fn"])
+
+
+def test_ltlf_to_dfa_kills_mona_process_group_on_timeout(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	converter = ltlf_to_dfa_module.LTLfToDFA()
+	monkeypatch.setattr(converter, "_render_mona_program", lambda _formula: "ws1s;")
+	monkeypatch.setattr(converter, "_resolve_mona_runtime", lambda: ("mona", {}))
+
+	killed: dict[str, object] = {}
+
+	class FakeProcess:
+		def __init__(self, *args, **kwargs) -> None:
+			self.pid = 4321
+			self.returncode = None
+
+		def communicate(self, timeout=None):
+			raise ltlf_to_dfa_module.subprocess.TimeoutExpired("mona", timeout)
+
+		def poll(self):
+			return None
+
+		def kill(self) -> None:
+			killed["kill_called"] = True
+
+		def wait(self, timeout=None) -> None:
+			killed["wait_timeout"] = timeout
+
+	monkeypatch.setattr(ltlf_to_dfa_module.subprocess, "Popen", FakeProcess)
+	monkeypatch.setattr(
+		ltlf_to_dfa_module.os,
+		"killpg",
+		lambda pid, sig: killed.update({"pid": pid, "signal": sig}),
+	)
+
+	result = converter._invoke_mona_directly(object())
+
+	assert result is False
+	assert killed["pid"] == 4321
+	assert killed["signal"] == ltlf_to_dfa_module.signal.SIGKILL
 
 
 def test_online_orchestrator_prefers_original_problem_for_verification() -> None:

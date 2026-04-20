@@ -5,8 +5,9 @@ LTLf to DFA conversion using `ltlf2dfa`.
 import os
 import re
 import shutil
-import sys
+import signal
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +16,11 @@ from ltlf2dfa.parser.ltlf import LTLfParser
 from ltlf2dfa.ltlf2dfa import UNSAT_DOT
 from ltlf2dfa.base import MonaProgram
 from utils.symbol_normalizer import SymbolNormalizer
+
+try:
+	import resource
+except ImportError:  # pragma: no cover - Unix-only safety guard.
+	resource = None  # type: ignore[assignment]
 
 
 class PredicateToProposition:
@@ -127,6 +133,7 @@ class LTLfToDFA:
     """
 
     MONA_TIMEOUT_SECONDS = 300
+    DEFAULT_MONA_MEMORY_LIMIT_MIB = 16384
 
     def __init__(self):
         self.ltlf_parser = LTLfParser()
@@ -201,6 +208,10 @@ class LTLfToDFA:
             ),
             "alphabet": self._extract_alphabet(dfa_dot, reverse_mapping),
             "construction": "generic_ltlf2dfa",
+            "initial_state": parse_metadata.get("initial_state"),
+            "accepting_states": tuple(parse_metadata.get("accepting_states") or ()),
+            "free_variables": tuple(parse_metadata.get("free_variables") or ()),
+            "guarded_transitions": tuple(parse_metadata.get("guarded_transitions") or ()),
         }
 
         return dfa_dot, metadata
@@ -230,12 +241,35 @@ class LTLfToDFA:
         return self._render_mona_graph_as_dot(graph), {
             "num_states": graph["num_states"],
             "num_transitions": graph["num_transitions"],
+            "initial_state": graph["init_state"],
+            "accepting_states": graph["accepting_states"],
+            "free_variables": graph["free_variables"],
+            "guarded_transitions": tuple(
+                {
+                    "source_state": source_state,
+                    "target_state": target_state,
+                    "guards": tuple(guards),
+                    "raw_label": self._render_guard_group_label(
+                        tuple(guards),
+                        tuple(graph["free_variables"]),
+                    ),
+                }
+                for (source_state, target_state), guards in sorted(
+                    graph["grouped_guards"].items(),
+                    key=lambda item: (
+                        self._numeric_state_sort_key(item[0][0]),
+                        self._numeric_state_sort_key(item[0][1]),
+                    ),
+                )
+            ),
         }
 
     def _invoke_mona_directly(self, formula_obj: Any) -> str | bool:
         """Invoke MONA directly so we can strip oversized debug comments and tune timeout safely."""
         mona_program = self._render_mona_program(formula_obj)
         mona_command, mona_env = self._resolve_mona_runtime()
+        mona_memory_limit_mib = self._mona_memory_limit_mib()
+        preexec_fn = self._build_mona_preexec_fn(mona_memory_limit_mib)
 
         with TemporaryDirectory(prefix="ltlf2dfa_mona_") as temp_dir:
             program_path = Path(temp_dir) / "automa.mona"
@@ -243,24 +277,32 @@ class LTLfToDFA:
             program_path.write_text(mona_program, encoding="utf-8")
 
             with stdout_path.open("w", encoding="utf-8") as stdout_handle:
+                process: subprocess.Popen[str] | None = None
+                stderr_output = ""
                 try:
-                    completed = subprocess.run(
+                    process = subprocess.Popen(
                         [mona_command, "-q", "-u", "-w", str(program_path)],
                         stdout=stdout_handle,
                         stderr=subprocess.PIPE,
                         text=True,
-                        timeout=self.MONA_TIMEOUT_SECONDS,
-                        check=False,
                         env=mona_env,
+                        start_new_session=True,
+                        preexec_fn=preexec_fn,
                     )
+                    _, stderr_output = process.communicate(timeout=self.MONA_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
+                    if process is not None and process.poll() is None:
+                        self._kill_mona_process(process)
                     return False
+                finally:
+                    stdout_handle.flush()
 
             stdout_size = stdout_path.stat().st_size if stdout_path.exists() else 0
-            stderr = str(completed.stderr or "").strip()
-            if completed.returncode != 0:
+            stderr = str(stderr_output or "").strip()
+            returncode = process.returncode if process is not None else None
+            if returncode != 0:
                 error_parts = [
-                    f"MONA exited with code {completed.returncode}.",
+                    f"MONA exited with code {returncode}.",
                     f"stdout_size={stdout_size} bytes.",
                 ]
                 if stderr:
@@ -269,6 +311,52 @@ class LTLfToDFA:
             if not stdout_size and stderr:
                 raise RuntimeError(stderr[:500])
             return stdout_path.read_text(encoding="utf-8").strip()
+
+    @classmethod
+    def _mona_memory_limit_mib(cls) -> int:
+        raw_value = str(
+            os.getenv("ONLINE_MONA_MEMORY_LIMIT_MIB")
+            or os.getenv("MONA_MEMORY_LIMIT_MIB")
+            or cls.DEFAULT_MONA_MEMORY_LIMIT_MIB
+        ).strip()
+        try:
+            return max(int(raw_value), 1)
+        except ValueError:
+            return cls.DEFAULT_MONA_MEMORY_LIMIT_MIB
+
+    @staticmethod
+    def _build_mona_preexec_fn(memory_limit_mib: int):
+        if resource is None:
+            return None
+
+        memory_limit_bytes = max(int(memory_limit_mib), 1) * 1024 * 1024
+
+        def _apply_limits() -> None:
+            for limit_name in ("RLIMIT_AS", "RLIMIT_DATA", "RLIMIT_RSS"):
+                limit_key = getattr(resource, limit_name, None)
+                if limit_key is None:
+                    continue
+                try:
+                    resource.setrlimit(
+                        limit_key,
+                        (memory_limit_bytes, memory_limit_bytes),
+                    )
+                    break
+                except (OSError, ValueError):
+                    continue
+
+        return _apply_limits
+
+    @staticmethod
+    def _kill_mona_process(process: subprocess.Popen[str]) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, OSError, ProcessLookupError):
+            process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
     @staticmethod
     def _resolve_mona_runtime() -> Tuple[str, Dict[str, str]]:

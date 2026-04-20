@@ -38,6 +38,14 @@ class DFABuilder:
 				metadata.get("num_transitions") or self._count_transitions(dfa_dot)
 			),
 			"alphabet": list(metadata.get("alphabet") or ()),
+			"initial_state": metadata.get("initial_state"),
+			"accepting_states": list(metadata.get("accepting_states") or ()),
+			"free_variables": list(metadata.get("free_variables") or ()),
+			"guarded_transitions": [
+				dict(item)
+				for item in (metadata.get("guarded_transitions") or ())
+				if isinstance(item, dict)
+			],
 			"timing_profile": {
 				"convert_seconds": convert_seconds,
 				"total_seconds": time.perf_counter() - total_start,
