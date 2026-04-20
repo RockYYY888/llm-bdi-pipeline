@@ -864,6 +864,10 @@ def test_launch_detached_controller_spawns_new_session_and_writes_state(
 	popen.assert_called_once()
 	assert popen.call_args.kwargs["start_new_session"] is True
 	assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
+	assert popen.call_args.kwargs["env"]["HTN_EVAL_IGNORE_SIGTERM"] == "1"
+	assert popen.call_args.kwargs["env"]["HTN_EVAL_CONTROLLER_LOG_FILE"].endswith(
+		"controller_20260420_200000.out",
+	)
 	command = popen.call_args.args[0]
 	assert command[:3] == [sys.executable, "-u", str((PROJECT_ROOT / "tests" / "run_official_problem_root_baseline.py").resolve())]
 	assert "--all-tracks" in command

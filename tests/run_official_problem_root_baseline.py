@@ -117,6 +117,7 @@ def _register_controller_runtime(run_dir: Path) -> None:
 	pid_path = _controller_pid_path(run_dir)
 	state_path = _controller_state_path(run_dir)
 	pid_path.write_text(f"{os.getpid()}\n")
+	log_file_env = os.environ.get("HTN_EVAL_CONTROLLER_LOG_FILE")
 
 	def _cleanup_controller_files() -> None:
 		try:
@@ -133,7 +134,32 @@ def _register_controller_runtime(run_dir: Path) -> None:
 		except Exception:
 			pass
 
+	def _handle_sigterm(_signum: int, _frame: Any) -> None:
+		try:
+			state = _read_controller_state(run_dir) or {}
+			state["last_signal"] = "SIGTERM"
+			state["sigterm_ignored_count"] = int(state.get("sigterm_ignored_count") or 0) + 1
+			state["active"] = True
+			state_path.write_text(json.dumps(state, indent=2))
+		except Exception:
+			pass
+		message = (
+			"[CONTROLLER] Ignored SIGTERM to keep detached HTN sweep alive."
+			f" count={json.loads(state_path.read_text()).get('sigterm_ignored_count', 1) if state_path.exists() else 1}\n"
+		)
+		try:
+			if log_file_env:
+				with Path(log_file_env).open("a") as handle:
+					handle.write(message)
+			else:
+				sys.stderr.write(message)
+				sys.stderr.flush()
+		except Exception:
+			pass
+
 	atexit.register(_cleanup_controller_files)
+	if os.environ.get("HTN_EVAL_IGNORE_SIGTERM") == "1":
+		signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def _launch_detached_controller(
@@ -175,6 +201,8 @@ def _launch_detached_controller(
 		if required_path not in pythonpath_parts:
 			pythonpath_parts.insert(0, required_path)
 	env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+	env["HTN_EVAL_IGNORE_SIGTERM"] = "1"
+	env["HTN_EVAL_CONTROLLER_LOG_FILE"] = str(log_file)
 	with log_file.open("a") as log_handle:
 		process = subprocess.Popen(
 			command,
