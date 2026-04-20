@@ -349,6 +349,75 @@ def test_goal_grounding_generate_does_not_retry_after_invalid_response_extractio
 	assert call_count["create"] == 1
 
 
+def test_goal_grounding_retries_timeout_before_first_chunk_and_then_succeeds() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+	generator.client = object()
+	call_count = {"create": 0}
+
+	def fake_create(self, messages, **_kwargs):
+		del messages
+		call_count["create"] += 1
+		if call_count["create"] < 3:
+			raise TimeoutError(
+				"Goal-grounding LLM request exceeded the configured wall-clock timeout "
+				"before a response chunk was created.",
+			)
+		return '{"ltlf_formula":"F(do_put_on(b1, b2))"}'
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(NLToLTLfGenerator, "_create_chat_completion", fake_create)
+	monkeypatch.setattr(NLToLTLfGenerator, "_extract_response_text", lambda self, response: str(response))
+	try:
+		result, _, _ = generator.generate(
+			"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
+			method_library=_sample_method_library(),
+			typed_objects={"b1": "block", "b2": "block"},
+			task_type_map={"do_put_on": ("block", "block")},
+			type_parent_map={"block": "object", "object": None},
+		)
+	finally:
+		monkeypatch.undo()
+
+	assert result.ltlf_formula == "F(do_put_on(b1, b2))"
+	assert call_count["create"] == 3
+	assert generator.last_generation_metadata["attempt_count"] == 3
+	assert len(generator.last_generation_metadata["attempt_errors"]) == 2
+
+
+def test_goal_grounding_stops_after_three_transport_retries() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+	generator.client = object()
+	call_count = {"create": 0}
+
+	def fake_create(self, messages, **_kwargs):
+		del messages
+		call_count["create"] += 1
+		raise TimeoutError(
+			"Goal-grounding LLM request exceeded the configured wall-clock timeout "
+			"before a response chunk was created.",
+		)
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(NLToLTLfGenerator, "_create_chat_completion", fake_create)
+	try:
+		with pytest.raises(TimeoutError, match="before a response chunk was created"):
+			generator.generate(
+				"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
+				method_library=_sample_method_library(),
+				typed_objects={"b1": "block", "b2": "block"},
+				task_type_map={"do_put_on": ("block", "block")},
+				type_parent_map={"block": "object", "object": None},
+			)
+	finally:
+		monkeypatch.undo()
+
+	assert call_count["create"] == 4
+	assert generator.last_generation_metadata["attempt_count"] == 4
+	assert len(generator.last_generation_metadata["attempt_errors"]) == 4
+
+
 def test_dfa_builder_wraps_converter_output(monkeypatch: pytest.MonkeyPatch) -> None:
 	class FakeConverter:
 		def convert(self, formula: str):

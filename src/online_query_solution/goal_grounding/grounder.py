@@ -28,6 +28,25 @@ MINIMAX_TRANSPORT_OVERHEAD_TOKENS = 2_048
 MINIMAX_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 MINIMAX_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
 ONLINE_LTLF_GENERATION_SESSION_ID = "online-ltlf-generation"
+GOAL_GROUNDING_MAX_TRANSPORT_RETRIES = 3
+GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
+	"exceeded the configured wall-clock timeout before a response chunk was created",
+	"exceeded the configured first-chunk deadline before any streaming content arrived",
+	"llm response did not include any choices",
+	"llm response choice did not include a message payload",
+)
+GOAL_GROUNDING_RETRYABLE_ERROR_CLASS_NAMES = {
+	"timeouterror",
+	"apitimeouterror",
+	"apiconnectionerror",
+	"readtimeout",
+	"connecttimeout",
+	"pooltimeout",
+	"readerror",
+	"connecterror",
+	"remoteprotocolerror",
+	"networkerror",
+}
 
 
 class NLToLTLfGenerator:
@@ -124,78 +143,95 @@ class NLToLTLfGenerator:
 		attempt_errors: list[Dict[str, str]] = []
 		response_transport_metadata: Dict[str, Any] = {}
 		result = None
-		attempt_count = 1
-		try:
-			messages = [
-				{"role": "system", "content": last_prompt["system"]},
-				{"role": "user", "content": last_prompt["user"]},
-			]
-			request_profile = self._goal_grounding_request_profile(messages=messages)
-			response = self._create_chat_completion(
-				messages,
-				response_max_tokens=int(current_attempt["response_max_tokens"]),
-				request_timeout=float(current_attempt["request_timeout"]),
-				request_profile=request_profile,
-			)
-			response_text, finish_reason, response_transport_metadata = self._read_response_payload(
-				response,
-				request_timeout=float(current_attempt["request_timeout"]),
-				transport_metadata=self._goal_grounding_transport_metadata(request_profile),
-			)
-			last_finish_reason = finish_reason
-			last_response_text = response_text
-			payload = self._parse_json_blob(response_text)
-			result = self._validate_payload(
-				query_text=query_text,
-				payload=payload,
-				method_library=method_library,
-				typed_objects=typed_objects or {},
-				task_type_map=task_type_map or {},
-				type_parent_map=type_parent_map or {},
-			)
-			self.last_generation_metadata = {
-				"attempt_mode": str(current_attempt["mode"]),
-				"attempt_count": attempt_count,
-				"attempt_errors": attempt_errors,
-				"task_event_count": len(result.subgoals),
-				"formula_atom_count": len(self._extract_formula_atoms(result.ltlf_formula)),
-				"model": self.model,
-				"last_prompt": dict(last_prompt),
-				"last_response": response_text,
-				"last_finish_reason": finish_reason,
-				**response_transport_metadata,
-			}
-			return result, last_prompt, response_text
-		except Exception as exc:
-			response_transport_metadata = dict(
-				getattr(exc, "transport_metadata", None) or response_transport_metadata or {},
-			)
-			transport_finish_reason = str(response_transport_metadata.get("llm_finish_reason") or "").strip()
-			if transport_finish_reason and not last_finish_reason:
-				last_finish_reason = transport_finish_reason
-			last_error = exc
-			attempt_errors.append(
-				{
-					"mode": str(current_attempt["mode"]),
-					"error": str(exc),
-					"finish_reason": last_finish_reason,
-				},
-			)
-			self.last_generation_metadata = {
-				"attempt_mode": str(current_attempt["mode"]),
-				"attempt_count": attempt_count,
-				"attempt_errors": list(attempt_errors),
-				"model": self.model,
-				"last_prompt": dict(last_prompt),
-				"last_response": last_response_text,
-				"last_finish_reason": last_finish_reason,
-				**response_transport_metadata,
-			}
+		attempt_count = 0
+		while True:
+			attempt_count += 1
+			last_response_text = ""
+			last_finish_reason = ""
+			response_transport_metadata = {}
+			try:
+				messages = [
+					{"role": "system", "content": last_prompt["system"]},
+					{"role": "user", "content": last_prompt["user"]},
+				]
+				request_profile = self._goal_grounding_request_profile(messages=messages)
+				response = self._create_chat_completion(
+					messages,
+					response_max_tokens=int(current_attempt["response_max_tokens"]),
+					request_timeout=float(current_attempt["request_timeout"]),
+					request_profile=request_profile,
+				)
+				response_text, finish_reason, response_transport_metadata = (
+					self._read_response_payload(
+						response,
+						request_timeout=float(current_attempt["request_timeout"]),
+						transport_metadata=self._goal_grounding_transport_metadata(request_profile),
+					)
+				)
+				last_finish_reason = finish_reason
+				last_response_text = response_text
+				payload = self._parse_json_blob(response_text)
+				result = self._validate_payload(
+					query_text=query_text,
+					payload=payload,
+					method_library=method_library,
+					typed_objects=typed_objects or {},
+					task_type_map=task_type_map or {},
+					type_parent_map=type_parent_map or {},
+				)
+				self.last_generation_metadata = {
+					"attempt_mode": str(current_attempt["mode"]),
+					"attempt_count": attempt_count,
+					"max_transport_retries": GOAL_GROUNDING_MAX_TRANSPORT_RETRIES,
+					"attempt_errors": attempt_errors,
+					"task_event_count": len(result.subgoals),
+					"formula_atom_count": len(self._extract_formula_atoms(result.ltlf_formula)),
+					"model": self.model,
+					"last_prompt": dict(last_prompt),
+					"last_response": response_text,
+					"last_finish_reason": finish_reason,
+					**response_transport_metadata,
+				}
+				return result, last_prompt, response_text
+			except Exception as exc:
+				response_transport_metadata = dict(
+					getattr(exc, "transport_metadata", None) or response_transport_metadata or {},
+				)
+				transport_finish_reason = str(
+					response_transport_metadata.get("llm_finish_reason") or "",
+				).strip()
+				if transport_finish_reason and not last_finish_reason:
+					last_finish_reason = transport_finish_reason
+				last_error = exc
+				retryable_error = self._is_retryable_goal_grounding_error(exc)
+				attempt_errors.append(
+					{
+						"mode": str(current_attempt["mode"]),
+						"error": str(exc),
+						"finish_reason": last_finish_reason,
+						"retryable": "true" if retryable_error else "false",
+					},
+				)
+				self.last_generation_metadata = {
+					"attempt_mode": str(current_attempt["mode"]),
+					"attempt_count": attempt_count,
+					"max_transport_retries": GOAL_GROUNDING_MAX_TRANSPORT_RETRIES,
+					"attempt_errors": list(attempt_errors),
+					"model": self.model,
+					"last_prompt": dict(last_prompt),
+					"last_response": last_response_text,
+					"last_finish_reason": last_finish_reason,
+					**response_transport_metadata,
+				}
+				if retryable_error and attempt_count <= GOAL_GROUNDING_MAX_TRANSPORT_RETRIES:
+					continue
+				break
 		if last_error is None:
 			raise RuntimeError("Goal grounding failed without a recorded exception.")
 		self.last_generation_metadata = {
 			"attempt_mode": str(current_attempt["mode"]),
 			"attempt_count": attempt_count,
+			"max_transport_retries": GOAL_GROUNDING_MAX_TRANSPORT_RETRIES,
 			"attempt_errors": attempt_errors,
 			"model": self.model,
 			"last_prompt": dict(last_prompt),
@@ -205,6 +241,17 @@ class NLToLTLfGenerator:
 			**response_transport_metadata,
 		}
 		raise last_error
+
+	@staticmethod
+	def _is_retryable_goal_grounding_error(exc: Exception) -> bool:
+		error_class_name = exc.__class__.__name__.strip().lower()
+		if error_class_name in GOAL_GROUNDING_RETRYABLE_ERROR_CLASS_NAMES:
+			return True
+		error_message = str(exc or "").strip().lower()
+		return any(
+			fragment in error_message
+			for fragment in GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS
+		)
 
 	def _build_prompt_attempts(
 		self,
