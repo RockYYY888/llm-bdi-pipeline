@@ -232,6 +232,9 @@ def test_goal_grounding_prompt_requires_explicit_order_preservation() -> None:
 	assert "Avoid deeply nested eventuality chains" in system_prompt
 	assert "X F(do_put_on(b1, b4))" in system_prompt
 	assert "do_put_on__e1(b8, b9)" in system_prompt
+	assert "final JSON answer must appear in the completion response content itself" in system_prompt
+	assert "MUST NOT leave the final answer only in hidden reasoning content" in system_prompt
+	assert "MUST NOT return an empty completion response" in system_prompt
 
 
 def test_goal_grounding_requires_llm_for_benchmark_style_query() -> None:
