@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from planning.process_capture import (
 from planning.representations import PlanningRepresentation
 from htn_evaluation.pipeline import HTNEvaluationPipeline
 from htn_evaluation.problem_root_evaluator import HTNProblemRootEvaluator
+import htn_evaluation.problem_root_evaluator as problem_root_evaluator
 import htn_evaluation.problem_root_runtime as problem_root_runtime
 from htn_evaluation.result_tables import (
 	HTN_PLANNER_IDS,
@@ -957,6 +959,138 @@ def test_planning_tasks_can_filter_to_one_requested_planner() -> None:
 
 	assert tasks
 	assert all(task.backend_name == "lifted_panda_sat" for task in tasks)
+
+
+def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressure(
+	tmp_path: Path,
+) -> None:
+	pipeline = HTNEvaluationPipeline(
+		domain_file=DOMAIN_FILES["transport"],
+		problem_file=str(
+			(PROJECT_ROOT / "src" / "domains" / "transport" / "problems" / "pfile01.hddl").resolve()
+		),
+	)
+	pipeline.output_dir = str(tmp_path / "official-eval")
+	evaluator = HTNProblemRootEvaluator(pipeline.context)
+
+	def make_task(task_id: str, representation_id: str) -> SimpleNamespace:
+		representation = SimpleNamespace(
+			representation_id=representation_id,
+			to_dict=lambda: {"representation_id": representation_id},
+		)
+		return SimpleNamespace(
+			task_id=task_id,
+			backend_name="lifted_panda_sat",
+			representation=representation,
+			to_dict=lambda: {
+				"task_id": task_id,
+				"backend_name": "lifted_panda_sat",
+				"representation": {"representation_id": representation_id},
+			},
+		)
+
+	tasks = (
+		make_task("task_a", "rep_a"),
+		make_task("task_b", "rep_b"),
+		make_task("task_c", "rep_c"),
+	)
+	evaluator.planning_tasks = Mock(return_value=tasks)  # type: ignore[method-assign]
+	pipeline.context._official_problem_root_planning_timeout_seconds = Mock(return_value=60.0)  # type: ignore[method-assign]
+
+	class FakeQueue:
+		def __init__(self) -> None:
+			self.items: list[dict[str, object]] = []
+
+		def put(self, item: dict[str, object]) -> None:
+			self.items.append(item)
+
+		def get(self, timeout: float | None = None) -> dict[str, object]:
+			if not self.items:
+				raise queue.Empty
+			return self.items.pop(0)
+
+		def close(self) -> None:
+			return None
+
+		def join_thread(self) -> None:
+			return None
+
+	class FakeProcess:
+		active_count = 0
+		max_active_count = 0
+
+		def __init__(self, *, kwargs: dict[str, object]) -> None:
+			self.kwargs = kwargs
+			self.pid = id(self)
+			self._alive = False
+
+		def start(self) -> None:
+			FakeProcess.active_count += 1
+			FakeProcess.max_active_count = max(
+				FakeProcess.max_active_count,
+				FakeProcess.active_count,
+			)
+			self._alive = True
+			task_payload = dict(self.kwargs["task_payload"])  # type: ignore[index]
+			output_dir = str(self.kwargs["output_dir"])  # type: ignore[index]
+			self.kwargs["result_queue"].put(  # type: ignore[index]
+				{
+					"message_type": "backend_attempt",
+					"backend_name": task_payload["backend_name"],
+					"task_id": task_payload["task_id"],
+					"representation_id": task_payload["representation"]["representation_id"],
+					"output_dir": output_dir,
+					"plan_solve_data": {
+						"summary": {"status": "failed"},
+						"artifacts": {},
+					},
+					"plan_verification_data": {
+						"summary": {"status": "failed"},
+						"artifacts": {},
+					},
+					"plan_solve_seconds": 1.0,
+					"plan_verification_seconds": 0.0,
+					"total_seconds": 1.0,
+					"success": False,
+					"selected_bucket": "no_plan_from_solver",
+					"stdout": "",
+					"stderr": "",
+				},
+			)
+
+		def join(self, timeout: float | None = None) -> None:
+			if self._alive:
+				self._alive = False
+				FakeProcess.active_count -= 1
+
+		def is_alive(self) -> bool:
+			return self._alive
+
+		def terminate(self) -> None:
+			self.join()
+
+		def kill(self) -> None:
+			self.join()
+
+	class FakeContext:
+		def Queue(self) -> FakeQueue:
+			return FakeQueue()
+
+		def Process(self, target=None, kwargs=None):  # type: ignore[no-untyped-def]
+			return FakeProcess(kwargs=kwargs or {})
+
+	with patch.object(
+		problem_root_evaluator.multiprocessing,
+		"get_context",
+		return_value=FakeContext(),
+	):
+		result = evaluator.run_backend_evaluation(
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id="lifted_panda_sat",
+		)
+
+	assert len(result["attempts"]) == 3
+	assert FakeProcess.max_active_count == 1
 
 
 def test_run_subprocess_to_files_spools_large_outputs_without_returning_full_payload(

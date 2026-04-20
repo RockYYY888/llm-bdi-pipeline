@@ -15,7 +15,7 @@ import queue
 import signal
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence
 
 from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
 from planning.official_benchmark import OFFICIAL_BACKEND_SELECTION_RULE
@@ -81,25 +81,76 @@ class HTNProblemRootEvaluator:
 		backend_root = Path(self.context.output_dir) / "backend_race"
 		backend_root.mkdir(parents=True, exist_ok=True)
 		context = multiprocessing.get_context("spawn")
-		result_queue = context.Queue()
-		processes: Dict[str, multiprocessing.Process] = {}
 		attempts: List[Dict[str, Any]] = []
 		race_start = time.perf_counter()
 		selected_attempt: Optional[Dict[str, Any]] = None
-		pending_tasks: Set[str] = set()
-		planning_task_by_id = {
-			task.task_id: task
-			for task in planning_tasks
-		}
 		stop_on_success = mode == PLANNER_OR_RACE_MODE
 
-		def launch_task(planning_task: PlanningBackendTask) -> None:
-			remaining_timeout = max(
-				planning_timeout_seconds - (time.perf_counter() - race_start),
-				1.0,
-			)
+		def incomplete_attempt(
+			planning_task: PlanningBackendTask,
+			*,
+			failure_reason: str,
+			total_seconds: float,
+		) -> Dict[str, Any]:
+			return {
+				"message_type": BACKEND_RESULT_MESSAGE,
+				"backend_name": planning_task.backend_name,
+				"task_id": planning_task.task_id,
+				"representation_id": planning_task.representation.representation_id,
+				"output_dir": str((backend_root / planning_task.task_id).resolve()),
+				"plan_solve_data": {
+					"summary": {
+						"backend": planning_task.backend_name,
+						"status": "failed",
+						"planning_mode": "official_problem_root",
+						"failure_bucket": "no_plan_from_solver",
+						"representation_id": planning_task.representation.representation_id,
+					},
+					"artifacts": {
+						"backend": planning_task.backend_name,
+						"status": "failed",
+						"planning_mode": "official_problem_root",
+						"failure_bucket": "no_plan_from_solver",
+						"planning_representation": planning_task.representation.to_dict(),
+						"failure_reason": failure_reason,
+					},
+				},
+				"plan_verification_data": {
+					"summary": {
+						"backend": "pandaPIparser",
+						"status": "failed",
+						"selection_rule": "first_hierarchical_verification_success",
+						"failure_bucket": "no_plan_from_solver",
+					},
+					"artifacts": {
+						"backend": planning_task.backend_name,
+						"status": "failed",
+						"selection_rule": "first_hierarchical_verification_success",
+						"failure_bucket": "no_plan_from_solver",
+						"failure_reason": failure_reason,
+					},
+				},
+				"plan_solve_seconds": None,
+				"plan_verification_seconds": None,
+				"total_seconds": total_seconds,
+				"success": False,
+				"selected_bucket": "no_plan_from_solver",
+				"stdout": "",
+				"stderr": "",
+			}
+
+		def run_single_task(planning_task: PlanningBackendTask) -> Dict[str, Any]:
+			raw_remaining_timeout = planning_timeout_seconds - (time.perf_counter() - race_start)
+			if raw_remaining_timeout <= 0.0:
+				return incomplete_attempt(
+					planning_task,
+					failure_reason="planner_timeout_budget_exhausted_before_backend_launch",
+					total_seconds=planning_timeout_seconds,
+				)
+			remaining_timeout = max(raw_remaining_timeout, 1.0)
 			attempt_output_dir = backend_root / planning_task.task_id
 			attempt_output_dir.mkdir(parents=True, exist_ok=True)
+			result_queue = context.Queue()
 			process = context.Process(
 				target=official_problem_root_planning_task_worker,
 				kwargs={
@@ -111,98 +162,43 @@ class HTNProblemRootEvaluator:
 					"planning_timeout_seconds": remaining_timeout,
 				},
 			)
-			process.start()
-			processes[planning_task.task_id] = process
-			pending_tasks.add(planning_task.task_id)
-
-		try:
-			for planning_task in planning_tasks:
-				launch_task(planning_task)
-
-			deadline = race_start + planning_timeout_seconds + 5.0
-			while pending_tasks:
+			attempt: Optional[Dict[str, Any]] = None
+			try:
+				process.start()
+				deadline = time.perf_counter() + remaining_timeout + 5.0
 				try:
-					wait_seconds = max(min(deadline - time.perf_counter(), 5.0), 0.1)
-					message = result_queue.get(timeout=wait_seconds)
-				except queue.Empty:
-					if time.perf_counter() >= deadline:
-						break
-					if not any(process.is_alive() for process in processes.values()):
-						break
-					continue
-
-				attempt = dict(message)
-				attempts.append(attempt)
-				task_id = str(attempt.get("task_id") or "")
-				pending_tasks.discard(task_id)
-				if stop_on_success and bool(attempt.get("success")):
-					selected_attempt = dict(attempt)
-					break
-		finally:
-			if selected_attempt is not None:
-				for task_id, process in processes.items():
-					if task_id == selected_attempt.get("task_id"):
-						continue
-					self.terminate_backend_process(process)
-			for process in processes.values():
-				process.join(timeout=1.0)
-				if process.is_alive():
-					self.terminate_backend_process(process)
+					while True:
+						try:
+							wait_seconds = max(min(deadline - time.perf_counter(), 5.0), 0.1)
+							message = result_queue.get(timeout=wait_seconds)
+							attempt = dict(message)
+							break
+						except queue.Empty:
+							if time.perf_counter() >= deadline:
+								break
+							if not process.is_alive():
+								break
+				finally:
 					process.join(timeout=1.0)
-			self.close_backend_race_queue(result_queue)
-
-		for task_id in sorted(pending_tasks):
-			planning_task = planning_task_by_id.get(task_id)
-			if planning_task is None:
-				continue
-			attempts.append(
-				{
-					"message_type": BACKEND_RESULT_MESSAGE,
-					"backend_name": planning_task.backend_name,
-					"task_id": planning_task.task_id,
-					"representation_id": planning_task.representation.representation_id,
-					"output_dir": str((backend_root / planning_task.task_id).resolve()),
-					"plan_solve_data": {
-						"summary": {
-							"backend": planning_task.backend_name,
-							"status": "failed",
-							"planning_mode": "official_problem_root",
-							"failure_bucket": "no_plan_from_solver",
-							"representation_id": planning_task.representation.representation_id,
-						},
-						"artifacts": {
-							"backend": planning_task.backend_name,
-							"status": "failed",
-							"planning_mode": "official_problem_root",
-							"failure_bucket": "no_plan_from_solver",
-							"planning_representation": planning_task.representation.to_dict(),
-							"failure_reason": "backend_attempt_incomplete_before_deadline",
-						},
-					},
-					"plan_verification_data": {
-						"summary": {
-							"backend": "pandaPIparser",
-							"status": "failed",
-							"selection_rule": "first_hierarchical_verification_success",
-							"failure_bucket": "no_plan_from_solver",
-						},
-						"artifacts": {
-							"backend": planning_task.backend_name,
-							"status": "failed",
-							"selection_rule": "first_hierarchical_verification_success",
-							"failure_bucket": "no_plan_from_solver",
-							"failure_reason": "backend_attempt_incomplete_before_deadline",
-						},
-					},
-					"plan_solve_seconds": None,
-					"plan_verification_seconds": None,
-					"total_seconds": planning_timeout_seconds,
-					"success": False,
-					"selected_bucket": "no_plan_from_solver",
-					"stdout": "",
-					"stderr": "",
-				},
+					if process.is_alive():
+						self.terminate_backend_process(process)
+						process.join(timeout=1.0)
+			finally:
+				self.close_backend_race_queue(result_queue)
+			if attempt is not None:
+				return attempt
+			return incomplete_attempt(
+				planning_task,
+				failure_reason="backend_attempt_incomplete_before_deadline",
+				total_seconds=planning_timeout_seconds,
 			)
+
+		for planning_task in planning_tasks:
+			attempt = run_single_task(planning_task)
+			attempts.append(attempt)
+			if stop_on_success and bool(attempt.get("success")):
+				selected_attempt = dict(attempt)
+				break
 
 		if selected_attempt is None:
 			selected_attempt = self.select_backend_attempt(attempts)
@@ -249,7 +245,7 @@ class HTNProblemRootEvaluator:
 			)
 			for task in planning_tasks
 		]
-		print(f"• Running parallel official planning tasks: {', '.join(task_labels)}")
+		print(f"• Running official planning tasks sequentially: {', '.join(task_labels)}")
 		attempts = list(race_result.get("attempts") or ())
 		selected_attempt = dict(race_result.get("selected_attempt") or {})
 		selected_output_dir = Path(str(selected_attempt.get("output_dir") or self.context.output_dir)).resolve()
@@ -377,7 +373,7 @@ class HTNProblemRootEvaluator:
 			error=(
 				None
 				if plan_solve_status_label == "Success"
-				else "parallel backend race failed"
+				else "official backend evaluation failed"
 			),
 			metadata=plan_solve_summary,
 		)
@@ -421,7 +417,7 @@ class HTNProblemRootEvaluator:
 			error=(
 				None
 				if plan_verification_status_label == "Success"
-				else "all parallel official backends failed verification"
+				else "all official planning tasks failed verification"
 			),
 			metadata=plan_verification_summary,
 		)
