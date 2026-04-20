@@ -2234,167 +2234,23 @@ class DomainCompletePipeline:
             except Exception:
                 process.kill()
 
+    def _htn_problem_root_evaluator(self):
+        evaluator = getattr(self, "_htn_problem_root_evaluator_instance", None)
+        if evaluator is not None:
+            return evaluator
+        from htn_evaluation.problem_root_evaluator import HTNProblemRootEvaluator
+
+        evaluator = HTNProblemRootEvaluator(self)
+        self._htn_problem_root_evaluator_instance = evaluator
+        return evaluator
+
     def _execute_official_problem_root_parallel_solver_race(
         self,
         method_library: Optional[HTNMethodLibrary] = None,
     ) -> Dict[str, Any]:
-        print("\n[PLAN SOLVE]")
-        print("-" * 80)
-        race_result = self._run_official_problem_root_backend_race()
-        planning_tasks = list(race_result.get("planning_tasks") or ())
-        task_labels = [
-            (
-                f"{task.get('backend_name')}@"
-                f"{((task.get('representation') or {}).get('representation_id') or 'unknown')}"
-            )
-            for task in planning_tasks
-        ]
-        print(f"• Running parallel official planning tasks: {', '.join(task_labels)}")
-        attempts = list(race_result.get("attempts") or ())
-        selected_attempt = dict(race_result.get("selected_attempt") or {})
-        selected_backend = str(selected_attempt.get("backend_name") or "unknown")
-        selected_representation = str(selected_attempt.get("representation_id") or "unknown")
-        selected_output_dir = Path(str(selected_attempt.get("output_dir") or self.output_dir)).resolve()
-        self._merge_official_backend_output_dir(selected_output_dir)
-
-        plan_solve_data = copy.deepcopy(selected_attempt.get("plan_solve_data") or {})
-        plan_verification_data = copy.deepcopy(selected_attempt.get("plan_verification_data") or {})
-        plan_solve_data = self._rewrite_artifact_root_paths(
-            plan_solve_data,
-            selected_output_dir,
-            Path(self.output_dir).resolve(),
+        return self._htn_problem_root_evaluator().execute_parallel_solver_race(
+            method_library=method_library,
         )
-        plan_verification_data = self._rewrite_artifact_root_paths(
-            plan_verification_data,
-            selected_output_dir,
-            Path(self.output_dir).resolve(),
-        )
-
-        attempt_summaries = [
-            {
-                "backend_name": str(attempt.get("backend_name") or "unknown"),
-                "task_id": str(attempt.get("task_id") or "unknown"),
-                "representation_id": str(attempt.get("representation_id") or "unknown"),
-                "success": bool(attempt.get("success")),
-                "selected_bucket": attempt.get("selected_bucket"),
-                "plan_solve_status": ((attempt.get("plan_solve_data") or {}).get("summary") or {}).get("status"),
-                "plan_verification_status": ((attempt.get("plan_verification_data") or {}).get("summary") or {}).get("status"),
-                "total_seconds": attempt.get("total_seconds"),
-                "stdout": attempt.get("stdout"),
-                "stderr": attempt.get("stderr"),
-            }
-            for attempt in attempts
-        ]
-
-        plan_solve_summary = dict((plan_solve_data.get("summary") or {}))
-        plan_solve_artifacts = dict((plan_solve_data.get("artifacts") or {}))
-        plan_verification_summary = dict((plan_verification_data.get("summary") or {}))
-        plan_verification_artifacts = dict((plan_verification_data.get("artifacts") or {}))
-        plan_solve_summary.update(
-            {
-                "solver_race_strategy": OFFICIAL_PARALLEL_SELECTION_RULE,
-                "selected_backend": selected_backend,
-                "selected_representation": selected_representation,
-                "backend_attempt_count": len(attempt_summaries),
-            }
-        )
-        plan_solve_artifacts.update(
-            {
-                "solver_race_strategy": OFFICIAL_PARALLEL_SELECTION_RULE,
-                "selected_backend": selected_backend,
-                "selected_representation": selected_representation,
-                "backend_attempts": attempt_summaries,
-            }
-        )
-        plan_verification_summary.update(
-            {
-                "selection_rule": OFFICIAL_PARALLEL_SELECTION_RULE,
-                "selected_backend": selected_backend,
-                "selected_representation": selected_representation,
-                "backend_attempt_count": len(attempt_summaries),
-            }
-        )
-        plan_verification_artifacts.update(
-            {
-                "selection_rule": OFFICIAL_PARALLEL_SELECTION_RULE,
-                "selected_backend": selected_backend,
-                "selected_representation": selected_representation,
-                "backend_attempts": attempt_summaries,
-            }
-        )
-        plan_solve_data = {"summary": plan_solve_summary, "artifacts": plan_solve_artifacts}
-        plan_verification_data = {"summary": plan_verification_summary, "artifacts": plan_verification_artifacts}
-
-        plan_solve_status_label = "Success" if plan_solve_summary.get("status") == "success" else "Failed"
-        self.logger.log_plan_solve(
-            plan_solve_artifacts,
-            plan_solve_status_label,
-            error=None if plan_solve_status_label == "Success" else "parallel backend race failed",
-            metadata=plan_solve_summary,
-        )
-        self.logger.record_step_timing(
-            "plan_solve",
-            float(selected_attempt.get("plan_solve_seconds") or 0.0)
-            + float(race_result.get("representation_build_seconds") or 0.0),
-            metadata={
-                "selected_backend": selected_backend,
-                "selected_representation": selected_representation,
-                "representation_build_seconds": round(
-                    float(race_result.get("representation_build_seconds") or 0.0),
-                    6,
-                ),
-                "race_wallclock_seconds": round(float(race_result.get("race_wallclock_seconds") or 0.0), 6),
-                "backend_attempt_count": len(attempt_summaries),
-            },
-        )
-        if plan_solve_summary.get("status") == "success":
-            print(
-                f"✓ Planner returned via backend: {selected_backend} "
-                f"on {selected_representation}"
-            )
-        else:
-            print(
-                "✗ Plan solve failed across all planning tasks "
-                f"(selected failure: {selected_backend} on {selected_representation})"
-            )
-
-        print("\n[OFFICIAL VERIFICATION]")
-        print("-" * 80)
-        plan_verification_status_label = "Success" if plan_verification_summary.get("status") == "success" else "Failed"
-        self.logger.log_official_verification(
-            plan_verification_artifacts,
-            plan_verification_status_label,
-            error=(
-                None
-                if plan_verification_status_label == "Success"
-                else "all parallel official backends failed verification"
-            ),
-            metadata=plan_verification_summary,
-        )
-        self.logger.record_step_timing(
-            "plan_verification",
-            float(selected_attempt.get("plan_verification_seconds") or 0.0),
-            metadata={
-                "selected_backend": selected_backend,
-                "selected_representation": selected_representation,
-                "race_wallclock_seconds": round(float(race_result.get("race_wallclock_seconds") or 0.0), 6),
-                "backend_attempt_count": len(attempt_summaries),
-            },
-        )
-        if plan_verification_summary.get("status") == "success":
-            print("✓ Official IPC verification complete")
-            print(f"  Selected backend: {selected_backend}")
-            print(f"  Selected representation: {selected_representation}")
-            print(f"  Verification result: {plan_verification_artifacts.get('verification_result')}")
-        else:
-            print("✗ Official verification failed: all planning tasks failed")
-            print(f"  Selected failure backend: {selected_backend}")
-            print(f"  Selected failure representation: {selected_representation}")
-
-        return {
-            "plan_solve": plan_solve_data,
-            "plan_verification": plan_verification_data,
-        }
 
     def _render_supported_hierarchical_plan(
         self,

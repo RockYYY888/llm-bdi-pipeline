@@ -26,7 +26,6 @@ from offline_method_generation.method_synthesis.schema import HTNLiteral, HTNMet
 from offline_method_generation.method_synthesis.synthesizer import HTNMethodSynthesizer
 from offline_method_generation.pipeline import OfflineMethodGenerationPipeline
 from offline_method_generation.artifacts import DomainLibraryArtifact, load_domain_library_artifact, persist_domain_library_artifact
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
 from pipeline.execution_logger import ExecutionLogger
 from tests.support.offline_generation_support import (
 	DOMAIN_FILES,
@@ -1015,7 +1014,7 @@ def test_domain_library_artifact_round_trips_masked_and_generated_domain_files(t
 
 
 def test_build_domain_library_synthesizes_from_masked_domain_only(tmp_path: Path) -> None:
-	pipeline = DomainCompletePipeline(domain_file=DOMAIN_FILES["blocksworld"])
+	pipeline = OfflineMethodGenerationPipeline(domain_file=DOMAIN_FILES["blocksworld"])
 	pipeline.logger = ExecutionLogger(logs_dir=str(tmp_path / "logs"), run_origin="tests")
 	official_method_library = build_method_library_from_domain_file(DOMAIN_FILES["blocksworld"])
 	captured: dict[str, object] = {}
@@ -1057,7 +1056,7 @@ def test_build_domain_library_synthesizes_from_masked_domain_only(tmp_path: Path
 			"model": None,
 		}
 
-	orchestrator = pipeline._offline_orchestrator()
+	orchestrator = pipeline._orchestrator
 	orchestrator.synthesise_domain_methods = fake_synthesise_domain_methods  # type: ignore[method-assign]
 	orchestrator.validate_domain_library = lambda method_library: {  # type: ignore[method-assign]
 		"validated_task_count": len(method_library.compound_tasks),
@@ -1073,18 +1072,11 @@ def test_build_domain_library_synthesizes_from_masked_domain_only(tmp_path: Path
 	assert Path(result["artifact_paths"]["generated_domain"]).exists()
 
 
-def test_domain_complete_pipeline_build_domain_library_delegates_to_offline_orchestrator() -> None:
-	pipeline = DomainCompletePipeline(domain_file=DOMAIN_FILES["blocksworld"])
+def test_offline_public_entrypoint_does_not_import_domain_complete_pipeline() -> None:
+	pipeline_source = (PROJECT_ROOT / "src" / "offline_method_generation" / "pipeline.py").read_text()
 
-	class FakeOrchestrator:
-		def build_domain_library(self, *, output_root=None):
-			return {"success": True, "output_root": output_root}
-
-	pipeline._offline_orchestrator_instance = FakeOrchestrator()  # type: ignore[assignment]
-
-	result = pipeline.build_domain_library(output_root="/tmp/offline-artifact-root")
-
-	assert result == {"success": True, "output_root": "/tmp/offline-artifact-root"}
+	assert "pipeline.domain_complete_pipeline" not in pipeline_source
+	assert "DomainCompletePipeline" not in pipeline_source
 
 
 def test_offline_domain_gate_is_legality_only_and_does_not_plan() -> None:
@@ -1161,6 +1153,14 @@ def test_offline_method_generation_pipeline_uses_dedicated_offline_orchestrator(
 
 	assert result == {"success": True, "output_root": "/tmp/generated-domain"}
 	assert fake_orchestrator.calls == ["/tmp/generated-domain"]
+
+
+def test_offline_pipeline_exposes_offline_only_context() -> None:
+	pipeline = OfflineMethodGenerationPipeline(domain_file=DOMAIN_FILES["blocksworld"])
+
+	assert pipeline.context.domain_file == DOMAIN_FILES["blocksworld"]
+	assert not hasattr(pipeline.context, "problem")
+	assert not hasattr(pipeline.context, "problem_file")
 
 
 def test_domain_complete_coverage_requires_executable_method_for_each_declared_task() -> None:

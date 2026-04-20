@@ -6,23 +6,35 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from ..pipeline.domain_complete_pipeline import DomainCompletePipeline
+from pipeline.execution_logger import ExecutionLogger
+
+from .context import OfflineSynthesisContext
+from .orchestrator import OfflineDomainSynthesisOrchestrator
 
 
 class OfflineMethodGenerationPipeline:
 	"""Public offline entrypoint for generated domain-library construction."""
 
 	def __init__(self, *, domain_file: str) -> None:
-		self._pipeline = DomainCompletePipeline(domain_file=domain_file)
+		self._context = OfflineSynthesisContext(domain_file=domain_file)
+		self._orchestrator = OfflineDomainSynthesisOrchestrator(self._context)
 
 	@property
-	def pipeline(self) -> DomainCompletePipeline:
-		"""Expose the underlying compatibility pipeline when low-level access is needed."""
-		return self._pipeline
+	def context(self) -> OfflineSynthesisContext:
+		"""Expose the offline-only synthesis context."""
+		return self._context
+
+	@property
+	def logger(self) -> ExecutionLogger:
+		return self._context.logger
+
+	@logger.setter
+	def logger(self, value: ExecutionLogger) -> None:
+		self._context.logger = value
 
 	def build_domain_library(
 		self,
 		*,
 		output_root: Optional[str] = None,
 	) -> Dict[str, Any]:
-		return self._pipeline.build_domain_library(output_root=output_root)
+		return self._orchestrator.build_domain_library(output_root=output_root)

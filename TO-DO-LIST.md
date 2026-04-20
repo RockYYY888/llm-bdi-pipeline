@@ -14,6 +14,10 @@
   - no query-conditioned offline synthesis
 - Use logger artifacts and real planner / verifier behavior as the main
   debugging signal, not heavyweight semantic validator layers.
+- Keep the architectural boundary explicit:
+  - offline = domain-only synthesis plus lightweight preflight
+  - Hierarchical Task Network planners = evaluation / diagnosis only
+  - online Jason runtime = frozen natural-language execution path
 
 ## Active Design
 
@@ -34,6 +38,29 @@
 
 ## Completed This Round
 
+- [x] Refactored the code boundary into three explicit tracks:
+  - `src/offline_method_generation/` now owns offline orchestration
+  - `src/htn_evaluation/` now owns planner-based problem-root evaluation
+  - `src/online_query_solution/` remains the frozen runtime path
+- [x] Reduced `DomainCompletePipeline` to a compatibility façade that dispatches
+  to:
+  - `OfflineDomainSynthesisOrchestrator`
+  - `HTNProblemRootEvaluator`
+- [x] Removed the remaining offline runtime dependency on
+  `DomainCompletePipeline`:
+  - `OfflineMethodGenerationPipeline` now builds an
+    `OfflineSynthesisContext` directly
+  - offline tests and support helpers no longer import the legacy façade
+  - offline-only context state no longer carries problem-instance or transition
+    runtime fields
+- [x] Split mixed benchmark support into:
+  - `tests/support/offline_generation_support.py`
+  - `tests/support/htn_evaluation_support.py`
+  - `tests/support/ground_truth_baseline_support.py` as compatibility re-export
+- [x] Added façade-boundary regression tests for:
+  - offline build delegation
+  - official parallel solver race delegation
+  - dedicated offline pipeline orchestration
 - [x] Removed the oversized legacy semantic-rule layer from offline generation.
 - [x] Split method-synthesis logic into smaller files under
   `src/offline_method_generation/method_synthesis/`.
@@ -49,6 +76,21 @@
   - uses first-chunk deadlines instead of completion truncation as the main
     latency control
 - [x] Fixed `MiniMax` model pinning to `minimax/minimax-m2.7`.
+- [x] Replaced the old multi-attempt MiniMax retry ladder with a single-pass
+  policy:
+  - no provider fallback
+  - no transport retry ladder
+  - single request only, hard fail on the first unsuccessful call
+- [x] Rebased MiniMax reasoning allocation on the routed model context instead of
+  tiny fixed reasoning budgets:
+  - OpenRouter-routed `minimax/minimax-m2.7` now uses `196608` total context as
+    the active budgeting baseline
+  - reserve the largest observed visible answer budget
+  - reserve about `10%` global context slack
+  - reserve prompt-estimate and transport overhead
+  - assign `70%` of the remaining headroom to provider-side reasoning
+- [x] Added a stable OpenRouter session label for offline synthesis:
+  - `session_id = offline-method-generation`
 - [x] Confirmed prompt support analysis no longer drops action-pattern
   structure.
 - [x] Added domain-gate progress output so long-running synthetic gate cases are
@@ -62,6 +104,11 @@
   name again.
 - [x] Repaired the offline-generation regression suite on the real current test
   tree.
+- [x] Collapsed the offline domain gate into a legality-only preflight:
+  - declared compound task coverage
+  - compound-child closure
+  - typed argument/object-scope case recording
+  - no planner portfolio inside offline gate
 - [x] Added an explicit official-method taxonomy module:
   - `noop_guard`
   - `direct_leaf`
@@ -121,7 +168,7 @@
   uncapped-completion MiniMax request policy:
   - log: `tests/generated/logs/20260419_181413_satellite2/execution.json`
   - `llm_request_max_tokens = null`
-  - first chunk arrived in about `218.6s` on the third relaxed attempt
+  - first chunk arrived in about `218.6s` under the old retry ladder
   - method synthesis succeeded
   - domain gate succeeded
 
@@ -135,8 +182,8 @@
   relying only on the OpenAI SDK wrapper.
 - [ ] Sequential live generation can now succeed on all four domains, but it is
   not yet repetition-stable:
-  - `blocksworld`, `marsrover`, and `transport` can succeed on the first attempt
-  - `satellite` currently needs the relaxed third attempt in the latest success
+  - the old multi-attempt ladder has now been removed
+  - repetition stability must be re-measured under the new single-pass policy
   - provider-side first-chunk variance is still the main instability source
 
 ## Important Findings
@@ -155,7 +202,8 @@
   policy is:
   - keep total completion uncapped at the application layer
   - constrain reasoning instead
-  - use first-chunk deadlines plus retries to control latency
+  - compute reasoning from routed context headroom instead of fixed `1/0` values
+  - use a single request with a conservative first-chunk deadline, not retries
 - `satellite` required two additional real fixes beyond prompt compression:
   - allow streaming responses with raw JSON-like text to continue into the
     existing parse / salvage path

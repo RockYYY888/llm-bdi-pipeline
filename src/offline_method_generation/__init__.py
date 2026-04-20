@@ -1,3 +1,3 @@
-"""
-Offline method-generation package.
-"""
+"""Offline domain-synthesis package."""
+
+__all__: list[str] = []
