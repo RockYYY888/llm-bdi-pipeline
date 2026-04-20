@@ -1,0 +1,389 @@
+"""
+Problem-root Hierarchical Task Network evaluation orchestration.
+
+This module owns the planner-based benchmark evaluation tracks for official and
+generated domains. It is a reference and diagnostic layer, not the deployed
+online runtime.
+"""
+
+from __future__ import annotations
+
+import copy
+import multiprocessing
+import os
+import queue
+import signal
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Set
+
+from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
+from planning.official_benchmark import OFFICIAL_BACKEND_SELECTION_RULE
+from .problem_root_runtime import official_problem_root_planning_task_worker
+
+
+BACKEND_RESULT_MESSAGE = "backend_attempt"
+
+
+class HTNProblemRootEvaluator:
+	"""Run Hierarchical Task Network planner-based benchmark evaluation."""
+
+	def __init__(self, pipeline_context: Any) -> None:
+		self.context = pipeline_context
+
+	def planning_tasks(
+		self,
+		timeout_seconds: Optional[float] = None,
+	) -> tuple[PlanningBackendTask, ...]:
+		build_result = self.context._build_problem_representations(
+			timeout_seconds=timeout_seconds,
+		)
+		return expand_backend_tasks_for_representations(
+			representations=build_result.representations,
+			backends=default_official_backends(workspace=str(self.context.output_dir)),
+		)
+
+	def run_backend_race(self) -> Dict[str, Any]:
+		if self.context.output_dir is None:
+			raise ValueError("Official problem-root backend race requires an output directory.")
+
+		planning_timeout_seconds = self.context._official_problem_root_planning_timeout_seconds()
+		representation_build_start = time.perf_counter()
+		planning_tasks = self.planning_tasks(
+			timeout_seconds=planning_timeout_seconds,
+		)
+		representation_build_seconds = time.perf_counter() - representation_build_start
+		backend_root = Path(self.context.output_dir) / "backend_race"
+		backend_root.mkdir(parents=True, exist_ok=True)
+		context = multiprocessing.get_context("spawn")
+		result_queue = context.Queue()
+		processes: Dict[str, multiprocessing.Process] = {}
+		attempts: List[Dict[str, Any]] = []
+		race_start = time.perf_counter()
+		selected_attempt: Optional[Dict[str, Any]] = None
+		pending_tasks: Set[str] = set()
+
+		def launch_task(planning_task: PlanningBackendTask) -> None:
+			remaining_timeout = max(
+				planning_timeout_seconds - (time.perf_counter() - race_start),
+				1.0,
+			)
+			attempt_output_dir = backend_root / planning_task.task_id
+			attempt_output_dir.mkdir(parents=True, exist_ok=True)
+			process = context.Process(
+				target=official_problem_root_planning_task_worker,
+				kwargs={
+					"result_queue": result_queue,
+					"domain_file": str(Path(self.context.domain_file).resolve()),
+					"problem_file": str(Path(self.context.problem_file).resolve()),
+					"output_dir": str(attempt_output_dir.resolve()),
+					"task_payload": planning_task.to_dict(),
+					"planning_timeout_seconds": remaining_timeout,
+				},
+			)
+			process.start()
+			processes[planning_task.task_id] = process
+			pending_tasks.add(planning_task.task_id)
+
+		try:
+			for planning_task in planning_tasks:
+				launch_task(planning_task)
+
+			deadline = race_start + planning_timeout_seconds + 5.0
+			while pending_tasks:
+				try:
+					wait_seconds = max(min(deadline - time.perf_counter(), 5.0), 0.1)
+					message = result_queue.get(timeout=wait_seconds)
+				except queue.Empty:
+					if time.perf_counter() >= deadline:
+						break
+					if not any(process.is_alive() for process in processes.values()):
+						break
+					continue
+
+				attempt = dict(message)
+				attempts.append(attempt)
+				task_id = str(attempt.get("task_id") or "")
+				pending_tasks.discard(task_id)
+				if bool(attempt.get("success")):
+					selected_attempt = dict(attempt)
+					break
+		finally:
+			if selected_attempt is not None:
+				for task_id, process in processes.items():
+					if task_id == selected_attempt.get("task_id"):
+						continue
+					self.terminate_backend_process(process)
+			for process in processes.values():
+				process.join(timeout=1.0)
+				if process.is_alive():
+					self.terminate_backend_process(process)
+					process.join(timeout=1.0)
+			self.close_backend_race_queue(result_queue)
+
+		if selected_attempt is None:
+			selected_attempt = self.select_backend_attempt(attempts)
+
+		return {
+			"planning_tasks": [task.to_dict() for task in planning_tasks],
+			"attempts": attempts,
+			"selected_attempt": selected_attempt,
+			"representation_build_seconds": representation_build_seconds,
+			"race_wallclock_seconds": time.perf_counter() - race_start,
+		}
+
+	def execute_parallel_solver_race(
+		self,
+		method_library=None,
+	) -> Dict[str, Any]:
+		print("\n[PLAN SOLVE]")
+		print("-" * 80)
+		race_result = self.run_backend_race()
+		planning_tasks = list(race_result.get("planning_tasks") or ())
+		task_labels = [
+			(
+				f"{task.get('backend_name')}@"
+				f"{((task.get('representation') or {}).get('representation_id') or 'unknown')}"
+			)
+			for task in planning_tasks
+		]
+		print(f"• Running parallel official planning tasks: {', '.join(task_labels)}")
+		attempts = list(race_result.get("attempts") or ())
+		selected_attempt = dict(race_result.get("selected_attempt") or {})
+		selected_output_dir = Path(str(selected_attempt.get("output_dir") or self.context.output_dir)).resolve()
+		self.context._merge_official_backend_output_dir(selected_output_dir)
+
+		plan_solve_data = copy.deepcopy(selected_attempt.get("plan_solve_data") or {})
+		plan_verification_data = copy.deepcopy(selected_attempt.get("plan_verification_data") or {})
+		plan_solve_data = self.context._rewrite_artifact_root_paths(
+			plan_solve_data,
+			selected_output_dir,
+			Path(self.context.output_dir).resolve(),
+		)
+		plan_verification_data = self.context._rewrite_artifact_root_paths(
+			plan_verification_data,
+			selected_output_dir,
+			Path(self.context.output_dir).resolve(),
+		)
+
+		attempt_summaries = [
+			{
+				"backend_name": str(attempt.get("backend_name") or "unknown"),
+				"task_id": str(attempt.get("task_id") or "unknown"),
+				"representation_id": str(attempt.get("representation_id") or "unknown"),
+				"success": bool(attempt.get("success")),
+				"selected_bucket": attempt.get("selected_bucket"),
+				"plan_solve_status": ((attempt.get("plan_solve_data") or {}).get("summary") or {}).get("status"),
+				"plan_verification_status": ((attempt.get("plan_verification_data") or {}).get("summary") or {}).get("status"),
+				"total_seconds": attempt.get("total_seconds"),
+				"stdout": attempt.get("stdout"),
+				"stderr": attempt.get("stderr"),
+			}
+			for attempt in attempts
+		]
+
+		plan_solve_summary = dict((plan_solve_data.get("summary") or {}))
+		plan_solve_artifacts = dict((plan_solve_data.get("artifacts") or {}))
+		plan_verification_summary = dict((plan_verification_data.get("summary") or {}))
+		plan_verification_artifacts = dict((plan_verification_data.get("artifacts") or {}))
+		plan_solve_summary.update(
+			{
+				"solver_race_strategy": OFFICIAL_BACKEND_SELECTION_RULE,
+				"solver_attempts": attempt_summaries,
+				"selected_solver_id": str(plan_solve_summary.get("solver_id") or selected_attempt.get("backend_name") or "unknown"),
+				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
+				"representation_build_seconds": race_result.get("representation_build_seconds"),
+				"race_wallclock_seconds": race_result.get("race_wallclock_seconds"),
+			}
+		)
+		plan_solve_artifacts.update(
+			{
+				"solver_race_strategy": OFFICIAL_BACKEND_SELECTION_RULE,
+				"solver_attempts": attempt_summaries,
+				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
+				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
+				"selected_bucket": selected_attempt.get("selected_bucket"),
+			}
+		)
+		plan_verification_summary.update(
+			{
+				"selection_rule": OFFICIAL_BACKEND_SELECTION_RULE,
+				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
+				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
+				"representation_build_seconds": race_result.get("representation_build_seconds"),
+				"race_wallclock_seconds": race_result.get("race_wallclock_seconds"),
+			}
+		)
+		plan_verification_artifacts.update(
+			{
+				"selection_rule": OFFICIAL_BACKEND_SELECTION_RULE,
+				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
+				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
+				"solver_attempts": attempt_summaries,
+			}
+		)
+		plan_solve_data = {
+			"summary": plan_solve_summary,
+			"artifacts": plan_solve_artifacts,
+		}
+		plan_verification_data = {
+			"summary": plan_verification_summary,
+			"artifacts": plan_verification_artifacts,
+		}
+
+		selected_backend_name = str(selected_attempt.get("backend_name") or "unknown")
+		selected_representation_id = str(selected_attempt.get("representation_id") or "unknown")
+		plan_solve_status_label = (
+			"Success" if plan_solve_summary.get("status") == "success" else "Failed"
+		)
+		self.context.logger.log_plan_solve(
+			plan_solve_artifacts,
+			plan_solve_status_label,
+			error=(
+				None
+				if plan_solve_status_label == "Success"
+				else "parallel backend race failed"
+			),
+			metadata=plan_solve_summary,
+		)
+		self.context.logger.record_step_timing(
+			"plan_solve",
+			float(selected_attempt.get("plan_solve_seconds") or 0.0)
+			+ float(race_result.get("representation_build_seconds") or 0.0),
+			metadata={
+				"selected_backend_name": selected_backend_name,
+				"selected_representation_id": selected_representation_id,
+				"representation_build_seconds": round(
+					float(race_result.get("representation_build_seconds") or 0.0),
+					6,
+				),
+				"race_wallclock_seconds": round(
+					float(race_result.get("race_wallclock_seconds") or 0.0),
+					6,
+				),
+				"backend_attempt_count": len(attempt_summaries),
+			},
+		)
+		if plan_solve_summary.get("status") == "success":
+			print(
+				f"✓ Planner returned via backend: {selected_backend_name} "
+				f"on {selected_representation_id}"
+			)
+		else:
+			print(
+				"✗ Plan solve failed across all planning tasks "
+				f"(selected failure: {selected_backend_name} on {selected_representation_id})"
+			)
+
+		print("\n[OFFICIAL VERIFICATION]")
+		print("-" * 80)
+		plan_verification_status_label = (
+			"Success" if plan_verification_summary.get("status") == "success" else "Failed"
+		)
+		self.context.logger.log_official_verification(
+			plan_verification_artifacts,
+			plan_verification_status_label,
+			error=(
+				None
+				if plan_verification_status_label == "Success"
+				else "all parallel official backends failed verification"
+			),
+			metadata=plan_verification_summary,
+		)
+		self.context.logger.record_step_timing(
+			"plan_verification",
+			float(selected_attempt.get("plan_verification_seconds") or 0.0),
+			metadata={
+				"selected_backend_name": selected_backend_name,
+				"selected_representation_id": selected_representation_id,
+				"race_wallclock_seconds": round(
+					float(race_result.get("race_wallclock_seconds") or 0.0),
+					6,
+				),
+				"backend_attempt_count": len(attempt_summaries),
+			},
+		)
+		if plan_verification_summary.get("status") == "success":
+			print("✓ Official IPC verification complete")
+			print(f"  Selected backend: {selected_backend_name}")
+			print(f"  Selected representation: {selected_representation_id}")
+			print(
+				f"  Verification result: "
+				f"{plan_verification_artifacts.get('verification_result')}"
+			)
+		else:
+			print("✗ Official verification failed: all planning tasks failed")
+			print(f"  Selected failure backend: {selected_backend_name}")
+			print(f"  Selected failure representation: {selected_representation_id}")
+		return {
+			"plan_solve": plan_solve_data,
+			"plan_verification": plan_verification_data,
+		}
+
+	@staticmethod
+	def official_problem_root_failure_rank(attempt: Dict[str, Any]) -> tuple[int, float]:
+		if attempt.get("success"):
+			return (0, float(attempt.get("total_seconds") or 0.0))
+		bucket = str(attempt.get("selected_bucket") or "unknown_failure")
+		priority = {
+			"hierarchical_plan_verified": 0,
+			"primitive_plan_valid_but_hierarchical_rejected": 1,
+			"primitive_plan_invalid": 2,
+			"no_plan_from_solver": 3,
+			"worker_exception": 4,
+		}.get(bucket, 5)
+		return (priority, float(attempt.get("total_seconds") or 0.0))
+
+	def select_backend_attempt(
+		self,
+		attempts: Sequence[Dict[str, Any]],
+	) -> Dict[str, Any]:
+		successful = [
+			attempt
+			for attempt in attempts
+			if bool(attempt.get("success"))
+		]
+		if successful:
+			return min(
+				successful,
+				key=lambda attempt: float(attempt.get("total_seconds") or 0.0),
+			)
+		if not attempts:
+			raise ValueError("No official problem-root backend attempts were provided.")
+		return min(attempts, key=self.official_problem_root_failure_rank)
+
+	@staticmethod
+	def close_backend_race_queue(result_queue: Any) -> None:
+		close_fn = getattr(result_queue, "close", None)
+		if callable(close_fn):
+			close_fn()
+		join_thread_fn = getattr(result_queue, "join_thread", None)
+		if callable(join_thread_fn):
+			join_thread_fn()
+
+	@staticmethod
+	def terminate_backend_process(process: multiprocessing.Process) -> None:
+		if not process.is_alive():
+			return
+		try:
+			if os.name == "posix":
+				process_group_id = os.getpgid(process.pid)
+				os.killpg(process_group_id, signal.SIGTERM)
+			else:
+				process.terminate()
+		except Exception:
+			process.terminate()
+		process.join(timeout=1.0)
+		if process.is_alive():
+			try:
+				if os.name == "posix":
+					process_group_id = os.getpgid(process.pid)
+					os.killpg(process_group_id, signal.SIGKILL)
+				else:
+					process.kill()
+			except Exception:
+				process.kill()

@@ -1,0 +1,100 @@
+"""
+Public HTN evaluation entrypoint.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from pipeline.execution_logger import ExecutionLogger
+
+from .context import HTNEvaluationContext
+from .problem_root_evaluator import HTNProblemRootEvaluator
+
+
+class HTNEvaluationPipeline:
+	"""Public entrypoint for planner-based HTN benchmark evaluation."""
+
+	def __init__(
+		self,
+		*,
+		domain_file: str,
+		problem_file: str,
+	) -> None:
+		self._context = HTNEvaluationContext(
+			domain_file=domain_file,
+			problem_file=problem_file,
+		)
+		self._htn_problem_root_evaluator_instance: Optional[HTNProblemRootEvaluator] = None
+
+	@property
+	def context(self) -> HTNEvaluationContext:
+		return self._context
+
+	@property
+	def config(self):
+		return self._context.config
+
+	@config.setter
+	def config(self, value) -> None:
+		self._context.config = value
+
+	@property
+	def domain(self):
+		return self._context.domain
+
+	@property
+	def problem(self):
+		return self._context.problem
+
+	@property
+	def domain_file(self) -> str:
+		return self._context.domain_file
+
+	@property
+	def problem_file(self) -> str:
+		return self._context.problem_file
+
+	@property
+	def output_dir(self) -> Optional[Path]:
+		return self._context.output_dir
+
+	@output_dir.setter
+	def output_dir(self, value: Optional[str | Path]) -> None:
+		self._context.output_dir = Path(value).resolve() if value is not None else None
+
+	@property
+	def logger(self) -> ExecutionLogger:
+		return self._context.logger
+
+	@logger.setter
+	def logger(self, value: ExecutionLogger) -> None:
+		self._context.logger = value
+
+	def _official_problem_root_structure_analysis(self):
+		return self._context._official_problem_root_structure_analysis()
+
+	def _official_problem_root_planning_timeout_seconds(
+		self,
+		timeout_seconds: Optional[float] = None,
+	) -> float:
+		return self._context._official_problem_root_planning_timeout_seconds(timeout_seconds)
+
+	def _merge_official_backend_output_dir(self, source_root: Path) -> None:
+		self._context._merge_official_backend_output_dir(source_root)
+
+	def _execute_official_problem_root_parallel_solver_race(
+		self,
+		method_library: Any = None,
+	) -> Dict[str, Any]:
+		_ = method_library
+		evaluator = self._htn_problem_root_evaluator_instance
+		if evaluator is None:
+			evaluator = HTNProblemRootEvaluator(self._context)
+			self._htn_problem_root_evaluator_instance = evaluator
+		return evaluator.execute_parallel_solver_race(method_library=method_library)
+
+	@staticmethod
+	def _close_backend_race_queue(result_queue: Any) -> None:
+		HTNProblemRootEvaluator.close_backend_race_queue(result_queue)

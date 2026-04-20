@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from tests.support.ground_truth_baseline_support import (
-	DOMAIN_FILES,
+from tests.support.htn_evaluation_support import (
 	load_domain_query_cases,
 	query_id_sort_key,
 	run_domain_problem_root_case,
-	run_official_domain_gate_preflight,
+)
+from tests.support.offline_domain_gate_support import run_official_domain_gate_preflight
+from tests.support.offline_generation_support import (
+	DOMAIN_FILES,
 )
 
 

@@ -19,10 +19,10 @@ from planning.process_capture import (
 	run_subprocess_to_files,
 )
 from planning.representations import PlanningRepresentation
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
+from htn_evaluation.pipeline import HTNEvaluationPipeline
 
-import tests.support.ground_truth_baseline_support as baseline_support
-from tests.support.ground_truth_baseline_support import DOMAIN_FILES, build_official_method_library
+import tests.support.htn_evaluation_support as baseline_support
+from tests.support.offline_generation_support import DOMAIN_FILES, build_official_method_library
 
 
 def test_official_method_library_clears_query_specific_targets() -> None:
@@ -32,7 +32,7 @@ def test_official_method_library_clears_query_specific_targets() -> None:
 
 
 def test_problem_structure_analysis_detects_total_order_blocksworld() -> None:
-	pipeline = DomainCompletePipeline(
+	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["blocksworld"],
 		problem_file=str(
 			(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl").resolve()
@@ -44,7 +44,7 @@ def test_problem_structure_analysis_detects_total_order_blocksworld() -> None:
 
 
 def test_problem_structure_analysis_detects_partial_order_transport() -> None:
-	pipeline = DomainCompletePipeline(
+	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["transport"],
 		problem_file=str(
 			(PROJECT_ROOT / "src" / "domains" / "transport" / "problems" / "pfile01.hddl").resolve()
@@ -56,7 +56,7 @@ def test_problem_structure_analysis_detects_partial_order_transport() -> None:
 
 
 def test_official_problem_root_timeout_is_benchmark_pinned() -> None:
-	pipeline = DomainCompletePipeline(
+	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["transport"],
 		problem_file=str(
 			(PROJECT_ROOT / "src" / "domains" / "transport" / "problems" / "pfile39.hddl").resolve()
@@ -191,7 +191,7 @@ def test_run_official_problem_root_baseline_for_domain_filters_query_ids() -> No
 def test_merge_official_backend_output_dir_skips_unreadable_backend_root(
 	tmp_path: Path,
 ) -> None:
-	pipeline = DomainCompletePipeline(
+	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["blocksworld"],
 		problem_file=str(
 			(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl").resolve()
@@ -218,10 +218,35 @@ def test_close_backend_race_queue_closes_and_joins_thread() -> None:
 	join_thread = Mock()
 	queue_stub = SimpleNamespace(close=close, join_thread=join_thread)
 
-	DomainCompletePipeline._close_backend_race_queue(queue_stub)
+	HTNEvaluationPipeline._close_backend_race_queue(queue_stub)
 
 	close.assert_called_once_with()
 	join_thread.assert_called_once_with()
+
+
+def test_parallel_solver_race_delegates_to_hierarchical_task_network_evaluator() -> None:
+	pipeline = HTNEvaluationPipeline(
+		domain_file=DOMAIN_FILES["blocksworld"],
+		problem_file=str(
+			(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl").resolve()
+		),
+	)
+
+	class FakeEvaluator:
+		def __init__(self) -> None:
+			self.method_libraries: list[object] = []
+
+		def execute_parallel_solver_race(self, *, method_library=None):
+			self.method_libraries.append(method_library)
+			return {"plan_solve": {"summary": {"status": "success"}}, "plan_verification": {"summary": {"status": "success"}}}
+
+	fake_evaluator = FakeEvaluator()
+	pipeline._htn_problem_root_evaluator_instance = fake_evaluator  # type: ignore[assignment]
+
+	result = pipeline._execute_official_problem_root_parallel_solver_race(method_library="sentinel")
+
+	assert result["plan_solve"]["summary"]["status"] == "success"
+	assert fake_evaluator.method_libraries == ["sentinel"]
 
 
 def test_run_subprocess_to_files_spools_large_outputs_without_returning_full_payload(
