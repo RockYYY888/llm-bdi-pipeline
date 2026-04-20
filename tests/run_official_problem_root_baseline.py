@@ -231,17 +231,22 @@ def _launch_detached_controller(
 
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 	from tests.support.htn_evaluation_support import (
+		load_domain_query_cases,
 		run_official_problem_root_baseline_for_domain,
 	)
 
+	output_root = run_dir / domain_key
 	summary = run_official_problem_root_baseline_for_domain(
 		domain_key,
 		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else None,
 		evaluation_mode=_RUN_EVALUATION_MODE,
 		planner_id=_RUN_PLANNER_ID,
+		output_root=output_root,
 	)
-	summary_path = run_dir / f"{domain_key}.summary.json"
-	summary_path.write_text(json.dumps(summary, indent=2))
+	total_query_count = len(load_domain_query_cases(domain_key))
+	if int(summary.get("attempted_problem_count") or 0) >= total_query_count:
+		summary_path = run_dir / f"{domain_key}.summary.json"
+		summary_path.write_text(json.dumps(summary, indent=2))
 	print(json.dumps(summary, indent=2))
 	return 0
 

@@ -1018,6 +1018,69 @@ def test_cleanup_reclaims_only_live_project_planning_processes() -> None:
 	assert killed == [101, 105]
 
 
+def test_run_single_domain_uses_domain_output_root_without_marking_partial_domain_complete(
+	tmp_path: Path,
+) -> None:
+	original_query_ids = list(baseline_runner._RUN_QUERY_IDS)
+	original_evaluation_mode = baseline_runner._RUN_EVALUATION_MODE
+	original_planner_id = baseline_runner._RUN_PLANNER_ID
+	mock_summary = {
+		"attempted_problem_count": 1,
+		"verified_success_count": 1,
+	}
+	with patch(
+		"tests.support.htn_evaluation_support.load_domain_query_cases",
+		return_value={"query_10": {}, "query_11": {}},
+	), patch(
+		"tests.support.htn_evaluation_support.run_official_problem_root_baseline_for_domain",
+		return_value=mock_summary,
+	) as run_domain:
+		try:
+			baseline_runner._RUN_QUERY_IDS = ["query_10"]
+			baseline_runner._RUN_EVALUATION_MODE = PLANNER_OR_RACE_MODE
+			baseline_runner._RUN_PLANNER_ID = None
+			result = baseline_runner._run_single_domain("transport", tmp_path)
+		finally:
+			baseline_runner._RUN_QUERY_IDS = original_query_ids
+			baseline_runner._RUN_EVALUATION_MODE = original_evaluation_mode
+			baseline_runner._RUN_PLANNER_ID = original_planner_id
+
+	assert result == 0
+	assert run_domain.call_args.kwargs["output_root"] == tmp_path / "transport"
+	assert not (tmp_path / "transport.summary.json").exists()
+
+
+def test_run_single_domain_writes_top_level_summary_when_domain_is_complete(
+	tmp_path: Path,
+) -> None:
+	original_query_ids = list(baseline_runner._RUN_QUERY_IDS)
+	original_evaluation_mode = baseline_runner._RUN_EVALUATION_MODE
+	original_planner_id = baseline_runner._RUN_PLANNER_ID
+	mock_summary = {
+		"attempted_problem_count": 2,
+		"verified_success_count": 2,
+	}
+	with patch(
+		"tests.support.htn_evaluation_support.load_domain_query_cases",
+		return_value={"query_10": {}, "query_11": {}},
+	), patch(
+		"tests.support.htn_evaluation_support.run_official_problem_root_baseline_for_domain",
+		return_value=mock_summary,
+	):
+		try:
+			baseline_runner._RUN_QUERY_IDS = []
+			baseline_runner._RUN_EVALUATION_MODE = PLANNER_OR_RACE_MODE
+			baseline_runner._RUN_PLANNER_ID = None
+			result = baseline_runner._run_single_domain("transport", tmp_path)
+		finally:
+			baseline_runner._RUN_QUERY_IDS = original_query_ids
+			baseline_runner._RUN_EVALUATION_MODE = original_evaluation_mode
+			baseline_runner._RUN_PLANNER_ID = original_planner_id
+
+	assert result == 0
+	assert (tmp_path / "transport.summary.json").exists()
+
+
 def test_launch_detached_controller_spawns_new_session_and_writes_state(
 	tmp_path: Path,
 ) -> None:
