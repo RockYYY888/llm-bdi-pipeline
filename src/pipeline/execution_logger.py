@@ -128,12 +128,13 @@ class ExecutionLogger:
 		model: Optional[str],
 		llm_prompt: Optional[Dict[str, str]],
 		llm_response: Optional[str],
+		metadata: Optional[Dict[str, Any]] = None,
 	) -> None:
 		self._set_step_payload(
 			"goal_grounding",
 			status="success",
 			artifacts=artifacts,
-			metadata={},
+			metadata=metadata,
 			llm=(
 				{
 					"used": used_llm,

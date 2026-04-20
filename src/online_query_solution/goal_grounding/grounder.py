@@ -5,14 +5,29 @@ LLM-driven temporal goal grounding for the Jason online runtime.
 from __future__ import annotations
 
 import json
+import math
 import re
+import signal
+import threading
+import time
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
 from online_query_solution.artifacts import GroundedSubgoal, TemporalGroundingResult
 from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
 from utils.symbol_normalizer import SymbolNormalizer
+
+MINIMAX_OPENROUTER_CONTEXT_WINDOW_TOKENS = 196_608
+MINIMAX_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
+MINIMAX_RESERVED_VISIBLE_ANSWER_TOKENS = 5_805
+MINIMAX_CONTEXT_MARGIN_RATIO = 0.10
+MINIMAX_REASONING_HEADROOM_RATIO = 0.70
+MINIMAX_TRANSPORT_OVERHEAD_TOKENS = 2_048
+MINIMAX_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
+MINIMAX_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
+ONLINE_LTLF_GENERATION_SESSION_ID = "online-ltlf-generation"
 
 
 class NLToLTLfGenerator:
@@ -107,21 +122,27 @@ class NLToLTLfGenerator:
 			"user": str(current_attempt["user"]),
 		}
 		attempt_errors: list[Dict[str, str]] = []
+		response_transport_metadata: Dict[str, Any] = {}
 		result = None
 		attempt_count = 1
 		try:
+			messages = [
+				{"role": "system", "content": last_prompt["system"]},
+				{"role": "user", "content": last_prompt["user"]},
+			]
+			request_profile = self._goal_grounding_request_profile(messages=messages)
 			response = self._create_chat_completion(
-				[
-					{"role": "system", "content": last_prompt["system"]},
-					{"role": "user", "content": last_prompt["user"]},
-				],
+				messages,
 				response_max_tokens=int(current_attempt["response_max_tokens"]),
 				request_timeout=float(current_attempt["request_timeout"]),
+				request_profile=request_profile,
 			)
-			finish_reason = self._extract_finish_reason(response)
+			response_text, finish_reason, response_transport_metadata = self._read_response_payload(
+				response,
+				request_timeout=float(current_attempt["request_timeout"]),
+				transport_metadata=self._goal_grounding_transport_metadata(request_profile),
+			)
 			last_finish_reason = finish_reason
-			last_response_text = self._serialise_raw_response(response)
-			response_text = self._extract_response_text(response)
 			last_response_text = response_text
 			payload = self._parse_json_blob(response_text)
 			result = self._validate_payload(
@@ -142,9 +163,16 @@ class NLToLTLfGenerator:
 				"last_prompt": dict(last_prompt),
 				"last_response": response_text,
 				"last_finish_reason": finish_reason,
+				**response_transport_metadata,
 			}
 			return result, last_prompt, response_text
 		except Exception as exc:
+			response_transport_metadata = dict(
+				getattr(exc, "transport_metadata", None) or response_transport_metadata or {},
+			)
+			transport_finish_reason = str(response_transport_metadata.get("llm_finish_reason") or "").strip()
+			if transport_finish_reason and not last_finish_reason:
+				last_finish_reason = transport_finish_reason
 			last_error = exc
 			attempt_errors.append(
 				{
@@ -161,6 +189,7 @@ class NLToLTLfGenerator:
 				"last_prompt": dict(last_prompt),
 				"last_response": last_response_text,
 				"last_finish_reason": last_finish_reason,
+				**response_transport_metadata,
 			}
 		if last_error is None:
 			raise RuntimeError("Goal grounding failed without a recorded exception.")
@@ -173,6 +202,7 @@ class NLToLTLfGenerator:
 			"last_response": last_response_text,
 			"last_response_preview": last_response_text[:500],
 			"last_finish_reason": last_finish_reason,
+			**response_transport_metadata,
 		}
 		raise last_error
 
@@ -267,11 +297,16 @@ class NLToLTLfGenerator:
 				"Formula syntax reminders:",
 				"- Atoms: grounded task-event calls such as do_put_on(b4, b2)",
 				"- Repeated grounded task calls must use occurrence-tagged atoms such as do_put_on__e1(b8, b9) and do_put_on__e2(b8, b9).",
-				"- Unary operators: F, G, X, WX",
-				"- Binary operators: U, R",
-				"- Boolean operators: !, &, |, ->, <->",
-				"- Constants: true, false",
-				"- For an explicit ordered sequence 'A then B then C', prefer a right-nested eventuality such as F(do_a(x) & F(do_b(y) & F(do_c(z)))).",
+				"- Supported unary operators: F, G, X, WX",
+				"- Supported binary operators: U, R",
+				"- Supported Boolean operators: !, &, |, ->, <->",
+				"- Supported constants and position predicates: true, false, last",
+				"- Do not use unsupported past-time operators such as Y, WY, O, S, P, or H.",
+				"- Avoid deeply nested eventuality chains such as F(A & F(B & F(C))).",
+				"- For explicit total-order sequences, prefer a shallow strict-precedence encoding.",
+				"- For 'A then B', use F(A) & F(B) & (!B U (A & !B & X F(B))).",
+				"- For 'A then B then C', add one such adjacent precedence constraint for A before B and one for B before C.",
+				"- This encoding permits unrelated actions between ordered task events but forbids the later task event before or at the same position as the earlier event.",
 				"- Use a plain conjunction of eventualities only when the query does not impose an order.",
 				"",
 				"Few-shot examples:",
@@ -287,7 +322,14 @@ class NLToLTLfGenerator:
 				"Example 2 output:",
 				json.dumps(
 					{
-						"ltlf_formula": "F(do_put_on(b4, b2) & F(do_put_on(b1, b4) & F(do_put_on(b3, b1))))",
+						"ltlf_formula": (
+							"F(do_put_on(b4, b2)) & F(do_put_on(b1, b4)) & "
+							"F(do_put_on(b3, b1)) & "
+							"(!do_put_on(b1, b4) U (do_put_on(b4, b2) & "
+							"!do_put_on(b1, b4) & X F(do_put_on(b1, b4)))) & "
+							"(!do_put_on(b3, b1) U (do_put_on(b1, b4) & "
+							"!do_put_on(b3, b1) & X F(do_put_on(b3, b1))))"
+						),
 					},
 					ensure_ascii=False,
 				),
@@ -295,7 +337,11 @@ class NLToLTLfGenerator:
 				"Example 3 output:",
 				json.dumps(
 					{
-						"ltlf_formula": "F(do_put_on__e1(b8, b9) & F(do_put_on__e2(b8, b9)))",
+						"ltlf_formula": (
+							"F(do_put_on__e1(b8, b9)) & F(do_put_on__e2(b8, b9)) & "
+							"(!do_put_on__e2(b8, b9) U (do_put_on__e1(b8, b9) & "
+							"!do_put_on__e2(b8, b9) & X F(do_put_on__e2(b8, b9))))"
+						),
 					},
 					ensure_ascii=False,
 				),
@@ -367,10 +413,6 @@ class NLToLTLfGenerator:
 		if not formula_atoms:
 			raise ValueError("LTLf formula does not contain any grounded task-event atoms.")
 
-		formula_atom_occurrences: Dict[str, int] = defaultdict(int)
-		for atom_expression in formula_atoms:
-			formula_atom_occurrences[str(atom_expression).strip()] += 1
-
 		seen_symbols: set[str] = set()
 		subgoals = []
 		for atom_expression in formula_atoms:
@@ -378,12 +420,6 @@ class NLToLTLfGenerator:
 			event_task_name, raw_base_task_name, has_explicit_event_identity = (
 				self._parse_task_event_predicate_name(raw_task_name)
 			)
-			if formula_atom_occurrences[str(atom_expression).strip()] > 1:
-				raise ValueError(
-					"Repeated grounded task call requires explicit grounded task-event identities. "
-					f'Use distinct atoms such as "{raw_base_task_name}__e1(...)" and '
-					f'"{raw_base_task_name}__e2(...)" instead of repeating "{atom_expression}".',
-				)
 			task_name = task_name_map.get(raw_base_task_name, raw_base_task_name)
 			if method_library is not None and method_library.task_for_name(task_name) is None:
 				raise ValueError(
@@ -422,10 +458,7 @@ class NLToLTLfGenerator:
 				event_task_name = raw_base_task_name
 			symbol = self.symbol_normalizer.create_propositional_symbol(event_task_name, list(args))
 			if symbol in seen_symbols:
-				raise ValueError(
-					f'LTLf formula reuses grounded task-event identity "{atom_expression}". '
-					"Each event atom must be unique within the formula.",
-				)
+				continue
 			seen_symbols.add(symbol)
 			subgoals.append(
 				GroundedSubgoal(
@@ -579,19 +612,56 @@ class NLToLTLfGenerator:
 		*,
 		response_max_tokens: Optional[int] = None,
 		request_timeout: Optional[float] = None,
+		request_profile: Optional[Dict[str, Any]] = None,
 	):
+		profile = dict(request_profile or self._goal_grounding_request_profile(messages=messages))
+		stream_response = bool(profile.get("stream_response"))
+		capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
+			response_max_tokens,
+		)
 		request_kwargs = {
 			"model": self.model,
 			"messages": messages,
 			"temperature": 0.0,
 			"timeout": float(request_timeout or self.request_timeout),
-			"max_tokens": int(response_max_tokens or self.response_max_tokens),
-			"response_format": {"type": "json_object"},
+			"stream": stream_response,
 		}
-		extra_body = self._openrouter_provider_routing_body()
+		if capped_response_max_tokens is not None:
+			request_kwargs["max_tokens"] = int(capped_response_max_tokens)
+		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
+			request_kwargs["response_format"] = {"type": "json_object"}
+		extra_body = self._openrouter_provider_routing_body(request_profile=profile)
 		if extra_body is not None:
 			request_kwargs["extra_body"] = extra_body
+		if self._should_use_raw_openrouter_stream_transport(stream_response=stream_response):
+			return self._create_raw_openrouter_stream_response(
+				request_kwargs,
+				request_timeout_seconds=float(request_timeout or self.request_timeout),
+			)
 		return self.client.chat.completions.create(**request_kwargs)
+
+	def _read_response_payload(
+		self,
+		response: object,
+		*,
+		request_timeout: float,
+		transport_metadata: Optional[Dict[str, Any]] = None,
+	) -> Tuple[str, str, Dict[str, Any]]:
+		metadata = dict(transport_metadata or {})
+		if isinstance(response, _RawOpenRouterStreamingResponse):
+			return self._consume_streaming_llm_response(
+				response,
+				transport_metadata=metadata,
+				total_timeout_seconds=max(float(request_timeout or 0.0), 0.0),
+			)
+		finish_reason = self._extract_finish_reason(response)
+		response_text = self._extract_response_text(response)
+		metadata["llm_response_mode"] = "non_streaming"
+		metadata["llm_finish_reason"] = finish_reason
+		request_id = self._extract_transport_request_id(response)
+		if request_id:
+			metadata["llm_request_id"] = request_id
+		return response_text, finish_reason, metadata
 
 	def _extract_response_text(self, response: object) -> str:
 		choices = getattr(response, "choices", None) or ()
@@ -616,6 +686,11 @@ class NLToLTLfGenerator:
 				extracted = self._normalise_response_content(dumped_message.get(key))
 				if extracted is not None:
 					return extracted
+		response_dump = response.model_dump() if hasattr(response, "model_dump") else None
+		if isinstance(response_dump, dict):
+			extracted = self._extract_response_text_from_response_dump(response_dump)
+			if extracted is not None:
+				return extracted
 		raise RuntimeError("LLM response did not contain usable textual JSON content.")
 
 	@staticmethod
@@ -634,7 +709,11 @@ class NLToLTLfGenerator:
 				pass
 		return repr(response)
 
-	def _openrouter_provider_routing_body(self) -> Dict[str, Any] | None:
+	def _openrouter_provider_routing_body(
+		self,
+		*,
+		request_profile: Optional[Dict[str, Any]] = None,
+	) -> Dict[str, Any] | None:
 		base_url = str(self.base_url or "").strip().lower()
 		if "openrouter.ai" not in base_url:
 			return None
@@ -649,15 +728,366 @@ class NLToLTLfGenerator:
 				"only": [provider_name],
 				"allow_fallbacks": False,
 			},
+			"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 		}
 		if provider_name == "minimax":
-			extra_body["reasoning"] = {
-				"max_tokens": 1,
-				"exclude": True,
-			}
+			reasoning_max_tokens = int(
+				(request_profile or {}).get("reasoning_max_tokens") or 0,
+			)
+			if reasoning_max_tokens > 0:
+				extra_body["reasoning"] = {
+					"max_tokens": reasoning_max_tokens,
+					"exclude": True,
+				}
 		return extra_body
 
-	def _normalise_response_content(self, content: object) -> str | None:
+	def _goal_grounding_request_profile(
+		self,
+		*,
+		messages: Optional[list[dict[str, str]]] = None,
+	) -> Dict[str, Any]:
+		model_name = str(self.model or "").strip().lower()
+		if model_name.startswith("minimax/"):
+			context_window_tokens = self._goal_grounding_total_context_tokens()
+			prompt_token_estimate = self._estimate_goal_grounding_prompt_token_budget(messages)
+			context_margin_tokens = math.ceil(
+				context_window_tokens * MINIMAX_CONTEXT_MARGIN_RATIO,
+			)
+			answer_token_reserve = MINIMAX_RESERVED_VISIBLE_ANSWER_TOKENS
+			transport_overhead_tokens = MINIMAX_TRANSPORT_OVERHEAD_TOKENS
+			reasoning_headroom_tokens = max(
+				context_window_tokens
+				- context_margin_tokens
+				- prompt_token_estimate
+				- answer_token_reserve
+				- transport_overhead_tokens,
+				0,
+			)
+			reasoning_max_tokens = max(
+				int(math.floor(reasoning_headroom_tokens * MINIMAX_REASONING_HEADROOM_RATIO)),
+				0,
+			)
+			return {
+				"name": "minimax_stream_single_pass",
+				"stream_response": True,
+				"reasoning_max_tokens": reasoning_max_tokens,
+				"first_chunk_timeout_seconds": MINIMAX_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
+				"context_window_tokens": context_window_tokens,
+				"prompt_token_estimate": prompt_token_estimate,
+				"answer_token_reserve": answer_token_reserve,
+				"context_margin_tokens": context_margin_tokens,
+				"reasoning_headroom_tokens": reasoning_headroom_tokens,
+				"reasoning_headroom_ratio": MINIMAX_REASONING_HEADROOM_RATIO,
+				"transport_overhead_tokens": transport_overhead_tokens,
+				"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
+			}
+		return {
+			"name": "default_profile",
+			"stream_response": self._should_stream_goal_grounding_response(),
+			"reasoning_max_tokens": None,
+			"first_chunk_timeout_seconds": 0.0,
+		}
+
+	def _goal_grounding_transport_metadata(
+		self,
+		request_profile: Optional[Dict[str, Any]],
+	) -> Dict[str, Any]:
+		profile = dict(request_profile or {})
+		metadata: Dict[str, Any] = {
+			"llm_request_profile": profile.get("name"),
+			"llm_reasoning_budget": profile.get("reasoning_max_tokens"),
+			"llm_first_chunk_timeout_seconds": profile.get("first_chunk_timeout_seconds"),
+		}
+		for metadata_key, profile_key in (
+			("llm_context_window_tokens", "context_window_tokens"),
+			("llm_prompt_token_estimate", "prompt_token_estimate"),
+			("llm_answer_token_reserve", "answer_token_reserve"),
+			("llm_context_margin_tokens", "context_margin_tokens"),
+			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
+			("llm_reasoning_headroom_ratio", "reasoning_headroom_ratio"),
+			("llm_transport_overhead_tokens", "transport_overhead_tokens"),
+			("llm_session_id", "session_id"),
+		):
+			if profile.get(profile_key) is not None:
+				metadata[metadata_key] = profile.get(profile_key)
+		return metadata
+
+	def _goal_grounding_total_context_tokens(self) -> int:
+		base_url = str(self.base_url or "").strip().lower()
+		if "openrouter.ai" in base_url:
+			return MINIMAX_OPENROUTER_CONTEXT_WINDOW_TOKENS
+		return MINIMAX_DIRECT_CONTEXT_WINDOW_TOKENS
+
+	@staticmethod
+	def _estimate_goal_grounding_prompt_token_budget(
+		messages: Optional[list[dict[str, str]]],
+	) -> int:
+		if not isinstance(messages, list):
+			return 0
+		total_characters = 0
+		for message in messages:
+			if not isinstance(message, dict):
+				continue
+			total_characters += len(str(message.get("content") or ""))
+		if total_characters <= 0:
+			return 0
+		return max(
+			1,
+			math.ceil(total_characters / MINIMAX_PROMPT_ESTIMATE_CHARS_PER_TOKEN),
+		)
+
+	def _apply_goal_grounding_provider_token_ceiling(
+		self,
+		requested_max_tokens: Optional[int],
+	) -> int | None:
+		model_name = str(self.model or "").strip().lower()
+		if model_name.startswith("minimax/"):
+			return None
+		requested = max(int(requested_max_tokens or self.response_max_tokens or 0), 1)
+		return requested
+
+	def _should_stream_goal_grounding_response(self) -> bool:
+		base_url = str(self.base_url or "").strip().lower()
+		return "openrouter.ai" in base_url
+
+	@staticmethod
+	def _run_with_wall_clock_timeout(
+		timeout_seconds: Optional[float],
+		callback,
+	):
+		effective_timeout_seconds = float(timeout_seconds or 0.0)
+		if effective_timeout_seconds <= 0.0:
+			return callback()
+		if threading.current_thread() is not threading.main_thread():
+			return callback()
+		if not hasattr(signal, "setitimer") or not hasattr(signal, "SIGALRM"):
+			return callback()
+
+		def _timeout_handler(signum, frame):  # type: ignore[no-untyped-def]
+			_ = (signum, frame)
+			raise TimeoutError(
+				"Goal-grounding LLM request exceeded the configured wall-clock "
+				"timeout before a response chunk was created.",
+			)
+
+		previous_handler = signal.getsignal(signal.SIGALRM)
+		try:
+			signal.signal(signal.SIGALRM, _timeout_handler)
+			signal.setitimer(signal.ITIMER_REAL, effective_timeout_seconds)
+			return callback()
+		finally:
+			signal.setitimer(signal.ITIMER_REAL, 0.0)
+			signal.signal(signal.SIGALRM, previous_handler)
+
+	def _should_use_raw_openrouter_stream_transport(
+		self,
+		*,
+		stream_response: bool,
+	) -> bool:
+		base_url = str(self.base_url or "").strip().lower()
+		return bool(stream_response) and "openrouter.ai" in base_url
+
+	def _create_raw_openrouter_stream_response(
+		self,
+		request_kwargs: Dict[str, Any],
+		*,
+		request_timeout_seconds: Optional[float],
+	):
+		import httpx
+
+		if not self.api_key:
+			raise RuntimeError("OpenRouter streaming transport requires an API key.")
+		base_url = str(self.base_url or "").rstrip("/")
+		url = f"{base_url}/chat/completions"
+		payload = {
+			key: value
+			for key, value in request_kwargs.items()
+			if key not in {"timeout", "response_format", "extra_body"}
+		}
+		extra_body = dict(request_kwargs.get("extra_body") or {})
+		payload.update(extra_body)
+		timeout_value = request_timeout_seconds if request_timeout_seconds is not None else self.request_timeout
+		client = httpx.Client(timeout=httpx.Timeout(timeout_value))
+		try:
+			request = client.build_request(
+				"POST",
+				url,
+				headers={
+					"Authorization": f"Bearer {self.api_key}",
+					"Content-Type": "application/json",
+				},
+				json=payload,
+			)
+			response = self._run_with_wall_clock_timeout(
+				request_timeout_seconds,
+				lambda: client.send(request, stream=True),
+			)
+			response.raise_for_status()
+		except Exception:
+			client.close()
+			raise
+		return _RawOpenRouterStreamingResponse(client=client, response=response)
+
+	def _consume_streaming_llm_response(
+		self,
+		response: object,
+		*,
+		transport_metadata: Optional[Dict[str, Any]] = None,
+		total_timeout_seconds: float = 0.0,
+	) -> Tuple[str, str, Dict[str, Any]]:
+		transport_metadata = dict(transport_metadata or {})
+		transport_metadata["llm_response_mode"] = "streaming"
+		request_id = self._extract_transport_request_id(response)
+		if request_id:
+			transport_metadata["llm_request_id"] = request_id
+		parts: list[str] = []
+		complete_payload: str | None = None
+		finish_reason = ""
+		close_stream = getattr(response, "close", None)
+		stream_start = time.monotonic()
+		first_chunk_recorded = False
+		first_chunk_timeout_seconds = float(
+			transport_metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
+		)
+		response_iterator = iter(response)
+		try:
+			while True:
+				elapsed_seconds = time.monotonic() - stream_start
+				remaining_total_timeout_seconds = (
+					total_timeout_seconds - elapsed_seconds
+					if total_timeout_seconds > 0.0
+					else 0.0
+				)
+				next_timeout_seconds: Optional[float] = None
+				if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0:
+					next_timeout_seconds = first_chunk_timeout_seconds - elapsed_seconds
+					if total_timeout_seconds > 0.0:
+						next_timeout_seconds = min(
+							next_timeout_seconds,
+							remaining_total_timeout_seconds,
+						)
+				elif total_timeout_seconds > 0.0:
+					next_timeout_seconds = remaining_total_timeout_seconds
+				if next_timeout_seconds is not None and next_timeout_seconds <= 0.0:
+					timeout_error = TimeoutError(
+						"Goal-grounding LLM call exceeded the configured first-chunk "
+						"deadline before any streaming content arrived."
+						if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
+						else "Goal-grounding LLM call exceeded the configured timeout "
+						"before returning a usable response.",
+					)
+					try:
+						setattr(timeout_error, "transport_metadata", dict(transport_metadata))
+					except Exception:
+						pass
+					raise timeout_error
+				try:
+					chunk = self._run_with_wall_clock_timeout(
+						next_timeout_seconds,
+						lambda: next(response_iterator),
+					)
+				except StopIteration:
+					break
+				except TimeoutError as exc:
+					timeout_error = TimeoutError(
+						"Goal-grounding LLM call exceeded the configured first-chunk "
+						"deadline before any streaming content arrived."
+						if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
+						else "Goal-grounding LLM call exceeded the configured timeout "
+						"before returning a usable response.",
+					)
+					try:
+						setattr(timeout_error, "transport_metadata", dict(transport_metadata))
+					except Exception:
+						pass
+					raise timeout_error from exc
+				request_id = self._extract_transport_request_id(chunk)
+				if request_id:
+					transport_metadata["llm_request_id"] = request_id
+				choices = getattr(chunk, "choices", None) or ()
+				if not choices:
+					continue
+				choice = choices[0]
+				finish_reason = str(getattr(choice, "finish_reason", "") or finish_reason).strip()
+				delta = getattr(choice, "delta", None)
+				for candidate in (
+					getattr(delta, "content", None) if delta is not None else None,
+					getattr(delta, "parsed", None) if delta is not None else None,
+					getattr(choice, "message", None),
+				):
+					extracted = self._normalise_response_content(candidate)
+					if extracted is None:
+						continue
+					if not first_chunk_recorded:
+						transport_metadata["llm_first_chunk_seconds"] = round(
+							time.monotonic() - stream_start,
+							6,
+						)
+						first_chunk_recorded = True
+					parts.append(extracted)
+				current_text = "".join(parts).strip()
+				candidate_payload = self._extract_complete_json_payload_text(current_text)
+				if candidate_payload is not None and complete_payload is None:
+					transport_metadata["llm_complete_json_seconds"] = round(
+						time.monotonic() - stream_start,
+						6,
+					)
+					complete_payload = candidate_payload
+				if total_timeout_seconds > 0.0 and (time.monotonic() - stream_start) >= total_timeout_seconds:
+					timeout_error = TimeoutError(
+						"Goal-grounding LLM call exceeded the configured timeout before "
+						"returning a usable response.",
+					)
+					try:
+						setattr(timeout_error, "transport_metadata", dict(transport_metadata))
+					except Exception:
+						pass
+					raise timeout_error
+			text = "".join(parts).strip()
+			if complete_payload is None:
+				complete_payload = self._extract_complete_json_payload_text(text)
+				if complete_payload is not None:
+					transport_metadata["llm_complete_json_seconds"] = round(
+						time.monotonic() - stream_start,
+						6,
+					)
+			transport_metadata["llm_finish_reason"] = finish_reason or "stop"
+			if finish_reason == "length":
+				error = RuntimeError(
+					"LLM response was truncated before completion (finish_reason=length).",
+				)
+				try:
+					setattr(error, "transport_metadata", dict(transport_metadata))
+				except Exception:
+					pass
+				raise error
+			if complete_payload is not None:
+				return complete_payload, finish_reason or "stop", transport_metadata
+			if text:
+				error = RuntimeError(
+					"LLM response did not contain usable textual JSON content. "
+					f"finish_reason={finish_reason!r}",
+				)
+				try:
+					setattr(error, "transport_metadata", dict(transport_metadata))
+				except Exception:
+					pass
+				raise error
+			error = RuntimeError(
+				"LLM response did not contain usable textual JSON content. "
+				f"finish_reason={finish_reason!r}",
+			)
+			try:
+				setattr(error, "transport_metadata", dict(transport_metadata))
+			except Exception:
+				pass
+			raise error
+		finally:
+			if callable(close_stream):
+				close_stream()
+
+	@staticmethod
+	def _normalise_response_content(content: object) -> str | None:
 		if content is None:
 			return None
 		if isinstance(content, str):
@@ -680,8 +1110,103 @@ class NLToLTLfGenerator:
 		extracted = self._normalise_response_content(text_attr)
 		if extracted is not None:
 			return extracted
+		value_attr = getattr(content, "value", None)
+		extracted = self._normalise_response_content(value_attr)
+		if extracted is not None:
+			return extracted
 		stringified = str(content).strip()
 		return stringified or None
+
+	@classmethod
+	def _extract_response_text_from_response_dump(cls, response_dump: Dict[str, Any]) -> str | None:
+		choices = response_dump.get("choices")
+		if isinstance(choices, list) and choices:
+			first_choice = choices[0]
+			if isinstance(first_choice, dict):
+				message = first_choice.get("message")
+				if isinstance(message, dict):
+					for key in ("content", "parsed", "output_text", "text"):
+						extracted = cls._normalise_response_content(message.get(key))
+						if extracted is not None:
+							return extracted
+				for key in ("content", "parsed", "output_text", "text"):
+					extracted = cls._normalise_response_content(first_choice.get(key))
+					if extracted is not None:
+						return extracted
+		for key in ("output_text", "text", "content", "parsed"):
+			extracted = cls._normalise_response_content(response_dump.get(key))
+			if extracted is not None:
+				return extracted
+		return None
+
+	@staticmethod
+	def _extract_transport_request_id(payload: object) -> str | None:
+		for attr_name in ("id", "response_id", "request_id", "_request_id"):
+			value = getattr(payload, attr_name, None)
+			if isinstance(value, str) and value.strip():
+				return value.strip()
+		response_payload = getattr(payload, "response", None)
+		if response_payload is not None:
+			for headers_attr in ("headers", "_headers"):
+				headers = getattr(response_payload, headers_attr, None)
+				if headers is None:
+					continue
+				for key in ("x-request-id", "request-id", "openai-request-id"):
+					try:
+						value = headers.get(key)
+					except Exception:
+						value = None
+					if isinstance(value, str) and value.strip():
+						return value.strip()
+		return None
+
+	@staticmethod
+	def _appears_truncated_json(text: str) -> bool:
+		open_curly = text.count("{")
+		close_curly = text.count("}")
+		open_square = text.count("[")
+		close_square = text.count("]")
+		if open_curly > close_curly:
+			return True
+		if open_square > close_square:
+			return True
+		return False
+
+	@classmethod
+	def _extract_complete_json_payload_text(cls, text: str) -> str | None:
+		stripped = str(text or "").strip()
+		if not stripped:
+			return None
+
+		def _decode_from(start_index: int) -> str | None:
+			candidate = stripped[start_index:]
+			if cls._appears_truncated_json(candidate):
+				return None
+			try:
+				parsed, end_index = json.JSONDecoder().raw_decode(candidate)
+			except json.JSONDecodeError:
+				return None
+			if not isinstance(parsed, (dict, list)):
+				return None
+			payload = candidate[:end_index].strip()
+			return payload or None
+
+		first_nonspace = stripped[0]
+		if first_nonspace in "{[":
+			payload = _decode_from(0)
+			if payload is not None:
+				return payload
+		object_index = stripped.find("{")
+		if object_index != -1:
+			payload = _decode_from(object_index)
+			if payload is not None:
+				return payload
+		array_index = stripped.find("[")
+		if array_index != -1:
+			payload = _decode_from(array_index)
+			if payload is not None:
+				return payload
+		return None
 
 	@staticmethod
 	def _suggest_response_max_tokens(query_text: str) -> int:
@@ -712,17 +1237,18 @@ class NLToLTLfGenerator:
 	@staticmethod
 	def _suggest_request_timeout(query_text: str) -> float:
 		query_length = len(str(query_text or ""))
-		if query_length >= 30000:
+		task_call_mentions = len(
+			re.findall(r"\b[a-z_][a-z0-9_]*\([^()]*\)", str(query_text or "")),
+		)
+		if task_call_mentions >= 30 or query_length >= 30000:
+			return 300.0
+		if task_call_mentions >= 18 or query_length >= 18000:
+			return 240.0
+		if task_call_mentions >= 10 or query_length >= 9000:
 			return 180.0
-		if query_length >= 20000:
-			return 150.0
-		if query_length >= 10000:
+		if task_call_mentions >= 4 or query_length >= 3000:
 			return 120.0
-		if query_length >= 6000:
-			return 90.0
-		if query_length >= 3000:
-			return 60.0
-		return 30.0
+		return 60.0
 
 	@staticmethod
 	def _normalise_ltlf_formula(ltlf_formula: str) -> str:
@@ -746,3 +1272,55 @@ class NLToLTLfGenerator:
 		if open_parentheses > 0:
 			normalised_chars.extend(")" for _ in range(open_parentheses))
 		return "".join(normalised_chars).strip()
+
+
+def _namespace_from_json_like(value: object) -> object:
+	if isinstance(value, dict):
+		return SimpleNamespace(
+			**{
+				key: _namespace_from_json_like(item)
+				for key, item in value.items()
+			},
+		)
+	if isinstance(value, list):
+		return [_namespace_from_json_like(item) for item in value]
+	return value
+
+
+class _RawOpenRouterStreamingResponse:
+	def __init__(self, *, client: Any, response: Any) -> None:
+		self._client = client
+		self._response = response
+		self.id = (
+			response.headers.get("x-request-id")
+			or response.headers.get("request-id")
+			or None
+		)
+
+	def __iter__(self):
+		for raw_line in self._response.iter_lines():
+			if raw_line is None:
+				continue
+			line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
+			text = line.strip()
+			if not text.startswith("data:"):
+				continue
+			payload = text[5:].strip()
+			if not payload:
+				continue
+			if payload == "[DONE]":
+				break
+			try:
+				chunk = json.loads(payload)
+			except json.JSONDecodeError:
+				continue
+			namespace_chunk = _namespace_from_json_like(chunk)
+			if getattr(namespace_chunk, "id", None) is None and self.id:
+				setattr(namespace_chunk, "id", self.id)
+			yield namespace_chunk
+
+	def close(self) -> None:
+		try:
+			self._response.close()
+		finally:
+			self._client.close()

@@ -31,6 +31,11 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 		model="test-goal-grounding-model",
 		llm_prompt={"system": "sys", "user": "usr"},
 		llm_response='{"ltlf_formula":"F(subgoal_1)","subgoals":[{"id":"subgoal_1","task_name":"stack","args":["c","b"]}]}',
+		metadata={
+			"online_domain_source": "benchmark",
+			"llm_response_mode": "streaming",
+			"llm_finish_reason": "stop",
+		},
 	)
 	logger.log_temporal_compilation(
 		{"ltlf_formula": "F(subgoal_1)", "transition_specs": [{"transition_name": "dfa_t1"}]},
@@ -77,6 +82,11 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	assert "PLAN SOLVE" in text_log
 	assert "OFFICIAL VERIFICATION" in text_log
 	assert "STAGE 1" not in text_log
+	assert '"ltlf_formula": "F(subgoal_1)"' in text_log
+	assert '"llm_response_mode": "streaming"' in text_log
+	assert '"llm_finish_reason": "stop"' in text_log
+	assert execution["goal_grounding"]["metadata"]["llm_response_mode"] == "streaming"
+	assert execution["goal_grounding"]["metadata"]["llm_finish_reason"] == "stop"
 
 
 def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:

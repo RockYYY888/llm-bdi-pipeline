@@ -13,11 +13,11 @@ if str(SRC_ROOT) in sys.path:
 	sys.path.remove(str(SRC_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
 from pipeline.execution_logger import ExecutionLogger
+from online_query_solution.pipeline import OnlineQuerySolutionPipeline
 from utils.benchmark_query_dataset import load_problem_query_cases
 
-from tests.support.ground_truth_baseline_support import (
+from tests.support.offline_generation_support import (
 	DOMAIN_FILES,
 	GENERATED_LOGS_DIR,
 	GENERATED_MASKED_DOMAIN_BUILDS_DIR,
@@ -136,12 +136,12 @@ def run_online_query_case(
 		library_source=library_source,
 	)
 
-	pipeline = DomainCompletePipeline(
+	pipeline = OnlineQuerySolutionPipeline(
 		domain_file=domain_file,
 		problem_file=str(case["problem_file"]),
 		online_domain_source=ONLINE_BENCHMARK_DOMAIN_SOURCE,
 	)
-	pipeline.logger = ExecutionLogger(logs_dir=str(GENERATED_LOGS_DIR), run_origin="tests")
+	pipeline.pipeline.logger = ExecutionLogger(logs_dir=str(GENERATED_LOGS_DIR), run_origin="tests")
 	result = pipeline.execute_query_with_library(
 		case["instruction"],
 		library_artifact=method_library_input,

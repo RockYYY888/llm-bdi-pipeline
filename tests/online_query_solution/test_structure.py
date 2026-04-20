@@ -60,6 +60,7 @@ def test_repository_tree_omits_retired_runtime_paths() -> None:
 		PROJECT_ROOT / "src" / "utils" / "pipeline_logger.py",
 		PROJECT_ROOT / "src" / "utils" / "benchmark_query_manifest.py",
 		PROJECT_ROOT / "src" / "utils" / "setup_mona_path.py",
+		PROJECT_ROOT / "src" / "pipeline" / "domain_complete_pipeline.py",
 		PROJECT_ROOT / "tests" / "stage1_interpretation",
 		PROJECT_ROOT / "tests" / "stage2_dfa_generation",
 		PROJECT_ROOT / "tests" / "stage3_method_synthesis",
@@ -87,3 +88,15 @@ def test_repository_tree_exposes_offline_and_online_roots() -> None:
 	assert (PROJECT_ROOT / "src" / "online_query_solution").is_dir()
 	assert (PROJECT_ROOT / "tests" / "offline_method_generation").is_dir()
 	assert (PROJECT_ROOT / "tests" / "online_query_solution").is_dir()
+
+
+def test_online_public_entrypoint_does_not_wrap_domain_complete_pipeline() -> None:
+	pipeline_source = (PROJECT_ROOT / "src" / "online_query_solution" / "pipeline.py").read_text()
+	benchmark_support_source = (
+		PROJECT_ROOT / "tests" / "support" / "online_query_solution_benchmark_support.py"
+	).read_text()
+
+	assert "pipeline.domain_complete_pipeline" not in pipeline_source
+	assert "DomainCompletePipeline" not in pipeline_source
+	assert "pipeline.domain_complete_pipeline" not in benchmark_support_source
+	assert "DomainCompletePipeline" not in benchmark_support_source

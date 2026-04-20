@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -13,16 +15,18 @@ if str(SRC_ROOT) not in sys.path:
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary, HTNTask
 from offline_method_generation.artifacts import DomainLibraryArtifact
 from online_query_solution.artifacts import DFACompilationResult, GroundedSubgoal
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
 from online_query_solution.agentspeak import AgentSpeakRenderer
 from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
 from online_query_solution.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from online_query_solution.jason_runtime.runner import JasonRunner, JasonValidationResult
+from online_query_solution.official_verification import resolve_verification_domain_file
+from online_query_solution.orchestrator import OnlineQuerySolutionOrchestrator
 from online_query_solution.temporal_compilation import dfa_builder
-from pipeline import domain_complete_pipeline as domain_complete_pipeline_module
+from pipeline.artifacts import TemporalGroundingResult
 from utils.hddl_parser import HDDLParser
 from verification.official_plan_verifier import IPCPrimitivePlanVerificationResult
-from tests.support.ground_truth_baseline_support import DOMAIN_FILES, build_official_method_library
+from online_query_solution import official_verification as online_official_verification_module
+from online_query_solution import orchestrator as online_orchestrator_module
 
 
 def _sample_method_library() -> HTNMethodLibrary:
@@ -86,20 +90,25 @@ def test_goal_grounding_validator_accepts_occurrence_tagged_repeated_task_events
 	]
 
 
-def test_goal_grounding_validator_rejects_repeated_raw_task_calls_without_event_identity() -> None:
+def test_goal_grounding_validator_allows_repeated_formula_references_to_same_event_atom() -> None:
 	generator = NLToLTLfGenerator()
 
-	with pytest.raises(ValueError, match="explicit grounded task-event identities"):
-		generator._validate_payload(
-			query_text="repeat stack",
-			payload={
-				"ltlf_formula": "F(stack(b, a) & F(stack(b, a)))",
-			},
-			method_library=_sample_method_library(),
-			typed_objects={"a": "block", "b": "block"},
-			task_type_map={"stack": ("block", "block")},
-			type_parent_map={"block": "object", "object": None},
-		)
+	result = generator._validate_payload(
+		query_text="strictly order two grounded task events",
+		payload={
+			"ltlf_formula": "F(stack(b, a)) & F(stack(c, b)) & "
+			"(!stack(c, b) U (stack(b, a) & !stack(c, b) & X F(stack(c, b))))",
+		},
+		method_library=_sample_method_library(),
+		typed_objects={"a": "block", "b": "block", "c": "block"},
+		task_type_map={"stack": ("block", "block")},
+		type_parent_map={"block": "object", "object": None},
+	)
+
+	assert [subgoal.subgoal_id for subgoal in result.subgoals] == [
+		"stack_b_a",
+		"stack_c_b",
+	]
 
 
 def test_goal_grounding_validator_rejects_extra_semantic_keys() -> None:
@@ -215,7 +224,8 @@ def test_goal_grounding_prompt_requires_explicit_order_preservation() -> None:
 	assert "Preserve temporal meaning exactly." in system_prompt
 	assert "Do not collapse an explicitly ordered task list" in system_prompt
 	assert "treat that inventory as context only" in system_prompt
-	assert "F(do_put_on(b4, b2) & F(do_put_on(b1, b4) & F(do_put_on(b3, b1))))" in system_prompt
+	assert "Avoid deeply nested eventuality chains" in system_prompt
+	assert "X F(do_put_on(b1, b4))" in system_prompt
 	assert "do_put_on__e1(b8, b9)" in system_prompt
 
 
@@ -450,7 +460,7 @@ def test_agentspeak_renderer_emits_subgoal_runtime_without_query_step() -> None:
 	assert 'dfa_edge_label(dfa_t1, "subgoal_1").' in asl
 
 
-def test_pipeline_prefers_original_problem_when_grounded_subgoals_match_root() -> None:
+def test_online_orchestrator_prefers_original_problem_for_verification() -> None:
 	goal_free_problem = PROJECT_ROOT / "tests" / "generated" / "goal_free_p01.hddl"
 	goal_free_problem.write_text(
 		(
@@ -460,66 +470,22 @@ def test_pipeline_prefers_original_problem_when_grounded_subgoals_match_root() -
 			"\t(:goal (and))\n",
 		),
 	)
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(goal_free_problem),
 	)
-	method_library = _sample_method_library()
-	online_domain = pipeline._resolve_online_domain_context()
-	dfa_result = DFACompilationResult(
-		query_text="q",
-		ltlf_formula="F(subgoal_1) & F(subgoal_2) & F(subgoal_3)",
-		alphabet=("subgoal_1", "subgoal_2", "subgoal_3"),
-		transition_specs=(),
-		ordered_subgoal_sequence=True,
-		subgoals=(
-			GroundedSubgoal("subgoal_1", "do_put_on", ("b4", "b2")),
-			GroundedSubgoal("subgoal_2", "do_put_on", ("b1", "b4")),
-			GroundedSubgoal("subgoal_3", "do_put_on", ("b3", "b1")),
-		),
-	)
-
-	problem_file, mode = pipeline._determine_verification_problem(
-		dfa_result=dfa_result,
-		method_library=method_library,
-		online_domain=online_domain,
-	)
+	problem_file, mode = orchestrator._determine_verification_problem()
 
 	assert mode == "original_problem"
 	assert problem_file == str(goal_free_problem.resolve())
 
 
-def test_pipeline_uses_original_problem_even_when_problem_has_goal_facts(
-	tmp_path: Path,
-) -> None:
-	pipeline = DomainCompletePipeline(
+def test_online_orchestrator_uses_original_problem_when_problem_has_goal_facts() -> None:
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p02.hddl"),
 	)
-	pipeline.output_dir = tmp_path
-	method_library = _sample_method_library()
-	online_domain = pipeline._resolve_online_domain_context()
-	dfa_result = DFACompilationResult(
-		query_text="q",
-		ltlf_formula="F(subgoal_1 & F(subgoal_2 & F(subgoal_3 & F(subgoal_4 & F(subgoal_5 & F(subgoal_6))))))",
-		alphabet=("subgoal_1", "subgoal_2", "subgoal_3", "subgoal_4", "subgoal_5", "subgoal_6"),
-		transition_specs=(),
-		ordered_subgoal_sequence=True,
-		subgoals=(
-			GroundedSubgoal("subgoal_1", "do_put_on", ("b3", "b5")),
-			GroundedSubgoal("subgoal_2", "do_put_on", ("b6", "b3")),
-			GroundedSubgoal("subgoal_3", "do_put_on", ("b1", "b6")),
-			GroundedSubgoal("subgoal_4", "do_put_on", ("b2", "b1")),
-			GroundedSubgoal("subgoal_5", "do_put_on", ("b4", "b2")),
-			GroundedSubgoal("subgoal_6", "do_put_on", ("b7", "b4")),
-		),
-	)
-
-	problem_file, mode = pipeline._determine_verification_problem(
-		dfa_result=dfa_result,
-		method_library=method_library,
-		online_domain=online_domain,
-	)
+	problem_file, mode = orchestrator._determine_verification_problem()
 
 	assert mode == "original_problem"
 	assert Path(problem_file).resolve() == (
@@ -527,61 +493,32 @@ def test_pipeline_uses_original_problem_even_when_problem_has_goal_facts(
 	).resolve()
 
 
-def test_query_specific_verification_problem_uses_empty_goal_block(tmp_path: Path) -> None:
-	pipeline = DomainCompletePipeline(
-		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
-		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
-	)
-	pipeline.output_dir = tmp_path
-	method_library = _sample_method_library()
-	online_domain = pipeline._resolve_online_domain_context()
-	dfa_result = DFACompilationResult(
-		query_text="q",
-		ltlf_formula="F(subgoal_1)",
-		alphabet=("subgoal_1",),
-		transition_specs=(),
-		ordered_subgoal_sequence=True,
-		subgoals=(
-			GroundedSubgoal("subgoal_1", "do_on_table", ("b2",)),
-		),
-	)
-
-	problem_path = pipeline._build_query_verification_problem(
-		dfa_result,
-		method_library,
-		online_domain=online_domain,
-	)
-	problem_text = problem_path.read_text()
-
-	assert "(:goal (and))" in problem_text
-	assert "(on b4 b2)" not in problem_text
-
-
 def test_online_domain_source_defaults_to_benchmark_domain() -> None:
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 	)
 
-	context = pipeline._resolve_online_domain_context()
+	context = orchestrator._resolve_online_domain_context()
 
 	assert context.source == "benchmark"
 	assert context.domain_file == str(
 		(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl").resolve()
 	)
-	assert context.domain.name == pipeline.domain.name
+	assert context.domain.name == orchestrator.domain.name
 
 
 def test_benchmark_online_path_uses_benchmark_domain_for_verification() -> None:
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 	)
-	online_domain = pipeline._resolve_online_domain_context()
+	online_domain = orchestrator._resolve_online_domain_context()
 
-	verification_domain_file, domain_build_seconds = pipeline._resolve_verification_domain_file(
+	verification_domain_file, domain_build_seconds = resolve_verification_domain_file(
 		method_library=_sample_method_library(),
 		online_domain=online_domain,
+		output_dir=str(PROJECT_ROOT / "tests" / "generated"),
 	)
 
 	assert verification_domain_file == Path(online_domain.domain_file).resolve()
@@ -593,7 +530,7 @@ def test_online_domain_source_can_switch_to_generated_domain(tmp_path: Path) -> 
 	generated_domain_path.write_text(
 		(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl").read_text()
 	)
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 		online_domain_source="generated",
@@ -608,11 +545,11 @@ def test_online_domain_source_can_switch_to_generated_domain(tmp_path: Path) -> 
 		generated_domain_file=str(generated_domain_path),
 	)
 
-	context = pipeline._resolve_online_domain_context(artifact)
+	context = orchestrator._resolve_online_domain_context(artifact)
 
 	assert context.source == "generated"
 	assert context.domain_file == str(generated_domain_path.resolve())
-	assert context.domain.name == pipeline.domain.name
+	assert context.domain.name == orchestrator.domain.name
 
 
 def test_online_domain_source_materializes_generated_domain_for_legacy_artifact(
@@ -620,7 +557,7 @@ def test_online_domain_source_materializes_generated_domain_for_legacy_artifact(
 ) -> None:
 	artifact_root = tmp_path / "legacy_artifact"
 	artifact_root.mkdir()
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 		online_domain_source="generated",
@@ -634,7 +571,7 @@ def test_online_domain_source_materializes_generated_domain_for_legacy_artifact(
 		artifact_root=str(artifact_root),
 	)
 
-	context = pipeline._resolve_online_domain_context(artifact)
+	context = orchestrator._resolve_online_domain_context(artifact)
 
 	assert context.source == "generated"
 	assert Path(context.domain_file).exists()
@@ -642,81 +579,12 @@ def test_online_domain_source_materializes_generated_domain_for_legacy_artifact(
 	assert Path(artifact_root / "generated_domain.hddl").exists()
 
 
-def test_pipeline_detects_total_ordered_subgoal_chain() -> None:
-	transition_specs = (
-		{
-			"source_state": "q1",
-			"target_state": "q2",
-			"subgoal_index": 1,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-		{
-			"source_state": "q2",
-			"target_state": "q3",
-			"subgoal_index": 2,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-		{
-			"source_state": "q3",
-			"target_state": "q4",
-			"subgoal_index": 3,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-	)
-
-	assert DomainCompletePipeline._is_total_ordered_subgoal_chain(
-		transition_specs,
-		expected_subgoal_count=3,
-	)
-
-
-def test_pipeline_rejects_unordered_subgoal_chain_detection() -> None:
-	transition_specs = (
-		{
-			"source_state": "q1",
-			"target_state": "q2",
-			"subgoal_index": 1,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-		{
-			"source_state": "q1",
-			"target_state": "q3",
-			"subgoal_index": 2,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-		{
-			"source_state": "q2",
-			"target_state": "q4",
-			"subgoal_index": 2,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-		{
-			"source_state": "q3",
-			"target_state": "q4",
-			"subgoal_index": 1,
-			"initial_state": "q1",
-			"accepting_states": ("q4",),
-		},
-	)
-
-	assert not DomainCompletePipeline._is_total_ordered_subgoal_chain(
-		transition_specs,
-		expected_subgoal_count=2,
-	)
-
-
-def test_pipeline_scales_jason_runtime_timeout_with_subgoal_count() -> None:
-	assert DomainCompletePipeline._jason_runtime_timeout_seconds(subgoal_count=10) == 120
-	assert DomainCompletePipeline._jason_runtime_timeout_seconds(subgoal_count=450) == 180
-	assert DomainCompletePipeline._jason_runtime_timeout_seconds(subgoal_count=650) == 240
-	assert DomainCompletePipeline._jason_runtime_timeout_seconds(subgoal_count=850) == 360
-	assert DomainCompletePipeline._jason_runtime_timeout_seconds(subgoal_count=1000) == 480
+def test_online_orchestrator_scales_jason_runtime_timeout_with_subgoal_count() -> None:
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=10) == 120
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=450) == 180
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=650) == 240
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=850) == 360
+	assert OnlineQuerySolutionOrchestrator._jason_runtime_timeout_seconds(subgoal_count=1000) == 480
 
 
 def test_jason_runner_execute_entry_perceives_initial_world() -> None:
@@ -858,81 +726,6 @@ def test_jason_runner_guided_replay_quotes_uppercase_constants() -> None:
 	)
 
 	assert '!turn_to(satellite1, "GroundStation1", "Phenomenon7")' in runtime_program
-
-
-def test_pipeline_infers_unordered_execution_guidance_from_problem_root_planner(
-	monkeypatch: pytest.MonkeyPatch,
-	tmp_path: Path,
-) -> None:
-	pipeline = DomainCompletePipeline(
-		domain_file=DOMAIN_FILES["marsrover"],
-		problem_file=str(
-			PROJECT_ROOT / "src" / "domains" / "marsrover" / "problems" / "pfile06.hddl"
-		),
-		online_domain_source="benchmark",
-	)
-	pipeline.output_dir = tmp_path
-	method_library = build_official_method_library(DOMAIN_FILES["marsrover"])
-	online_domain = pipeline._resolve_online_domain_context(source="benchmark")
-	subgoals = tuple(
-		GroundedSubgoal(
-			f"subgoal_{index}",
-			str(task.task_name),
-			tuple(str(arg) for arg in tuple(task.args or ())),
-		)
-		for index, task in enumerate(tuple(pipeline.problem.htn_tasks or ()), start=1)
-	)
-	dfa_result = DFACompilationResult(
-		query_text="unordered rover query",
-		ltlf_formula=" & ".join(
-			f"F(subgoal_{index})"
-			for index in range(1, len(subgoals) + 1)
-		),
-		alphabet=tuple(subgoal.subgoal_id for subgoal in subgoals),
-		transition_specs=(),
-		ordered_subgoal_sequence=False,
-		subgoals=subgoals,
-	)
-
-	class FakePlan:
-		actual_plan = "fake"
-		action_path = ("sample_soil(rover1, rover1store, waypoint5)", "communicate_soil_data(...)")
-
-	class FakePlanner:
-		def __init__(self, workspace: str) -> None:
-			self.workspace = workspace
-
-		def toolchain_available(self) -> bool:
-			return True
-
-		def plan_hddl_files(self, **_: object) -> FakePlan:
-			return FakePlan()
-
-		def extract_method_trace(self, plan_text: str):
-			assert plan_text == "fake"
-			return [
-				{"method_name": "m-get_rock_data", "task_args": ["waypoint0"]},
-				{"method_name": "m-get_soil_data", "task_args": ["waypoint5"]},
-			]
-
-	monkeypatch.setattr("pipeline.domain_complete_pipeline.PANDAPlanner", FakePlanner)
-
-	guidance = pipeline._infer_unordered_execution_guidance(
-		dfa_result=dfa_result,
-		method_library=method_library,
-		online_domain=online_domain,
-	)
-
-	assert guidance["preferred_unordered_target_ids"][:2] == ("subgoal_5", "subgoal_1")
-	assert guidance["preferred_method_trace"][:2] == (
-		{"method_name": "m-get_rock_data", "task_args": ("waypoint0",)},
-		{"method_name": "m-get_soil_data", "task_args": ("waypoint5",)},
-	)
-	assert guidance["preferred_action_path"] == (
-		"sample_soil(rover1, rover1store, waypoint5)",
-		"communicate_soil_data(...)",
-	)
-	assert guidance["preferred_hierarchical_plan_text"] == "fake"
 
 
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
@@ -1107,6 +900,15 @@ def test_goal_grounding_prompts_treat_complete_the_tasks_lists_as_ordered_by_def
 
 	assert "ordered by default" in system_prompt
 	assert "Few-shot examples:" in system_prompt
+	assert "Supported unary operators: F, G, X, WX" in system_prompt
+	assert "Supported binary operators: U, R" in system_prompt
+	assert "last" in system_prompt
+	assert "Do not use unsupported past-time operators" in system_prompt
+	assert "Avoid deeply nested eventuality chains" in system_prompt
+	assert "F(A & F(B & F(C)))" in system_prompt
+	assert "(!B U (A & !B & X F(B)))" in system_prompt
+	assert "X F(do_put_on(b1, b4))" in system_prompt
+	assert "F(do_put_on(b4, b2) & F(do_put_on(b1, b4)" not in system_prompt
 
 
 def test_goal_grounding_prompt_attempts_keep_single_strict_mode_for_huge_queries() -> None:
@@ -1138,12 +940,111 @@ def test_goal_grounding_response_budget_scales_with_explicit_task_list_length() 
 	assert NLToLTLfGenerator._suggest_response_max_tokens(query_text) == 32000
 
 
-def test_goal_grounding_chat_completion_uses_single_json_object_request() -> None:
+def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences() -> None:
+	query_text = (
+		"Using blocks b1, b5, b7, b13, b11, b3, b12, b2, b4, b20, b21, b10, b16, "
+		"b8, b9, b19, b18, b15, and b17, complete the tasks "
+		"do_put_on(b1, b5), then do_put_on(b7, b1), then do_put_on(b13, b7), "
+		"then do_put_on(b1, b5), then do_put_on(b7, b1), then do_put_on(b13, b7), "
+		"then do_put_on(b11, b13), then do_put_on(b3, b11), then do_put_on(b12, b2), "
+		"then do_put_on(b4, b12), then do_put_on(b20, b4), then do_put_on(b21, b20), "
+		"then do_put_on(b10, b16), then do_put_on(b8, b10), then do_put_on(b9, b8), "
+		"then do_put_on(b19, b9), then do_put_on(b18, b15), then do_put_on(b17, b18)."
+	)
+
+	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
+
+
+def test_goal_grounding_minimax_request_profile_uses_dynamic_reasoning_budget() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
 		model="minimax/minimax-m2.7",
 		base_url="https://openrouter.ai/api/v1",
+	)
+	messages = [
+		{"role": "system", "content": "Return strict minified JSON only."},
+		{"role": "user", "content": "Ground this query into one LTLf formula."},
+	]
+
+	profile = generator._goal_grounding_request_profile(messages=messages)
+
+	expected_prompt_estimate = generator._estimate_goal_grounding_prompt_token_budget(messages)
+	expected_margin = math.ceil(196_608 * 0.10)
+	expected_headroom = max(
+		196_608 - expected_margin - expected_prompt_estimate - 5_805 - 2_048,
+		0,
+	)
+	expected_reasoning_budget = int(expected_headroom * 0.70)
+
+	assert profile["name"] == "minimax_stream_single_pass"
+	assert profile["stream_response"] is True
+	assert profile["first_chunk_timeout_seconds"] == 300.0
+	assert profile["context_window_tokens"] == 196_608
+	assert profile["prompt_token_estimate"] == expected_prompt_estimate
+	assert profile["answer_token_reserve"] == 5_805
+	assert profile["context_margin_tokens"] == expected_margin
+	assert profile["transport_overhead_tokens"] == 2_048
+	assert profile["reasoning_headroom_tokens"] == expected_headroom
+	assert profile["reasoning_headroom_ratio"] == 0.70
+	assert profile["reasoning_max_tokens"] == expected_reasoning_budget
+	assert profile["session_id"] == "online-ltlf-generation"
+
+
+def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_completion_cap() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	captured_request: dict[str, object] = {}
+
+	class FakeGenerator(NLToLTLfGenerator):
+		def _create_raw_openrouter_stream_response(
+			self,
+			request_kwargs,
+			*,
+			request_timeout_seconds=None,
+		):
+			captured_request["request_kwargs"] = dict(request_kwargs)
+			captured_request["request_timeout_seconds"] = request_timeout_seconds
+			return {"ok": True}
+
+	generator = FakeGenerator(
+		domain_file=domain_file,
+		model="minimax/minimax-m2.7",
+		base_url="https://openrouter.ai/api/v1",
+		api_key="sk-test",
+	)
+
+	response = generator._create_chat_completion(
+		[{"role": "system", "content": "Return JSON."}],
+		response_max_tokens=321,
+		request_timeout=123.0,
+	)
+
+	assert response == {"ok": True}
+	request_kwargs = captured_request["request_kwargs"]
+	assert captured_request["request_timeout_seconds"] == 123.0
+	assert request_kwargs["timeout"] == 123.0
+	assert request_kwargs["stream"] is True
+	assert "max_tokens" not in request_kwargs
+	assert "response_format" not in request_kwargs
+	expected_profile = generator._goal_grounding_request_profile(
+		messages=[{"role": "system", "content": "Return JSON."}],
+	)
+	assert request_kwargs["extra_body"] == {
+		"provider": {"only": ["minimax"], "allow_fallbacks": False},
+		"session_id": "online-ltlf-generation",
+		"reasoning": {
+			"max_tokens": expected_profile["reasoning_max_tokens"],
+			"exclude": True,
+		},
+	}
+
+
+def test_goal_grounding_chat_completion_keeps_json_object_request_off_openrouter_streaming_path() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	generator = NLToLTLfGenerator(
+		domain_file=domain_file,
+		model="other/model",
+		base_url="https://api.example.com/v1",
 	)
 
 	class FakeCompletions:
@@ -1176,24 +1077,87 @@ def test_goal_grounding_chat_completion_uses_single_json_object_request() -> Non
 	assert len(fake_completions.calls) == 1
 	assert fake_completions.calls[0]["timeout"] == 123.0
 	assert fake_completions.calls[0]["max_tokens"] == 321
+	assert fake_completions.calls[0]["stream"] is False
 	assert fake_completions.calls[0]["response_format"] == {"type": "json_object"}
-	assert fake_completions.calls[0]["extra_body"] == {
-		"provider": {"only": ["minimax"], "allow_fallbacks": False},
-		"reasoning": {"max_tokens": 1, "exclude": True},
-	}
+
+
+def test_goal_grounding_streaming_rejects_length_finish_even_when_json_is_complete() -> None:
+	class FakeDelta:
+		def __init__(self, content):
+			self.content = content
+
+	class FakeChoice:
+		def __init__(self, content, finish_reason=None):
+			self.delta = FakeDelta(content)
+			self.finish_reason = finish_reason
+
+	class FakeChunk:
+		def __init__(self, chunk_id, content, finish_reason=None):
+			self.id = chunk_id
+			self.choices = [FakeChoice(content, finish_reason=finish_reason)]
+
+	class FakeStream:
+		def __iter__(self):
+			yield FakeChunk("req_goal_123", '{"ltlf_formula":"F(do_put_on(b4, b2))')
+			yield FakeChunk("req_goal_123", '"}', finish_reason="length")
+
+		def close(self):
+			return None
+
+	generator = NLToLTLfGenerator()
+
+	with pytest.raises(RuntimeError, match="finish_reason=length") as exc_info:
+		generator._consume_streaming_llm_response(
+			FakeStream(),
+			total_timeout_seconds=10.0,
+		)
+
+	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
+	assert transport_metadata["llm_request_id"] == "req_goal_123"
+	assert transport_metadata["llm_response_mode"] == "streaming"
+	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_complete_json_seconds"] >= 0.0
+	assert transport_metadata["llm_finish_reason"] == "length"
+
+
+def test_goal_grounding_streaming_enforces_first_chunk_deadline() -> None:
+	class BlockingStream:
+		def __iter__(self):
+			return self
+
+		def __next__(self):
+			time.sleep(0.05)
+			raise AssertionError("stream iteration should have timed out before yielding")
+
+		def close(self):
+			return None
+
+	generator = NLToLTLfGenerator()
+
+	with pytest.raises(TimeoutError, match="first-chunk deadline") as exc_info:
+		generator._consume_streaming_llm_response(
+			BlockingStream(),
+			transport_metadata={"llm_first_chunk_timeout_seconds": 0.01},
+			total_timeout_seconds=0.1,
+		)
+
+	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
+	assert transport_metadata["llm_response_mode"] == "streaming"
+	assert transport_metadata["llm_first_chunk_timeout_seconds"] == 0.01
+	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
 
 def test_execute_query_with_jason_returns_none_when_runtime_fails(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
 ) -> None:
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 	)
-	pipeline.output_dir = tmp_path
-	online_domain = pipeline._resolve_online_domain_context()
-	grounding_result = domain_complete_pipeline_module.TemporalGroundingResult(
+	orchestrator.output_dir = tmp_path
+	online_domain = orchestrator._resolve_online_domain_context()
+	grounding_result = TemporalGroundingResult(
 		query_text="stack b on a",
 		ltlf_formula="F(subgoal_1)",
 		subgoals=(GroundedSubgoal("subgoal_1", "do_put_on", ("b", "a")),),
@@ -1235,19 +1199,19 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 				timing_profile={},
 			)
 
-	monkeypatch.setattr(domain_complete_pipeline_module, "JasonRunner", lambda **_kwargs: FakeRunner())
+	monkeypatch.setattr(online_orchestrator_module, "JasonRunner", lambda **_kwargs: FakeRunner())
 	monkeypatch.setattr(
-		pipeline,
-		"_planner_action_schemas_for_domain",
+		online_orchestrator_module,
+		"planner_action_schemas_for_domain",
 		lambda _domain: [{"action_name": "turn_to"}],
 	)
 	monkeypatch.setattr(
-		pipeline,
-		"_render_supported_hierarchical_plan",
+		online_orchestrator_module,
+		"render_supported_hierarchical_plan",
 		lambda **_kwargs: "guided plan",
 	)
 
-	result = pipeline._execute_query_with_jason(
+	result = orchestrator._execute_query_with_jason(
 		grounding_result=grounding_result,
 		dfa_result=dfa_result,
 		method_library=_sample_method_library(),
@@ -1268,13 +1232,13 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
 ) -> None:
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 	)
-	pipeline.output_dir = tmp_path
-	online_domain = pipeline._resolve_online_domain_context()
-	grounding_result = domain_complete_pipeline_module.TemporalGroundingResult(
+	orchestrator.output_dir = tmp_path
+	online_domain = orchestrator._resolve_online_domain_context()
+	grounding_result = TemporalGroundingResult(
 		query_text="stack b on a",
 		ltlf_formula="F(subgoal_1)",
 		subgoals=(GroundedSubgoal("subgoal_1", "do_put_on", ("b", "a")),),
@@ -1314,19 +1278,19 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 				timing_profile={},
 			)
 
-	monkeypatch.setattr(domain_complete_pipeline_module, "JasonRunner", lambda **_kwargs: FakeRunner())
+	monkeypatch.setattr(online_orchestrator_module, "JasonRunner", lambda **_kwargs: FakeRunner())
 	monkeypatch.setattr(
-		pipeline,
-		"_planner_action_schemas_for_domain",
+		online_orchestrator_module,
+		"planner_action_schemas_for_domain",
 		lambda _domain: [{"action_name": "turn_to"}],
 	)
 	monkeypatch.setattr(
-		pipeline,
-		"_render_supported_hierarchical_plan",
+		online_orchestrator_module,
+		"render_supported_hierarchical_plan",
 		lambda **_kwargs: "reconstructed plan",
 	)
 
-	result = pipeline._execute_query_with_jason(
+	result = orchestrator._execute_query_with_jason(
 		grounding_result=grounding_result,
 		dfa_result=dfa_result,
 		method_library=_sample_method_library(),
@@ -1347,13 +1311,13 @@ def test_verify_plan_officially_restores_terminal_newline_for_guided_plan_text(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
 ) -> None:
-	pipeline = DomainCompletePipeline(
+	orchestrator = OnlineQuerySolutionOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
 		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
 		online_domain_source="benchmark",
 	)
-	pipeline.output_dir = tmp_path
-	online_domain = pipeline._resolve_online_domain_context(source="benchmark")
+	orchestrator.output_dir = tmp_path
+	online_domain = orchestrator._resolve_online_domain_context(source="benchmark")
 
 	class FakeVerifier:
 		def tool_available(self) -> bool:
@@ -1380,12 +1344,15 @@ def test_verify_plan_officially_restores_terminal_newline_for_guided_plan_text(
 		def verify_plan(self, **kwargs):
 			raise AssertionError("verify_plan should not be called when guided plan text is present")
 
-	monkeypatch.setattr(domain_complete_pipeline_module, "IPCPlanVerifier", lambda: FakeVerifier())
+	monkeypatch.setattr(
+		online_official_verification_module,
+		"IPCPlanVerifier",
+		lambda: FakeVerifier(),
+	)
 
-	plan_verification = pipeline._verify_plan_officially(
-		None,
-		_sample_method_library(),
-		{
+	plan_verification = orchestrator._verify_plan_officially(
+		method_library=_sample_method_library(),
+		plan_solve_data={
 			"summary": {
 				"backend": "jason",
 				"status": "success",

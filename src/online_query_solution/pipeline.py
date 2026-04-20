@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from pipeline.domain_complete_pipeline import DomainCompletePipeline
+from online_query_solution.orchestrator import OnlineQuerySolutionOrchestrator
 
 
 class OnlineQuerySolutionPipeline:
@@ -19,15 +19,15 @@ class OnlineQuerySolutionPipeline:
 		problem_file: str | None = None,
 		online_domain_source: str | None = None,
 	) -> None:
-		self._pipeline = DomainCompletePipeline(
+		self._pipeline = OnlineQuerySolutionOrchestrator(
 			domain_file=domain_file,
 			problem_file=problem_file,
 			online_domain_source=online_domain_source,
 		)
 
 	@property
-	def pipeline(self) -> DomainCompletePipeline:
-		"""Expose the underlying compatibility pipeline when low-level access is needed."""
+	def pipeline(self) -> OnlineQuerySolutionOrchestrator:
+		"""Expose the online orchestrator when low-level access is needed."""
 		return self._pipeline
 
 	def run_query(self, nl_instruction: str) -> Dict[str, Any]:
