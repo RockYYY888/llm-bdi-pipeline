@@ -163,10 +163,8 @@ def infer_blueprint_family_archetypes(blueprint: Mapping[str, Any]) -> tuple[str
 	headline_support_tasks = _non_none_values(
 		blueprint.get("headline_support_tasks") or (),
 	)
-	support_hints = headline_support_tasks + _non_none_values(
+	support_calls = _non_none_values(
 		blueprint.get("support_call_palette") or (),
-	) + _non_none_values(
-		blueprint.get("support_task_hints") or (),
 	)
 	uncovered_families = _non_none_values(
 		blueprint.get("uncovered_prerequisite_families") or (),
@@ -198,23 +196,29 @@ def infer_blueprint_family_archetypes(blueprint: Mapping[str, Any]) -> tuple[str
 	if headline_support_tasks and not helper_only:
 		archetypes.append(HIERARCHICAL_ORCHESTRATION)
 	if direct_primitives:
-		if helper_only and not support_hints and not uncovered_families:
+		if helper_only and not support_calls and not uncovered_families:
 			archetypes.append(DIRECT_LEAF)
 		elif (
 			not headline_support_tasks
-			and (support_hints or uncovered_families)
+			and (support_calls or uncovered_families)
 			and not _looks_like_composite_task_signature(task_signature)
 		):
 			archetypes.append(SUPPORT_THEN_LEAF)
-		elif not headline_support_tasks and not (support_hints or uncovered_families):
+		elif not headline_support_tasks and not (support_calls or uncovered_families):
 			archetypes.append(DIRECT_LEAF)
-	if support_hints and (
-		not direct_primitives
-		or _looks_like_composite_task_signature(task_signature)
-	):
-		archetypes.append(HIERARCHICAL_ORCHESTRATION)
+	if support_calls:
+		if _looks_like_composite_task_signature(task_signature):
+			archetypes.append(HIERARCHICAL_ORCHESTRATION)
+		elif HIERARCHICAL_ORCHESTRATION not in archetypes:
+			archetypes.append(SUPPORT_THEN_LEAF)
+	if uncovered_families and method_family_schemas and not direct_primitives:
+		if _looks_like_composite_task_signature(task_signature):
+			archetypes.append(HIERARCHICAL_ORCHESTRATION)
+		elif HIERARCHICAL_ORCHESTRATION not in archetypes:
+			archetypes.append(SUPPORT_THEN_LEAF)
 	if method_family_schemas and not recursive_families and not direct_primitives:
-		archetypes.append(HIERARCHICAL_ORCHESTRATION)
+		if _looks_like_composite_task_signature(task_signature):
+			archetypes.append(HIERARCHICAL_ORCHESTRATION)
 	return tuple(_unique_preserve_order(archetypes))
 
 

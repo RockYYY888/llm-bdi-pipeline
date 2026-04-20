@@ -87,6 +87,7 @@ def test_domain_prompt_is_query_independent_and_does_not_leak_official_methods(t
 	assert "method_blueprints" in user_prompt
 	assert '"method_family_schemas"' in user_prompt
 	assert '"uncovered_prerequisite_families"' in user_prompt
+	assert "never reuse one AUX or task variable across argument positions whose declared types are incompatible" in user_prompt
 	assert "primitive_actions:" not in user_prompt
 	assert "<silent_self_check>" not in user_prompt
 	assert "Emit one JSON object with keys compound_tasks and methods." in user_prompt
@@ -172,9 +173,11 @@ def test_domain_prompt_analysis_keeps_transport_blueprints_type_aligned(tmp_path
 		for family in deliver_blueprint["method_family_schemas"]
 		if isinstance(family, dict)
 	)
+	assert get_to_blueprint["direct_primitive_achievers"] == ["none"]
 	assert any(
-		"drive(?v" in line
-		for line in get_to_blueprint["direct_primitive_achievers"]
+		"drive(?v" in str(family.get("final_step") or "")
+		for family in get_to_blueprint["method_family_schemas"]
+		if isinstance(family, dict)
 	)
 	assert load_blueprint["headline_candidates"] == ["helper_only"]
 	assert unload_blueprint["headline_candidates"] == ["helper_only"]
@@ -182,6 +185,8 @@ def test_domain_prompt_analysis_keeps_transport_blueprints_type_aligned(tmp_path
 	assert unload_blueprint["preferred_family_shape"] == "direct_leaf"
 	assert load_blueprint["method_family_schemas"] == ["none"]
 	assert unload_blueprint["method_family_schemas"] == ["none"]
+	assert "deliver(?p, ?l)" not in deliver_blueprint["support_call_palette"]
+	assert "get-to(?v, ?l)" not in get_to_blueprint["support_call_palette"]
 	assert any(
 		"pick_up(?v, ?l, ?p" in line
 		for line in load_blueprint["direct_primitive_achievers"]
@@ -245,6 +250,7 @@ def test_rendered_method_blueprints_use_compact_prompt_shape() -> None:
 	assert isinstance(rendered["uncovered_prerequisite_families"][0], dict)
 	assert "need" in rendered["uncovered_prerequisite_families"][0]
 	assert "acquire" in rendered["uncovered_prerequisite_families"][0]
+	assert "support_call_palette" not in rendered
 
 
 def test_rendered_helper_only_transport_leaf_tasks_omit_fake_headlines(tmp_path: Path) -> None:

@@ -522,6 +522,10 @@ def _build_method_blueprints(
 		if not headline_candidates:
 			support_task_hints = []
 			headline_support_tasks = []
+		support_call_palette = _prune_support_call_palette(
+			support_call_palette,
+			task_signature=str(contract.get("task_signature") or "").strip(),
+		)
 		preferred_family_shape = _classify_preferred_family_shape(
 			support_call_palette=support_call_palette,
 			support_task_hints=support_task_hints,
@@ -532,6 +536,11 @@ def _build_method_blueprints(
 		witness_binding_required = _payload_contains_auxiliary_witnesses(
 			producer_templates,
 			method_family_schemas,
+		)
+		blueprint_direct_primitive_achievers = (
+			[]
+			if method_family_schemas
+			else producer_templates
 		)
 
 		blueprints.append(
@@ -545,7 +554,7 @@ def _build_method_blueprints(
 				"headline_support_tasks": _limited_unique(headline_support_tasks, limit=4) or ["none"],
 				"support_call_palette": _limited_unique(support_call_palette, limit=6) or ["none"],
 				"support_task_hints": _limited_unique(support_task_hints, limit=4) or ["none"],
-				"direct_primitive_achievers": producer_templates or ["none"],
+				"direct_primitive_achievers": blueprint_direct_primitive_achievers or ["none"],
 				"uncovered_prerequisite_families": _limited_unique(
 					uncovered_prerequisite_families,
 					limit=4,
@@ -568,6 +577,31 @@ def _payload_contains_auxiliary_witnesses(*payloads: object) -> bool:
 		return "AUX_" in str(value or "")
 
 	return any(_contains_aux(payload) for payload in payloads)
+
+
+def _prune_support_call_palette(
+	support_call_palette: Sequence[str],
+	*,
+	task_signature: str,
+) -> list[str]:
+	normalised_task_signature = _normalise_task_call_signature(task_signature)
+	return [
+		call
+		for call in _limited_unique(support_call_palette, limit=6)
+		if str(call).strip()
+		and str(call).strip() != "none"
+		and _normalise_task_call_signature(call) != normalised_task_signature
+	]
+
+
+def _normalise_task_call_signature(signature: object) -> str:
+	text = str(signature or "").strip()
+	match = re.fullmatch(r"([^(]+)\((.*)\)", text)
+	if match is None:
+		return _sanitize_name(text)
+	name = _sanitize_name(match.group(1).strip())
+	args = ",".join(str(arg).strip() for arg in match.group(2).split(","))
+	return f"{name}({args})"
 
 
 def _classify_preferred_family_shape(
@@ -660,7 +694,6 @@ def _render_method_blueprint_blocks(method_blueprints: Sequence[Dict[str, Any]])
 			serializable["headlines"] = headline_candidates
 		for key in (
 			"headline_support_tasks",
-			"support_call_palette",
 			"uncovered_prerequisite_families",
 		):
 			if key == "uncovered_prerequisite_families":
@@ -1051,8 +1084,9 @@ def build_domain_htn_user_prompt(
 			"6. Treat method_family_schemas as concrete evidence and use direct_primitive_achievers plus uncovered_prerequisite_families only to fill real support gaps.",
 			"7. If headline_support_tasks is non-empty for a supported state-goal task, route at least one method through that declared support task instead of exposing only the terminal primitive.",
 			"8. If witness_binding_required=true, bind auxiliary witnesses explicitly in method parameters, context, subtasks, and ordering; never place them in task_args.",
-			"9. If redundant_if_noop_holds=true, omit that constructive method; if recursive_support_calls are listed, place them before final_step; if cleanup_steps are listed, place them after final_step.",
-			"10. Use explicit step objects with pairwise ordering edges and never invent undeclared compound helpers, predicates, or schema fields.",
+			"9. Respect declared slot typing exactly: never reuse one AUX or task variable across argument positions whose declared types are incompatible; introduce a fresh witness variable for each distinct type-constrained role.",
+			"10. If redundant_if_noop_holds=true, omit that constructive method; if recursive_support_calls are listed, place them before final_step; if cleanup_steps are listed, place them after final_step.",
+			"11. Use explicit step objects with pairwise ordering edges and never invent undeclared compound helpers, predicates, or schema fields.",
 		]
 	)
 	sections = [
