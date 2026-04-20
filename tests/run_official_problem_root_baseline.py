@@ -471,6 +471,7 @@ def _run_sequential_full_baseline(
 				domain_key,
 				evaluation_mode=mode,
 				planner_id=normalized_planner_id,
+				output_root=run_dir / domain_key,
 			)
 		)
 	)

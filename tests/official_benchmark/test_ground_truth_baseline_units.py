@@ -155,7 +155,9 @@ def test_lifted_panda_backend_uses_full_backend_timeout_budget() -> None:
 	assert kwargs["timeout_seconds"] == 1800.0
 
 
-def test_run_official_problem_root_baseline_for_domain_filters_query_ids() -> None:
+def test_run_official_problem_root_baseline_for_domain_filters_query_ids(
+	tmp_path: Path,
+) -> None:
 	load_cases = Mock(
 		return_value={
 			"query_01": {"problem_file": "pfile01.hddl", "instruction": "q1"},
@@ -207,6 +209,7 @@ def test_run_official_problem_root_baseline_for_domain_filters_query_ids() -> No
 		summary = baseline_support.run_official_problem_root_baseline_for_domain(
 			"transport",
 			query_ids=("query_03", "query_01"),
+			output_root=tmp_path / "planner_or_race" / "transport",
 		)
 	finally:
 		baseline_support.load_domain_query_cases = original_load
@@ -468,6 +471,190 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 	assert problem_rows[0]["plan_verification_time_seconds"] == 2.0
 	assert problem_rows[0]["representation_build_seconds"] == 1.25
 	assert problem_rows[0]["solver_race_wallclock_seconds"] == 11.0
+
+
+def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries(
+	tmp_path: Path,
+) -> None:
+	output_root = tmp_path / "planner_or_race" / "transport"
+	output_root.mkdir(parents=True, exist_ok=True)
+	existing_problem_row = {
+		"domain_key": "transport",
+		"query_id": "query_01",
+		"problem_file": "pfile01.hddl",
+		"instruction": "q1",
+		"evaluation_mode": PLANNER_OR_RACE_MODE,
+		"requested_planner_id": None,
+		"track_id": PLANNER_OR_RACE_MODE,
+		"ipc_verified_success": True,
+		"outcome_bucket": "hierarchical_plan_verified",
+		"log_dir": "/tmp/query-01",
+		"execution_time_seconds": 10.0,
+		"plan_solve_time_seconds": 8.0,
+		"plan_verification_time_seconds": 2.0,
+		"representation_build_seconds": 0.5,
+		"solver_race_wallclock_seconds": 9.0,
+		"plan_solve_status": "success",
+		"plan_verification_status": "success",
+		"selected_solver_id": "sat",
+		"selected_backend_name": "lifted_panda_sat",
+		"selected_representation_id": "linearized_total_order",
+	}
+	(output_root / "problem_results.json").write_text(
+		json.dumps([existing_problem_row], indent=2),
+	)
+	(output_root / "domain_summary.json").write_text(
+		json.dumps(
+			{
+				"domain_gate_preflight": {
+					"success": True,
+					"log_dir": "/tmp/domain-gate",
+					"artifact_root": "/tmp/domain-gate-artifacts",
+					"validated_task_count": 3,
+				},
+			},
+			indent=2,
+		),
+	)
+
+	load_cases = Mock(
+		return_value={
+			"query_01": {"problem_file": "pfile01.hddl", "instruction": "q1"},
+			"query_02": {"problem_file": "pfile02.hddl", "instruction": "q2"},
+		},
+	)
+	run_case = Mock(
+		return_value={
+			"query_id": "query_02",
+			"case": {"problem_file": "pfile02.hddl", "instruction": "q2"},
+			"log_dir": Path("/tmp/query-02"),
+			"success": False,
+			"outcome_bucket": "no_plan_from_solver",
+			"execution": {
+				"execution_time_seconds": 20.0,
+				"timings": {
+					"plan_solve": {
+						"total_seconds": 19.0,
+						"metadata": {
+							"representation_build_seconds": 0.5,
+							"race_wallclock_seconds": 19.0,
+						},
+					},
+					"plan_verification": {
+						"total_seconds": 0.5,
+						"metadata": {"race_wallclock_seconds": 19.0},
+					},
+				},
+			},
+			"plan_solve": {"summary": {"status": "failed"}},
+			"plan_verification": {"summary": {"status": "failed"}, "artifacts": {}},
+		},
+	)
+
+	original_load = baseline_support.load_domain_query_cases
+	original_run_case = baseline_support.run_domain_problem_root_case
+	try:
+		baseline_support.load_domain_query_cases = load_cases
+		baseline_support.run_domain_problem_root_case = run_case
+		summary = baseline_support.run_official_problem_root_baseline_for_domain(
+			"transport",
+			query_ids=("query_01", "query_02"),
+			output_root=output_root,
+		)
+	finally:
+		baseline_support.load_domain_query_cases = original_load
+		baseline_support.run_domain_problem_root_case = original_run_case
+
+	run_case.assert_called_once()
+	assert run_case.call_args.args[:2] == ("transport", "query_02")
+	assert summary["attempted_problem_count"] == 2
+	assert summary["verified_success_count"] == 1
+	problem_rows = json.loads((output_root / "problem_results.json").read_text())
+	assert [row["query_id"] for row in problem_rows] == ["query_01", "query_02"]
+
+
+def test_run_official_problem_root_baseline_for_domain_persists_partial_query_checkpoint_before_failure(
+	tmp_path: Path,
+) -> None:
+	output_root = tmp_path / "planner_or_race" / "transport"
+	load_cases = Mock(
+		return_value={
+			"query_01": {"problem_file": "pfile01.hddl", "instruction": "q1"},
+			"query_02": {"problem_file": "pfile02.hddl", "instruction": "q2"},
+		},
+	)
+	run_case = Mock(
+		side_effect=[
+			{
+				"query_id": "query_01",
+				"case": {"problem_file": "pfile01.hddl", "instruction": "q1"},
+				"log_dir": Path("/tmp/query-01"),
+				"success": True,
+				"outcome_bucket": "hierarchical_plan_verified",
+				"execution": {
+					"execution_time_seconds": 12.5,
+					"timings": {
+						"plan_solve": {
+							"total_seconds": 10.0,
+							"metadata": {
+								"representation_build_seconds": 1.25,
+								"race_wallclock_seconds": 11.0,
+							},
+						},
+						"plan_verification": {
+							"total_seconds": 2.0,
+							"metadata": {"race_wallclock_seconds": 11.0},
+						},
+					},
+				},
+				"plan_solve": {"summary": {"status": "success"}},
+				"plan_verification": {
+					"summary": {"status": "success"},
+					"artifacts": {
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				},
+			},
+			RuntimeError("boom"),
+		],
+	)
+	run_gate = Mock(
+		return_value={
+			"success": True,
+			"log_dir": Path("/tmp/domain-gate"),
+			"artifact_root": Path("/tmp/domain-gate-artifacts"),
+			"domain_gate": {"validated_task_count": 3},
+		},
+	)
+
+	original_load = baseline_support.load_domain_query_cases
+	original_run_case = baseline_support.run_domain_problem_root_case
+	original_run_gate = baseline_support.run_official_domain_gate_preflight
+	try:
+		baseline_support.load_domain_query_cases = load_cases
+		baseline_support.run_domain_problem_root_case = run_case
+		baseline_support.run_official_domain_gate_preflight = run_gate
+		try:
+			baseline_support.run_official_problem_root_baseline_for_domain(
+				"transport",
+				query_ids=("query_01", "query_02"),
+				output_root=output_root,
+			)
+			raise AssertionError("Expected the second query to fail.")
+		except RuntimeError as exc:
+			assert str(exc) == "boom"
+	finally:
+		baseline_support.load_domain_query_cases = original_load
+		baseline_support.run_domain_problem_root_case = original_run_case
+		baseline_support.run_official_domain_gate_preflight = original_run_gate
+
+	problem_rows = json.loads((output_root / "problem_results.json").read_text())
+	assert [row["query_id"] for row in problem_rows] == ["query_01"]
+	domain_summary = json.loads((output_root / "domain_summary.json").read_text())
+	assert domain_summary["attempted_problem_count"] == 1
+	assert domain_summary["verified_success_count"] == 1
 
 
 def test_result_tables_build_planner_capability_matrix_rows_and_csv(

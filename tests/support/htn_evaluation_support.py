@@ -38,6 +38,51 @@ from tests.support.offline_generation_support import (
 from tests.support.offline_domain_gate_support import run_official_domain_gate_preflight
 
 
+def _load_existing_problem_rows(
+	output_root: Path,
+	*,
+	selected_query_ids: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+	problem_results_path = output_root / "problem_results.json"
+	if not problem_results_path.exists():
+		return {}
+	try:
+		rows = json.loads(problem_results_path.read_text())
+	except Exception:
+		return {}
+	if not isinstance(rows, list):
+		return {}
+	selected = set(selected_query_ids)
+	row_map: Dict[str, Dict[str, Any]] = {}
+	for row in rows:
+		if not isinstance(row, dict):
+			continue
+		query_id = str(row.get("query_id") or "").strip()
+		if not query_id or query_id not in selected:
+			continue
+		row_map[query_id] = dict(row)
+	return row_map
+
+
+def _load_domain_gate_preflight_from_existing_summary(
+	output_root: Path,
+) -> Optional[Dict[str, Any]]:
+	for candidate in (
+		output_root / "domain_summary.json",
+		output_root / "summary.json",
+	):
+		if not candidate.exists():
+			continue
+		try:
+			summary = json.loads(candidate.read_text())
+		except Exception:
+			continue
+		domain_gate_preflight = dict(summary.get("domain_gate_preflight") or {})
+		if domain_gate_preflight:
+			return domain_gate_preflight
+	return None
+
+
 def run_domain_problem_root_case(
 	domain_key: str,
 	query_id: str,
@@ -115,6 +160,7 @@ def run_official_problem_root_baseline_for_domain(
 	query_ids: Optional[Sequence[str]] = None,
 	evaluation_mode: str = PLANNER_OR_RACE_MODE,
 	planner_id: Optional[str] = None,
+	output_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
 	mode = validate_evaluation_mode(evaluation_mode)
 	normalized_planner_id = validate_planner_id(
@@ -132,26 +178,48 @@ def run_official_problem_root_baseline_for_domain(
 		raise KeyError(
 			f"Unknown query ids for domain '{domain_key}': {', '.join(missing_query_ids)}",
 		)
-	query_reports = [
-		run_domain_problem_root_case(
+	output_root = (
+		Path(output_root).resolve()
+		if output_root is not None
+		else (
+			GENERATED_BASELINE_DIR
+			/ planner_track_id(evaluation_mode=mode, planner_id=normalized_planner_id)
+			/ domain_key
+		).resolve()
+	)
+	existing_problem_rows = _load_existing_problem_rows(
+		output_root,
+		selected_query_ids=selected_query_ids,
+	)
+	domain_gate_preflight = _load_domain_gate_preflight_from_existing_summary(output_root)
+	if domain_gate_preflight is None:
+		domain_gate_report = run_official_domain_gate_preflight(domain_key)
+		domain_gate_preflight = {
+			"success": bool(domain_gate_report.get("success")),
+			"log_dir": str(domain_gate_report.get("log_dir")),
+			"artifact_root": str(domain_gate_report.get("artifact_root")),
+			"validated_task_count": (
+				(domain_gate_report.get("domain_gate") or {}).get("validated_task_count")
+			),
+		}
+
+	def ordered_problem_rows() -> list[Dict[str, Any]]:
+		return [
+			dict(existing_problem_rows[query_id])
+			for query_id in selected_query_ids
+			if query_id in existing_problem_rows
+		]
+
+	for query_id in selected_query_ids:
+		if query_id in existing_problem_rows:
+			continue
+		report = run_domain_problem_root_case(
 			domain_key,
 			query_id,
 			evaluation_mode=mode,
 			planner_id=normalized_planner_id,
 		)
-		for query_id in selected_query_ids
-	]
-	domain_gate_report = run_official_domain_gate_preflight(domain_key)
-	domain_gate_preflight = {
-		"success": bool(domain_gate_report.get("success")),
-		"log_dir": str(domain_gate_report.get("log_dir")),
-		"artifact_root": str(domain_gate_report.get("artifact_root")),
-		"validated_task_count": (
-			(domain_gate_report.get("domain_gate") or {}).get("validated_task_count")
-		),
-	}
-	problem_rows = [
-		build_problem_result_row(
+		existing_problem_rows[query_id] = build_problem_result_row(
 			domain_key=domain_key,
 			query_id=str(report["query_id"]),
 			case=report["case"],
@@ -159,19 +227,27 @@ def run_official_problem_root_baseline_for_domain(
 			evaluation_mode=mode,
 			planner_id=normalized_planner_id,
 		)
-		for report in query_reports
-	]
+		partial_problem_rows = ordered_problem_rows()
+		partial_summary = build_domain_summary(
+			domain_key=domain_key,
+			problem_rows=partial_problem_rows,
+			evaluation_mode=mode,
+			planner_id=normalized_planner_id,
+			domain_gate_preflight=domain_gate_preflight,
+		)
+		write_domain_results(
+			output_root,
+			problem_rows=partial_problem_rows,
+			domain_summary=partial_summary,
+		)
+
+	problem_rows = ordered_problem_rows()
 	summary = build_domain_summary(
 		domain_key=domain_key,
 		problem_rows=problem_rows,
 		evaluation_mode=mode,
 		planner_id=normalized_planner_id,
 		domain_gate_preflight=domain_gate_preflight,
-	)
-	output_root = (
-		GENERATED_BASELINE_DIR
-		/ planner_track_id(evaluation_mode=mode, planner_id=normalized_planner_id)
-		/ domain_key
 	)
 	output_paths = write_domain_results(
 		output_root,
