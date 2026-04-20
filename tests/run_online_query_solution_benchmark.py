@@ -182,6 +182,26 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 	print("\n".join(lines))
 
 
+def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> None:
+	latest_manifest = {
+		"run_dir": str(run_dir),
+		"summary_json": str(run_dir / "summary.json"),
+		"summary_txt": str(run_dir / "summary.txt"),
+		"online_domain_source": summary.get("online_domain_source"),
+		"library_source": summary.get("library_source"),
+		"total_queries": summary.get("total_queries"),
+		"verified_successes": summary.get("verified_successes"),
+		"completed_domains": list(summary.get("completed_domains") or []),
+		"internal_failures": list(summary.get("internal_failures") or []),
+		"complete": bool(summary.get("complete")),
+	}
+	(RUNS_ROOT / "latest.json").write_text(json.dumps(latest_manifest, indent=2))
+	(RUNS_ROOT / "latest_summary.json").write_text(json.dumps(summary, indent=2))
+	summary_text_path = run_dir / "summary.txt"
+	if summary_text_path.exists():
+		(RUNS_ROOT / "latest_summary.txt").write_text(summary_text_path.read_text())
+
+
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 	from tests.support.online_query_solution_benchmark_support import (
 		run_online_query_solution_benchmark_for_domain,
@@ -227,6 +247,7 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1) -> int:
 	summary["complete"] = len(domain_summaries) == len(DOMAIN_KEYS) and not internal_failures
 	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 	_write_human_summary(run_dir, summary)
+	_write_latest_run_manifest(run_dir, summary)
 	return 0 if summary["complete"] else 1
 
 

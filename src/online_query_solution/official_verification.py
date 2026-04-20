@@ -51,7 +51,7 @@ def render_supported_hierarchical_plan(
 		return None
 
 
-def rewrite_guided_plan_source_names(
+def rewrite_hierarchical_plan_source_names(
 	plan_text: str,
 	method_library: HTNMethodLibrary,
 ) -> str:
@@ -177,7 +177,7 @@ def verify_jason_hierarchical_plan(
 		or Path(problem_file).resolve()
 	)
 	verification_mode = str(plan_solve_artifacts.get("verification_mode") or "original_problem")
-	guided_plan_text = plan_solve_artifacts.get("guided_hierarchical_plan_text")
+	hierarchical_plan_text = plan_solve_artifacts.get("hierarchical_plan_text")
 	verification_domain_file, domain_build_seconds = resolve_verification_domain_file(
 		method_library=method_library,
 		online_domain=online_domain,
@@ -185,17 +185,17 @@ def verify_jason_hierarchical_plan(
 	)
 
 	verifier_start = time.perf_counter()
-	if guided_plan_text:
-		guided_plan_text = rewrite_guided_plan_source_names(
-			str(guided_plan_text),
+	if hierarchical_plan_text:
+		hierarchical_plan_text = rewrite_hierarchical_plan_source_names(
+			str(hierarchical_plan_text),
 			method_library,
 		)
-		if guided_plan_text and not guided_plan_text.endswith("\n"):
-			guided_plan_text = f"{guided_plan_text}\n"
+		if hierarchical_plan_text and not hierarchical_plan_text.endswith("\n"):
+			hierarchical_plan_text = f"{hierarchical_plan_text}\n"
 		verifier_result = verifier.verify_plan_text(
 			domain_file=verification_domain_file,
 			problem_file=verification_problem_file,
-			plan_text=guided_plan_text,
+			plan_text=hierarchical_plan_text,
 			output_dir=output_dir,
 			plan_kind="hierarchical",
 			build_warning=None,

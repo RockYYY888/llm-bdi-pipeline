@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from offline_method_generation.method_synthesis.naming import query_root_alias_task_name
-from offline_method_generation.method_synthesis.schema import HTNLiteral, HTNMethodLibrary
+from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
 from online_query_solution.jason_runtime.environment_adapter import (
 	EnvironmentAdapterResult,
 	Stage6EnvironmentAdapter,
@@ -91,7 +91,6 @@ class JasonRunner:
 	min_java_major = 17
 	max_java_major = 23
 	environment_class_name = "JasonPipelineEnvironment"
-	_UNORDERED_TARGET_RETRY_LIMIT = 64
 
 	def __init__(
 		self,
@@ -121,8 +120,6 @@ class JasonRunner:
 		self,
 		*,
 		agentspeak_code: str,
-		target_literals: Sequence[HTNLiteral],
-		protected_target_literals: Sequence[HTNLiteral] = (),
 		method_library: HTNMethodLibrary | None = None,
 		action_schemas: Sequence[Dict[str, Any]],
 		seed_facts: Sequence[str] = (),
@@ -132,7 +129,6 @@ class JasonRunner:
 		domain_name: str,
 		problem_file: str | Path | None = None,
 		output_dir: str | Path,
-		completion_mode: str = "target_literals",
 	) -> JasonValidationResult:
 		"""Execute Jason validation and return a structured result."""
 		total_start = time.perf_counter()
@@ -175,20 +171,16 @@ class JasonRunner:
 		)
 		runner_asl = self._build_runner_asl(
 			runtime_agentspeak_code,
-			target_literals,
-			protected_target_literals=protected_target_literals,
 			method_library=method_library,
 			seed_facts=seed_facts,
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
-			completion_mode=completion_mode,
 		)
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
 			action_schemas=action_schemas,
 			seed_facts=seed_facts,
-			target_literals=target_literals,
 		)
 		no_ancestor_goal_source = self._build_no_ancestor_goal_internal_action_source()
 		timing_profile["source_build_seconds"] = time.perf_counter() - source_build_start
@@ -517,17 +509,13 @@ class JasonRunner:
 	def _build_runner_asl(
 		self,
 		agentspeak_code: str,
-		target_literals: Sequence[HTNLiteral],
 		*,
-		protected_target_literals: Sequence[HTNLiteral] = (),
 		method_library: HTNMethodLibrary | None = None,
 		seed_facts: Sequence[str] = (),
 		runtime_objects: Sequence[str] = (),
 		object_types: Optional[Dict[str, str]] = None,
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
-		completion_mode: str = "target_literals",
 	) -> str:
-		ordered_query_sequence = False
 		runtime_ready_code = self._inject_runtime_object_beliefs(
 			agentspeak_code,
 			seed_facts=seed_facts,
@@ -540,168 +528,30 @@ class JasonRunner:
 			environment_ready_code,
 			method_library,
 		)
-		protected_target_signatures = {
-			literal.to_signature()
-			for literal in protected_target_literals
-			if not literal.is_equality
-		}
-		target_observations = self._extract_transition_target_observations(
-			trace_ready_code,
-			target_literals,
-			protected_literal_signatures=(
-				protected_target_signatures
-				if protected_target_signatures
-				else None
-			),
-		)
-		trace_ready_code = self._restrict_unsafe_noop_methods_to_satisfied_or_protected_targets(
-			trace_ready_code,
-			method_library,
-			target_observations,
-		)
-		if completion_mode == "accepting_state":
-			lines = [
-				trace_ready_code.rstrip(),
-				"",
-				*self._render_failure_handlers(
-					method_library,
-					ordered_query_sequence=False,
-				),
-				"",
-				"/* Execution Entry */",
-				"!execute.",
-				"",
-				"+!execute : true <-",
-			]
-			lines.extend(
-				self._indent_body(
-					[
-						'.print("execute start")',
-						".perceive",
-						"!run_dfa",
-						"?dfa_state(FINAL_STATE)",
-						"?accepting_state(FINAL_STATE)",
-						'.print("execute success")',
-						".stopMAS",
-					],
-				),
-			)
-			lines.append("")
-			lines.append("-!execute : true <-")
-			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
-			lines.append("")
-			return "\n".join(lines)
-		completed_target_ids: List[str] = []
-		completed_literal_signatures = {
-			observation["literal"].to_signature()
-			for observation in target_observations
-			if str(observation.get("target_id", "")).strip() in completed_target_ids
-		}
-		remaining_target_observations = [
-			observation
-			for observation in target_observations
-			if observation["literal"].to_signature() not in completed_literal_signatures
-		]
-		observation_ready_code = self._instrument_transition_wrappers_for_target_observations(
-			trace_ready_code,
-			target_observations,
-		)
-		target_context = (
-			self._observed_target_context_expression(target_observations)
-			or self._target_context_expression(target_literals)
-		)
-		ordered_transition_chain = (
-			self._ordered_target_transition_chain(
-				observation_ready_code,
-				target_observations,
-			)
-			if ordered_query_sequence
-			else []
-		)
 		lines = [
-			observation_ready_code.rstrip(),
+			trace_ready_code.rstrip(),
 			"",
-			*self._render_target_observation_plans(target_observations),
-			"",
-			*self._render_failure_handlers(
-				method_library,
-				ordered_query_sequence=ordered_query_sequence,
-			),
+			*self._render_failure_handlers(method_library),
 			"",
 			"/* Execution Entry */",
 			"!execute.",
 			"",
+			"+!execute : true <-",
 		]
-		if completion_mode != "target_literals":
-			raise JasonValidationError(
-				f"Unsupported Jason runtime completion mode: {completion_mode}",
-				metadata={"completion_mode": completion_mode},
-			)
-
-		lines.append(f"+!verify_targets : {target_context} <-")
-		lines.extend(self._indent_body(["true"]))
-		lines.append("")
-		if not ordered_query_sequence:
-			lines.append("+!execute : true <-")
-			lines.extend(
-				self._indent_body(
-					[
-						'.print("execute start")',
-						".perceive",
-						"!run_dfa",
-						"!verify_targets",
-						'.print("execute success")',
-						".stopMAS",
-					],
-				),
-			)
-			lines.append("")
-			lines.append("-!execute : true <-")
-			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
-			lines.append("")
-			return "\n".join(lines)
-
-		lines.append("+!execute : true <-")
-		execute_body = [
-			'.print("execute start")',
-			".perceive",
-			(
-				"!execute_progress_chain_1"
-				if ordered_transition_chain
-				else "!run_dfa"
-			),
-		]
-		if not ordered_transition_chain:
-			execute_body.extend(
+		lines.extend(
+			self._indent_body(
 				[
+					'.print("execute start")',
+					".perceive",
+					"!run_dfa",
 					"?dfa_state(FINAL_STATE)",
 					"?accepting_state(FINAL_STATE)",
-					"!verify_targets",
 					'.print("execute success")',
 					".stopMAS",
 				],
-			)
-		lines.extend(
-			self._indent_body(execute_body),
+			),
 		)
 		lines.append("")
-		if ordered_transition_chain:
-			lines.extend(
-				self._render_chained_goal_plans(
-					"execute_progress_chain",
-					[
-						f"!{transition_name}"
-						for transition_name in ordered_transition_chain
-					],
-					[
-						"?dfa_state(FINAL_STATE)",
-						"?accepting_state(FINAL_STATE)",
-						"!verify_targets",
-						'.print("execute success")',
-						".stopMAS",
-					],
-				),
-			)
 		lines.append("-!execute : true <-")
 		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
@@ -795,620 +645,6 @@ class JasonRunner:
 
 		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
 		return f"{prefix}{injected_section}{suffix}"
-
-	def _extract_transition_target_observations(
-		self,
-		agentspeak_code: str,
-		target_literals: Sequence[HTNLiteral],
-		*,
-		protected_literal_signatures: Optional[Set[str]] = None,
-	) -> List[Dict[str, Any]]:
-		if not target_literals:
-			return []
-		targets_by_signature = {
-			literal.to_signature(): literal
-			for literal in target_literals
-		}
-		target_id_by_signature: Dict[str, str] = {}
-		observations: List[Dict[str, Any]] = []
-		seen_transitions: set[str] = set()
-		for match in re.finditer(
-			r'dfa_edge_label\(([^,]+),\s*"([^"]*)"\)\.',
-			agentspeak_code,
-		):
-			transition_name = match.group(1).strip()
-			label = match.group(2).strip()
-			target_literal = targets_by_signature.get(label)
-			if target_literal is None or transition_name in seen_transitions:
-				continue
-			seen_transitions.add(transition_name)
-			target_id = target_id_by_signature.get(label)
-			if target_id is None:
-				target_id = f"t{len(target_id_by_signature) + 1}"
-				target_id_by_signature[label] = target_id
-			observations.append(
-				{
-					"transition_name": transition_name,
-					"target_id": target_id,
-					"literal": target_literal,
-					"protect_target": (
-						True
-						if protected_literal_signatures is None
-						else target_literal.to_signature() in protected_literal_signatures
-					),
-				},
-			)
-		return observations
-
-	def _extract_unordered_subgoal_observations(
-		self,
-		agentspeak_code: str,
-	) -> List[Dict[str, Any]]:
-		observations: List[Dict[str, Any]] = []
-		seen_target_ids: Set[str] = set()
-		for match in re.finditer(
-			r'dfa_edge_label\(([^,]+),\s*"(subgoal_\d+)"\)\.',
-			agentspeak_code,
-		):
-			transition_name = match.group(1).strip()
-			target_id = match.group(2).strip()
-			if not transition_name or not target_id or target_id in seen_target_ids:
-				continue
-			seen_target_ids.add(target_id)
-			observations.append(
-				{
-					"transition_name": transition_name,
-					"target_id": target_id,
-					"literal": None,
-					"protect_target": False,
-				},
-			)
-		return observations
-
-	def _instrument_transition_wrappers_for_target_observations(
-		self,
-		agentspeak_code: str,
-		target_observations: Sequence[Dict[str, Any]],
-	) -> str:
-		if not target_observations:
-			return agentspeak_code
-
-		observation_by_transition = {
-			str(item["transition_name"]): item
-			for item in target_observations
-		}
-		start_marker = "/* DFA Transition Wrappers */"
-		end_marker = "/* DFA Control Plans */"
-		start_index = agentspeak_code.find(start_marker)
-		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
-			return agentspeak_code
-
-		prefix = agentspeak_code[:start_index]
-		section = agentspeak_code[start_index:end_index]
-		suffix = agentspeak_code[end_index:]
-		section_lines = section.splitlines()
-		if not section_lines:
-			return agentspeak_code
-
-		header = section_lines[0]
-		content_lines = section_lines[1:]
-		chunks: List[List[str]] = []
-		current: List[str] = []
-		for line in content_lines:
-			if not line.strip():
-				if current:
-					chunks.append(current)
-					current = []
-				continue
-			current.append(line)
-		if current:
-			chunks.append(current)
-
-		instrumented_chunks: List[str] = []
-		for chunk in chunks:
-			head_line = chunk[0]
-			body_lines = list(chunk[1:])
-			match = re.match(r"^\s*\+!([^\s(:]+)", head_line)
-			if match is None or not body_lines:
-				instrumented_chunks.append("\n".join(chunk))
-				continue
-			transition_name = match.group(1).strip()
-			observation = observation_by_transition.get(transition_name)
-			if observation is None:
-				instrumented_chunks.append("\n".join(chunk))
-				continue
-			target_id = str(observation["target_id"])
-			insert_at = 1
-			for index, line in enumerate(body_lines, start=1):
-				stripped = line.strip()
-				if not stripped.startswith("!"):
-					continue
-				if stripped.startswith("!mark_target_"):
-					continue
-				insert_at = index
-			instrumented_body = list(body_lines)
-			instrumented_body.insert(insert_at, f"\t!mark_target_{target_id};")
-			normalised_body = [
-				line.strip().rstrip(";.")
-				for line in instrumented_body
-				if line.strip()
-			]
-			progress_guard_chunks = self._render_progress_guarded_transition_chunks(
-				head_line,
-				normalised_body,
-				observation,
-			)
-			if progress_guard_chunks:
-				instrumented_chunks.extend(progress_guard_chunks)
-				continue
-			instrumented_chunks.append(
-				"\n".join([head_line, *self._indent_body(normalised_body)]),
-			)
-
-		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
-		return f"{prefix}{instrumented_section}{suffix}"
-
-	def _render_progress_guarded_transition_chunks(
-		self,
-		head_line: str,
-		body_lines: Sequence[str],
-		observation: Dict[str, Any],
-	) -> List[str]:
-		literal = observation.get("literal")
-		if not isinstance(literal, HTNLiteral) or literal.is_equality:
-			return []
-
-		first_goal_index = None
-		first_goal: Optional[Tuple[str, Tuple[str, ...]]] = None
-		for index, line in enumerate(body_lines):
-			goal = self._parse_asl_goal_statement(line)
-			if goal is None:
-				continue
-			goal_name, _ = goal
-			if goal_name.startswith("mark_target_") or goal_name.startswith("advance_dfa_for_"):
-				continue
-			first_goal_index = index
-			first_goal = goal
-			break
-		if first_goal_index is None or first_goal is None:
-			return []
-
-		task_name, _task_args = first_goal
-		guard_atom = self._progress_target_guard_atom(
-			task_name,
-			literal.predicate,
-			tuple(literal.args),
-		)
-		if not guard_atom:
-			return []
-
-		parsed_head = self._split_plan_head(head_line)
-		if parsed_head is None:
-			return []
-		head_prefix, base_context, head_suffix = parsed_head
-		target_context = self._literal_to_context_expression(literal)
-		unmet_context = self._literal_to_unmet_context_expression(literal)
-		satisfied_head = (
-			f"{head_prefix}{self._combine_contexts(base_context, target_context)}{head_suffix}"
-		)
-		unmet_head = (
-			f"{head_prefix}{self._combine_contexts(base_context, unmet_context)}{head_suffix}"
-		)
-
-		unmet_body = list(body_lines)
-		unmet_body.insert(first_goal_index, f"+{guard_atom}")
-		unmet_body.insert(first_goal_index + 2, f"-{guard_atom}")
-		return [
-			"\n".join([satisfied_head, *self._indent_body(body_lines)]),
-			"\n".join([unmet_head, *self._indent_body(unmet_body)]),
-		]
-
-	def _render_target_observation_plans(
-		self,
-		target_observations: Sequence[Dict[str, Any]],
-	) -> List[str]:
-		if not target_observations:
-			return []
-
-		lines = ["/* Target Observation Plans */"]
-		seen_targets: set[str] = set()
-		for observation in target_observations:
-			target_id = str(observation["target_id"])
-			if target_id in seen_targets:
-				continue
-			seen_targets.add(target_id)
-			literal = observation["literal"]
-			if not isinstance(literal, HTNLiteral) or literal.is_equality:
-				lines.append(f"+!mark_target_{target_id} : target_seen({target_id}) <-")
-				lines.extend(self._indent_body(["true"]))
-				lines.append("")
-				lines.append(f"+!mark_target_{target_id} : true <-")
-				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
-				lines.append("")
-				continue
-			context = self._literal_to_context_expression(literal)
-			protection_atom = (
-				self._target_protection_atom(literal)
-				if bool(observation.get("protect_target", True))
-				else ""
-			)
-			lines.append(f"+!mark_target_{target_id} : target_seen({target_id}) <-")
-			lines.extend(self._indent_body(["true"]))
-			lines.append("")
-			if protection_atom:
-				lines.append(
-					f"+!mark_target_{target_id} : {context} & {protection_atom} <-"
-				)
-				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
-				lines.append("")
-				lines.append(
-					f"+!mark_target_{target_id} : {context} & not {protection_atom} <-"
-				)
-				lines.extend(
-					self._indent_body(
-						[
-							f"+target_seen({target_id})",
-							f"+{protection_atom}",
-						],
-					),
-				)
-			else:
-				lines.append(f"+!mark_target_{target_id} : {context} <-")
-				lines.extend(self._indent_body([f"+target_seen({target_id})"]))
-			lines.append("")
-		return lines
-
-	def _rewrite_unordered_control_plans(
-		self,
-		agentspeak_code: str,
-		target_observations: Sequence[Dict[str, Any]],
-		*,
-		method_library: HTNMethodLibrary | None = None,
-	) -> str:
-		start_marker = "/* DFA Control Plans */"
-		start_index = agentspeak_code.find(start_marker)
-		if start_index == -1:
-			return agentspeak_code
-
-		prefix = agentspeak_code[:start_index]
-		target_context = self._observed_target_context_expression(target_observations)
-		transition_edges = self._extract_transition_state_edges(agentspeak_code)
-		if not transition_edges:
-			return self._rewrite_unordered_control_plans_linear_fallback(
-				agentspeak_code,
-				target_observations,
-				method_library=method_library,
-			)
-		observations_by_target: Dict[str, List[Dict[str, Any]]] = {}
-		for item in target_observations:
-			target_id = str(item["target_id"])
-			transition_name = str(item["transition_name"])
-			if transition_name not in transition_edges:
-				continue
-			observations_by_target.setdefault(target_id, []).append(dict(item))
-		if not observations_by_target:
-			return self._rewrite_unordered_control_plans_linear_fallback(
-				agentspeak_code,
-				target_observations,
-				method_library=method_library,
-			)
-
-		control_lines = ["/* DFA Control Plans */"]
-		if target_context:
-			control_lines.append(f"+!run_dfa : {target_context} <-")
-			control_lines.extend(self._indent_body(["true"]))
-			control_lines.append("")
-		control_lines.extend(self._render_runtime_blocker_clearers(method_library))
-		control_lines.append("+!clear_blocked_targets : blocked_target(TARGET_ID) <-")
-		control_lines.extend(
-			self._indent_body(
-				[
-					"-blocked_target(TARGET_ID)",
-					"!clear_blocked_targets",
-				],
-			),
-		)
-		control_lines.append("")
-		control_lines.append("+!clear_blocked_targets : true <-")
-		control_lines.extend(self._indent_body(["true"]))
-		control_lines.append("")
-		for target_id in observations_by_target:
-			control_lines.append(
-				f"+!run_dfa : not target_seen({target_id}) & "
-				f"not blocked_target({target_id}) <-"
-			)
-			control_lines.extend(
-				self._indent_body(
-					[
-						f"!advance_target_{target_id}",
-						"!clear_runtime_blockers",
-						"!clear_blocked_targets",
-						"!run_dfa",
-					],
-				),
-			)
-			control_lines.append("")
-			for retry_index in range(1, self._UNORDERED_TARGET_RETRY_LIMIT + 1):
-				retry_marker = f"r{retry_index}"
-				control_lines.append(
-					f"-!advance_target_{target_id} : not target_seen({target_id}) & "
-					f"not target_retry({target_id}, {retry_marker}) <-"
-				)
-				control_lines.extend(
-					self._indent_body(
-						[
-							f"+target_retry({target_id}, {retry_marker})",
-							"!clear_runtime_blockers",
-							f"!advance_target_{target_id}",
-						],
-					),
-				)
-				control_lines.append("")
-			control_lines.append(f"-!advance_target_{target_id} : not target_seen({target_id}) <-")
-			control_lines.extend(
-				self._indent_body(
-					[
-						f"+blocked_target({target_id})",
-						"!clear_runtime_blockers",
-						"!run_dfa",
-					],
-				),
-			)
-			control_lines.append("")
-		for target_id, observations in observations_by_target.items():
-			seen_state_transition_pairs: set[Tuple[str, str]] = set()
-			for item in observations:
-				transition_name = str(item["transition_name"])
-				source_state, _target_state = transition_edges[transition_name]
-				pair = (source_state, transition_name)
-				if pair in seen_state_transition_pairs:
-					continue
-				seen_state_transition_pairs.add(pair)
-				control_lines.append(
-					f"+!advance_target_{target_id} : "
-					f"{self._call('dfa_state', (source_state,))} <-"
-				)
-				control_lines.extend(self._indent_body([f"!{transition_name}"]))
-				control_lines.append("")
-			control_lines.append(f"+!advance_target_{target_id} : true <-")
-			control_lines.extend(self._indent_body([".fail"]))
-			control_lines.append("")
-		control_lines.append("+!run_dfa : true <-")
-		control_lines.extend(self._indent_body([".fail"]))
-		control_lines.append("")
-		return prefix + "\n".join(control_lines).rstrip() + "\n"
-
-	def _render_runtime_blocker_clearers(
-		self,
-		method_library: HTNMethodLibrary | None,
-	) -> List[str]:
-		lines: List[str] = []
-		if method_library is None:
-			lines.append("+!clear_runtime_blockers : true <-")
-			lines.extend(self._indent_body(["true"]))
-			lines.append("")
-			return lines
-
-		target_task_names = {
-			str(binding.task_name).strip()
-			for binding in method_library.target_task_bindings or []
-			if str(binding.task_name).strip()
-		}
-		seen_triggers: set[str] = set()
-		for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
-			if not task.is_primitive and task.name in target_task_names:
-				continue
-			handler_args = self._failure_handler_args(task.parameters)
-			blocked_goal = self._call(
-				"blocked_runtime_goal",
-				(self._asl_atom_or_string(self._sanitize_name(task.name)), *handler_args),
-			)
-			if blocked_goal in seen_triggers:
-				continue
-			seen_triggers.add(blocked_goal)
-			lines.append(f"+!clear_runtime_blockers : {blocked_goal} <-")
-			lines.extend(
-				self._indent_body(
-					[
-						f"-{blocked_goal}",
-						"!clear_runtime_blockers",
-					],
-				),
-			)
-			lines.append("")
-		lines.append("+!clear_runtime_blockers : true <-")
-		lines.extend(self._indent_body(["true"]))
-		lines.append("")
-		return lines
-
-	def _rewrite_unordered_control_plans_linear_fallback(
-		self,
-		agentspeak_code: str,
-		target_observations: Sequence[Dict[str, Any]],
-		*,
-		method_library: HTNMethodLibrary | None = None,
-	) -> str:
-		start_marker = "/* DFA Control Plans */"
-		start_index = agentspeak_code.find(start_marker)
-		if start_index == -1:
-			return agentspeak_code
-
-		prefix = agentspeak_code[:start_index]
-		target_context = self._observed_target_context_expression(target_observations)
-		control_lines = ["/* DFA Control Plans */"]
-		if target_context:
-			control_lines.append(f"+!run_dfa : {target_context} <-")
-			control_lines.extend(self._indent_body(["true"]))
-			control_lines.append("")
-		control_lines.extend(self._render_runtime_blocker_clearers(method_library))
-		control_lines.append("+!clear_blocked_targets : blocked_transition(TRANSITION_ID) <-")
-		control_lines.extend(
-			self._indent_body(
-				[
-					"-blocked_transition(TRANSITION_ID)",
-					"!clear_blocked_targets",
-				],
-			),
-		)
-		control_lines.append("")
-		control_lines.append("+!clear_blocked_targets : true <-")
-		control_lines.extend(self._indent_body(["true"]))
-		control_lines.append("")
-		for item in target_observations:
-			target_id = str(item["target_id"])
-			transition_name = str(item["transition_name"])
-			transition_atom = self._asl_atom_or_string(transition_name)
-			control_lines.append(
-				f"+!run_dfa : not target_seen({target_id}) & "
-				f"not blocked_transition({transition_atom}) <-"
-			)
-			control_lines.extend(
-				self._indent_body(
-					[
-						f"!{transition_name}",
-						"!clear_runtime_blockers",
-						"!clear_blocked_targets",
-						"!run_dfa",
-					],
-				),
-			)
-			control_lines.append("")
-			control_lines.append(f"-!{transition_name} : not target_seen({target_id}) <-")
-			control_lines.extend(
-				self._indent_body(
-					[
-						f"+blocked_transition({transition_atom})",
-						"!run_dfa",
-					],
-				),
-			)
-			control_lines.append("")
-		control_lines.append("+!run_dfa : true <-")
-		control_lines.extend(self._indent_body([".fail"]))
-		control_lines.append("")
-		return prefix + "\n".join(control_lines).rstrip() + "\n"
-
-	def _observed_target_context_expression(
-		self,
-		target_observations: Sequence[Dict[str, Any]],
-	) -> str:
-		if not target_observations:
-			return ""
-		seen_targets: set[str] = set()
-		ordered_targets: List[str] = []
-		for observation in target_observations:
-			target_id = str(observation["target_id"])
-			if target_id in seen_targets:
-				continue
-			seen_targets.add(target_id)
-			ordered_targets.append(target_id)
-		return " & ".join(f"target_seen({target_id})" for target_id in ordered_targets)
-
-	def _ordered_target_transition_chain(
-		self,
-		agentspeak_code: str,
-		target_observations: Sequence[Dict[str, Any]],
-		*,
-		require_initial_state: bool = True,
-	) -> List[str]:
-		if not target_observations:
-			return []
-
-		transition_edges = self._extract_transition_state_edges(agentspeak_code)
-		if not transition_edges:
-			return []
-
-		transition_names: List[str] = []
-		seen_transitions: set[str] = set()
-		for observation in target_observations:
-			transition_name = str(observation.get("transition_name", "")).strip()
-			if not transition_name or transition_name in seen_transitions:
-				continue
-			if transition_name not in transition_edges:
-				return []
-			transition_names.append(transition_name)
-			seen_transitions.add(transition_name)
-
-		if not transition_names:
-			return []
-
-		previous_target_state: Optional[str] = None
-		for transition_name in transition_names:
-			source_state, target_state = transition_edges[transition_name]
-			if not source_state or not target_state or source_state == target_state:
-				return []
-			if previous_target_state is not None and source_state != previous_target_state:
-				return []
-			previous_target_state = target_state
-
-		if require_initial_state:
-			initial_state = self._extract_initial_dfa_state(agentspeak_code)
-			first_source_state = transition_edges[transition_names[0]][0]
-			if initial_state and first_source_state != initial_state:
-				return []
-
-		accepting_states = self._extract_accepting_dfa_states(agentspeak_code)
-		final_state = transition_edges[transition_names[-1]][1]
-		if accepting_states and final_state not in accepting_states:
-			return []
-
-		return transition_names
-
-	def _extract_transition_state_edges(self, agentspeak_code: str) -> Dict[str, Tuple[str, str]]:
-		start_marker = "/* DFA Transition Wrappers */"
-		end_marker = "/* DFA Control Plans */"
-		start_index = agentspeak_code.find(start_marker)
-		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
-			return {}
-
-		section = agentspeak_code[start_index:end_index]
-		edges: Dict[str, Tuple[str, str]] = {}
-		chunks = [
-			chunk.strip()
-			for chunk in re.split(r"\n\s*\n", section.strip())
-			if chunk.strip()
-		]
-		for chunk in chunks:
-			lines = chunk.splitlines()
-			if not lines or lines[0].strip() == start_marker:
-				continue
-			header_line = lines[0].strip()
-			header_match = re.match(r"^\+!([^\s(:]+)\s*:\s*(.*?)\s*<-$", header_line)
-			if header_match is None:
-				continue
-			transition_name = header_match.group(1).strip()
-			source_match = re.search(r"\bdfa_state\(([^)]+)\)", header_match.group(2))
-			if source_match is None:
-				continue
-			body_text = "\n".join(lines[1:])
-			target_matches = re.findall(r"\+dfa_state\(([^)]+)\)", body_text)
-			if not target_matches:
-				continue
-			edges[transition_name] = (
-				source_match.group(1).strip(),
-				target_matches[-1].strip(),
-			)
-		return edges
-
-	@staticmethod
-	def _extract_accepting_dfa_states(agentspeak_code: str) -> set[str]:
-		return {
-			match.group(1).strip()
-			for match in re.finditer(
-				r"^accepting_state\(([^)]+)\)\.",
-				agentspeak_code,
-				flags=re.MULTILINE,
-			)
-			if match.group(1).strip()
-		}
-
-	def _extract_initial_dfa_state(self, agentspeak_code: str) -> Optional[str]:
-		match = re.search(r"^\s*dfa_state\(([^)]+)\)\.\s*$", agentspeak_code, re.MULTILINE)
-		if match is None:
-			return None
-		return match.group(1).strip()
 
 	def _extract_action_path(self, stdout: str) -> List[str]:
 		pattern = re.compile(r"^runtime env action success (.+?)\s*$")
@@ -1847,105 +1083,6 @@ class JasonRunner:
 		).strip()
 		return action_name in {"nop", "noop"}
 
-	@classmethod
-	def _progress_guard_specs_by_task(
-		cls,
-		method_library: HTNMethodLibrary,
-	) -> Dict[str, Tuple[Tuple[str, Tuple[int, ...]], ...]]:
-		specs_by_task: Dict[str, List[Tuple[str, Tuple[int, ...]]]] = {}
-		inferred_source_specs: Dict[str, Dict[str, Tuple[int, ...]]] = {}
-		for method in method_library.methods or ():
-			task_name = str(getattr(method, "task_name", "") or "").strip()
-			task = method_library.task_for_name(task_name)
-			if task is None:
-				continue
-			task_parameters = tuple(str(item) for item in (getattr(task, "parameters", ()) or ()))
-			parameter_index = {parameter: index for index, parameter in enumerate(task_parameters)}
-			source_predicates = {
-				cls._sanitize_name(predicate)
-				for predicate in tuple(getattr(task, "source_predicates", ()) or ())
-				if str(predicate or "").strip()
-			}
-			if not source_predicates:
-				continue
-			for literal in tuple(getattr(method, "context", ()) or ()):
-				if getattr(literal, "is_equality", False) or not getattr(literal, "is_positive", True):
-					continue
-				predicate_name = str(getattr(literal, "predicate", "") or "").strip()
-				if cls._sanitize_name(predicate_name) not in source_predicates:
-					continue
-				literal_args = tuple(str(arg) for arg in (getattr(literal, "args", ()) or ()))
-				if any(arg not in parameter_index for arg in literal_args):
-					continue
-				inferred_source_specs.setdefault(task_name, {})[predicate_name] = tuple(
-					parameter_index[arg]
-					for arg in literal_args
-				)
-		tasks = tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ())
-		for task in tasks:
-			task_name = str(getattr(task, "name", "") or "").strip()
-			if not task_name:
-				continue
-			parameters = tuple(str(item) for item in (getattr(task, "parameters", ()) or ()))
-			parameter_index = {parameter: index for index, parameter in enumerate(parameters)}
-			specs: List[Tuple[str, Tuple[int, ...]]] = []
-			headline = getattr(task, "headline_literal", None)
-			if headline is not None and not getattr(headline, "is_equality", False):
-				headline_args = tuple(getattr(headline, "args", ()) or ())
-				predicate = str(getattr(headline, "predicate", "") or "").strip()
-				indices = tuple(
-					parameter_index[arg]
-					for arg in headline_args
-					if arg in parameter_index
-				)
-				if predicate and len(indices) == len(headline_args):
-					specs.append((predicate, indices))
-			if not specs:
-				for predicate in tuple(getattr(task, "source_predicates", ()) or ()):
-					predicate_name = str(predicate or "").strip()
-					if not predicate_name:
-						continue
-					inferred_indices = (
-						inferred_source_specs.get(task_name, {}).get(predicate_name)
-					)
-					if inferred_indices is not None:
-						specs.append((predicate_name, inferred_indices))
-					else:
-						specs.append((predicate_name, tuple(range(len(parameters)))))
-			if specs:
-				specs_by_task[task_name] = specs
-		return {
-			task_name: tuple(specs)
-			for task_name, specs in specs_by_task.items()
-		}
-
-	@classmethod
-	def _progress_target_guard_atom(
-		cls,
-		task_name: str,
-		predicate_name: str,
-		args: Sequence[str],
-		*,
-		preserve_variables: bool = False,
-	) -> str:
-		predicate = str(predicate_name or "").strip()
-		if not predicate:
-			return ""
-		rendered_args = (
-			cls._runtime_atom_term(task_name),
-			cls._runtime_atom_term(predicate),
-			*tuple(
-				(
-					str(arg).strip()
-					if preserve_variables and cls._looks_like_asl_variable(str(arg).strip())
-					else cls._runtime_atom_term(arg)
-				)
-				for arg in args
-				if str(arg).strip()
-			),
-		)
-		return cls._call(f"progress_target_{len(rendered_args) - 2}", rendered_args)
-
 	@staticmethod
 	def _combine_contexts(*contexts: str) -> str:
 		parts: List[str] = []
@@ -1985,8 +1122,6 @@ class JasonRunner:
 	def _render_failure_handlers(
 		self,
 		method_library: HTNMethodLibrary | None,
-		*,
-		ordered_query_sequence: bool = True,
 	) -> List[str]:
 		lines = ["/* Failure Handlers */"]
 		lines.append("-!run_dfa : true <-")
@@ -1996,24 +1131,10 @@ class JasonRunner:
 			),
 		)
 		lines.append("")
-		lines.append("-!verify_targets : true <-")
-		lines.extend(
-			self._indent_body(
-				['.print("runtime goal failed ", fail_goal(verify_targets))', ".stopMAS"],
-			),
-		)
-		lines.append("")
 		if method_library is None:
 			return lines
-		target_task_names = {
-			str(binding.task_name).strip()
-			for binding in method_library.target_task_bindings or []
-			if str(binding.task_name).strip()
-		}
 		seen_triggers: set[str] = set()
 		for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
-			if not task.is_primitive and task.name in target_task_names:
-				continue
 			handler_args = self._failure_handler_args(task.parameters)
 			trigger = self._call(self._sanitize_name(task.name), handler_args)
 			if trigger in seen_triggers:
@@ -3404,295 +2525,6 @@ class JasonRunner:
 		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{instrumented_section}{suffix}"
 
-	def _restrict_unsafe_noop_methods_to_satisfied_or_protected_targets(
-		self,
-		agentspeak_code: str,
-		method_library: HTNMethodLibrary | None,
-		target_observations: Sequence[Dict[str, Any]],
-	) -> str:
-		if method_library is None or not method_library.methods:
-			return agentspeak_code
-
-		guard_specs_by_task = self._progress_guard_specs_by_task(method_library)
-		if not guard_specs_by_task:
-			return agentspeak_code
-
-		method_lookup = {
-			str(getattr(method, "method_name", "") or ""): method
-			for method in method_library.methods
-		}
-		start_marker = "/* HTN Method Plans */"
-		end_marker = "/* DFA Transition Wrappers */"
-		start_index = agentspeak_code.find(start_marker)
-		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
-			return agentspeak_code
-
-		prefix = agentspeak_code[:start_index]
-		section = agentspeak_code[start_index:end_index]
-		suffix = agentspeak_code[end_index:]
-		section_lines = section.splitlines()
-		if not section_lines:
-			return agentspeak_code
-
-		header = section_lines[0]
-		chunks: List[List[str]] = []
-		current: List[str] = []
-		for line in section_lines[1:]:
-			if not line.strip():
-				if current:
-					chunks.append(current)
-					current = []
-				continue
-			current.append(line)
-		if current:
-			chunks.append(current)
-
-		changed = False
-		restricted_chunks: List[str] = []
-		for chunk in chunks:
-			if not chunk:
-				continue
-			method_name = self._trace_method_name_from_chunk(chunk)
-			method = method_lookup.get(method_name)
-			if (
-				method is None
-				or not self._method_is_runtime_noop(method)
-				or self._method_noop_context_satisfies_advertised_guard(method, guard_specs_by_task)
-			):
-				restricted_chunks.append("\n".join(chunk))
-				continue
-			parsed_head = self._split_method_trigger_head(chunk[0])
-			if parsed_head is None:
-				restricted_chunks.append("\n".join(chunk))
-				continue
-			head_prefix, task_name, head_args, context, head_suffix = parsed_head
-			specs = guard_specs_by_task.get(str(getattr(method, "task_name", "") or ""))
-			if not specs:
-				specs = guard_specs_by_task.get(task_name)
-			if specs and self._rendered_noop_head_context_satisfies_guard_specs(
-				head_args,
-				context,
-				specs,
-			):
-				restricted_chunks.append("\n".join(chunk))
-				continue
-			guard_contexts = self._unsafe_noop_allowed_contexts(
-				task_name,
-				head_args,
-				specs or (),
-				target_observations,
-			)
-			if not guard_contexts:
-				restricted_chunks.append("\n".join(chunk))
-				continue
-			changed = True
-			for guard_context in guard_contexts:
-				next_context = self._combine_contexts(context, guard_context)
-				restricted_chunks.append(
-					"\n".join([f"{head_prefix}{next_context}{head_suffix}", *chunk[1:]]),
-				)
-
-		if not changed:
-			return agentspeak_code
-
-		restricted_section = "\n\n".join([header, *restricted_chunks]).rstrip() + "\n\n"
-		return f"{prefix}{restricted_section}{suffix}"
-
-	def _method_noop_context_satisfies_advertised_guard(
-		self,
-		method: HTNMethod,
-		guard_specs_by_task: Dict[str, Tuple[Tuple[str, Tuple[int, ...]], ...]],
-	) -> bool:
-		task_name = str(getattr(method, "task_name", "") or "")
-		specs = guard_specs_by_task.get(task_name)
-		if not specs:
-			return False
-
-		task_args = tuple(str(arg) for arg in (getattr(method, "task_args", ()) or ()))
-		if not task_args:
-			task_args = tuple(str(arg) for arg in (getattr(method, "parameters", ()) or ()))
-		context_literals = tuple(getattr(method, "context", ()) or ())
-		for predicate_name, arg_indices in specs:
-			if any(index >= len(task_args) for index in arg_indices):
-				continue
-			expected_args = tuple(task_args[index] for index in arg_indices)
-			for literal in context_literals:
-				if getattr(literal, "is_equality", False) or not getattr(literal, "is_positive", True):
-					continue
-				if self._sanitize_name(getattr(literal, "predicate", "")) != self._sanitize_name(predicate_name):
-					continue
-				if tuple(str(arg) for arg in (getattr(literal, "args", ()) or ())) == expected_args:
-					return True
-		return False
-
-	def _rendered_noop_head_context_satisfies_guard_specs(
-		self,
-		head_args: Sequence[str],
-		context_text: str,
-		specs: Sequence[Tuple[str, Tuple[int, ...]]],
-	) -> bool:
-		context_parts = tuple(
-			part.strip()
-			for part in str(context_text or "").split("&")
-			if part.strip()
-		)
-		if not context_parts:
-			return False
-
-		for predicate_name, arg_indices in specs:
-			if any(index >= len(head_args) for index in arg_indices):
-				continue
-			expected_args = tuple(str(head_args[index]) for index in arg_indices)
-			for part in context_parts:
-				parsed = self._parse_asl_context_conjunct(part)
-				if parsed is None or parsed.get("kind") != "atom":
-					continue
-				if self._sanitize_name(str(parsed.get("predicate", ""))) != (
-					self._sanitize_name(predicate_name)
-				):
-					continue
-				if tuple(str(arg) for arg in tuple(parsed.get("args") or ())) == expected_args:
-					return True
-		return False
-
-	def _unsafe_noop_allowed_contexts(
-		self,
-		task_name: str,
-		head_args: Sequence[str],
-		specs: Sequence[Tuple[str, Tuple[int, ...]]],
-		target_observations: Sequence[Dict[str, Any]],
-	) -> Tuple[str, ...]:
-		contexts: List[str] = []
-		seen: set[str] = set()
-
-		def add_context(context: str) -> None:
-			cleaned = str(context or "").strip()
-			if not cleaned or cleaned in seen:
-				return
-			seen.add(cleaned)
-			contexts.append(cleaned)
-
-		for predicate_name, arg_indices in specs:
-			if any(index >= len(head_args) for index in arg_indices):
-				continue
-			guard_args = tuple(head_args[index] for index in arg_indices)
-			add_context(
-				self._context_atom(
-					predicate_name,
-					guard_args,
-					preserve_variables=True,
-				),
-			)
-
-		for context in self._protected_target_guard_contexts(
-			head_args,
-			specs,
-			target_observations,
-		):
-			add_context(context)
-
-		_ = task_name
-		return tuple(contexts)
-
-	def _protected_target_guard_contexts(
-		self,
-		head_args: Sequence[str],
-		specs: Sequence[Tuple[str, Tuple[int, ...]]],
-		target_observations: Sequence[Dict[str, Any]],
-	) -> Tuple[str, ...]:
-		contexts: List[str] = []
-		seen: set[str] = set()
-		protected_specs: set[Tuple[str, bool, int]] = set()
-		prefix_protected_contexts: List[str] = []
-		for observation in target_observations:
-			if not bool(observation.get("protect_target", True)):
-				continue
-			literal = observation.get("literal")
-			if not isinstance(literal, HTNLiteral) or literal.is_equality:
-				continue
-			protected_specs.add(
-				(
-					self._sanitize_name(literal.predicate),
-					bool(literal.is_positive),
-					len(tuple(literal.args or ())),
-				),
-			)
-			prefix_context = self._protected_target_prefix_context(
-				head_args,
-				literal,
-			)
-			if prefix_context:
-				prefix_protected_contexts.append(prefix_context)
-		for predicate_name, arg_indices in specs:
-			if any(index >= len(head_args) for index in arg_indices):
-				continue
-			sanitized_predicate = self._sanitize_name(predicate_name)
-			if not sanitized_predicate:
-				continue
-			guard_args = tuple(head_args[index] for index in arg_indices)
-			positive_key = (sanitized_predicate, True, len(arg_indices))
-			negative_key = (sanitized_predicate, False, len(arg_indices))
-			if positive_key in protected_specs:
-				protection_context = self._context_atom(
-					f"protected_target_{sanitized_predicate}",
-					guard_args,
-					preserve_variables=True,
-				)
-				if protection_context and protection_context not in seen:
-					seen.add(protection_context)
-					contexts.append(protection_context)
-			if negative_key in protected_specs:
-				absence_context = self._context_atom(
-					f"protected_absence_{sanitized_predicate}",
-					guard_args,
-					preserve_variables=True,
-				)
-				if absence_context and absence_context not in seen:
-					seen.add(absence_context)
-					contexts.append(absence_context)
-		for prefix_context in prefix_protected_contexts:
-			if prefix_context and prefix_context not in seen:
-				seen.add(prefix_context)
-				contexts.append(prefix_context)
-		return tuple(contexts)
-
-	def _protected_target_prefix_context(
-		self,
-		head_args: Sequence[str],
-		literal: HTNLiteral,
-	) -> str:
-		if not bool(literal.is_positive):
-			return ""
-		normalized_head_args = tuple(
-			str(arg).strip()
-			for arg in head_args
-			if str(arg).strip()
-		)
-		normalized_literal_args = tuple(
-			str(arg).strip()
-			for arg in tuple(literal.args or ())
-			if str(arg).strip()
-		)
-		if not normalized_head_args or len(normalized_literal_args) <= len(normalized_head_args):
-			return ""
-		variable_bindings: Dict[str, str] = {}
-		for index, head_arg in enumerate(normalized_head_args):
-			literal_arg = normalized_literal_args[index]
-			if self._looks_like_asl_variable(head_arg):
-				existing = variable_bindings.get(head_arg)
-				if existing is not None and existing != literal_arg:
-					return ""
-				variable_bindings[head_arg] = literal_arg
-				continue
-			if head_arg != literal_arg:
-				return ""
-		return self._context_atom(
-			f"protected_target_{self._sanitize_name(literal.predicate)}",
-			normalized_head_args + normalized_literal_args[len(normalized_head_args):],
-			preserve_variables=True,
-		)
-
 	@classmethod
 	def _context_atom(
 		cls,
@@ -3846,9 +2678,7 @@ public class no_ancestor_goal extends DefaultInternalAction {
 		*,
 		action_schemas: Sequence[Dict[str, Any]],
 		seed_facts: Sequence[str],
-		target_literals: Sequence[HTNLiteral],
 	) -> str:
-		_ = target_literals
 		seed_atoms = [
 			atom
 			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
@@ -4196,61 +3026,6 @@ public class {self.environment_class_name} extends Environment {{
 			rendered_patterns = ", ".join(self._render_pattern_java(item) for item in clause)
 			rendered_clauses.append(f"new Pattern[]{{{rendered_patterns}}}")
 		return f"new Pattern[][]{{{', '.join(rendered_clauses)}}}"
-
-	def _target_context_expression(self, target_literals: Sequence[HTNLiteral]) -> str:
-		rendered_literals = [
-			self._literal_to_context_expression(literal)
-			for literal in target_literals
-		]
-		rendered_literals = [item for item in rendered_literals if item]
-		if not rendered_literals:
-			return "true"
-		return " & ".join(rendered_literals)
-
-	@classmethod
-	def _literal_to_context_expression(cls, literal: HTNLiteral) -> str:
-		if literal.is_equality and len(literal.args) == 2:
-			operator = "==" if literal.is_positive else "\\=="
-			return (
-				f"{cls._runtime_atom_term(literal.args[0])} {operator} "
-				f"{cls._runtime_atom_term(literal.args[1])}"
-			)
-		predicate = cls._sanitize_name(literal.predicate)
-		atom = (
-			f"{predicate}({', '.join(cls._runtime_atom_term(arg) for arg in literal.args)})"
-			if literal.args
-			else predicate
-		)
-		if literal.is_positive:
-			return atom
-		return f"not {atom}"
-
-	@classmethod
-	def _literal_to_unmet_context_expression(cls, literal: HTNLiteral) -> str:
-		if literal.is_equality and len(literal.args) == 2:
-			operator = "\\==" if literal.is_positive else "=="
-			return (
-				f"{cls._runtime_atom_term(literal.args[0])} {operator} "
-				f"{cls._runtime_atom_term(literal.args[1])}"
-			)
-		predicate = cls._sanitize_name(literal.predicate)
-		atom = (
-			f"{predicate}({', '.join(cls._runtime_atom_term(arg) for arg in literal.args)})"
-			if literal.args
-			else predicate
-		)
-		if literal.is_positive:
-			return f"not {atom}"
-		return atom
-
-	@classmethod
-	def _target_protection_atom(cls, literal: HTNLiteral) -> str:
-		if literal.is_equality:
-			return ""
-		family = "protected_target" if literal.is_positive else "protected_absence"
-		predicate = cls._sanitize_name(literal.predicate)
-		args = tuple(cls._runtime_atom_term(arg) for arg in literal.args)
-		return cls._call(f"{family}_{predicate}", args)
 
 	def _resolve_log_config(self) -> Path:
 		log_conf = (

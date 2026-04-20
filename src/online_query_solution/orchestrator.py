@@ -549,8 +549,6 @@ class OnlineQuerySolutionOrchestrator:
 			)
 			validation = runner.validate(
 				agentspeak_code=agentspeak_code,
-				target_literals=(),
-				protected_target_literals=(),
 				method_library=method_library,
 				action_schemas=action_schemas,
 				seed_facts=seed_facts,
@@ -560,7 +558,6 @@ class OnlineQuerySolutionOrchestrator:
 				domain_name=online_domain.domain.name,
 				problem_file=str(Path(verification_problem_file).resolve()),
 				output_dir=output_dir,
-				completion_mode="accepting_state",
 			)
 			if validation.status != "success":
 				raise ValueError(validation.stderr or validation.stdout or "Jason runtime returned failure")
@@ -577,7 +574,7 @@ class OnlineQuerySolutionOrchestrator:
 				ltlf_formula=grounding_result.ltlf_formula,
 				action_path=tuple(validation.action_path),
 				method_trace=tuple(dict(item) for item in validation.method_trace),
-				guided_hierarchical_plan_text=hierarchical_plan_text,
+				hierarchical_plan_text=hierarchical_plan_text,
 				verification_problem_file=str(Path(verification_problem_file).resolve()),
 				verification_mode=verification_mode,
 				artifacts={
@@ -741,8 +738,8 @@ class OnlineQuerySolutionOrchestrator:
 				"ordered_subgoal_sequence": dfa_result.ordered_subgoal_sequence,
 				"action_path": list(jason_result.action_path),
 				"method_trace": list(jason_result.method_trace),
-				"guided_hierarchical_plan_text": jason_result.guided_hierarchical_plan_text,
-				"guided_hierarchical_plan_source": "jason_runtime",
+				"hierarchical_plan_text": jason_result.hierarchical_plan_text,
+				"hierarchical_plan_source": "jason_runtime",
 				"verification_problem_file": jason_result.verification_problem_file,
 				"verification_domain_file": None,
 				"timing_profile": dict(jason_result.timing_profile),

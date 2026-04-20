@@ -10,29 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from offline_method_generation.method_synthesis.schema import (
-	HTNLiteral,
 	HTNMethodLibrary,
-	HTNTargetTaskBinding,
 )
-
-
-def _literal_to_dict(literal: HTNLiteral) -> Dict[str, Any]:
-	return {
-		"predicate": literal.predicate,
-		"args": list(literal.args),
-		"is_positive": literal.is_positive,
-		"source_symbol": literal.source_symbol,
-		"is_equality": literal.is_equality,
-	}
-
-
-def _load_literal(payload: Dict[str, Any]) -> HTNLiteral:
-	return HTNLiteral(
-		predicate=str(payload.get("predicate") or ""),
-		args=tuple(str(arg) for arg in (payload.get("args") or ())),
-		is_positive=bool(payload.get("is_positive", True)),
-		source_symbol=payload.get("source_symbol"),
-	)
 
 
 @dataclass(frozen=True)
@@ -187,7 +166,7 @@ class JasonExecutionResult:
 	ltlf_formula: str
 	action_path: Tuple[str, ...]
 	method_trace: Tuple[Dict[str, Any], ...]
-	guided_hierarchical_plan_text: Optional[str] = None
+	hierarchical_plan_text: Optional[str] = None
 	verification_problem_file: Optional[str] = None
 	verification_mode: str = "original_problem"
 	artifacts: Dict[str, Any] = field(default_factory=dict)
@@ -200,7 +179,7 @@ class JasonExecutionResult:
 			"ltlf_formula": self.ltlf_formula,
 			"action_path": list(self.action_path),
 			"method_trace": [dict(item) for item in self.method_trace],
-			"guided_hierarchical_plan_text": self.guided_hierarchical_plan_text,
+			"hierarchical_plan_text": self.hierarchical_plan_text,
 			"verification_problem_file": self.verification_problem_file,
 			"verification_mode": self.verification_mode,
 			"artifacts": dict(self.artifacts),
@@ -223,7 +202,7 @@ class JasonExecutionResult:
 				for item in (payload.get("method_trace") or ())
 				if isinstance(item, dict)
 			),
-			guided_hierarchical_plan_text=payload.get("guided_hierarchical_plan_text"),
+			hierarchical_plan_text=payload.get("hierarchical_plan_text"),
 			verification_problem_file=payload.get("verification_problem_file"),
 			verification_mode=str(payload.get("verification_mode") or "original_problem"),
 			artifacts=dict(payload.get("artifacts") or {}),
@@ -412,25 +391,6 @@ def load_domain_library_artifact(
 			str(generated_domain_path) if generated_domain_path.exists() else None
 		),
 	)
-
-
-def query_bound_method_library(
-	method_library: HTNMethodLibrary,
-	*,
-	target_literals: Sequence[HTNLiteral],
-	target_task_bindings: Sequence[HTNTargetTaskBinding],
-) -> HTNMethodLibrary:
-	"""Create a transient query-bound overlay without mutating the persisted artifact."""
-
-	return HTNMethodLibrary(
-		compound_tasks=list(method_library.compound_tasks),
-		primitive_tasks=list(method_library.primitive_tasks),
-		methods=list(method_library.methods),
-		target_literals=list(target_literals),
-		target_task_bindings=list(target_task_bindings),
-	)
-
-
 __all__ = [
 	"DomainLibraryArtifact",
 	"DFACompilationResult",
@@ -439,5 +399,4 @@ __all__ = [
 	"TemporalGroundingResult",
 	"load_domain_library_artifact",
 	"persist_domain_library_artifact",
-	"query_bound_method_library",
 ]

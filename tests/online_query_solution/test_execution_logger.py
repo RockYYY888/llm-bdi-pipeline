@@ -75,6 +75,7 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	assert "domain_gate" not in execution
 	assert "stage1_status" not in execution
 	assert "pending" not in text_log
+	assert "ONLINE QUERY SOLUTION EXECUTION" in text_log
 	assert "GOAL GROUNDING" in text_log
 	assert "TEMPORAL COMPILATION" in text_log
 	assert "AGENTSPEAK RENDERING" in text_log
@@ -113,5 +114,7 @@ def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:
 	)
 	log_path = logger.end_pipeline(success=True)
 	execution = json.loads((log_path.parent / "execution.json").read_text())
+	text_log = log_path.read_text()
 
 	assert execution["plan_solve"]["artifacts"]["backend_attempts"][0]["stdout"] == "solver-bytes"
+	assert "OFFICIAL PROBLEM ROOT EXECUTION" in text_log

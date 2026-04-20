@@ -374,10 +374,17 @@ class ExecutionLogger:
 		if self.current_record is None or self.current_log_dir is None:
 			return
 		record = self._record_to_dict()
+		mode = str(record.get("mode") or "").strip()
+		if mode == "online_query_solution":
+			header = "ONLINE QUERY SOLUTION EXECUTION"
+		elif mode == "official_problem_root_execution":
+			header = "OFFICIAL PROBLEM ROOT EXECUTION"
+		else:
+			header = "PIPELINE EXECUTION"
 		lines = [
-			"DOMAIN-COMPLETE PIPELINE EXECUTION",
+			header,
 			"=" * 80,
-			f"Mode: {record.get('mode')}",
+			f"Mode: {mode or 'unknown'}",
 			f"Success: {record.get('success')}",
 			f"Domain: {record.get('domain_name') or 'N/A'}",
 			f"Problem: {record.get('problem_name') or 'N/A'}",

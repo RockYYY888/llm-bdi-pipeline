@@ -612,13 +612,11 @@ accepting_state(q2).
 	!dfa_t1;
 	!run_dfa.
 """.strip(),
-		target_literals=(),
 		method_library=_sample_method_library(),
 		seed_facts=("(clear b1)", "(handempty)"),
 		runtime_objects=("b1",),
 		object_types={"b1": "block"},
 		type_parent_map={"block": "object", "object": None},
-		completion_mode="accepting_state",
 	)
 
 	assert '.print("execute start")' in runtime_program
@@ -657,18 +655,15 @@ dfa_edge_label(dfa_t2, "subgoal_2").
 +!run_dfa : dfa_state(q0) & accepting_state(q0) <-
 	true.
 """.strip(),
-		target_literals=(),
 		method_library=_sample_method_library(),
 		seed_facts=(),
 		runtime_objects=(),
 		object_types={},
 		type_parent_map={},
-		completion_mode="accepting_state",
 	)
 
 	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
 
-	assert "!verify_targets" not in execute_section
 	assert "?accepting_state(FINAL_STATE)" in runtime_program
 	assert "!run_dfa" in execute_section
 
@@ -691,20 +686,18 @@ accepting_state(q0).
 +!run_dfa : true <-
 	true.
 """.strip(),
-		target_literals=(),
 		method_library=_sample_method_library(),
 		seed_facts=(),
 		runtime_objects=(),
 		object_types={},
 		type_parent_map={},
-		completion_mode="accepting_state",
 	)
 
 	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
 
 	assert "!run_dfa" in execute_section
 	assert '.print("execute success")' in execute_section
-	assert "!guided_replay_1" not in execute_section
+	assert execute_section.count("!run_dfa") == 1
 
 
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
@@ -788,8 +781,6 @@ accepting_state(q0).
 +!run_dfa : true <-
 	true.
 """.strip(),
-		target_literals=(),
-		protected_target_literals=(),
 		method_library=_sample_method_library(),
 		action_schemas=[{"name": "noop"}],
 		seed_facts=(),
@@ -799,7 +790,6 @@ accepting_state(q0).
 		domain_name="blocks",
 		problem_file=None,
 		output_dir=tmp_path,
-		completion_mode="accepting_state",
 	)
 
 	assert captured["agentspeak_code"].index("m-navigate_abs-1") < captured["agentspeak_code"].index(
@@ -875,8 +865,6 @@ accepting_state(q0).
 +!run_dfa : true <-
 	true.
 """.strip(),
-		target_literals=(),
-		protected_target_literals=(),
 		method_library=_sample_method_library(),
 		action_schemas=[{"name": "noop"}],
 		seed_facts=(),
@@ -886,7 +874,6 @@ accepting_state(q0).
 		domain_name="blocks",
 		problem_file=None,
 		output_dir=tmp_path,
-		completion_mode="accepting_state",
 	)
 
 	assert result.status == "success"
@@ -1370,10 +1357,10 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 	)
 
 	assert result is not None
-	assert result.guided_hierarchical_plan_text == "reconstructed plan"
+	assert result.hierarchical_plan_text == "reconstructed plan"
 
 
-def test_verify_plan_officially_restores_terminal_newline_for_guided_plan_text(
+def test_verify_plan_officially_restores_terminal_newline_for_hierarchical_plan_text(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
 ) -> None:
@@ -1408,7 +1395,9 @@ def test_verify_plan_officially_restores_terminal_newline_for_guided_plan_text(
 			)
 
 		def verify_plan(self, **kwargs):
-			raise AssertionError("verify_plan should not be called when guided plan text is present")
+			raise AssertionError(
+				"verify_plan should not be called when hierarchical plan text is present"
+			)
 
 	monkeypatch.setattr(
 		online_official_verification_module,
@@ -1429,7 +1418,7 @@ def test_verify_plan_officially_restores_terminal_newline_for_guided_plan_text(
 					PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"
 				),
 				"verification_mode": "original_problem",
-				"guided_hierarchical_plan_text": "==>\nroot",
+				"hierarchical_plan_text": "==>\nroot",
 				"action_path": [],
 				"method_trace": [],
 			},
