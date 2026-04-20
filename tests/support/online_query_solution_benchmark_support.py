@@ -220,10 +220,16 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		report.get("problem_file")
 		or ((report.get("case") or {}).get("problem_file") or ""),
 	)
+	instruction = str(
+		report.get("instruction")
+		or ((report.get("case") or {}).get("instruction") or ""),
+	).strip()
 	log_dir = report.get("log_dir")
 	return {
 		"run_id": report.get("run_id"),
+		"domain_key": str(report.get("domain_key") or ""),
 		"query_id": str(report.get("query_id") or ""),
+		"instruction": instruction,
 		"problem_file": problem_file,
 		"library_source": str(report.get("library_source") or ""),
 		"success": bool(report.get("success")),
@@ -238,6 +244,7 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 def _load_query_report_checkpoint(
 	query_result_path: Path,
 	*,
+	domain_key: str,
 	query_id: str,
 	library_source: str,
 ) -> Optional[Dict[str, Any]]:
@@ -246,6 +253,8 @@ def _load_query_report_checkpoint(
 	try:
 		payload = json.loads(query_result_path.read_text())
 	except json.JSONDecodeError:
+		return None
+	if str(payload.get("domain_key") or "") != domain_key:
 		return None
 	if str(payload.get("query_id") or "") != query_id:
 		return None
@@ -405,6 +414,7 @@ def run_online_query_solution_benchmark_for_domain(
 		for query_id in selected_query_ids:
 			cached_report = _load_query_report_checkpoint(
 				_query_result_path(domain_output_root, query_id),
+				domain_key=domain_key,
 				query_id=query_id,
 				library_source=normalized_library_source,
 			)
@@ -419,12 +429,13 @@ def run_online_query_solution_benchmark_for_domain(
 		query_report = _serialize_query_report(
 			{
 				**run_online_query_case(
-				domain_key,
-				query_id,
-				library_source=normalized_library_source,
-				logs_root=domain_output_root / "logs",
+					domain_key,
+					query_id,
+					library_source=normalized_library_source,
+					logs_root=domain_output_root / "logs",
 				),
 				"run_id": run_id,
+				"domain_key": domain_key,
 			},
 		)
 		query_reports_by_id[query_id] = query_report

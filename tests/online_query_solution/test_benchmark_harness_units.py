@@ -77,8 +77,8 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 	monkeypatch,
 ) -> None:
 	query_cases = {
-		"q1": {"problem_file": tmp_path / "p1.hddl"},
-		"q2": {"problem_file": tmp_path / "p2.hddl"},
+		"q1": {"problem_file": tmp_path / "p1.hddl", "instruction": "q1 instruction"},
+		"q2": {"problem_file": tmp_path / "p2.hddl", "instruction": "q2 instruction"},
 	}
 	monkeypatch.setattr(
 		benchmark_support,
@@ -97,6 +97,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 		calls.append((query_id, str(Path(logs_root or "").resolve())))
 		return {
 			"query_id": query_id,
+			"instruction": str(query_cases[query_id]["instruction"]),
 			"problem_file": str(query_cases[query_id]["problem_file"]),
 			"library_source": library_source,
 			"success": True,
@@ -124,7 +125,9 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 		json.dumps(
 			{
 				"run_id": "run-001",
+				"domain_key": "blocksworld",
 				"query_id": "q1",
+				"instruction": "q1 instruction",
 				"problem_file": str(query_cases["q1"]["problem_file"]),
 				"library_source": "benchmark",
 				"success": True,
@@ -156,10 +159,28 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 	assert summary["completed_query_ids"] == ["q1", "q2"]
 	assert summary["resumed_query_ids"] == ["q1"]
 	assert summary["query_results"][0]["run_id"] == "run-001"
+	assert summary["query_results"][0]["query_result_path"].endswith("q1.json")
 	assert (run_root / "blocksworld.summary.json").exists()
 	assert (domain_root / "summary.json").exists()
 	assert (domain_root / "state.json").exists()
-	assert json.loads((query_results_root / "q2.json").read_text())["run_id"] == "run-001"
+	assert json.loads((query_results_root / "q2.json").read_text()) == {
+		"run_id": "run-001",
+		"domain_key": "blocksworld",
+		"query_id": "q2",
+		"instruction": "q2 instruction",
+		"problem_file": str(query_cases["q2"]["problem_file"]),
+		"library_source": "benchmark",
+		"success": True,
+		"result": {"success": True, "step": ""},
+		"outcome_bucket": "hierarchical_plan_verified",
+		"log_dir": str((domain_root / "logs" / "q2").resolve()),
+		"execution": {
+			"runtime_execution": {
+				"metadata": {"verification_mode": "original_problem"},
+			},
+		},
+		"online_domain_source": "benchmark",
+	}
 
 
 def test_domain_benchmark_supports_single_query_runs(
@@ -167,8 +188,8 @@ def test_domain_benchmark_supports_single_query_runs(
 	monkeypatch,
 ) -> None:
 	query_cases = {
-		"q1": {"problem_file": tmp_path / "p1.hddl"},
-		"q2": {"problem_file": tmp_path / "p2.hddl"},
+		"q1": {"problem_file": tmp_path / "p1.hddl", "instruction": "q1 instruction"},
+		"q2": {"problem_file": tmp_path / "p2.hddl", "instruction": "q2 instruction"},
 	}
 	monkeypatch.setattr(
 		benchmark_support,
@@ -185,6 +206,7 @@ def test_domain_benchmark_supports_single_query_runs(
 	):
 		return {
 			"query_id": query_id,
+			"instruction": str(query_cases[query_id]["instruction"]),
 			"problem_file": str(query_cases[query_id]["problem_file"]),
 			"library_source": library_source,
 			"success": False,
@@ -212,6 +234,7 @@ def test_domain_benchmark_supports_single_query_runs(
 	assert summary["runtime_execution_failures"] == 1
 	assert summary["complete"] is True
 	assert summary["query_results"][0]["run_id"] == "single-query-run"
+	assert summary["query_results"][0]["query_result_path"].endswith("q2.json")
 	assert (
 		tmp_path
 		/ "single-query-run"
