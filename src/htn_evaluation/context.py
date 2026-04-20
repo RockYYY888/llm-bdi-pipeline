@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Set, Tuple
 
 from pipeline.execution_logger import ExecutionLogger
-from planning.official_benchmark import OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
+from planning.official_benchmark import (
+	OFFICIAL_BENCHMARK_CPU_COUNT,
+	OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB,
+	OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS,
+)
 from planning.problem_structure import ProblemStructure, ProblemStructureAnalyzer
 from planning.representations import PlanningRepresentationBuilder, RepresentationBuildResult
 from utils.config import Config, get_config
@@ -26,6 +30,8 @@ class HTNEvaluationContext:
 	"""Minimal runtime context for planner-based HTN evaluation."""
 
 	OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS = OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
+	OFFICIAL_PROBLEM_ROOT_MEMORY_LIMIT_MIB = OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB
+	OFFICIAL_PROBLEM_ROOT_CPU_COUNT = OFFICIAL_BENCHMARK_CPU_COUNT
 
 	def __init__(
 		self,
@@ -119,6 +125,15 @@ class HTNEvaluationContext:
 		if timeout_seconds is not None:
 			return max(float(timeout_seconds), 1.0)
 		return float(self.OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS)
+
+	def _official_problem_root_resource_profile(self) -> Dict[str, Any]:
+		return {
+			"planning_timeout_seconds": float(
+				self.OFFICIAL_PROBLEM_ROOT_PLANNING_TIMEOUT_SECONDS,
+			),
+			"memory_limit_mib": int(self.OFFICIAL_PROBLEM_ROOT_MEMORY_LIMIT_MIB),
+			"cpu_count": int(self.OFFICIAL_PROBLEM_ROOT_CPU_COUNT),
+		}
 
 	@staticmethod
 	def _rewrite_artifact_root_paths(value: Any, source_root: Path, target_root: Path) -> Any:

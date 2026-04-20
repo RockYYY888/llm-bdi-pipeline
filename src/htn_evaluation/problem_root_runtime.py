@@ -14,13 +14,23 @@ import os
 import re
 import shutil
 import signal
+import sys
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+	import resource
+except ImportError:  # pragma: no cover - not expected on Unix CI, but keep runtime-safe.
+	resource = None  # type: ignore[assignment]
+
 from planning.backends import PlanningBackendTask, backend_by_name
 from planning.panda_portfolio import PANDAPlanner
+from planning.official_benchmark import (
+	OFFICIAL_BENCHMARK_CPU_COUNT,
+	OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB,
+)
 from verification.official_plan_verifier import IPCPlanVerifier
 
 from .context import HTNEvaluationContext
@@ -40,6 +50,61 @@ class _NullExecutionLogger:
 	def log_official_verification(self, *args, **kwargs) -> None:
 		return None
 
+
+def _apply_official_resource_profile(
+	*,
+	memory_limit_mib: int,
+	cpu_count: int,
+) -> Dict[str, Any]:
+	"""Apply IPC-style resource bounds to the current worker process."""
+	profile: Dict[str, Any] = {
+		"requested_memory_limit_mib": int(memory_limit_mib),
+		"requested_cpu_count": int(cpu_count),
+		"memory_limit_enforced": False,
+		"cpu_affinity_enforced": False,
+		"memory_limit_strategy": None,
+		"cpu_affinity_strategy": None,
+		"platform": sys.platform,
+	}
+
+	if not sys.platform.startswith("linux"):
+		profile["memory_limit_strategy"] = "linux_only_not_applied"
+		profile["cpu_affinity_strategy"] = "linux_only_not_applied"
+		return profile
+
+	memory_limit_bytes = max(int(memory_limit_mib), 1) * 1024 * 1024
+	if resource is not None:
+		for limit_name in ("RLIMIT_AS", "RLIMIT_DATA"):
+			limit_key = getattr(resource, limit_name, None)
+			if limit_key is None:
+				continue
+			try:
+				resource.setrlimit(limit_key, (memory_limit_bytes, memory_limit_bytes))
+				profile["memory_limit_enforced"] = True
+				profile["memory_limit_strategy"] = limit_name
+				break
+			except (OSError, ValueError):
+				continue
+	else:
+		profile["memory_limit_strategy"] = "resource_unavailable"
+
+	if int(cpu_count) == 1:
+		sched_setaffinity = getattr(os, "sched_setaffinity", None)
+		if callable(sched_setaffinity):
+			try:
+				existing_affinity = os.sched_getaffinity(0)
+				target_cpu = min(existing_affinity) if existing_affinity else 0
+				sched_setaffinity(0, {target_cpu})
+				profile["cpu_affinity_enforced"] = True
+				profile["cpu_affinity_strategy"] = "sched_setaffinity"
+			except (AttributeError, OSError, ValueError):
+				profile["cpu_affinity_strategy"] = "sched_setaffinity_failed"
+		else:
+			profile["cpu_affinity_strategy"] = "sched_setaffinity_unavailable"
+	else:
+		profile["cpu_affinity_strategy"] = "not_requested"
+
+	return profile
 
 def _sanitize_identifier(value: str) -> str:
 	text = str(value or "").strip().lower()
@@ -569,6 +634,10 @@ def official_problem_root_planning_task_worker(
 	try:
 		if hasattr(os, "setsid"):
 			os.setsid()
+		resource_profile = _apply_official_resource_profile(
+			memory_limit_mib=OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB,
+			cpu_count=OFFICIAL_BENCHMARK_CPU_COUNT,
+		)
 		context = HTNEvaluationContext(
 			domain_file=domain_file,
 			problem_file=problem_file,
@@ -608,6 +677,7 @@ def official_problem_root_planning_task_worker(
 					plan_solve_summary.get("status") == "success"
 					and plan_verification_summary.get("status") == "success"
 				),
+				"resource_profile": resource_profile,
 				"selected_bucket": (
 					plan_verification_summary.get("selected_bucket")
 					or plan_verification_summary.get("failure_bucket")
@@ -661,6 +731,15 @@ def official_problem_root_planning_task_worker(
 				"plan_verification_seconds": plan_verification_seconds,
 				"total_seconds": time.perf_counter() - total_start,
 				"success": False,
+				"resource_profile": {
+					"requested_memory_limit_mib": OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB,
+					"requested_cpu_count": OFFICIAL_BENCHMARK_CPU_COUNT,
+					"memory_limit_enforced": False,
+					"cpu_affinity_enforced": False,
+					"memory_limit_strategy": "worker_exception_before_context",
+					"cpu_affinity_strategy": "worker_exception_before_context",
+					"platform": sys.platform,
+				},
 				"selected_bucket": "worker_exception",
 				"stdout": captured_stdout.getvalue(),
 				"stderr": captured_stderr.getvalue(),

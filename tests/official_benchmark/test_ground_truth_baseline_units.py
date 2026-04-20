@@ -21,6 +21,7 @@ from planning.process_capture import (
 from planning.representations import PlanningRepresentation
 from htn_evaluation.pipeline import HTNEvaluationPipeline
 from htn_evaluation.problem_root_evaluator import HTNProblemRootEvaluator
+import htn_evaluation.problem_root_runtime as problem_root_runtime
 from htn_evaluation.result_tables import (
 	HTN_PLANNER_IDS,
 	PLANNER_OR_RACE_MODE,
@@ -76,6 +77,21 @@ def test_official_problem_root_timeout_is_benchmark_pinned() -> None:
 	assert pipeline._official_problem_root_planning_timeout_seconds() == (
 		OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
 	)
+
+
+def test_official_problem_root_resource_profile_matches_ipc_limits() -> None:
+	pipeline = HTNEvaluationPipeline(
+		domain_file=DOMAIN_FILES["transport"],
+		problem_file=str(
+			(PROJECT_ROOT / "src" / "domains" / "transport" / "problems" / "pfile39.hddl").resolve()
+		),
+	)
+	profile = pipeline.context._official_problem_root_resource_profile()
+	assert profile == {
+		"planning_timeout_seconds": 1800.0,
+		"memory_limit_mib": 8192,
+		"cpu_count": 1,
+	}
 
 
 def test_pandadealer_backend_uses_full_backend_timeout_budget() -> None:
@@ -461,6 +477,37 @@ def test_supported_planner_ids_are_stable() -> None:
 		"pandadealer_agile_lama",
 		"lifted_panda_sat",
 	)
+
+
+def test_apply_official_resource_profile_records_memory_and_cpu_enforcement() -> None:
+	with patch.object(
+		problem_root_runtime.sys,
+		"platform",
+		"linux",
+	), patch.object(
+		problem_root_runtime.resource,
+		"setrlimit",
+	) as setrlimit, patch.object(
+		problem_root_runtime.os,
+		"sched_getaffinity",
+		return_value={3, 7},
+		create=True,
+	), patch.object(
+		problem_root_runtime.os,
+		"sched_setaffinity",
+		create=True,
+	) as setaffinity:
+		profile = problem_root_runtime._apply_official_resource_profile(
+			memory_limit_mib=8192,
+			cpu_count=1,
+		)
+
+	assert setrlimit.called
+	setaffinity.assert_called_once_with(0, {3})
+	assert profile["memory_limit_enforced"] is True
+	assert profile["cpu_affinity_enforced"] is True
+	assert profile["requested_memory_limit_mib"] == 8192
+	assert profile["requested_cpu_count"] == 1
 
 
 def test_planning_tasks_can_filter_to_one_requested_planner() -> None:

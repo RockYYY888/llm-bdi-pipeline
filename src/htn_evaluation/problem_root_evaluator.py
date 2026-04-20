@@ -275,6 +275,7 @@ class HTNProblemRootEvaluator:
 				"representation_id": str(attempt.get("representation_id") or "unknown"),
 				"success": bool(attempt.get("success")),
 				"selected_bucket": attempt.get("selected_bucket"),
+				"resource_profile": dict(attempt.get("resource_profile") or {}),
 				"plan_solve_status": ((attempt.get("plan_solve_data") or {}).get("summary") or {}).get("status"),
 				"plan_verification_status": ((attempt.get("plan_verification_data") or {}).get("summary") or {}).get("status"),
 				"total_seconds": attempt.get("total_seconds"),
@@ -303,6 +304,7 @@ class HTNProblemRootEvaluator:
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"representation_build_seconds": race_result.get("representation_build_seconds"),
 				"race_wallclock_seconds": race_result.get("race_wallclock_seconds"),
+				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
 		plan_solve_artifacts.update(
@@ -319,6 +321,7 @@ class HTNProblemRootEvaluator:
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"selected_bucket": selected_attempt.get("selected_bucket"),
+				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
 		plan_verification_summary.update(
@@ -335,6 +338,7 @@ class HTNProblemRootEvaluator:
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"representation_build_seconds": race_result.get("representation_build_seconds"),
 				"race_wallclock_seconds": race_result.get("race_wallclock_seconds"),
+				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
 		plan_verification_artifacts.update(
@@ -350,6 +354,7 @@ class HTNProblemRootEvaluator:
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"solver_attempts": attempt_summaries,
+				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
 		plan_solve_data = {
