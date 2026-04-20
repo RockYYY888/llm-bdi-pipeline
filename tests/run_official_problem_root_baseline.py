@@ -246,8 +246,10 @@ def _track_specs() -> List[Dict[str, str | None]]:
 def _run_all_tracks() -> int:
 	from htn_evaluation.result_tables import (
 		build_planner_capability_rows,
+		build_problem_capability_rows,
 		build_track_summary,
 		write_planner_capability_matrix,
+		write_problem_capability_matrix,
 	)
 
 	run_dir = RUNS_ROOT / _timestamp()
@@ -278,10 +280,18 @@ def _run_all_tracks() -> int:
 
 	matrix_rows = build_planner_capability_rows(track_summaries.values())
 	matrix_paths = write_planner_capability_matrix(run_dir, rows=matrix_rows)
+	problem_matrix_rows = build_problem_capability_rows(track_summaries.values())
+	problem_matrix_paths = write_problem_capability_matrix(
+		run_dir,
+		rows=problem_matrix_rows,
+	)
 	combined_summary = {
 		"run_dir": str(run_dir),
 		"tracks": track_summaries,
-		"output_paths": matrix_paths,
+		"output_paths": {
+			**matrix_paths,
+			**problem_matrix_paths,
+		},
 		"complete": all(bool(track_summary.get("complete")) for track_summary in track_summaries.values()),
 	}
 	(run_dir / "summary.json").write_text(json.dumps(combined_summary, indent=2))
@@ -293,11 +303,13 @@ def main() -> int:
 	from htn_evaluation.result_tables import (
 		PLANNER_OR_RACE_MODE,
 		build_planner_capability_rows,
+		build_problem_capability_rows,
 		build_track_summary,
 		planner_track_id,
 		validate_evaluation_mode,
 		validate_planner_id,
 		write_planner_capability_matrix,
+		write_problem_capability_matrix,
 	)
 
 	parser = argparse.ArgumentParser()
@@ -351,6 +363,10 @@ def main() -> int:
 	write_planner_capability_matrix(
 		run_dir,
 		rows=build_planner_capability_rows((track_summary,)),
+	)
+	write_problem_capability_matrix(
+		run_dir,
+		rows=build_problem_capability_rows((track_summary,)),
 	)
 	return 0 if summary["complete"] else 1
 

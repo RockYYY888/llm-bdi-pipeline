@@ -28,9 +28,11 @@ from htn_evaluation.result_tables import (
 	PLANNER_OR_RACE_MODE,
 	SINGLE_PLANNER_MODE,
 	build_planner_capability_rows,
+	build_problem_capability_rows,
 	build_problem_result_row,
 	build_track_summary,
 	write_planner_capability_matrix,
+	write_problem_capability_matrix,
 )
 
 import tests.support.htn_evaluation_support as baseline_support
@@ -523,13 +525,34 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 					"no_plan_from_solver": 0,
 					"unknown_failure": 0,
 				},
+				"query_results": [
+					{
+						"query_id": "query_01",
+						"problem_file": "p01.hddl",
+						"log_dir": "/tmp/log",
+						"success": True,
+						"outcome_bucket": "hierarchical_plan_verified",
+						"execution_time_seconds": 17.0,
+						"plan_solve_time_seconds": 12.0,
+						"plan_verification_time_seconds": 5.0,
+						"representation_build_seconds": 0.7,
+						"solver_race_wallclock_seconds": 13.5,
+						"plan_solve_status": "success",
+						"plan_verification_status": "success",
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				],
 			},
 		},
 		evaluation_mode=PLANNER_OR_RACE_MODE,
 		planner_id=None,
 	)
 	rows = build_planner_capability_rows((track_summary,))
+	problem_rows = build_problem_capability_rows((track_summary,))
 	paths = write_planner_capability_matrix(tmp_path, rows=rows)
+	problem_paths = write_problem_capability_matrix(tmp_path, rows=problem_rows)
 
 	assert problem_row["selected_backend_name"] == "lifted_panda_sat"
 	assert problem_row["execution_time_seconds"] == 17.0
@@ -541,6 +564,12 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	assert Path(paths["planner_capability_matrix_json"]).exists()
 	assert Path(paths["planner_capability_matrix_csv"]).exists()
 	assert "domain_key" in Path(paths["planner_capability_matrix_csv"]).read_text()
+	assert problem_rows[0]["query_id"] == "query_01"
+	assert problem_rows[0]["execution_time_seconds"] == 17.0
+	assert problem_rows[0]["solver_race_wallclock_seconds"] == 13.5
+	assert Path(problem_paths["problem_capability_matrix_json"]).exists()
+	assert Path(problem_paths["problem_capability_matrix_csv"]).exists()
+	assert "query_id" in Path(problem_paths["problem_capability_matrix_csv"]).read_text()
 
 
 def test_supported_planner_ids_are_stable() -> None:

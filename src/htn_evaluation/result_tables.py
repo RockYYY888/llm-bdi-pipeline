@@ -382,6 +382,53 @@ def build_planner_capability_rows(
 	return tuple(rows)
 
 
+def build_problem_capability_rows(
+	track_summaries: Iterable[Mapping[str, Any]],
+) -> Tuple[Dict[str, Any], ...]:
+	rows = []
+	for track_summary in track_summaries:
+		track_id = str(track_summary.get("track_id") or "")
+		evaluation_mode = str(track_summary.get("evaluation_mode") or "")
+		requested_planner_id = track_summary.get("requested_planner_id")
+		for domain_key, domain_summary in dict(track_summary.get("domains") or {}).items():
+			for query_result in list(domain_summary.get("query_results") or ()):
+				row = {
+					"track_id": track_id,
+					"evaluation_mode": evaluation_mode,
+					"requested_planner_id": requested_planner_id,
+					"domain_key": str(domain_key),
+					"query_id": str(query_result.get("query_id") or ""),
+					"problem_file": str(query_result.get("problem_file") or ""),
+					"log_dir": str(query_result.get("log_dir") or ""),
+					"ipc_verified_success": bool(query_result.get("success")),
+					"outcome_bucket": str(
+						query_result.get("outcome_bucket") or "unknown_failure"
+					),
+					"execution_time_seconds": _coerce_float(
+						query_result.get("execution_time_seconds"),
+					),
+					"plan_solve_time_seconds": _coerce_float(
+						query_result.get("plan_solve_time_seconds"),
+					),
+					"plan_verification_time_seconds": _coerce_float(
+						query_result.get("plan_verification_time_seconds"),
+					),
+					"representation_build_seconds": _coerce_float(
+						query_result.get("representation_build_seconds"),
+					),
+					"solver_race_wallclock_seconds": _coerce_float(
+						query_result.get("solver_race_wallclock_seconds"),
+					),
+					"plan_solve_status": query_result.get("plan_solve_status"),
+					"plan_verification_status": query_result.get("plan_verification_status"),
+					"selected_solver_id": query_result.get("selected_solver_id"),
+					"selected_backend_name": query_result.get("selected_backend_name"),
+					"selected_representation_id": query_result.get("selected_representation_id"),
+				}
+				rows.append(row)
+	return tuple(rows)
+
+
 def write_planner_capability_matrix(
 	output_root: Path,
 	*,
@@ -415,4 +462,46 @@ def write_planner_capability_matrix(
 	return {
 		"planner_capability_matrix_json": str(json_path),
 		"planner_capability_matrix_csv": str(csv_path),
+	}
+
+
+def write_problem_capability_matrix(
+	output_root: Path,
+	*,
+	rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, str]:
+	output_root.mkdir(parents=True, exist_ok=True)
+	json_path = output_root / "problem_capability_matrix.json"
+	csv_path = output_root / "problem_capability_matrix.csv"
+	row_payload = [dict(row) for row in rows]
+	json_path.write_text(json.dumps(row_payload, indent=2))
+	fieldnames = [
+		"track_id",
+		"evaluation_mode",
+		"requested_planner_id",
+		"domain_key",
+		"query_id",
+		"problem_file",
+		"log_dir",
+		"ipc_verified_success",
+		"outcome_bucket",
+		"execution_time_seconds",
+		"plan_solve_time_seconds",
+		"plan_verification_time_seconds",
+		"representation_build_seconds",
+		"solver_race_wallclock_seconds",
+		"plan_solve_status",
+		"plan_verification_status",
+		"selected_solver_id",
+		"selected_backend_name",
+		"selected_representation_id",
+	]
+	with csv_path.open("w", newline="") as handle:
+		writer = csv.DictWriter(handle, fieldnames=fieldnames)
+		writer.writeheader()
+		for row in row_payload:
+			writer.writerow({field: row.get(field) for field in fieldnames})
+	return {
+		"problem_capability_matrix_json": str(json_path),
+		"problem_capability_matrix_csv": str(csv_path),
 	}
