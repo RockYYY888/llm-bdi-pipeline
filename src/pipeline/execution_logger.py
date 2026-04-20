@@ -9,7 +9,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 STEP_TITLES = {
@@ -43,6 +43,14 @@ class ExecutionRecord:
 	output_dir: str = "output"
 	execution_time_seconds: float = 0.0
 	timings: Dict[str, Any] = field(default_factory=dict)
+	ltlf_formula: Optional[str] = None
+	ltlf_atom_count: Optional[int] = None
+	ltlf_operator_counts: Dict[str, Any] = field(default_factory=dict)
+	mona_failure_signature: Optional[str] = None
+	jason_failure_class: Optional[str] = None
+	failed_goals: Tuple[str, ...] = ()
+	verifier_missing_goal_facts: Tuple[str, ...] = ()
+	failure_signature: Optional[Dict[str, Any]] = None
 	goal_grounding: Optional[Dict[str, Any]] = None
 	temporal_compilation: Optional[Dict[str, Any]] = None
 	method_synthesis: Optional[Dict[str, Any]] = None
@@ -118,6 +126,33 @@ class ExecutionLogger:
 			"breakdown": dict(breakdown or {}),
 			"metadata": dict(metadata or {}),
 		}
+		self._save_current_state()
+
+	def record_failure_signature(
+		self,
+		signature: Optional[Dict[str, Any]],
+	) -> None:
+		if self.current_record is None:
+			return
+		normalized_signature = self._sanitise_paths(dict(signature or {})) if signature is not None else {}
+		self.current_record.failure_signature = normalized_signature or None
+		self.current_record.ltlf_formula = normalized_signature.get("ltlf_formula")
+		self.current_record.ltlf_atom_count = normalized_signature.get("ltlf_atom_count")
+		self.current_record.ltlf_operator_counts = dict(
+			normalized_signature.get("ltlf_operator_counts") or {},
+		)
+		self.current_record.mona_failure_signature = normalized_signature.get("mona_failure_signature")
+		self.current_record.jason_failure_class = normalized_signature.get("jason_failure_class")
+		self.current_record.failed_goals = tuple(
+			str(goal).strip()
+			for goal in (normalized_signature.get("failed_goals") or ())
+			if str(goal).strip()
+		)
+		self.current_record.verifier_missing_goal_facts = tuple(
+			str(fact).strip()
+			for fact in (normalized_signature.get("verifier_missing_goal_facts") or ())
+			if str(fact).strip()
+		)
 		self._save_current_state()
 
 	def log_goal_grounding_success(
@@ -356,6 +391,7 @@ class ExecutionLogger:
 	def _save_current_state(self) -> None:
 		if self.current_record is None or self.current_log_dir is None:
 			return
+		self.current_log_dir.mkdir(parents=True, exist_ok=True)
 		execution_path = self.current_log_dir / "execution.json"
 		execution_path.write_text(json.dumps(self._record_to_dict(), indent=2))
 
@@ -391,6 +427,16 @@ class ExecutionLogger:
 			f"Execution seconds: {record.get('execution_time_seconds', 0.0):.3f}",
 			"",
 		]
+		failure_signature = record.get("failure_signature")
+		if isinstance(failure_signature, dict) and failure_signature:
+			lines.extend(
+				[
+					"FAILURE SIGNATURE",
+					"-" * 80,
+					json.dumps(failure_signature, indent=2),
+					"",
+				],
+			)
 		for step_name in (
 			"goal_grounding",
 			"temporal_compilation",

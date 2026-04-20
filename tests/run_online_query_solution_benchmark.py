@@ -58,6 +58,8 @@ def _start_domain_run(run_dir: Path, domain_key: str, env: Dict[str, str]) -> Do
 		"--run-dir",
 		str(run_dir),
 	]
+	for query_id in _RUN_FAILED_ONLY_QUERY_IDS.get(domain_key, ()):
+		command.extend(["--query-id", str(query_id)])
 	if _RUN_RESUME:
 		command.append("--resume")
 	output_handle = output_path.open("w")
@@ -123,6 +125,34 @@ def _load_existing_domain_summaries(run_dir: Path) -> Dict[str, Dict[str, object
 		if summary.get("complete", True):
 			domain_summaries[domain_key] = summary
 	return domain_summaries
+
+
+def _load_failed_query_ids_for_run(
+	run_id: str,
+	*,
+	runs_root: Path = RUNS_ROOT,
+) -> Dict[str, List[str]]:
+	run_dir = runs_root / str(run_id).strip()
+	failed_query_ids_by_domain: Dict[str, List[str]] = {}
+	for domain_key in DOMAIN_KEYS:
+		summary_path = run_dir / domain_key / "summary.json"
+		if not summary_path.exists():
+			summary_path = run_dir / f"{domain_key}.summary.json"
+		if not summary_path.exists():
+			continue
+		try:
+			summary = json.loads(summary_path.read_text())
+		except json.JSONDecodeError:
+			continue
+		failed_query_ids = [
+			str(result.get("query_id") or "").strip()
+			for result in (summary.get("query_results") or ())
+			if str(result.get("query_id") or "").strip()
+			and not bool(result.get("success"))
+		]
+		if failed_query_ids:
+			failed_query_ids_by_domain[domain_key] = failed_query_ids
+	return failed_query_ids_by_domain
 
 
 def _aggregate_domain_summaries(
@@ -255,7 +285,7 @@ def _run_single_domain(domain_key: str, run_dir: Path, *, resume: bool = False) 
 
 	summary = run_online_query_solution_benchmark_for_domain(
 		domain_key,
-		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else None,
+		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else tuple(_RUN_FAILED_ONLY_QUERY_IDS.get(domain_key, ())) or None,
 		library_source=_RUN_LIBRARY_SOURCE,
 		output_root=run_dir,
 		run_id=run_dir.name,
@@ -285,6 +315,10 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1, run_id: str | None =
 		domain_key
 		for domain_key in DOMAIN_KEYS
 		if domain_key not in domain_summaries
+		and (
+			not _RUN_FAILED_ONLY_QUERY_IDS
+			or _RUN_FAILED_ONLY_QUERY_IDS.get(domain_key)
+		)
 	]
 	active_runs: List[DomainRun] = []
 	internal_failures: List[str] = []
@@ -325,6 +359,7 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1, run_id: str | None =
 _RUN_QUERY_IDS: List[str] = []
 _RUN_LIBRARY_SOURCE = "benchmark"
 _RUN_RESUME = False
+_RUN_FAILED_ONLY_QUERY_IDS: Dict[str, List[str]] = {}
 
 
 def main() -> int:
@@ -333,6 +368,7 @@ def main() -> int:
 	parser.add_argument("--run-dir")
 	parser.add_argument("--run-id")
 	parser.add_argument("--resume-run-id")
+	parser.add_argument("--replay-failed-run-id")
 	parser.add_argument("--resume", action="store_true")
 	parser.add_argument("--query-id", action="append", default=[])
 	parser.add_argument("--max-concurrent-domains", type=int, default=1)
@@ -342,10 +378,15 @@ def main() -> int:
 		default="benchmark",
 	)
 	args = parser.parse_args()
-	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE, _RUN_RESUME
+	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE, _RUN_RESUME, _RUN_FAILED_ONLY_QUERY_IDS
 	_RUN_QUERY_IDS = list(args.query_id or [])
 	_RUN_LIBRARY_SOURCE = str(args.library_source)
 	_RUN_RESUME = bool(args.resume or args.resume_run_id)
+	_RUN_FAILED_ONLY_QUERY_IDS = (
+		_load_failed_query_ids_for_run(str(args.replay_failed_run_id).strip())
+		if args.replay_failed_run_id
+		else {}
+	)
 	resolved_run_id = str(args.resume_run_id or args.run_id or "").strip() or None
 
 	if args.domain:

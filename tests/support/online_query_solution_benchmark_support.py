@@ -15,6 +15,10 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from pipeline.execution_logger import ExecutionLogger
 from online_query_solution.pipeline import OnlineQuerySolutionPipeline
+from online_query_solution.failure_signature import (
+	build_failure_signature,
+	extract_mona_failure_signature,
+)
 from utils.benchmark_query_dataset import load_problem_query_cases
 
 from tests.support.offline_generation_support import (
@@ -88,6 +92,60 @@ def _classify_online_query_failure(result: Dict[str, Any], execution: Dict[str, 
 	if verification_payload.get("status") == "failed":
 		return "hierarchical_rejection_failed"
 	return "unknown_failure"
+
+
+def _extract_failure_signature(
+	execution: Dict[str, Any],
+	report_result: Dict[str, Any],
+) -> Dict[str, Any]:
+	ltlf_formula = str(execution.get("ltlf_formula") or "").strip() or None
+	if not ltlf_formula:
+		for step_name in ("goal_grounding", "temporal_compilation", "runtime_execution"):
+			step_payload = execution.get(step_name)
+			if not isinstance(step_payload, dict):
+				continue
+			artifacts = dict(step_payload.get("artifacts") or {})
+			ltlf_formula = str(artifacts.get("ltlf_formula") or "").strip() or None
+			if ltlf_formula:
+				break
+
+	mona_failure_signature = str(execution.get("mona_failure_signature") or "").strip() or None
+	if not mona_failure_signature:
+		temporal_payload = dict(execution.get("temporal_compilation") or {})
+		mona_failure_signature = extract_mona_failure_signature(str(temporal_payload.get("error") or ""))
+
+	jason_failure_class = str(execution.get("jason_failure_class") or "").strip() or None
+	if not jason_failure_class:
+		runtime_payload = dict(execution.get("runtime_execution") or {})
+		artifacts = dict(runtime_payload.get("artifacts") or {})
+		jason_failure_class = str(artifacts.get("failure_class") or "").strip() or None
+
+	failed_goals = tuple(
+		str(goal).strip()
+		for goal in (
+			execution.get("failed_goals")
+			or ((execution.get("runtime_execution") or {}).get("artifacts") or {}).get("failed_goals")
+			or ()
+		)
+		if str(goal).strip()
+	)
+	verifier_missing_goal_facts = tuple(
+		str(fact).strip()
+		for fact in (
+			execution.get("verifier_missing_goal_facts")
+			or ((execution.get("plan_verification") or {}).get("metadata") or {}).get("missing_goal_facts")
+			or ((execution.get("plan_verification") or {}).get("artifacts") or {}).get("missing_goal_facts")
+			or ()
+		)
+		if str(fact).strip()
+	)
+	return build_failure_signature(
+		ltlf_formula=ltlf_formula,
+		mona_failure_signature=mona_failure_signature,
+		jason_failure_class=jason_failure_class,
+		failed_goals=failed_goals,
+		verifier_missing_goal_facts=verifier_missing_goal_facts,
+	)
 
 
 def ensure_online_domain_library_artifact(domain_key: str) -> Path:
@@ -166,6 +224,7 @@ def run_online_query_case(
 			f"Observed: {reported_online_domain_source}",
 		)
 	outcome_bucket = _classify_online_query_failure(result, execution)
+	failure_signature = _extract_failure_signature(execution, result)
 
 	return {
 		"query_id": query_id,
@@ -177,6 +236,7 @@ def run_online_query_case(
 		"outcome_bucket": outcome_bucket,
 		"log_dir": log_dir,
 		"execution": execution,
+		"failure_signature": failure_signature,
 		"online_domain_source": reported_online_domain_source,
 	}
 
@@ -237,6 +297,18 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		"outcome_bucket": str(report.get("outcome_bucket") or "unknown_failure"),
 		"log_dir": str(log_dir) if log_dir else None,
 		"execution": dict(report.get("execution") or {}),
+		"failure_signature": dict(report.get("failure_signature") or {}),
+		"ltlf_formula": (report.get("failure_signature") or {}).get("ltlf_formula"),
+		"ltlf_atom_count": (report.get("failure_signature") or {}).get("ltlf_atom_count"),
+		"ltlf_operator_counts": dict(
+			((report.get("failure_signature") or {}).get("ltlf_operator_counts") or {}),
+		),
+		"mona_failure_signature": (report.get("failure_signature") or {}).get("mona_failure_signature"),
+		"jason_failure_class": (report.get("failure_signature") or {}).get("jason_failure_class"),
+		"failed_goals": list(((report.get("failure_signature") or {}).get("failed_goals") or [])),
+		"verifier_missing_goal_facts": list(
+			((report.get("failure_signature") or {}).get("verifier_missing_goal_facts") or []),
+		),
 		"online_domain_source": str(report.get("online_domain_source") or ""),
 	}
 
@@ -352,6 +424,17 @@ def _build_domain_summary(
 						"verification_mode",
 					)
 					or "",
+				),
+				"ltlf_formula": (report.get("failure_signature") or {}).get("ltlf_formula"),
+				"ltlf_atom_count": (report.get("failure_signature") or {}).get("ltlf_atom_count"),
+				"ltlf_operator_counts": dict(
+					((report.get("failure_signature") or {}).get("ltlf_operator_counts") or {}),
+				),
+				"mona_failure_signature": (report.get("failure_signature") or {}).get("mona_failure_signature"),
+				"jason_failure_class": (report.get("failure_signature") or {}).get("jason_failure_class"),
+				"failed_goals": list(((report.get("failure_signature") or {}).get("failed_goals") or [])),
+				"verifier_missing_goal_facts": list(
+					((report.get("failure_signature") or {}).get("verifier_missing_goal_facts") or []),
 				),
 				"online_domain_source": str(report.get("online_domain_source") or ""),
 				"library_source": str(report.get("library_source") or ""),

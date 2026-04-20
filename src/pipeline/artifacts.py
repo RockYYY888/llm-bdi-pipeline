@@ -169,6 +169,9 @@ class JasonExecutionResult:
 	hierarchical_plan_text: Optional[str] = None
 	verification_problem_file: Optional[str] = None
 	verification_mode: str = "original_problem"
+	failed_goals: Tuple[str, ...] = ()
+	failure_class: Optional[str] = None
+	consistency_checks: Dict[str, Any] = field(default_factory=dict)
 	artifacts: Dict[str, Any] = field(default_factory=dict)
 	timing_profile: Dict[str, Any] = field(default_factory=dict)
 	diagnostics: Tuple[str, ...] = ()
@@ -182,6 +185,9 @@ class JasonExecutionResult:
 			"hierarchical_plan_text": self.hierarchical_plan_text,
 			"verification_problem_file": self.verification_problem_file,
 			"verification_mode": self.verification_mode,
+			"failed_goals": list(self.failed_goals),
+			"failure_class": self.failure_class,
+			"consistency_checks": dict(self.consistency_checks),
 			"artifacts": dict(self.artifacts),
 			"timing_profile": dict(self.timing_profile),
 			"diagnostics": list(self.diagnostics),
@@ -205,6 +211,17 @@ class JasonExecutionResult:
 			hierarchical_plan_text=payload.get("hierarchical_plan_text"),
 			verification_problem_file=payload.get("verification_problem_file"),
 			verification_mode=str(payload.get("verification_mode") or "original_problem"),
+			failed_goals=tuple(
+				str(goal).strip()
+				for goal in (payload.get("failed_goals") or ())
+				if str(goal).strip()
+			),
+			failure_class=(
+				str(payload.get("failure_class")).strip()
+				if payload.get("failure_class") is not None
+				else None
+			),
+			consistency_checks=dict(payload.get("consistency_checks") or {}),
 			artifacts=dict(payload.get("artifacts") or {}),
 			timing_profile=dict(payload.get("timing_profile") or {}),
 			diagnostics=tuple(

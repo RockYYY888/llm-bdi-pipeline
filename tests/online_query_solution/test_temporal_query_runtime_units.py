@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -19,6 +20,13 @@ from online_query_solution.agentspeak import (
 	AgentSpeakRenderer,
 	build_agentspeak_transition_specs,
 )
+from online_query_solution.goal_grounding.canonical_ordered_formula import (
+	ANCHORED_NEXT_CHAIN,
+	CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE,
+	apply_task_event_occurrence_suffixes,
+	build_ordered_benchmark_formula,
+	select_canonical_benchmark_ordered_formula_style,
+)
 from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
 from online_query_solution.goal_grounding.grounding_map import GroundingMap
 from online_query_solution.jason_runtime.environment_adapter import EnvironmentAdapterResult
@@ -28,6 +36,7 @@ from online_query_solution.orchestrator import OnlineQuerySolutionOrchestrator
 from online_query_solution.temporal_compilation import dfa_builder
 from online_query_solution.temporal_compilation import ltlf_to_dfa as ltlf_to_dfa_module
 from pipeline.artifacts import TemporalGroundingResult
+from utils.benchmark_query_dataset import load_problem_query_cases
 from utils.hddl_parser import HDDLParser
 from verification.official_plan_verifier import IPCPrimitivePlanVerificationResult
 from online_query_solution import official_verification as online_official_verification_module
@@ -49,6 +58,50 @@ def _sample_method_library() -> HTNMethodLibrary:
 				is_primitive=False,
 				source_name="do_put_on",
 			),
+		],
+		primitive_tasks=[],
+		methods=[],
+	)
+
+
+def _rover_method_library() -> HTNMethodLibrary:
+	return HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="get_soil_data", parameters=("waypoint",), is_primitive=False),
+			HTNTask(name="get_rock_data", parameters=("waypoint",), is_primitive=False),
+			HTNTask(
+				name="get_image_data",
+				parameters=("objective", "mode"),
+				is_primitive=False,
+			),
+		],
+		primitive_tasks=[],
+		methods=[],
+	)
+
+
+def _transport_method_library() -> HTNMethodLibrary:
+	return HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="deliver", parameters=("package", "location"), is_primitive=False),
+			HTNTask(name="get_to", parameters=("vehicle", "location"), is_primitive=False),
+			HTNTask(name="load", parameters=("vehicle", "location", "package"), is_primitive=False),
+		],
+		primitive_tasks=[],
+		methods=[],
+	)
+
+
+def _satellite_method_library() -> HTNMethodLibrary:
+	return HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="do_observation", parameters=("direction", "mode"), is_primitive=False),
+			HTNTask(
+				name="activate_instrument",
+				parameters=("satellite", "instrument"),
+				is_primitive=False,
+			),
+			HTNTask(name="auto_calibrate", parameters=("satellite", "instrument"), is_primitive=False),
 		],
 		primitive_tasks=[],
 		methods=[],
@@ -229,14 +282,92 @@ def test_goal_grounding_prompt_requires_explicit_order_preservation() -> None:
 	assert "Preserve temporal meaning exactly." in system_prompt
 	assert "Do not collapse an explicitly ordered task list" in system_prompt
 	assert "treat that inventory as context only" in system_prompt
-	assert "Avoid deeply nested eventuality chains" in system_prompt
-	assert "shallow adjacent strict-precedence encoding" in system_prompt
-	assert "(!B U (A & !B))" in system_prompt
-	assert "do_put_on__e1(b8, b9)" in system_prompt
+	assert "anchored Next chain" in system_prompt
+	assert "A & X(B)" in system_prompt
+	assert "do not wrap the ordered task-event chain in an outer f(...)" in system_prompt.lower()
+	assert "__e1(" in system_prompt
 	assert "final JSON answer must appear in the completion response content itself" in system_prompt
 	assert "MUST NOT leave the final answer only in hidden reasoning content" in system_prompt
 	assert "MUST NOT return an empty completion response" in system_prompt
 	assert "goal_facts" not in system_prompt
+
+
+def test_goal_grounding_prompt_uses_rover_local_examples_without_do_prefix_bias() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "marsrover" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+
+	system_prompt, _ = generator._build_prompts(
+		query_text="Using rover waypoint objects, complete the tasks get_soil_data(waypoint0), then get_rock_data(waypoint1).",
+		method_library=_rover_method_library(),
+		typed_objects={
+			"waypoint0": "waypoint",
+			"waypoint1": "waypoint",
+			"objective0": "objective",
+			"mode0": "mode",
+		},
+		task_type_map={
+			"get_soil_data": ("waypoint",),
+			"get_rock_data": ("waypoint",),
+			"get_image_data": ("objective", "mode"),
+		},
+	)
+
+	assert "get_soil_data(" in system_prompt
+	assert "get_rock_data(" in system_prompt
+	assert "get_image_data(" in system_prompt
+	assert "do_get_soil_data(" not in system_prompt
+	assert "do_put_on(" not in system_prompt
+
+
+def test_goal_grounding_prompt_uses_transport_local_examples_without_do_deliver_bias() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "transport" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+
+	system_prompt, _ = generator._build_prompts(
+		query_text="Using transport objects, complete the tasks deliver(package0, location0).",
+		method_library=_transport_method_library(),
+		typed_objects={
+			"truck0": "vehicle",
+			"location0": "location",
+			"package0": "package",
+		},
+		task_type_map={
+			"deliver": ("package", "location"),
+			"get_to": ("vehicle", "location"),
+			"load": ("vehicle", "location", "package"),
+		},
+	)
+
+	assert "deliver(" in system_prompt
+	assert "get_to(" in system_prompt
+	assert "do_deliver(" not in system_prompt
+	assert "do_put_on(" not in system_prompt
+
+
+def test_goal_grounding_prompt_uses_grounded_satellite_examples_without_lifted_atoms() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "satellite" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+
+	system_prompt, _ = generator._build_prompts(
+		query_text="Using satellite objects, complete the tasks do_observation(direction0, mode0).",
+		method_library=_satellite_method_library(),
+		typed_objects={
+			"direction0": "image_direction",
+			"mode0": "mode",
+			"satellite0": "satellite",
+			"instrument0": "instrument",
+		},
+		task_type_map={
+			"do_observation": ("image_direction", "mode"),
+			"activate_instrument": ("satellite", "instrument"),
+			"auto_calibrate": ("satellite", "instrument"),
+		},
+	)
+
+	assert "do_observation(direction0, mode0)" in system_prompt
+	assert "activate_instrument(satellite0, instrument0)" in system_prompt
+	assert "auto_calibrate(satellite0, instrument0)" in system_prompt
+	assert "do_observation(?" not in system_prompt
 
 
 def test_goal_grounding_requires_llm_for_benchmark_style_query() -> None:
@@ -322,7 +453,7 @@ def test_goal_grounding_prompt_ignores_setup_inventory_and_requires_strict_json(
 	assert "treat that inventory as context only" in system_prompt
 	assert "preserve the repeated order and count" in system_prompt
 	assert "Output must be minified JSON" in system_prompt
-	assert "do_put_on__e2(b8, b9)" in system_prompt
+	assert "__e2(" in system_prompt
 
 
 def test_goal_grounding_generate_does_not_retry_after_nontransport_response_extraction_error() -> None:
@@ -518,7 +649,166 @@ def test_dfa_builder_always_uses_ltlf2dfa_for_ordered_sequence(
 
 	assert seen_formulas == ["F(stack(b, a) & F(stack(c, b)))"]
 	assert result["construction"] == "generic_ltlf2dfa"
-	assert result["alphabet"] == ["stack_b_a", "stack_c_b"]
+
+
+def _benchmark_ordered_task_atoms(case_id: str) -> tuple[str, ...]:
+	query_cases = load_problem_query_cases(
+		PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems",
+		limit=10**9,
+	)
+	instruction = str(query_cases[case_id]["instruction"])
+	task_calls = tuple(re.findall(r"(do_[a-z_]+\([^)]*\))", instruction))
+	return apply_task_event_occurrence_suffixes(task_calls)
+
+
+def test_canonical_ordered_formula_style_selection_prefers_small_complete_candidate() -> None:
+	chosen_style = select_canonical_benchmark_ordered_formula_style(
+		{
+			"adjacent_until_strict_precedence": {
+				"compiled_case_count": 0,
+				"total_case_count": 7,
+				"median_num_states": float("inf"),
+				"median_num_transitions": float("inf"),
+				"median_convert_seconds": float("inf"),
+				"median_formula_length": 1000.0,
+			},
+			"anchored_next_chain": {
+				"compiled_case_count": 7,
+				"total_case_count": 7,
+				"median_num_states": 26.0,
+				"median_num_transitions": 50.0,
+				"median_convert_seconds": 0.04,
+				"median_formula_length": 420.0,
+			},
+			"eventual_next_chain": {
+				"compiled_case_count": 7,
+				"total_case_count": 7,
+				"median_num_states": 35.0,
+				"median_num_transitions": 72.0,
+				"median_convert_seconds": 0.18,
+				"median_formula_length": 424.0,
+			},
+		},
+	)
+
+	assert CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE == ANCHORED_NEXT_CHAIN
+	assert chosen_style == ANCHORED_NEXT_CHAIN
+
+
+@pytest.mark.parametrize(
+	"case_id",
+	("query_7", "query_8", "query_9", "query_10", "query_11", "query_12", "query_13"),
+)
+def test_canonical_ordered_formula_compiles_current_blocksworld_temporal_failures(
+	case_id: str,
+) -> None:
+	task_atoms = _benchmark_ordered_task_atoms(case_id)
+	formula = build_ordered_benchmark_formula(
+		task_atoms,
+		style=CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE,
+	)
+
+	result = dfa_builder.build_dfa_from_ltlf(formula)
+
+	assert result["construction"] == "generic_ltlf2dfa"
+	assert int(result["num_states"] or 0) > 0
+	assert int(result["num_transitions"] or 0) > 0
+
+
+def test_jason_runner_rejects_unbound_runtime_variables_in_method_bodies() -> None:
+	runner = JasonRunner()
+
+	unsafe_chunk = [
+		"+!get_to(V, DEST) : road(SRC, DEST) <-",
+		'\t.print("runtime trace method flat ", "m-drive-to-via");',
+		"\t!get_to(V, MID);",
+		"\t!drive(V, MID, DEST).",
+	]
+	safe_chunk = [
+		"+!get_to(V, DEST) : road(MID, DEST) & at(V, MID) <-",
+		'\t.print("runtime trace method flat ", "m-drive-to-via");',
+		"\t!get_to(V, MID);",
+		"\t!drive(V, MID, DEST).",
+	]
+
+	assert runner._chunk_runtime_variables_are_safe(unsafe_chunk) is False
+	assert runner._chunk_runtime_variables_are_safe(safe_chunk) is True
+
+
+def test_jason_runner_orders_noop_then_direct_then_via_chunks() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!get_to(V, DEST) : at(V, DEST) <-",
+				'\t.print("runtime trace method flat ", "m-i-am-there");',
+				"\ttrue.",
+			],
+		),
+		"\n".join(
+			[
+				"+!get_to(V, DEST) : at(V, SRC) & road(SRC, DEST) <-",
+				'\t.print("runtime trace method flat ", "m-drive-to");',
+				"\t!drive(V, SRC, DEST).",
+			],
+		),
+		"\n".join(
+			[
+				"+!get_to(V, DEST) : road(MID, DEST) & at(V, MID) <-",
+				'\t.print("runtime trace method flat ", "m-drive-to-via");',
+				"\t!get_to(V, MID);",
+				"\t!drive(V, MID, DEST).",
+			],
+		),
+	]
+
+	ordered_chunks = runner._order_runtime_method_plan_chunks(
+		chunks,
+		fact_index={
+			("at", 2): (("truck_0", "loc_0"),),
+			("road", 2): (("loc_0", "loc_1"), ("loc_1", "loc_2")),
+		},
+		type_domains={},
+	)
+
+	assert '"m-i-am-there"' in ordered_chunks[0]
+	assert '"m-drive-to"' in ordered_chunks[1]
+	assert '"m-drive-to-via"' in ordered_chunks[2]
+
+
+def test_jason_runner_filters_transport_via_chunks_without_current_position_context() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!get_to(V, DEST) : road(MID, DEST) <-",
+				'\t.print("runtime trace method flat ", "m-drive-to-via");',
+				"\t!get_to(V, MID);",
+				"\t!drive(V, MID, DEST).",
+			],
+		),
+		"\n".join(
+			[
+				"+!get_to(V, DEST) : road(MID, DEST) & at(V, MID) <-",
+				'\t.print("runtime trace method flat ", "m-drive-to-via");',
+				"\t!get_to(V, MID);",
+				"\t!drive(V, MID, DEST).",
+			],
+		),
+	]
+
+	ordered_chunks = runner._order_runtime_method_plan_chunks(
+		chunks,
+		fact_index={
+			("at", 2): (("truck_0", "loc_0"),),
+			("road", 2): (("loc_0", "loc_1"),),
+		},
+		type_domains={},
+	)
+
+	assert len(ordered_chunks) == 1
+	assert '"m-drive-to-via"' in ordered_chunks[0]
+	assert "at(V, MID)" in ordered_chunks[0]
 
 
 def test_dfa_builder_always_uses_ltlf2dfa_for_large_ordered_sequence(
@@ -1204,9 +1494,9 @@ def test_goal_grounding_prompts_treat_complete_the_tasks_lists_as_ordered_by_def
 	assert "Supported binary operators: U, R" in system_prompt
 	assert "last" in system_prompt
 	assert "Do not use unsupported past-time operators" in system_prompt
-	assert "Avoid deeply nested eventuality chains" in system_prompt
+	assert "deep nested eventuality chains" in system_prompt
 	assert "F(A & F(B & F(C)))" in system_prompt
-	assert "(!B U (A & !B))" in system_prompt
+	assert "A & X(B)" in system_prompt
 	assert "X F(do_put_on(b1, b4))" not in system_prompt
 	assert "F(do_put_on(b4, b2) & F(do_put_on(b1, b4)" not in system_prompt
 

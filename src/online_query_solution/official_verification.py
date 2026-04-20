@@ -14,6 +14,7 @@ from online_query_solution.domain_selection import (
 	ONLINE_DOMAIN_SOURCE_BENCHMARK,
 	OnlineDomainContext,
 )
+from online_query_solution.failure_signature import infer_missing_goal_facts
 from planning.panda_portfolio import PANDAPlanner
 from verification.official_plan_verifier import IPCPlanVerifier
 
@@ -212,6 +213,18 @@ def verify_jason_hierarchical_plan(
 	verifier_seconds = time.perf_counter() - verifier_start
 
 	artifacts = verifier_result.to_dict()
+	replayed_world_facts = (
+		(((plan_solve_artifacts.get("consistency_checks") or {}).get("action_path_schema_replay") or {}).get(
+			"world_facts",
+		))
+		or ()
+	)
+	missing_goal_facts = infer_missing_goal_facts(
+		problem_file=verification_problem_file,
+		world_facts=replayed_world_facts,
+	)
+	if missing_goal_facts:
+		artifacts["missing_goal_facts"] = list(missing_goal_facts)
 	summary = {
 		"backend": "pandaPIparser",
 		"status": "success" if verifier_result.verification_result is True else "failed",
@@ -226,6 +239,7 @@ def verify_jason_hierarchical_plan(
 		"online_domain_file": online_domain.domain_file,
 		"verification_domain_file": str(verification_domain_file),
 		"verification_problem_file": verification_problem_file,
+		"missing_goal_facts": list(missing_goal_facts),
 	}
 
 	success = (

@@ -12,10 +12,17 @@ import threading
 import time
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
 from online_query_solution.artifacts import GroundedSubgoal, TemporalGroundingResult
+from online_query_solution.goal_grounding.canonical_ordered_formula import (
+	CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE,
+	apply_task_event_occurrence_suffixes,
+	build_ordered_benchmark_formula,
+	build_unordered_eventuality_formula,
+	ordered_formula_style_prompt_guidance,
+)
 from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
 from utils.symbol_normalizer import SymbolNormalizer
 
@@ -301,6 +308,10 @@ class NLToLTLfGenerator:
 	) -> Tuple[str, str]:
 		task_lines = self._task_inventory_lines(method_library, task_type_map)
 		object_lines = self._object_inventory_lines(typed_objects)
+		few_shot_lines = self._few_shot_prompt_lines(
+			typed_objects=typed_objects,
+			task_type_map=task_type_map,
+		)
 		domain_task_signatures = "\n".join(
 			f"- {task.to_signature()}"
 			for task in getattr(self.domain, "tasks", ())
@@ -331,13 +342,15 @@ class NLToLTLfGenerator:
 				"- MUST NOT leave the final answer only in hidden reasoning content.",
 				"- MUST NOT return an empty completion response.",
 				"- Every atomic proposition in ltlf_formula must itself be one grounded task-event call.",
-				"- Use atoms in task-call form such as do_put_on(b4, b2) or do_clear(b2).",
-				"- If the same grounded task call must occur multiple times, each repeated occurrence must use a distinct grounded task-event identity by appending an occurrence suffix to the task name, such as do_put_on__e1(b8, b9) and do_put_on__e2(b8, b9).",
+				"- Every atomic proposition must reuse an exact callable task name from the provided inventory.",
+				"- Never add or remove a task-name prefix such as do_.",
+				"- If the same grounded task call must occur multiple times, each repeated occurrence must use a distinct grounded task-event identity by appending an occurrence suffix to the task name, such as task__e1(arg1, arg2) and task__e2(arg1, arg2).",
 				"- Never reuse the exact same task-event atom twice in one formula.",
 				"- Do not use placeholder atoms such as subgoal_1, query_step_1, goal_1, or event_1.",
 				'- Do not output lifted variables such as ?x. All args must be grounded problem objects from the provided inventory.',
 				'- Do not invent tasks or objects.',
-				"- If the query begins with an object inventory such as 'Using blocks ...' or any other setup inventory, treat that inventory as context only, not as task-event atoms.",
+				"- Do not derive new task names from object inventories, setup inventories, or domain descriptions.",
+				"- If the query begins with an object inventory such as 'Using ...' or any other setup inventory, treat that inventory as context only, not as task-event atoms.",
 				"- Create task-event atoms only from explicitly requested grounded task invocations in the query.",
 				"- Do not create task-event atoms from bare object names, setup inventories, or explanatory text.",
 				"- If the query literally lists grounded task calls after a phrase like 'complete the tasks', copy exactly those task calls into the formula and keep their order.",
@@ -346,53 +359,20 @@ class NLToLTLfGenerator:
 				"- If the query is ambiguous, still return your best grounded interpretation as one formula. Do not add extra fields.",
 				"",
 				"Formula syntax reminders:",
-				"- Atoms: grounded task-event calls such as do_put_on(b4, b2)",
-				"- Repeated grounded task calls must use occurrence-tagged atoms such as do_put_on__e1(b8, b9) and do_put_on__e2(b8, b9).",
+				"- Atoms: grounded task-event calls using exact callable inventory names.",
+				"- Repeated grounded task calls must use occurrence-tagged atoms such as task__e1(...) and task__e2(...).",
 				"- Supported unary operators: F, G, X, WX",
 				"- Supported binary operators: U, R",
 				"- Supported Boolean operators: !, &, |, ->, <->",
 				"- Supported constants and position predicates: true, false, last",
 				"- Do not use unsupported past-time operators such as Y, WY, O, S, P, or H.",
-				"- Avoid deeply nested eventuality chains such as F(A & F(B & F(C))).",
-				"- For explicit total-order sequences, prefer a shallow adjacent strict-precedence encoding.",
-				"- For 'A then B', use F(A) & F(B) & (!B U (A & !B)).",
-				"- For 'A then B then C', add one such adjacent precedence constraint for A before B and one for B before C.",
-				"- This encoding permits unrelated actions between ordered task events but forbids the later task event before or at the same position as the earlier event.",
+				*ordered_formula_style_prompt_guidance(
+					style=CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE,
+				),
 				"- Use a plain conjunction of eventualities only when the query does not impose an order.",
 				"",
 				"Few-shot examples:",
-				'Example 1 input: "Using blocks b1 and b2, complete the tasks do_clear(b2) and do_put_on(b1, b2) in any order."',
-				"Example 1 output:",
-				json.dumps(
-					{
-						"ltlf_formula": "F(do_clear(b2)) & F(do_put_on(b1, b2))",
-					},
-					ensure_ascii=False,
-				),
-				'Example 2 input: "Using blocks b4, b2, b1, and b3, complete the tasks do_put_on(b4, b2), then do_put_on(b1, b4), then do_put_on(b3, b1)."',
-				"Example 2 output:",
-				json.dumps(
-					{
-						"ltlf_formula": (
-							"F(do_put_on(b4, b2)) & F(do_put_on(b1, b4)) & "
-							"F(do_put_on(b3, b1)) & "
-							"(!do_put_on(b1, b4) U (do_put_on(b4, b2) & !do_put_on(b1, b4))) & "
-							"(!do_put_on(b3, b1) U (do_put_on(b1, b4) & !do_put_on(b3, b1)))"
-						),
-					},
-					ensure_ascii=False,
-				),
-				'Example 3 input: "Using blocks b8 and b9, complete the tasks do_put_on(b8, b9), then do_put_on(b8, b9)."',
-				"Example 3 output:",
-				json.dumps(
-					{
-						"ltlf_formula": (
-							"F(do_put_on__e1(b8, b9)) & F(do_put_on__e2(b8, b9)) & "
-							"(!do_put_on__e2(b8, b9) U (do_put_on__e1(b8, b9) & !do_put_on__e2(b8, b9)))"
-						),
-					},
-					ensure_ascii=False,
-				),
+				*few_shot_lines,
 			],
 		)
 		user_prompt = "\n".join(
@@ -421,6 +401,137 @@ class NLToLTLfGenerator:
 			source_suffix = f" | source_name={source_name}" if source_name and source_name != task_name else ""
 			lines.append(f"- {task_name}({typed_signature}){source_suffix}")
 		return "\n".join(lines)
+
+	def _few_shot_prompt_lines(
+		self,
+		*,
+		typed_objects: Dict[str, str],
+		task_type_map: Dict[str, Tuple[str, ...]],
+	) -> Tuple[str, ...]:
+		task_names = tuple(
+			task_name
+			for task_name in task_type_map.keys()
+			if str(task_name).strip()
+		)
+		if not task_names:
+			return ()
+		task_name_set = {str(task_name).strip() for task_name in task_names}
+		selected_task_names = self._few_shot_task_family(task_name_set) or task_names[:3]
+		if len(selected_task_names) == 1:
+			selected_task_names = (*selected_task_names, selected_task_names[0])
+
+		unordered_atoms = tuple(
+			self._sample_grounded_task_call(
+				task_name=task_name,
+				task_type_map=task_type_map,
+				typed_objects=typed_objects,
+			)
+			for task_name in selected_task_names[:2]
+		)
+		ordered_atoms = tuple(
+			self._sample_grounded_task_call(
+				task_name=task_name,
+				task_type_map=task_type_map,
+				typed_objects=typed_objects,
+			)
+			for task_name in selected_task_names[: min(3, len(selected_task_names))]
+		)
+		repeated_atom = self._sample_grounded_task_call(
+			task_name=selected_task_names[0],
+			task_type_map=task_type_map,
+			typed_objects=typed_objects,
+		)
+		repeated_atoms = apply_task_event_occurrence_suffixes((repeated_atom, repeated_atom))
+		domain_label = self._few_shot_domain_label(typed_objects)
+
+		few_shot_examples = (
+			(
+				f'Example 1 input: "Using {domain_label}, complete the tasks '
+				f'{unordered_atoms[0]} and {unordered_atoms[1]} in any order."',
+				json.dumps(
+					{
+						"ltlf_formula": build_unordered_eventuality_formula(unordered_atoms),
+					},
+					ensure_ascii=False,
+				),
+			),
+			(
+				f'Example 2 input: "Using {domain_label}, complete the tasks '
+				f"{', then '.join(ordered_atoms)}.\"",
+				json.dumps(
+					{
+						"ltlf_formula": build_ordered_benchmark_formula(ordered_atoms),
+					},
+					ensure_ascii=False,
+				),
+			),
+			(
+				f'Example 3 input: "Using {domain_label}, complete the tasks '
+				f'{repeated_atom}, then {repeated_atom}."',
+				json.dumps(
+					{
+						"ltlf_formula": build_ordered_benchmark_formula(repeated_atoms),
+					},
+					ensure_ascii=False,
+				),
+			),
+		)
+		lines: list[str] = []
+		for index, (input_text, output_text) in enumerate(few_shot_examples, start=1):
+			lines.append(input_text)
+			lines.append(f"Example {index} output:")
+			lines.append(output_text)
+		return tuple(lines)
+
+	@staticmethod
+	def _few_shot_task_family(task_name_set: set[str]) -> Tuple[str, ...]:
+		families = (
+			("get_soil_data", "get_rock_data", "get_image_data"),
+			("deliver", "get_to", "load"),
+			("do_observation", "activate_instrument", "auto_calibrate"),
+			("do_clear", "do_put_on", "do_on_table"),
+		)
+		for family in families:
+			matched = tuple(task_name for task_name in family if task_name in task_name_set)
+			if len(matched) >= 2:
+				return matched
+		return ()
+
+	@staticmethod
+	def _few_shot_domain_label(typed_objects: Dict[str, str]) -> str:
+		if not typed_objects:
+			return "the provided grounded objects"
+		sorted_objects = sorted(str(object_name).strip() for object_name in typed_objects if str(object_name).strip())
+		if len(sorted_objects) == 1:
+			return f"the grounded object {sorted_objects[0]}"
+		if len(sorted_objects) == 2:
+			return f"the grounded objects {sorted_objects[0]} and {sorted_objects[1]}"
+		return (
+			"the grounded objects "
+			+ ", ".join(sorted_objects[:3])
+			+ (", ..." if len(sorted_objects) > 3 else "")
+		)
+
+	@staticmethod
+	def _sample_grounded_task_call(
+		*,
+		task_name: str,
+		task_type_map: Dict[str, Tuple[str, ...]],
+		typed_objects: Dict[str, str],
+	) -> str:
+		argument_types = tuple(task_type_map.get(str(task_name), ()))
+		args: list[str] = []
+		for index, type_name in enumerate(argument_types, start=1):
+			candidate = next(
+				(
+					str(object_name).strip()
+					for object_name, object_type in sorted(typed_objects.items())
+					if str(object_type).strip() == str(type_name).strip()
+				),
+				"",
+			)
+			args.append(candidate or f"{str(type_name).strip() or 'arg'}{index}")
+		return f"{str(task_name).strip()}({', '.join(args)})"
 
 	@staticmethod
 	def _object_inventory_lines(typed_objects: Dict[str, str]) -> str:

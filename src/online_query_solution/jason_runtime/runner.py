@@ -1770,6 +1770,24 @@ class JasonRunner:
 					)
 					if goal is not None
 				]
+				trace_method_name = self._trace_method_name_from_chunk(body_lines)
+				body_goal_count = len(body_goals)
+				has_self_recursive_goal = any(
+					str(goal[0]).strip() == str(item.get("task_name") or "").strip()
+					for goal in body_goals
+				)
+				via_like_method = "via" in trace_method_name.lower() or has_self_recursive_goal
+				variable_safe = self._chunk_runtime_variables_are_safe(lines)
+				if str(item.get("task_name") or "").strip() == "get_to" and via_like_method:
+					has_current_position_context = any(
+						(parsed.get("kind") == "atom" and str(parsed.get("predicate")) == "at")
+						for parsed in (
+							self._parse_asl_context_conjunct(str(part))
+							for part in tuple(item.get("context_parts") or ())
+						)
+						if parsed is not None
+					)
+					variable_safe = variable_safe and has_current_position_context
 				weighted_noop_support = 0
 				for goal_index, goal in enumerate(body_goals, start=1):
 					if self._goal_has_noop_runtime_support(
@@ -1815,6 +1833,10 @@ class JasonRunner:
 						)
 				item["sort_key"] = (
 					0 if self._chunk_is_noop_method_plan(body_lines) else 1,
+					0 if variable_safe else 1,
+					0 if not has_self_recursive_goal else 1,
+					0 if not via_like_method else 1,
+					body_goal_count,
 					-non_type_context_count,
 					-grounded_head_arg_count,
 					-grounded_context_arg_count,
@@ -1822,8 +1844,11 @@ class JasonRunner:
 					-weighted_noop_support,
 					int(item.get("index", 0)),
 				)
+				item["variable_safe"] = variable_safe
+			safe_group_items = [item for item in group_items if bool(item.get("variable_safe"))]
+			if safe_group_items:
+				group_items = safe_group_items
 			group_items.sort(key=lambda item: tuple(item.get("sort_key") or ()))
-			group_items = list(reversed(group_items))
 			ordered_chunks.extend(str(item["chunk"]) for item in group_items)
 
 		return ordered_chunks
@@ -1966,8 +1991,48 @@ class JasonRunner:
 
 		if not specialised_chunks:
 			return [original]
-		specialised_chunks.append(original)
+		if self._chunk_runtime_variables_are_safe(chunk):
+			specialised_chunks.append(original)
 		return specialised_chunks
+
+	def _chunk_runtime_variables_are_safe(
+		self,
+		chunk: Sequence[str],
+	) -> bool:
+		if not chunk:
+			return True
+		parsed_head = self._parse_asl_method_head(str(chunk[0]))
+		if parsed_head is None:
+			return True
+		_, head_args, context_parts = parsed_head
+		bound_variables = {
+			str(arg)
+			for arg in tuple(head_args or ())
+			if self._looks_like_asl_variable(str(arg))
+		}
+		for part in tuple(context_parts or ()):
+			parsed = self._parse_asl_context_conjunct(str(part))
+			if parsed is None:
+				continue
+			if parsed.get("kind") == "atom":
+				bound_variables.update(
+					str(arg)
+					for arg in tuple(parsed.get("args") or ())
+					if self._looks_like_asl_variable(str(arg))
+				)
+				continue
+			if parsed.get("kind") == "inequality":
+				for token in (str(parsed["lhs"]), str(parsed["rhs"])):
+					if self._looks_like_asl_variable(token) and token not in bound_variables:
+						return False
+		for raw_line in chunk[1:]:
+			statement = str(raw_line or "").strip().rstrip(";.")
+			if not statement:
+				continue
+			statement_variables = self._extract_asl_variables(statement)
+			if statement_variables and not statement_variables.issubset(bound_variables):
+				return False
+		return True
 
 	def _candidate_bindings_for_local_witnesses(
 		self,

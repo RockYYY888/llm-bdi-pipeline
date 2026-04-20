@@ -53,6 +53,17 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 		backend="RunLocalMAS",
 		metadata={"step_count": 2},
 	)
+	logger.record_failure_signature(
+		{
+			"ltlf_formula": "F(stack(c, b))",
+			"ltlf_atom_count": 1,
+			"ltlf_operator_counts": {"F": 1},
+			"mona_failure_signature": None,
+			"jason_failure_class": None,
+			"failed_goals": [],
+			"verifier_missing_goal_facts": [],
+		},
+	)
 	logger.log_plan_solve({"step_count": 2}, "Success", metadata={"backend": "jason"})
 	logger.log_official_verification(
 		{"verification_result": True},
@@ -88,6 +99,9 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	assert '"llm_finish_reason": "stop"' in text_log
 	assert execution["goal_grounding"]["metadata"]["llm_response_mode"] == "streaming"
 	assert execution["goal_grounding"]["metadata"]["llm_finish_reason"] == "stop"
+	assert execution["ltlf_formula"] == "F(stack(c, b))"
+	assert execution["ltlf_atom_count"] == 1
+	assert execution["ltlf_operator_counts"] == {"F": 1}
 
 
 def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:

@@ -19,6 +19,7 @@ from tests.support.online_query_solution_benchmark_support import (
 )
 import tests.support.online_query_solution_benchmark_support as benchmark_support
 from tests.run_online_query_solution_benchmark import (
+	_load_failed_query_ids_for_run,
 	_write_latest_run_manifest,
 	_write_run_summary_snapshot,
 )
@@ -109,6 +110,15 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 					"metadata": {"verification_mode": "original_problem"},
 				},
 			},
+			"failure_signature": {
+				"ltlf_formula": None,
+				"ltlf_atom_count": 0,
+				"ltlf_operator_counts": {},
+				"mona_failure_signature": None,
+				"jason_failure_class": None,
+				"failed_goals": [],
+				"verifier_missing_goal_facts": [],
+			},
 			"online_domain_source": "benchmark",
 		}
 
@@ -139,6 +149,15 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 						"metadata": {"verification_mode": "original_problem"},
 					},
 				},
+				"failure_signature": {
+					"ltlf_formula": None,
+					"ltlf_atom_count": 0,
+					"ltlf_operator_counts": {},
+					"mona_failure_signature": None,
+					"jason_failure_class": None,
+					"failed_goals": [],
+					"verifier_missing_goal_facts": [],
+				},
 				"online_domain_source": "benchmark",
 			},
 			indent=2,
@@ -160,6 +179,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 	assert summary["resumed_query_ids"] == ["q1"]
 	assert summary["query_results"][0]["run_id"] == "run-001"
 	assert summary["query_results"][0]["query_result_path"].endswith("q1.json")
+	assert summary["query_results"][0]["ltlf_formula"] is None
 	assert (run_root / "blocksworld.summary.json").exists()
 	assert (domain_root / "summary.json").exists()
 	assert (domain_root / "state.json").exists()
@@ -179,6 +199,22 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 				"metadata": {"verification_mode": "original_problem"},
 			},
 		},
+		"failure_signature": {
+			"ltlf_formula": None,
+			"ltlf_atom_count": 0,
+			"ltlf_operator_counts": {},
+			"mona_failure_signature": None,
+			"jason_failure_class": None,
+			"failed_goals": [],
+			"verifier_missing_goal_facts": [],
+		},
+		"ltlf_formula": None,
+		"ltlf_atom_count": 0,
+		"ltlf_operator_counts": {},
+		"mona_failure_signature": None,
+		"jason_failure_class": None,
+		"failed_goals": [],
+		"verifier_missing_goal_facts": [],
 		"online_domain_source": "benchmark",
 	}
 
@@ -213,7 +249,16 @@ def test_domain_benchmark_supports_single_query_runs(
 			"result": {"success": False, "step": "runtime_execution"},
 			"outcome_bucket": "runtime_execution_failed",
 			"log_dir": str((Path(logs_root or tmp_path) / query_id).resolve()),
-			"execution": {},
+			"execution": {"jason_failure_class": "runtime_failure_marker"},
+			"failure_signature": {
+				"ltlf_formula": None,
+				"ltlf_atom_count": 0,
+				"ltlf_operator_counts": {},
+				"mona_failure_signature": None,
+				"jason_failure_class": "runtime_failure_marker",
+				"failed_goals": [],
+				"verifier_missing_goal_facts": [],
+			},
 			"online_domain_source": "benchmark",
 		}
 
@@ -234,6 +279,7 @@ def test_domain_benchmark_supports_single_query_runs(
 	assert summary["runtime_execution_failures"] == 1
 	assert summary["complete"] is True
 	assert summary["query_results"][0]["run_id"] == "single-query-run"
+	assert summary["query_results"][0]["jason_failure_class"] == "runtime_failure_marker"
 	assert summary["query_results"][0]["query_result_path"].endswith("q2.json")
 	assert (
 		tmp_path
@@ -272,3 +318,25 @@ def test_full_sweep_summary_snapshot_writes_incremental_run_state(tmp_path: Path
 	assert (tmp_path / "20260420_220000" / "summary.txt").read_text().startswith(
 		"run_id: 20260420_220000\n",
 	)
+
+
+def test_load_failed_query_ids_for_run_collects_failed_queries(tmp_path: Path) -> None:
+	run_root = tmp_path / "run-001"
+	domain_root = run_root / "blocksworld"
+	domain_root.mkdir(parents=True)
+	(domain_root / "summary.json").write_text(
+		json.dumps(
+			{
+				"query_results": [
+					{"query_id": "q1", "success": False},
+					{"query_id": "q2", "success": True},
+					{"query_id": "q3", "success": False},
+				],
+			},
+			indent=2,
+		),
+	)
+
+	failed_query_ids = _load_failed_query_ids_for_run("run-001", runs_root=tmp_path)
+
+	assert failed_query_ids == {"blocksworld": ["q1", "q3"]}

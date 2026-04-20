@@ -14,12 +14,18 @@ from online_query_solution.agentspeak import (
 	AgentSpeakRenderer,
 	build_agentspeak_transition_specs,
 )
+from online_query_solution.failure_signature import (
+	build_failure_signature,
+	extract_mona_failure_signature,
+	infer_missing_goal_facts,
+)
 from online_query_solution.domain_selection import (
 	OnlineDomainContext,
 	normalize_online_domain_source,
 )
 from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
 from online_query_solution.jason_runtime import JasonRunner
+from online_query_solution.jason_runtime.runner import JasonValidationError
 from online_query_solution.runtime_context import (
 	action_type_map_for_domain,
 	build_type_parent_map_for_domain,
@@ -260,6 +266,7 @@ class OnlineQuerySolutionOrchestrator:
 		plan_verification_data = self._verify_plan_officially(
 			method_library=domain_library,
 			plan_solve_data=plan_solve_data,
+			ltlf_formula=grounding_result.ltlf_formula,
 			online_domain=online_domain,
 		)
 		if plan_verification_data is None:
@@ -343,6 +350,7 @@ class OnlineQuerySolutionOrchestrator:
 				llm_prompt=llm_prompt,
 				llm_response=llm_response,
 			)
+			self._record_failure_signature(ltlf_formula=grounding_result.ltlf_formula)
 			self._record_step_timing(
 				"goal_grounding",
 				stage_start,
@@ -369,6 +377,7 @@ class OnlineQuerySolutionOrchestrator:
 					"attempt_errors": generation_metadata.get("attempt_errors"),
 				},
 			)
+			self._record_failure_signature()
 			self._record_step_timing("goal_grounding", stage_start)
 			print(f"✗ Goal grounding failed: {exc}")
 			return None, None, None
@@ -422,6 +431,7 @@ class OnlineQuerySolutionOrchestrator:
 					"task_event_count": len(grounding_result.subgoals),
 				},
 			)
+			self._record_failure_signature(ltlf_formula=grounding_result.ltlf_formula)
 			self._record_step_timing(
 				"temporal_compilation",
 				stage_start,
@@ -437,6 +447,10 @@ class OnlineQuerySolutionOrchestrator:
 			return result
 		except Exception as exc:
 			self.logger.log_temporal_compilation(None, "Failed", error=str(exc))
+			self._record_failure_signature(
+				ltlf_formula=grounding_result.ltlf_formula,
+				mona_failure_signature=extract_mona_failure_signature(str(exc)),
+			)
 			self._record_step_timing("temporal_compilation", stage_start)
 			print(f"✗ Temporal compilation failed: {exc}")
 			return None
@@ -577,6 +591,9 @@ class OnlineQuerySolutionOrchestrator:
 				hierarchical_plan_text=hierarchical_plan_text,
 				verification_problem_file=str(Path(verification_problem_file).resolve()),
 				verification_mode=verification_mode,
+				failed_goals=tuple(validation.failed_goals),
+				failure_class=validation.failure_class,
+				consistency_checks=dict(validation.consistency_checks),
 				artifacts={
 					**agentspeak_artifacts,
 					**dict(validation.artifacts),
@@ -598,6 +615,11 @@ class OnlineQuerySolutionOrchestrator:
 					"runtime_execution_mode": "jason_runtime",
 				},
 			)
+			self._record_failure_signature(
+				ltlf_formula=grounding_result.ltlf_formula,
+				jason_failure_class=result.failure_class,
+				failed_goals=result.failed_goals,
+			)
 			self._record_step_timing(
 				"runtime_execution",
 				stage_start,
@@ -612,6 +634,26 @@ class OnlineQuerySolutionOrchestrator:
 			)
 			print(f"✓ Jason action steps: {len(result.action_path)}")
 			return result
+		except JasonValidationError as exc:
+			validation_metadata = dict(getattr(exc, "metadata", {}) or {})
+			self.logger.log_runtime_execution(
+				validation_metadata or None,
+				"Failed",
+				error=str(exc),
+				backend="RunLocalMAS",
+				metadata={
+					"verification_mode": verification_mode,
+					"online_domain_source": online_domain.source,
+				},
+			)
+			self._record_failure_signature(
+				ltlf_formula=grounding_result.ltlf_formula,
+				jason_failure_class=validation_metadata.get("failure_class"),
+				failed_goals=tuple(validation_metadata.get("failed_goals") or ()),
+			)
+			self._record_step_timing("runtime_execution", stage_start)
+			print(f"✗ Runtime execution failed: {exc}")
+			return None
 		except Exception as exc:
 			self.logger.log_runtime_execution(
 				None,
@@ -623,6 +665,7 @@ class OnlineQuerySolutionOrchestrator:
 					"online_domain_source": online_domain.source,
 				},
 			)
+			self._record_failure_signature(ltlf_formula=grounding_result.ltlf_formula)
 			self._record_step_timing("runtime_execution", stage_start)
 			print(f"✗ Runtime execution failed: {exc}")
 			return None
@@ -632,6 +675,7 @@ class OnlineQuerySolutionOrchestrator:
 		*,
 		method_library: HTNMethodLibrary,
 		plan_solve_data: Dict[str, Any],
+		ltlf_formula: str = "",
 		online_domain: OnlineDomainContext,
 	) -> Optional[Dict[str, Any]]:
 		print("\n[OFFICIAL VERIFICATION]")
@@ -646,6 +690,7 @@ class OnlineQuerySolutionOrchestrator:
 			output_dir=self._require_output_dir(),
 		)
 		if outcome.data is not None and (outcome.data.get("summary") or {}).get("status") == "skipped":
+			self._record_failure_signature(ltlf_formula=ltlf_formula)
 			self.logger.log_official_verification(
 				outcome.data.get("artifacts"),
 				"Skipped",
@@ -656,6 +701,15 @@ class OnlineQuerySolutionOrchestrator:
 			return outcome.data
 
 		if not outcome.success:
+			verifier_missing_goal_facts = tuple(
+				str(fact).strip()
+				for fact in (((outcome.data or {}).get("summary") or {}).get("missing_goal_facts") or ())
+				if str(fact).strip()
+			)
+			self._record_failure_signature(
+				ltlf_formula=ltlf_formula,
+				verifier_missing_goal_facts=verifier_missing_goal_facts,
+			)
 			self.logger.log_official_verification(
 				(outcome.data or {}).get("artifacts"),
 				"Failed",
@@ -681,6 +735,14 @@ class OnlineQuerySolutionOrchestrator:
 			outcome.data.get("artifacts") if outcome.data else None,
 			"Success",
 			metadata=outcome.data.get("summary") if outcome.data else None,
+		)
+		self._record_failure_signature(
+			ltlf_formula=ltlf_formula,
+			verifier_missing_goal_facts=tuple(
+				str(fact).strip()
+				for fact in ((outcome.data or {}).get("summary") or {}).get("missing_goal_facts") or ()
+				if str(fact).strip()
+			),
 		)
 		self._record_step_timing(
 			"plan_verification",
@@ -725,6 +787,7 @@ class OnlineQuerySolutionOrchestrator:
 				"online_domain_file": online_domain.domain_file,
 				"task_count": len(grounding_result.subgoals),
 				"step_count": len(jason_result.action_path),
+				"failure_class": jason_result.failure_class,
 			},
 			"artifacts": {
 				"backend": "jason",
@@ -742,10 +805,32 @@ class OnlineQuerySolutionOrchestrator:
 				"hierarchical_plan_source": "jason_runtime",
 				"verification_problem_file": jason_result.verification_problem_file,
 				"verification_domain_file": None,
+				"failed_goals": list(jason_result.failed_goals),
+				"failure_class": jason_result.failure_class,
+				"consistency_checks": dict(jason_result.consistency_checks),
 				"timing_profile": dict(jason_result.timing_profile),
 				"artifacts": dict(jason_result.artifacts),
 			},
 		}
+
+	def _record_failure_signature(
+		self,
+		*,
+		ltlf_formula: str | None = None,
+		mona_failure_signature: str | None = None,
+		jason_failure_class: str | None = None,
+		failed_goals: Tuple[str, ...] | list[str] = (),
+		verifier_missing_goal_facts: Tuple[str, ...] | list[str] = (),
+	) -> None:
+		self.logger.record_failure_signature(
+			build_failure_signature(
+				ltlf_formula=ltlf_formula,
+				mona_failure_signature=mona_failure_signature,
+				jason_failure_class=jason_failure_class,
+				failed_goals=tuple(failed_goals),
+				verifier_missing_goal_facts=tuple(verifier_missing_goal_facts),
+			),
+		)
 
 	def _record_step_timing(
 		self,
