@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 import time
-from dataclasses import dataclass
+import traceback
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,136 +16,14 @@ RUNS_ROOT = PROJECT_ROOT / "tests" / "generated" / "official_ground_truth_full"
 DOMAIN_KEYS = ("blocksworld", "marsrover", "satellite", "transport")
 
 
-@dataclass
-class DomainRun:
-	name: str
-	track_id: str
-	command: List[str]
-	output_path: Path
-	summary_path: Path
-	process: subprocess.Popen[str]
-
-
 def _timestamp() -> str:
 	return time.strftime("%Y%m%d_%H%M%S", time.localtime())
 
 
-def _build_env() -> Dict[str, str]:
-	env = os.environ.copy()
-	env["PYTHONPATH"] = os.pathsep.join(
-		[
-			str(PROJECT_ROOT / "src"),
-			str(PROJECT_ROOT),
-		],
-	)
-	return env
-
-
-def _start_domain_run(
-	run_dir: Path,
-	domain_key: str,
-	env: Dict[str, str],
-	*,
-	evaluation_mode: str,
-	planner_id: str | None,
-	track_id: str,
-) -> DomainRun:
-	output_path = run_dir / f"{domain_key}.out"
-	summary_path = run_dir / f"{domain_key}.summary.json"
-	command = [
-		sys.executable,
-		str(Path(__file__).resolve()),
-		"--domain",
-		domain_key,
-		"--run-dir",
-		str(run_dir),
-		"--evaluation-mode",
-		evaluation_mode,
-	]
-	if planner_id:
-		command.extend(["--planner-id", planner_id])
-	output_handle = output_path.open("w")
-	process = subprocess.Popen(
-		command,
-		cwd=PROJECT_ROOT,
-		env=env,
-		stdout=output_handle,
-		stderr=subprocess.STDOUT,
-		text=True,
-	)
-	return DomainRun(
-		name=domain_key,
-		track_id=track_id,
-		command=command,
-		output_path=output_path,
-		summary_path=summary_path,
-		process=process,
-	)
-
-
-def _aggregate_domain_summaries(run_dir: Path, domain_summaries: Dict[str, Dict[str, object]]) -> Dict[str, object]:
-	total_queries = sum(int(summary.get("total_queries", 0)) for summary in domain_summaries.values())
-	domain_gate_pass = sum(
-		1
-		for summary in domain_summaries.values()
-		if bool((summary.get("domain_gate_preflight") or {}).get("success"))
-	)
-	return {
-		"run_dir": str(run_dir),
-		"domain_gate_pass": domain_gate_pass,
-		"domain_gate_fail": len(domain_summaries) - domain_gate_pass,
-		"total_queries": total_queries,
-		"solver_no_plan_failures": sum(
-			int(summary.get("solver_no_plan_failures", 0))
-			for summary in domain_summaries.values()
-		),
-		"primitive_invalid_failures": sum(
-			int(summary.get("primitive_invalid_failures", 0))
-			for summary in domain_summaries.values()
-		),
-		"hierarchical_rejection_failures": sum(
-			int(summary.get("hierarchical_rejection_failures", 0))
-			for summary in domain_summaries.values()
-		),
-		"verified_successes": sum(
-			int(summary.get("verified_successes", 0))
-			for summary in domain_summaries.values()
-		),
-		"unknown_failures": sum(
-			int(summary.get("unknown_failures", 0))
-			for summary in domain_summaries.values()
-		),
-		"domains": domain_summaries,
-	}
-
-
-def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
-	lines = [
-		f"run_dir: {summary['run_dir']}",
-		f"domain_gate_pass: {summary['domain_gate_pass']}",
-		f"domain_gate_fail: {summary['domain_gate_fail']}",
-		f"total_queries: {summary['total_queries']}",
-		f"solver_no_plan_failures: {summary['solver_no_plan_failures']}",
-		f"primitive_invalid_failures: {summary['primitive_invalid_failures']}",
-		f"hierarchical_rejection_failures: {summary['hierarchical_rejection_failures']}",
-		f"verified_successes: {summary['verified_successes']}",
-		f"unknown_failures: {summary['unknown_failures']}",
-	]
-	for domain_key, domain_summary in dict(summary.get("domains") or {}).items():
-		lines.append(
-			f"{domain_key}: gate_success={bool((domain_summary.get('domain_gate_preflight') or {}).get('success'))}, "
-			f"queries={domain_summary.get('total_queries')}, "
-			f"verified={domain_summary.get('verified_successes')}, "
-			f"hierarchical_rejected={domain_summary.get('hierarchical_rejection_failures')}, "
-			f"primitive_invalid={domain_summary.get('primitive_invalid_failures')}, "
-			f"no_plan={domain_summary.get('solver_no_plan_failures')}",
-		)
-	(run_dir / "summary.txt").write_text("\n".join(lines) + "\n")
-	print("\n".join(lines))
-
-
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
-	from tests.support.htn_evaluation_support import run_official_problem_root_baseline_for_domain
+	from tests.support.htn_evaluation_support import (
+		run_official_problem_root_baseline_for_domain,
+	)
 
 	summary = run_official_problem_root_baseline_for_domain(
 		domain_key,
@@ -161,60 +37,146 @@ def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 	return 0
 
 
-def _run_parallel_full_baseline(
+def _write_text_summary(run_dir: Path, summary: Mapping[str, Any]) -> None:
+	track_summary = dict(summary.get("track_summary") or {})
+	lines = [
+		f"run_dir: {summary['run_dir']}",
+		f"track_id: {summary['track_id']}",
+		f"evaluation_mode: {summary['evaluation_mode']}",
+		f"requested_planner_id: {summary['requested_planner_id']}",
+		f"complete: {summary['complete']}",
+		f"completed_domains: {', '.join(summary.get('completed_domains') or [])}",
+		f"attempted_problem_count: {track_summary.get('attempted_problem_count', 0)}",
+		f"verified_success_count: {track_summary.get('verified_success_count', 0)}",
+	]
+	for domain_key, domain_summary in dict(track_summary.get("domains") or {}).items():
+		lines.append(
+			f"{domain_key}: attempted={domain_summary.get('attempted_problem_count', 0)}, "
+			f"verified={domain_summary.get('verified_success_count', 0)}, "
+			f"no_plan={domain_summary.get('solver_no_plan_failures', 0)}, "
+			f"primitive_invalid={domain_summary.get('primitive_invalid_failures', 0)}, "
+			f"hierarchical_rejected={domain_summary.get('hierarchical_rejection_failures', 0)}",
+		)
+	(run_dir / "summary.txt").write_text("\n".join(lines) + "\n")
+
+
+def _write_track_outputs(
+	*,
+	run_dir: Path,
+	domain_summaries: Mapping[str, Mapping[str, Any]],
+	evaluation_mode: str,
+	planner_id: Optional[str],
+	track_id: str,
+	internal_failures: Optional[List[Mapping[str, str]]] = None,
+) -> Dict[str, Any]:
+	from htn_evaluation.result_tables import (
+		build_planner_capability_rows,
+		build_problem_capability_rows,
+		build_track_summary,
+		write_planner_capability_matrix,
+		write_problem_capability_matrix,
+	)
+
+	track_summary = build_track_summary(
+		run_dir=run_dir,
+		domain_summaries=dict(domain_summaries),
+		evaluation_mode=evaluation_mode,
+		planner_id=planner_id,
+	)
+	track_summary["track_id"] = track_id
+	track_summary["completed_domains"] = sorted(domain_summaries)
+	track_summary["complete"] = len(domain_summaries) == len(DOMAIN_KEYS)
+	(run_dir / "track_summary.json").write_text(json.dumps(track_summary, indent=2))
+
+	planner_paths = write_planner_capability_matrix(
+		run_dir,
+		rows=build_planner_capability_rows((track_summary,)),
+	)
+	problem_paths = write_problem_capability_matrix(
+		run_dir,
+		rows=build_problem_capability_rows((track_summary,)),
+	)
+	summary = {
+		"run_dir": str(run_dir),
+		"track_id": track_id,
+		"evaluation_mode": evaluation_mode,
+		"requested_planner_id": planner_id,
+		"completed_domains": sorted(domain_summaries),
+		"complete": (
+			len(domain_summaries) == len(DOMAIN_KEYS)
+			and not list(internal_failures or [])
+		),
+		"internal_failures": list(internal_failures or []),
+		"track_summary": track_summary,
+		"output_paths": {
+			**planner_paths,
+			**problem_paths,
+		},
+	}
+	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+	_write_text_summary(run_dir, summary)
+	return summary
+
+
+def _run_sequential_full_baseline(
 	*,
 	run_dir: Path,
 	evaluation_mode: str,
-	planner_id: str | None,
+	planner_id: Optional[str],
 	track_id: str,
-) -> Dict[str, object]:
-	env = _build_env()
+	domain_runner: Optional[
+		Callable[[str, str, Optional[str]], Mapping[str, Any]]
+	] = None,
+) -> Dict[str, Any]:
+	from tests.support.htn_evaluation_support import (
+		run_official_problem_root_baseline_for_domain,
+	)
+
 	run_dir.mkdir(parents=True, exist_ok=True)
-	runs = [
-		_start_domain_run(
-			run_dir,
-			domain_key,
-			env,
+	runner = domain_runner or (
+		lambda domain_key, mode, normalized_planner_id: (
+			run_official_problem_root_baseline_for_domain(
+				domain_key,
+				evaluation_mode=mode,
+				planner_id=normalized_planner_id,
+			)
+		)
+	)
+	domain_summaries: Dict[str, Mapping[str, Any]] = {}
+	internal_failures: List[Mapping[str, str]] = []
+	for domain_key in DOMAIN_KEYS:
+		print(f"[TRACK] starting domain={domain_key}", flush=True)
+		try:
+			domain_summary = runner(domain_key, evaluation_mode, planner_id)
+		except Exception:
+			internal_failures.append(
+				{
+					"domain_key": domain_key,
+					"traceback": traceback.format_exc(),
+				},
+			)
+			break
+		domain_summaries[domain_key] = domain_summary
+		(run_dir / f"{domain_key}.summary.json").write_text(
+			json.dumps(dict(domain_summary), indent=2),
+		)
+		_write_track_outputs(
+			run_dir=run_dir,
+			domain_summaries=domain_summaries,
 			evaluation_mode=evaluation_mode,
 			planner_id=planner_id,
 			track_id=track_id,
+			internal_failures=internal_failures,
 		)
-		for domain_key in DOMAIN_KEYS
-	]
-
-	launch_metadata = {
-		run.name: {
-			"pid": run.process.pid,
-			"command": run.command,
-			"output_path": str(run.output_path),
-			"summary_path": str(run.summary_path),
-		}
-		for run in runs
-	}
-	(run_dir / "launch.json").write_text(json.dumps(launch_metadata, indent=2))
-
-	domain_summaries: Dict[str, Dict[str, object]] = {}
-	internal_failures: List[str] = []
-	for run in runs:
-		return_code = run.process.wait()
-		if return_code != 0:
-			internal_failures.append(run.name)
-			continue
-		if not run.summary_path.exists():
-			internal_failures.append(run.name)
-			continue
-		domain_summaries[run.name] = json.loads(run.summary_path.read_text())
-
-	summary = _aggregate_domain_summaries(run_dir, domain_summaries)
-	summary["track_id"] = track_id
-	summary["evaluation_mode"] = evaluation_mode
-	summary["requested_planner_id"] = planner_id
-	summary["internal_failures"] = internal_failures
-	summary["completed_domains"] = sorted(domain_summaries)
-	summary["complete"] = len(domain_summaries) == len(DOMAIN_KEYS) and not internal_failures
-	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-	_write_human_summary(run_dir, summary)
-	return summary
+		print(f"[TRACK] finished domain={domain_key}", flush=True)
+	return _write_track_outputs(
+		run_dir=run_dir,
+		domain_summaries=domain_summaries,
+		evaluation_mode=evaluation_mode,
+		planner_id=planner_id,
+		track_id=track_id,
+		internal_failures=internal_failures,
+	)
 
 
 _RUN_QUERY_IDS: List[str] = []
@@ -244,72 +206,38 @@ def _track_specs() -> List[Dict[str, str | None]]:
 
 
 def _run_all_tracks() -> int:
-	from htn_evaluation.result_tables import (
-		build_planner_capability_rows,
-		build_problem_capability_rows,
-		build_track_summary,
-		write_planner_capability_matrix,
-		write_problem_capability_matrix,
-	)
-
 	run_dir = RUNS_ROOT / _timestamp()
 	run_dir.mkdir(parents=True, exist_ok=True)
-	track_summaries: Dict[str, Dict[str, object]] = {}
+	track_summaries: Dict[str, Dict[str, Any]] = {}
 	for spec in _track_specs():
 		track_id = str(spec["track_id"])
 		track_dir = run_dir / track_id
-		track_domain_summary = _run_parallel_full_baseline(
+		track_summary = _run_sequential_full_baseline(
 			run_dir=track_dir,
 			evaluation_mode=str(spec["evaluation_mode"]),
 			planner_id=spec["planner_id"],
 			track_id=track_id,
 		)
-		track_summaries[track_id] = build_track_summary(
-			run_dir=track_dir,
-			domain_summaries=dict(track_domain_summary.get("domains") or {}),
-			evaluation_mode=str(spec["evaluation_mode"]),
-			planner_id=spec["planner_id"],
-		)
-		track_summaries[track_id]["complete"] = bool(track_domain_summary.get("complete"))
-		track_summaries[track_id]["internal_failures"] = list(
-			track_domain_summary.get("internal_failures") or [],
-		)
-		(track_dir / "track_summary.json").write_text(
-			json.dumps(track_summaries[track_id], indent=2),
-		)
-
-	matrix_rows = build_planner_capability_rows(track_summaries.values())
-	matrix_paths = write_planner_capability_matrix(run_dir, rows=matrix_rows)
-	problem_matrix_rows = build_problem_capability_rows(track_summaries.values())
-	problem_matrix_paths = write_problem_capability_matrix(
-		run_dir,
-		rows=problem_matrix_rows,
-	)
+		track_summaries[track_id] = track_summary
 	combined_summary = {
 		"run_dir": str(run_dir),
 		"tracks": track_summaries,
-		"output_paths": {
-			**matrix_paths,
-			**problem_matrix_paths,
-		},
-		"complete": all(bool(track_summary.get("complete")) for track_summary in track_summaries.values()),
+		"complete": all(
+			bool(track_summary.get("complete"))
+			for track_summary in track_summaries.values()
+		),
 	}
 	(run_dir / "summary.json").write_text(json.dumps(combined_summary, indent=2))
 	print(json.dumps(combined_summary, indent=2))
-	return 0
+	return 0 if combined_summary["complete"] else 1
 
 
 def main() -> int:
 	from htn_evaluation.result_tables import (
 		PLANNER_OR_RACE_MODE,
-		build_planner_capability_rows,
-		build_problem_capability_rows,
-		build_track_summary,
 		planner_track_id,
 		validate_evaluation_mode,
 		validate_planner_id,
-		write_planner_capability_matrix,
-		write_problem_capability_matrix,
 	)
 
 	parser = argparse.ArgumentParser()
@@ -347,26 +275,11 @@ def main() -> int:
 		evaluation_mode=_RUN_EVALUATION_MODE,
 		planner_id=_RUN_PLANNER_ID,
 	)
-	summary = _run_parallel_full_baseline(
+	summary = _run_sequential_full_baseline(
 		run_dir=run_dir,
 		evaluation_mode=_RUN_EVALUATION_MODE,
 		planner_id=_RUN_PLANNER_ID,
 		track_id=track_id,
-	)
-	track_summary = build_track_summary(
-		run_dir=run_dir,
-		domain_summaries=dict(summary.get("domains") or {}),
-		evaluation_mode=_RUN_EVALUATION_MODE,
-		planner_id=_RUN_PLANNER_ID,
-	)
-	(run_dir / "track_summary.json").write_text(json.dumps(track_summary, indent=2))
-	write_planner_capability_matrix(
-		run_dir,
-		rows=build_planner_capability_rows((track_summary,)),
-	)
-	write_problem_capability_matrix(
-		run_dir,
-		rows=build_problem_capability_rows((track_summary,)),
 	)
 	return 0 if summary["complete"] else 1
 

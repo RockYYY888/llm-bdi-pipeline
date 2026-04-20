@@ -36,6 +36,7 @@ from htn_evaluation.result_tables import (
 )
 
 import tests.support.htn_evaluation_support as baseline_support
+import tests.run_official_problem_root_baseline as baseline_runner
 from tests.support.offline_generation_support import DOMAIN_FILES, build_official_method_library
 
 
@@ -570,6 +571,87 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	assert Path(problem_paths["problem_capability_matrix_json"]).exists()
 	assert Path(problem_paths["problem_capability_matrix_csv"]).exists()
 	assert "query_id" in Path(problem_paths["problem_capability_matrix_csv"]).read_text()
+
+
+def test_sequential_full_baseline_writes_incremental_track_outputs(
+	tmp_path: Path,
+) -> None:
+	original_domain_keys = baseline_runner.DOMAIN_KEYS
+	baseline_runner.DOMAIN_KEYS = ("blocksworld", "transport")
+	try:
+		def fake_domain_runner(
+			domain_key: str,
+			evaluation_mode: str,
+			planner_id: str | None,
+		) -> dict[str, object]:
+			return {
+				"domain_key": domain_key,
+				"evaluation_mode": evaluation_mode,
+				"requested_planner_id": planner_id,
+				"attempted_problem_count": 1,
+				"execution_time_seconds_total": 12.0,
+				"execution_time_seconds_average": 12.0,
+				"plan_solve_time_seconds_total": 9.0,
+				"plan_solve_time_seconds_average": 9.0,
+				"plan_verification_time_seconds_total": 3.0,
+				"plan_verification_time_seconds_average": 3.0,
+				"verified_success_count": 1,
+				"verified_successes": 1,
+				"hierarchical_rejection_failures": 0,
+				"primitive_invalid_failures": 0,
+				"solver_no_plan_failures": 0,
+				"unknown_failures": 0,
+				"bucket_counts": {
+					"hierarchical_plan_verified": 1,
+					"primitive_plan_valid_but_hierarchical_rejected": 0,
+					"primitive_plan_invalid": 0,
+					"no_plan_from_solver": 0,
+					"unknown_failure": 0,
+				},
+				"query_results": [
+					{
+						"query_id": f"{domain_key}_query_01",
+						"problem_file": f"{domain_key}.hddl",
+						"log_dir": f"/tmp/{domain_key}",
+						"success": True,
+						"outcome_bucket": "hierarchical_plan_verified",
+						"execution_time_seconds": 12.0,
+						"plan_solve_time_seconds": 9.0,
+						"plan_verification_time_seconds": 3.0,
+						"representation_build_seconds": 0.5,
+						"solver_race_wallclock_seconds": 10.5,
+						"plan_solve_status": "success",
+						"plan_verification_status": "success",
+						"selected_solver_id": "sat",
+						"selected_backend_name": "lifted_panda_sat",
+						"selected_representation_id": "linearized_total_order",
+					},
+				],
+			}
+
+		summary = baseline_runner._run_sequential_full_baseline(
+			run_dir=tmp_path,
+			evaluation_mode=PLANNER_OR_RACE_MODE,
+			planner_id=None,
+			track_id=PLANNER_OR_RACE_MODE,
+			domain_runner=fake_domain_runner,
+		)
+	finally:
+		baseline_runner.DOMAIN_KEYS = original_domain_keys
+
+	assert summary["complete"] is True
+	assert Path(tmp_path / "blocksworld.summary.json").exists()
+	assert Path(tmp_path / "transport.summary.json").exists()
+	assert Path(tmp_path / "track_summary.json").exists()
+	assert Path(tmp_path / "summary.json").exists()
+	assert Path(tmp_path / "planner_capability_matrix.json").exists()
+	assert Path(tmp_path / "planner_capability_matrix.csv").exists()
+	assert Path(tmp_path / "problem_capability_matrix.json").exists()
+	assert Path(tmp_path / "problem_capability_matrix.csv").exists()
+	problem_rows = json.loads((tmp_path / "problem_capability_matrix.json").read_text())
+	assert problem_rows[0]["execution_time_seconds"] == 12.0
+	assert problem_rows[0]["plan_solve_time_seconds"] == 9.0
+	assert problem_rows[0]["plan_verification_time_seconds"] == 3.0
 
 
 def test_supported_planner_ids_are_stable() -> None:
