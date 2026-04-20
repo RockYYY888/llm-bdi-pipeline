@@ -222,6 +222,7 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 	)
 	log_dir = report.get("log_dir")
 	return {
+		"run_id": report.get("run_id"),
 		"query_id": str(report.get("query_id") or ""),
 		"problem_file": problem_file,
 		"library_source": str(report.get("library_source") or ""),
@@ -325,6 +326,7 @@ def _build_domain_summary(
 		"query_results": [
 			{
 				"query_id": str(report.get("query_id") or ""),
+				"run_id": report.get("run_id"),
 				"problem_file": str(report.get("problem_file") or ""),
 				"log_dir": str(report.get("log_dir") or ""),
 				"query_result_path": str(
@@ -415,12 +417,15 @@ def run_online_query_solution_benchmark_for_domain(
 		if query_id in query_reports_by_id:
 			continue
 		query_report = _serialize_query_report(
-			run_online_query_case(
+			{
+				**run_online_query_case(
 				domain_key,
 				query_id,
 				library_source=normalized_library_source,
 				logs_root=domain_output_root / "logs",
-			),
+				),
+				"run_id": run_id,
+			},
 		)
 		query_reports_by_id[query_id] = query_report
 		_query_result_path(domain_output_root, query_id).write_text(

@@ -173,6 +173,7 @@ def _aggregate_domain_summaries(
 
 def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 	lines = [
+		f"run_id: {summary.get('run_id') or run_dir.name}",
 		f"run_dir: {summary['run_dir']}",
 		f"online_domain_source: {summary['online_domain_source']}",
 		f"library_source: {summary['library_source']}",

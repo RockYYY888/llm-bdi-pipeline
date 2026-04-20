@@ -42,7 +42,7 @@ def test_online_benchmark_standard_library_source_is_benchmark() -> None:
 def test_full_sweep_writes_latest_run_manifest_files(tmp_path: Path) -> None:
 	run_dir = tmp_path / "20260420_220000"
 	run_dir.mkdir(parents=True)
-	(run_dir / "summary.txt").write_text("verified_successes: 3\n")
+	(run_dir / "summary.txt").write_text("run_id: 20260420_220000\nverified_successes: 3\n")
 	summary = {
 		"run_id": "20260420_220000",
 		"run_dir": str(run_dir),
@@ -67,8 +67,9 @@ def test_full_sweep_writes_latest_run_manifest_files(tmp_path: Path) -> None:
 	assert latest["run_dir"] == str(run_dir)
 	assert latest["summary_json"] == str(run_dir / "summary.json")
 	assert latest["summary_txt"] == str(run_dir / "summary.txt")
+	assert (tmp_path / "latest_summary.txt").read_text().startswith("run_id: 20260420_220000\n")
 	assert json.loads((tmp_path / "latest_summary.json").read_text())["verified_successes"] == 3
-	assert (tmp_path / "latest_summary.txt").read_text() == "verified_successes: 3\n"
+	assert "verified_successes: 3\n" in (tmp_path / "latest_summary.txt").read_text()
 
 
 def test_domain_benchmark_resume_reuses_query_checkpoints(
@@ -122,6 +123,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 	(query_results_root / "q1.json").write_text(
 		json.dumps(
 			{
+				"run_id": "run-001",
 				"query_id": "q1",
 				"problem_file": str(query_cases["q1"]["problem_file"]),
 				"library_source": "benchmark",
@@ -153,10 +155,11 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 	assert summary["run_id"] == "run-001"
 	assert summary["completed_query_ids"] == ["q1", "q2"]
 	assert summary["resumed_query_ids"] == ["q1"]
+	assert summary["query_results"][0]["run_id"] == "run-001"
 	assert (run_root / "blocksworld.summary.json").exists()
 	assert (domain_root / "summary.json").exists()
 	assert (domain_root / "state.json").exists()
-	assert (query_results_root / "q2.json").exists()
+	assert json.loads((query_results_root / "q2.json").read_text())["run_id"] == "run-001"
 
 
 def test_domain_benchmark_supports_single_query_runs(
@@ -208,6 +211,7 @@ def test_domain_benchmark_supports_single_query_runs(
 	assert summary["selected_query_ids"] == ["q2"]
 	assert summary["runtime_execution_failures"] == 1
 	assert summary["complete"] is True
+	assert summary["query_results"][0]["run_id"] == "single-query-run"
 	assert (
 		tmp_path
 		/ "single-query-run"
@@ -242,3 +246,6 @@ def test_full_sweep_summary_snapshot_writes_incremental_run_state(tmp_path: Path
 	assert summary["completed_domains"] == ["blocksworld"]
 	assert "transport" in summary["internal_failures"]
 	assert (tmp_path / "20260420_220000" / "summary.json").exists()
+	assert (tmp_path / "20260420_220000" / "summary.txt").read_text().startswith(
+		"run_id: 20260420_220000\n",
+	)
