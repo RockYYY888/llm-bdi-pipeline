@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 import sys
 import time
@@ -1779,11 +1778,11 @@ def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences(
 	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
 
 
-def test_goal_grounding_minimax_request_profile_uses_dynamic_reasoning_budget() -> None:
+def test_goal_grounding_kimi_request_profile_uses_streaming_without_reasoning_override() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 	)
 	messages = [
@@ -1794,24 +1793,13 @@ def test_goal_grounding_minimax_request_profile_uses_dynamic_reasoning_budget() 
 	profile = generator._goal_grounding_request_profile(messages=messages)
 
 	expected_prompt_estimate = generator._estimate_goal_grounding_prompt_token_budget(messages)
-	expected_margin = math.ceil(196_608 * 0.10)
-	expected_headroom = max(
-		196_608 - expected_margin - expected_prompt_estimate - 5_805 - 2_048,
-		0,
-	)
-	expected_reasoning_budget = int(expected_headroom * 0.70)
 
-	assert profile["name"] == "minimax_stream_single_pass"
+	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["stream_response"] is True
 	assert profile["first_chunk_timeout_seconds"] == 300.0
 	assert profile["context_window_tokens"] == 196_608
 	assert profile["prompt_token_estimate"] == expected_prompt_estimate
-	assert profile["answer_token_reserve"] == 5_805
-	assert profile["context_margin_tokens"] == expected_margin
-	assert profile["transport_overhead_tokens"] == 2_048
-	assert profile["reasoning_headroom_tokens"] == expected_headroom
-	assert profile["reasoning_headroom_ratio"] == 0.70
-	assert profile["reasoning_max_tokens"] == expected_reasoning_budget
+	assert profile["reasoning_max_tokens"] is None
 	assert profile["session_id"] == "online-ltlf-generation"
 
 
@@ -1832,7 +1820,7 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_comple
 
 	generator = FakeGenerator(
 		domain_file=domain_file,
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 		api_key="sk-test",
 	)
@@ -1850,16 +1838,9 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_comple
 	assert request_kwargs["stream"] is True
 	assert "max_tokens" not in request_kwargs
 	assert "response_format" not in request_kwargs
-	expected_profile = generator._goal_grounding_request_profile(
-		messages=[{"role": "system", "content": "Return JSON."}],
-	)
 	assert request_kwargs["extra_body"] == {
-		"provider": {"only": ["minimax"], "allow_fallbacks": False},
+		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},
 		"session_id": "online-ltlf-generation",
-		"reasoning": {
-			"max_tokens": expected_profile["reasoning_max_tokens"],
-			"exclude": True,
-		},
 	}
 
 
@@ -1969,6 +1950,7 @@ def test_goal_grounding_streaming_enforces_first_chunk_deadline() -> None:
 	assert transport_metadata["llm_response_mode"] == "streaming"
 	assert transport_metadata["llm_first_chunk_timeout_seconds"] == 0.01
 	assert transport_metadata.get("llm_first_chunk_seconds") is None
+
 
 def test_goal_grounding_streaming_counts_reasoning_as_stream_activity() -> None:
 	class FakeDelta:

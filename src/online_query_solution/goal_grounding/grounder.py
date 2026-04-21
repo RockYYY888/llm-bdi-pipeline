@@ -26,14 +26,10 @@ from online_query_solution.goal_grounding.canonical_ordered_formula import (
 from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
 from utils.symbol_normalizer import SymbolNormalizer
 
-MINIMAX_OPENROUTER_CONTEXT_WINDOW_TOKENS = 196_608
-MINIMAX_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
-MINIMAX_RESERVED_VISIBLE_ANSWER_TOKENS = 5_805
-MINIMAX_CONTEXT_MARGIN_RATIO = 0.10
-MINIMAX_REASONING_HEADROOM_RATIO = 0.70
-MINIMAX_TRANSPORT_OVERHEAD_TOKENS = 2_048
-MINIMAX_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
-MINIMAX_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
+KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 196_608
+KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
+KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
+KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
 ONLINE_LTLF_GENERATION_SESSION_ID = "online-ltlf-generation"
 GOAL_GROUNDING_MAX_TRANSPORT_RETRIES = 3
 GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
@@ -990,15 +986,6 @@ class NLToLTLfGenerator:
 			},
 			"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 		}
-		if provider_name == "minimax":
-			reasoning_max_tokens = int(
-				(request_profile or {}).get("reasoning_max_tokens") or 0,
-			)
-			if reasoning_max_tokens > 0:
-				extra_body["reasoning"] = {
-					"max_tokens": reasoning_max_tokens,
-					"exclude": True,
-				}
 		return extra_body
 
 	def _goal_grounding_request_profile(
@@ -1007,38 +994,16 @@ class NLToLTLfGenerator:
 		messages: Optional[list[dict[str, str]]] = None,
 	) -> Dict[str, Any]:
 		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("minimax/"):
+		if model_name.startswith("moonshotai/"):
 			context_window_tokens = self._goal_grounding_total_context_tokens()
 			prompt_token_estimate = self._estimate_goal_grounding_prompt_token_budget(messages)
-			context_margin_tokens = math.ceil(
-				context_window_tokens * MINIMAX_CONTEXT_MARGIN_RATIO,
-			)
-			answer_token_reserve = MINIMAX_RESERVED_VISIBLE_ANSWER_TOKENS
-			transport_overhead_tokens = MINIMAX_TRANSPORT_OVERHEAD_TOKENS
-			reasoning_headroom_tokens = max(
-				context_window_tokens
-				- context_margin_tokens
-				- prompt_token_estimate
-				- answer_token_reserve
-				- transport_overhead_tokens,
-				0,
-			)
-			reasoning_max_tokens = max(
-				int(math.floor(reasoning_headroom_tokens * MINIMAX_REASONING_HEADROOM_RATIO)),
-				0,
-			)
 			return {
-				"name": "minimax_stream_single_pass",
+				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				"reasoning_max_tokens": reasoning_max_tokens,
-				"first_chunk_timeout_seconds": MINIMAX_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
+				"reasoning_max_tokens": None,
+				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
-				"answer_token_reserve": answer_token_reserve,
-				"context_margin_tokens": context_margin_tokens,
-				"reasoning_headroom_tokens": reasoning_headroom_tokens,
-				"reasoning_headroom_ratio": MINIMAX_REASONING_HEADROOM_RATIO,
-				"transport_overhead_tokens": transport_overhead_tokens,
 				"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 			}
 		return {
@@ -1075,8 +1040,8 @@ class NLToLTLfGenerator:
 	def _goal_grounding_total_context_tokens(self) -> int:
 		base_url = str(self.base_url or "").strip().lower()
 		if "openrouter.ai" in base_url:
-			return MINIMAX_OPENROUTER_CONTEXT_WINDOW_TOKENS
-		return MINIMAX_DIRECT_CONTEXT_WINDOW_TOKENS
+			return KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS
+		return KIMI_DIRECT_CONTEXT_WINDOW_TOKENS
 
 	@staticmethod
 	def _estimate_goal_grounding_prompt_token_budget(
@@ -1093,7 +1058,7 @@ class NLToLTLfGenerator:
 			return 0
 		return max(
 			1,
-			math.ceil(total_characters / MINIMAX_PROMPT_ESTIMATE_CHARS_PER_TOKEN),
+			math.ceil(total_characters / KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN),
 		)
 
 	def _apply_goal_grounding_provider_token_ceiling(
@@ -1101,7 +1066,7 @@ class NLToLTLfGenerator:
 		requested_max_tokens: Optional[int],
 	) -> int | None:
 		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("minimax/"):
+		if model_name.startswith("moonshotai/"):
 			return None
 		requested = max(int(requested_max_tokens or self.response_max_tokens or 0), 1)
 		return requested

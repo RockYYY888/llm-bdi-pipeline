@@ -173,12 +173,12 @@ class MethodSynthesisLLMTransportMixin:
 		"""
 		Keep provider-specific handling explicit even when no extra cap is applied.
 
-		For MiniMax method synthesis, the more reliable setting is currently to avoid
+		For Kimi method synthesis, the more reliable setting is currently to avoid
 		an application-side completion ceiling entirely and constrain only reasoning.
 		"""
 		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("minimax/"):
-			# Keep completion uncapped for MiniMax method synthesis; reasoning and
+		if model_name.startswith("moonshotai/"):
+			# Keep completion uncapped for Kimi method synthesis; reasoning and
 			# first-chunk deadlines are the control knobs that matter here.
 			return None
 		requested = max(int(requested_max_tokens or 0), 1)
@@ -466,7 +466,7 @@ class MethodSynthesisLLMTransportMixin:
 				"allow_fallbacks": False,
 			},
 		}
-		if provider_name == "minimax":
+		if provider_name == "moonshotai":
 			reasoning_max_tokens = int(
 				(request_profile or {}).get("reasoning_max_tokens") or 0,
 			)
@@ -479,10 +479,10 @@ class MethodSynthesisLLMTransportMixin:
 
 	def _method_synthesis_request_profile(self, *, attempt_index: int) -> Dict[str, Any]:
 		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("minimax/"):
+		if model_name.startswith("moonshotai/"):
 			if attempt_index <= 1:
 				return {
-					"name": "minimax_stream_reasoning1",
+					"name": "kimi_stream_single_pass",
 					"stream_response": True,
 					"reasoning_max_tokens": 1,
 					"first_chunk_timeout_seconds": 180.0,
@@ -490,14 +490,14 @@ class MethodSynthesisLLMTransportMixin:
 				}
 			if attempt_index == 2:
 				return {
-					"name": "minimax_stream_no_reasoning",
+					"name": "kimi_stream_single_pass",
 					"stream_response": True,
 					"reasoning_max_tokens": 0,
 					"first_chunk_timeout_seconds": 180.0,
 					"response_healing_plugin": False,
 				}
 			return {
-				"name": "minimax_stream_no_reasoning_relaxed",
+				"name": "kimi_stream_single_pass",
 				"stream_response": True,
 				"reasoning_max_tokens": 0,
 				"first_chunk_timeout_seconds": 240.0,

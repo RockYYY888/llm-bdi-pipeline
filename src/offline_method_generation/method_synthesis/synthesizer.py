@@ -164,7 +164,7 @@ class HTNMethodSynthesizer(
 		)
 		metadata["llm_prompt"] = prompt
 		metadata["llm_request_count"] = 1
-		if str(self.model or "").strip().lower().startswith("minimax/"):
+		if str(self.model or "").strip().lower().startswith("moonshotai/"):
 			request_max_tokens = None
 		else:
 			request_max_tokens = self._estimate_method_synthesis_response_token_budget(
@@ -593,7 +593,7 @@ class HTNMethodSynthesizer(
 
 	def _method_synthesis_max_attempts(self) -> int:
 		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("minimax/"):
+		if model_name.startswith("moonshotai/"):
 			return 3
 		return 1
 
@@ -616,7 +616,7 @@ class HTNMethodSynthesizer(
 	) -> float:
 		_ = exc
 		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("minimax/"):
+		if model_name.startswith("moonshotai/"):
 			return float(20 * max(attempt_index, 1))
 		return float(max(attempt_index, 1))
 

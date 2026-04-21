@@ -285,7 +285,7 @@ def test_library_postprocess_bound_helpers_are_callable_via_synthesizer_instance
 
 def test_method_synthesis_transport_streams_on_openrouter_base_url() -> None:
 	synthesizer = HTNMethodSynthesizer(
-		model="minimax/minimax-m1",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 	)
 
@@ -310,7 +310,7 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 			self.chat = FakeChat()
 
 	synthesizer = HTNMethodSynthesizer(
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 	)
 	synthesizer.client = FakeClient()
@@ -321,15 +321,15 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 	assert "response_format" not in captured_kwargs
 
 
-def test_method_synthesis_transport_omits_minimax_completion_ceiling() -> None:
-	synthesizer = HTNMethodSynthesizer(model="minimax/minimax-m2.7")
+def test_method_synthesis_transport_omits_kimi_completion_ceiling() -> None:
+	synthesizer = HTNMethodSynthesizer(model="moonshotai/kimi-k2.6")
 
 	assert synthesizer._apply_method_synthesis_provider_token_ceiling(48000) is None
 
 
 def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 	)
 	prompt = {
@@ -340,7 +340,7 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	profile = synthesizer._method_synthesis_request_profile(prompt=prompt)
 	expected_prompt_tokens = synthesizer._estimate_method_synthesis_prompt_token_budget(prompt)
 
-	assert profile["name"] == "minimax_stream_single_pass"
+	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["context_window_tokens"] == 196608
 	assert profile["prompt_token_estimate"] == expected_prompt_tokens
 	assert profile["answer_token_reserve"] == 5805
@@ -359,13 +359,13 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 
 def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() -> None:
 	synthesizer = HTNMethodSynthesizer(
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 	)
 
 	extra_body = synthesizer._openrouter_provider_routing_body(
 		request_profile={
-			"name": "minimax_stream_single_pass",
+			"name": "kimi_stream_single_pass",
 			"stream_response": True,
 			"reasoning_max_tokens": 0,
 			"first_chunk_timeout_seconds": 300.0,
@@ -421,7 +421,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 			return object()
 
 	synthesizer = FakeSynthesizer(
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 		api_key="sk-test",
 		timeout=60,
@@ -431,7 +431,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 		{"system": "x", "user": "y"},
 		max_tokens=16,
 		request_profile={
-			"name": "minimax_stream_reasoning8",
+			"name": "kimi_stream_single_pass",
 			"stream_response": True,
 			"reasoning_max_tokens": 8,
 			"first_chunk_timeout_seconds": 90.0,
@@ -446,7 +446,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
 
 
-def test_method_synthesis_transport_omits_max_tokens_for_minimax_requests() -> None:
+def test_method_synthesis_transport_omits_max_tokens_for_kimi_requests() -> None:
 	captured_request = {}
 
 	class FakeSynthesizer(HTNMethodSynthesizer):
@@ -461,7 +461,7 @@ def test_method_synthesis_transport_omits_max_tokens_for_minimax_requests() -> N
 			return object()
 
 	synthesizer = FakeSynthesizer(
-		model="minimax/minimax-m2.7",
+		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
 		api_key="sk-test",
 		timeout=60,
@@ -471,7 +471,7 @@ def test_method_synthesis_transport_omits_max_tokens_for_minimax_requests() -> N
 		{"system": "x", "user": "y"},
 		max_tokens=None,
 		request_profile={
-			"name": "minimax_stream_single_pass",
+			"name": "kimi_stream_single_pass",
 			"stream_response": True,
 			"reasoning_max_tokens": 0,
 			"first_chunk_timeout_seconds": 300.0,
@@ -510,7 +510,7 @@ def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
 			{"system": "x", "user": "y"},
 			max_tokens=16,
 			request_profile={
-				"name": "minimax_stream_reasoning8",
+				"name": "kimi_stream_single_pass",
 				"stream_response": True,
 				"reasoning_max_tokens": 8,
 				"first_chunk_timeout_seconds": 0.01,
@@ -545,7 +545,7 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 	assert getattr(exc_info.value, "transport_metadata", {}) == {
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "streaming",
-		"llm_request_profile": "minimax_stream_single_pass",
+		"llm_request_profile": "kimi_stream_single_pass",
 		"llm_reasoning_budget": 123526,
 		"llm_first_chunk_timeout_seconds": 300.0,
 		"llm_context_window_tokens": 204800,
@@ -680,7 +680,7 @@ def test_method_synthesis_transport_counts_reasoning_as_stream_activity() -> Non
 def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
 	class SinglePassSynthesizer(HTNMethodSynthesizer):
 		def __init__(self):
-			super().__init__(model="minimax/minimax-m2.7")
+			super().__init__(model="moonshotai/kimi-k2.6")
 			self.call_count = 0
 
 		def _call_llm(self, prompt, *, max_tokens=None):
@@ -692,7 +692,7 @@ def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
 			error.transport_metadata = {
 				"llm_request_id": "req_retry_1",
 				"llm_response_mode": "streaming",
-				"llm_request_profile": "minimax_stream_single_pass",
+				"llm_request_profile": "kimi_stream_single_pass",
 			}
 			raise error
 
@@ -709,7 +709,7 @@ def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
 	assert synthesizer.call_count == 1
 	assert metadata["llm_attempts"] == 1
 	assert metadata["llm_attempt_trace"][0]["request_id"] == "req_retry_1"
-	assert metadata["llm_attempt_trace"][0]["request_profile"] == "minimax_stream_single_pass"
+	assert metadata["llm_attempt_trace"][0]["request_profile"] == "kimi_stream_single_pass"
 
 
 def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arrives() -> None:

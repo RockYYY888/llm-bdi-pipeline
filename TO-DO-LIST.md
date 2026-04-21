@@ -70,24 +70,21 @@
   - first chunk timing
   - complete JSON timing
   - reasoning preview when no usable JSON arrives
-- [x] Fixed the MiniMax request policy so offline method synthesis:
-  - constrains reasoning budget directly
+- [x] Fixed the Kimi request policy so offline method synthesis:
+  - uses OpenRouter streaming without a provider-specific reasoning override
   - does not send an application-side total completion `max_tokens` ceiling
   - uses first-chunk deadlines instead of completion truncation as the main
     latency control
-- [x] Fixed `MiniMax` model pinning to `minimax/minimax-m2.7`.
-- [x] Replaced the old multi-attempt MiniMax retry ladder with a single-pass
+- [x] Fixed model pinning to `moonshotai/kimi-k2.6`.
+- [x] Replaced the old multi-attempt provider retry ladder with a single-pass
   policy:
   - no provider fallback
   - no transport retry ladder
   - single request only, hard fail on the first unsuccessful call
-- [x] Rebased MiniMax reasoning allocation on the routed model context instead of
-  tiny fixed reasoning budgets:
-  - OpenRouter-routed `minimax/minimax-m2.7` now uses `196608` total context as
-    the active budgeting baseline
-  - reserve the largest observed visible answer budget
-  - reserve about `10%` global context slack
-  - reserve prompt-estimate and transport overhead
+- [x] Rebased Kimi streaming diagnostics on the routed model context:
+  - OpenRouter-routed `moonshotai/kimi-k2.6` uses `196608` total context as the
+    conservative metadata baseline
+  - record prompt-estimate and request session id
   - assign `70%` of the remaining headroom to provider-side reasoning
 - [x] Added a stable OpenRouter session label for offline synthesis:
   - `session_id = offline-method-generation`
@@ -144,28 +141,28 @@
   - method synthesis succeeded
   - domain gate succeeded
 - [x] Real sequential live generated build succeeded for `blocksworld` under
-  the uncapped-completion MiniMax request policy:
+  the uncapped-completion streaming request policy:
   - log: `tests/generated/logs/20260419_175744_BLOCKS/execution.json`
   - `llm_request_max_tokens = null`
   - first chunk arrived in about `31.8s`
   - method synthesis succeeded
   - domain gate succeeded
 - [x] Real sequential live generated build succeeded for `marsrover` under the
-  uncapped-completion MiniMax request policy:
+  uncapped-completion streaming request policy:
   - log: `tests/generated/logs/20260419_175937_rover/execution.json`
   - `llm_request_max_tokens = null`
   - first chunk arrived in about `32.7s`
   - method synthesis succeeded
   - domain gate succeeded
 - [x] Real sequential live generated build succeeded for `transport` under the
-  uncapped-completion MiniMax request policy:
+  uncapped-completion streaming request policy:
   - log: `tests/generated/logs/20260419_181204_transport/execution.json`
   - `llm_request_max_tokens = null`
   - first chunk arrived in about `105.7s`
   - method synthesis succeeded
   - domain gate succeeded
 - [x] Real sequential live generated build succeeded for `satellite` under the
-  uncapped-completion MiniMax request policy:
+  uncapped-completion streaming request policy:
   - log: `tests/generated/logs/20260419_181413_satellite2/execution.json`
   - `llm_request_max_tokens = null`
   - first chunk arrived in about `218.6s` under the old retry ladder
@@ -198,11 +195,12 @@
     growth
 - The current transport no longer shows that duplicated late-output behavior in
   the successful / stalled reruns after the refactor.
-- For `minimax/minimax-m2.7` offline method synthesis, the current preferred
+- For `moonshotai/kimi-k2.6` offline method synthesis, the current preferred
   policy is:
   - keep total completion uncapped at the application layer
-  - constrain reasoning instead
-  - compute reasoning from routed context headroom instead of fixed `1/0` values
+  - use OpenRouter streaming with provider fallback disabled
+  - record routed context metadata instead of sending provider-specific
+    reasoning overrides
   - use a single request with a conservative first-chunk deadline, not retries
 - `satellite` required two additional real fixes beyond prompt compression:
   - allow streaming responses with raw JSON-like text to continue into the

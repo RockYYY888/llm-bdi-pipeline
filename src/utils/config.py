@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-DEFAULT_GOAL_GROUNDING_MODEL = "minimax/minimax-m2.7"
-DEFAULT_METHOD_SYNTHESIS_MODEL = "minimax/minimax-m2.7"
-DEFAULT_SHARED_MODEL = "deepseek-chat"
+DEFAULT_GOAL_GROUNDING_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_METHOD_SYNTHESIS_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_SHARED_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_ONLINE_DOMAIN_SOURCE = "benchmark"
 
 

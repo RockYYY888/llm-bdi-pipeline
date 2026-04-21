@@ -17,7 +17,7 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
     monkeypatch.setenv("OPENAI_MODEL", "deepseek-chat")
     monkeypatch.setenv("GOAL_GROUNDING_MODEL", "deepseek/deepseek-chat-v3-0324")
-    monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "minimax/minimax-m2")
+    monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "legacy/provider-model")
     monkeypatch.setenv("OPENAI_TIMEOUT", "120")
     monkeypatch.setenv("METHOD_SYNTHESIS_TIMEOUT", "240")
     monkeypatch.setenv("METHOD_SYNTHESIS_MAX_TOKENS", "4096")
@@ -31,7 +31,7 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     assert config.openai_api_key == "sk-shared"
     assert config.openai_model == "deepseek-chat"
     assert config.goal_grounding_model == "deepseek/deepseek-chat-v3-0324"
-    assert config.method_synthesis_model == "minimax/minimax-m2.7"
+    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
     assert config.openai_timeout == 120
     assert config.method_synthesis_timeout == 240
     assert config.method_synthesis_max_tokens == 4096
@@ -70,32 +70,32 @@ def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
 
 def test_goal_grounding_model_inherits_shared_model_when_no_explicit_override(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_MODEL", "minimax/minimax-m2.7")
+    monkeypatch.setenv("OPENAI_MODEL", "moonshotai/kimi-k2.6")
     monkeypatch.delenv("GOAL_GROUNDING_MODEL", raising=False)
 
     config = Config()
 
-    assert config.goal_grounding_model == "minimax/minimax-m2.7"
+    assert config.goal_grounding_model == "moonshotai/kimi-k2.6"
 
 
-def test_goal_grounding_model_defaults_to_pinned_minimax_when_no_env_is_set(monkeypatch):
+def test_goal_grounding_model_defaults_to_pinned_kimi_when_no_env_is_set(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.delenv("GOAL_GROUNDING_MODEL", raising=False)
 
     config = Config()
 
-    assert config.goal_grounding_model == "minimax/minimax-m2.7"
+    assert config.goal_grounding_model == "moonshotai/kimi-k2.6"
 
 
-def test_method_synthesis_model_defaults_to_pinned_minimax_chat(monkeypatch):
+def test_method_synthesis_model_defaults_to_pinned_kimi_chat(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("OPENAI_MODEL", "shared-model")
     monkeypatch.delenv("METHOD_SYNTHESIS_MODEL", raising=False)
 
     config = Config()
 
-    assert config.method_synthesis_model == "minimax/minimax-m2.7"
+    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
 def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
@@ -115,20 +115,20 @@ def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
 
     assert config.openai_model == "shell-model"
     assert config.goal_grounding_model == "shell-goal-grounding-model"
-    assert config.method_synthesis_model == "minimax/minimax-m2.7"
+    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
-def test_method_synthesis_model_is_pinned_even_when_dotenv_sets_legacy_m2(monkeypatch):
+def test_method_synthesis_model_is_pinned_even_when_dotenv_sets_legacy_override(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
 
     config = Config()
     config._merge_env_lines(
         [
-            "METHOD_SYNTHESIS_MODEL=minimax/minimax-m2",
+            "METHOD_SYNTHESIS_MODEL=legacy/provider-model",
         ]
     )
 
-    assert config.method_synthesis_model == "minimax/minimax-m2.7"
+    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
 def test_online_domain_source_defaults_to_benchmark(monkeypatch):

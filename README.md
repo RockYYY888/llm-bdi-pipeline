@@ -135,8 +135,8 @@ Minimum configuration:
 ```bash
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=...
-OPENAI_MODEL=minimax/minimax-m2.7
-GOAL_GROUNDING_MODEL=minimax/minimax-m2.7
+OPENAI_MODEL=moonshotai/kimi-k2.6
+GOAL_GROUNDING_MODEL=moonshotai/kimi-k2.6
 ONLINE_DOMAIN_SOURCE=benchmark
 ```
 
