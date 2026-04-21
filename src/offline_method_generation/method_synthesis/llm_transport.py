@@ -529,6 +529,7 @@ class MethodSynthesisLLMTransportMixin:
 		close_stream = getattr(response, "close", None)
 		stream_start = time.monotonic()
 		first_chunk_recorded = False
+		first_content_chunk_recorded = False
 		first_chunk_timeout_seconds = float(
 			metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
 		)
@@ -553,7 +554,7 @@ class MethodSynthesisLLMTransportMixin:
 			if next_chunk_timeout_seconds is not None and next_chunk_timeout_seconds <= 0.0:
 				timeout_error = TimeoutError(
 					"Method-synthesis LLM call exceeded the configured first-chunk "
-					"deadline before any streaming content arrived."
+					"deadline before any streaming chunk arrived."
 					if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
 					else "Method-synthesis LLM call exceeded the configured timeout "
 					"before returning a usable response.",
@@ -575,7 +576,7 @@ class MethodSynthesisLLMTransportMixin:
 			except TimeoutError as exc:
 				timeout_error = TimeoutError(
 					"Method-synthesis LLM call exceeded the configured first-chunk "
-					"deadline before any streaming content arrived."
+					"deadline before any streaming chunk arrived."
 					if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
 					else "Method-synthesis LLM call exceeded the configured timeout "
 					"before returning a usable response.",
@@ -612,6 +613,12 @@ class MethodSynthesisLLMTransportMixin:
 						self._emit_method_synthesis_progress(
 							f"first_chunk_seconds={metadata['llm_first_chunk_seconds']}",
 						)
+					if not first_content_chunk_recorded:
+						metadata["llm_first_content_chunk_seconds"] = round(
+							time.monotonic() - stream_start,
+							6,
+						)
+						first_content_chunk_recorded = True
 					parts.append(extracted)
 			for reasoning_candidate in (
 				getattr(delta, "reasoning", None) if delta is not None else None,
@@ -621,6 +628,18 @@ class MethodSynthesisLLMTransportMixin:
 			):
 				extracted_reasoning = self._normalise_response_content(reasoning_candidate)
 				if extracted_reasoning is not None:
+					if not first_chunk_recorded:
+						metadata["llm_first_chunk_seconds"] = round(
+							time.monotonic() - stream_start,
+							6,
+						)
+						metadata["llm_first_reasoning_chunk_seconds"] = metadata[
+							"llm_first_chunk_seconds"
+						]
+						first_chunk_recorded = True
+						self._emit_method_synthesis_progress(
+							f"first_chunk_seconds={metadata['llm_first_chunk_seconds']}",
+						)
 					reasoning_parts.append(extracted_reasoning)
 			current_text = "".join(parts).strip()
 			complete_payload = self._extract_complete_json_payload_text(current_text)

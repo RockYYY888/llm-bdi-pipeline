@@ -1970,6 +1970,55 @@ def test_goal_grounding_streaming_enforces_first_chunk_deadline() -> None:
 	assert transport_metadata["llm_first_chunk_timeout_seconds"] == 0.01
 	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
+def test_goal_grounding_streaming_counts_reasoning_as_stream_activity() -> None:
+	class FakeDelta:
+		def __init__(self, reasoning=None):
+			self.content = None
+			self.reasoning = reasoning
+
+	class FakeChoice:
+		def __init__(self, reasoning=None):
+			self.delta = FakeDelta(reasoning=reasoning)
+			self.finish_reason = None
+			self.reasoning = reasoning
+
+	class FakeChunk:
+		def __init__(self, chunk_id, reasoning=None):
+			self.id = chunk_id
+			self.choices = [FakeChoice(reasoning=reasoning)]
+
+	class ReasoningThenBlockingStream:
+		def __init__(self):
+			self.index = 0
+
+		def __iter__(self):
+			return self
+
+		def __next__(self):
+			self.index += 1
+			if self.index == 1:
+				return FakeChunk("req_goal_reasoning", reasoning="thinking")
+			time.sleep(0.05)
+			raise AssertionError("stream iteration should have timed out by total deadline")
+
+		def close(self):
+			return None
+
+	generator = NLToLTLfGenerator()
+
+	with pytest.raises(TimeoutError, match="configured timeout") as exc_info:
+		generator._consume_streaming_llm_response(
+			ReasoningThenBlockingStream(),
+			transport_metadata={"llm_first_chunk_timeout_seconds": 0.01},
+			total_timeout_seconds=0.02,
+		)
+
+	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
+	assert transport_metadata["llm_request_id"] == "req_goal_reasoning"
+	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_reasoning_chunk_seconds"] >= 0.0
+	assert "llm_first_content_chunk_seconds" not in transport_metadata
+
 
 def test_execute_query_with_jason_returns_none_when_runtime_fails(
 	monkeypatch: pytest.MonkeyPatch,

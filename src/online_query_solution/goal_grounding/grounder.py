@@ -1201,11 +1201,13 @@ class NLToLTLfGenerator:
 		if request_id:
 			transport_metadata["llm_request_id"] = request_id
 		parts: list[str] = []
+		reasoning_parts: list[str] = []
 		complete_payload: str | None = None
 		finish_reason = ""
 		close_stream = getattr(response, "close", None)
 		stream_start = time.monotonic()
 		first_chunk_recorded = False
+		first_content_chunk_recorded = False
 		first_chunk_timeout_seconds = float(
 			transport_metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
 		)
@@ -1231,7 +1233,7 @@ class NLToLTLfGenerator:
 				if next_timeout_seconds is not None and next_timeout_seconds <= 0.0:
 					timeout_error = TimeoutError(
 						"Goal-grounding LLM call exceeded the configured first-chunk "
-						"deadline before any streaming content arrived."
+						"deadline before any streaming chunk arrived."
 						if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
 						else "Goal-grounding LLM call exceeded the configured timeout "
 						"before returning a usable response.",
@@ -1251,7 +1253,7 @@ class NLToLTLfGenerator:
 				except TimeoutError as exc:
 					timeout_error = TimeoutError(
 						"Goal-grounding LLM call exceeded the configured first-chunk "
-						"deadline before any streaming content arrived."
+						"deadline before any streaming chunk arrived."
 						if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
 						else "Goal-grounding LLM call exceeded the configured timeout "
 						"before returning a usable response.",
@@ -1284,7 +1286,32 @@ class NLToLTLfGenerator:
 							6,
 						)
 						first_chunk_recorded = True
+					if not first_content_chunk_recorded:
+						transport_metadata["llm_first_content_chunk_seconds"] = round(
+							time.monotonic() - stream_start,
+							6,
+						)
+						first_content_chunk_recorded = True
 					parts.append(extracted)
+				for reasoning_candidate in (
+					getattr(delta, "reasoning", None) if delta is not None else None,
+					getattr(delta, "reasoning_content", None) if delta is not None else None,
+					getattr(delta, "reasoning_details", None) if delta is not None else None,
+					getattr(choice, "reasoning", None),
+				):
+					extracted_reasoning = self._normalise_response_content(reasoning_candidate)
+					if extracted_reasoning is None:
+						continue
+					if not first_chunk_recorded:
+						transport_metadata["llm_first_chunk_seconds"] = round(
+							time.monotonic() - stream_start,
+							6,
+						)
+						transport_metadata["llm_first_reasoning_chunk_seconds"] = (
+							transport_metadata["llm_first_chunk_seconds"]
+						)
+						first_chunk_recorded = True
+					reasoning_parts.append(extracted_reasoning)
 				current_text = "".join(parts).strip()
 				candidate_payload = self._extract_complete_json_payload_text(current_text)
 				if candidate_payload is not None and complete_payload is None:
@@ -1328,6 +1355,10 @@ class NLToLTLfGenerator:
 					"LLM response text did not contain a complete usable JSON object. "
 					f"finish_reason={finish_reason!r}",
 				)
+				reasoning_preview = "\n".join(reasoning_parts).strip()
+				if reasoning_preview:
+					transport_metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
+					transport_metadata["llm_reasoning_characters"] = len(reasoning_preview)
 				try:
 					setattr(error, "transport_metadata", dict(transport_metadata))
 				except Exception:
@@ -1337,6 +1368,10 @@ class NLToLTLfGenerator:
 				"LLM response returned empty textual completion content. "
 				f"finish_reason={finish_reason!r}",
 			)
+			reasoning_preview = "\n".join(reasoning_parts).strip()
+			if reasoning_preview:
+				transport_metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
+				transport_metadata["llm_reasoning_characters"] = len(reasoning_preview)
 			try:
 				setattr(error, "transport_metadata", dict(transport_metadata))
 			except Exception:
@@ -1355,7 +1390,7 @@ class NLToLTLfGenerator:
 			return text or None
 		if isinstance(content, dict):
 			for key in ("text", "value", "content"):
-				extracted = self._normalise_response_content(content.get(key))
+				extracted = NLToLTLfGenerator._normalise_response_content(content.get(key))
 				if extracted is not None:
 					return extracted
 			return json.dumps(content, ensure_ascii=False)
@@ -1363,15 +1398,15 @@ class NLToLTLfGenerator:
 			parts = [
 				extracted
 				for item in content
-				if (extracted := self._normalise_response_content(item)) is not None
+				if (extracted := NLToLTLfGenerator._normalise_response_content(item)) is not None
 			]
 			return "\n".join(parts).strip() or None
 		text_attr = getattr(content, "text", None)
-		extracted = self._normalise_response_content(text_attr)
+		extracted = NLToLTLfGenerator._normalise_response_content(text_attr)
 		if extracted is not None:
 			return extracted
 		value_attr = getattr(content, "value", None)
-		extracted = self._normalise_response_content(value_attr)
+		extracted = NLToLTLfGenerator._normalise_response_content(value_attr)
 		if extracted is not None:
 			return extracted
 		stringified = str(content).strip()
