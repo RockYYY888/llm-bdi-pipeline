@@ -599,7 +599,13 @@ class HTNMethodLibrary:
                                 "parent",
                                 edge.get(
                                     "from",
-                                    edge.get("first", edge.get("precedent")),
+                                    edge.get(
+                                        "first",
+                                        edge.get(
+                                            "precedent",
+                                            edge.get("sup", edge.get("先行")),
+                                        ),
+                                    ),
                                 ),
                             ),
                         ),
@@ -612,7 +618,13 @@ class HTNMethodLibrary:
                                 "child",
                                 edge.get(
                                     "to",
-                                    edge.get("second", edge.get("subsequent")),
+                                    edge.get(
+                                        "second",
+                                        edge.get(
+                                            "subsequent",
+                                            edge.get("sub", edge.get("后继")),
+                                        ),
+                                    ),
                                 ),
                             ),
                         ),

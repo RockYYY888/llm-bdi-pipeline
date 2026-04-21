@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -14,6 +15,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from offline_method_generation.method_synthesis.schema import HTNMethodLibrary
 from .errors import LLMStreamingResponseError
+
+KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
+KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
+KIMI_REASONING_CONTEXT_RATIO = 0.60
+KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
+KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 400.0
+OFFLINE_METHOD_GENERATION_SESSION_ID = "offline-method-generation"
 
 
 def _namespace_from_json_like(value: object) -> object:
@@ -173,13 +181,11 @@ class MethodSynthesisLLMTransportMixin:
 		"""
 		Keep provider-specific handling explicit even when no extra cap is applied.
 
-		For Kimi method synthesis, the more reliable setting is currently to avoid
-		an application-side completion ceiling entirely and constrain only reasoning.
+		For Kimi method synthesis, avoid an application-side completion ceiling so
+		the provider can stream the complete method library response.
 		"""
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			# Keep completion uncapped for Kimi method synthesis; reasoning and
-			# first-chunk deadlines are the control knobs that matter here.
 			return None
 		requested = max(int(requested_max_tokens or 0), 1)
 		return requested
@@ -189,15 +195,27 @@ class MethodSynthesisLLMTransportMixin:
 		prompt: Dict[str, str],
 		*,
 		max_tokens: Optional[int] = None,
-		attempt_index: int = 1,
 	) -> Tuple[str, Optional[str], Dict[str, Any]]:
 		timeout_seconds = float(self.timeout or 0.0)
-		request_profile = self._method_synthesis_request_profile(attempt_index=attempt_index)
+		request_profile = self._method_synthesis_request_profile(prompt=prompt)
 		transport_metadata: Dict[str, Any] = {
 			"llm_request_profile": request_profile["name"],
 			"llm_reasoning_budget": request_profile.get("reasoning_max_tokens"),
 			"llm_first_chunk_timeout_seconds": request_profile.get("first_chunk_timeout_seconds"),
 		}
+		for metadata_key, profile_key in (
+			("llm_context_window_tokens", "context_window_tokens"),
+			("llm_prompt_token_estimate", "prompt_token_estimate"),
+			("llm_answer_token_reserve", "answer_token_reserve"),
+			("llm_context_margin_tokens", "context_margin_tokens"),
+			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
+			("llm_reasoning_headroom_ratio", "reasoning_headroom_ratio"),
+			("llm_reasoning_context_ratio", "reasoning_context_ratio"),
+			("llm_transport_overhead_tokens", "transport_overhead_tokens"),
+			("llm_session_id", "session_id"),
+		):
+			if request_profile.get(profile_key) is not None:
+				transport_metadata[metadata_key] = request_profile.get(profile_key)
 		request_timeout_seconds = self._method_synthesis_request_timeout_seconds(
 			timeout_seconds=timeout_seconds,
 			request_profile=request_profile,
@@ -465,43 +483,41 @@ class MethodSynthesisLLMTransportMixin:
 				"only": [provider_name],
 				"allow_fallbacks": False,
 			},
+			"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
 		}
-		if provider_name == "moonshotai":
-			reasoning_max_tokens = int(
-				(request_profile or {}).get("reasoning_max_tokens") or 0,
-			)
-			if reasoning_max_tokens > 0:
-				extra_body["reasoning"] = {
-					"max_tokens": reasoning_max_tokens,
-					"exclude": True,
-				}
+		reasoning_max_tokens = int(
+			(request_profile or {}).get("reasoning_max_tokens") or 0,
+		)
+		if reasoning_max_tokens > 0:
+			extra_body["reasoning"] = {
+				"max_tokens": reasoning_max_tokens,
+				"exclude": False,
+			}
 		return extra_body
 
-	def _method_synthesis_request_profile(self, *, attempt_index: int) -> Dict[str, Any]:
+	def _method_synthesis_request_profile(
+		self,
+		*,
+		prompt: Optional[Dict[str, str]] = None,
+	) -> Dict[str, Any]:
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			if attempt_index <= 1:
-				return {
-					"name": "kimi_stream_single_pass",
-					"stream_response": True,
-					"reasoning_max_tokens": 1,
-					"first_chunk_timeout_seconds": 180.0,
-					"response_healing_plugin": False,
-				}
-			if attempt_index == 2:
-				return {
-					"name": "kimi_stream_single_pass",
-					"stream_response": True,
-					"reasoning_max_tokens": 0,
-					"first_chunk_timeout_seconds": 180.0,
-					"response_healing_plugin": False,
-				}
+			context_window_tokens = self._method_synthesis_total_context_tokens()
+			prompt_token_estimate = self._estimate_method_synthesis_prompt_token_budget(prompt)
+			reasoning_max_tokens = math.floor(
+				context_window_tokens * KIMI_REASONING_CONTEXT_RATIO,
+			)
 			return {
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				"reasoning_max_tokens": 0,
-				"first_chunk_timeout_seconds": 240.0,
+				# Do not cap the visible answer; cap hidden reasoning to avoid timeout-only runs.
+				"reasoning_max_tokens": reasoning_max_tokens,
+				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"response_healing_plugin": False,
+				"context_window_tokens": context_window_tokens,
+				"prompt_token_estimate": prompt_token_estimate,
+				"reasoning_context_ratio": KIMI_REASONING_CONTEXT_RATIO,
+				"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
 			}
 		return {
 			"name": "default_profile",
@@ -510,6 +526,26 @@ class MethodSynthesisLLMTransportMixin:
 			"first_chunk_timeout_seconds": 0.0,
 			"response_healing_plugin": False,
 		}
+
+	def _method_synthesis_total_context_tokens(self) -> int:
+		base_url = str(self.base_url or "").strip().lower()
+		if "openrouter.ai" in base_url:
+			return KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS
+		return KIMI_DIRECT_CONTEXT_WINDOW_TOKENS
+
+	@staticmethod
+	def _estimate_method_synthesis_prompt_token_budget(
+		prompt: Optional[Dict[str, str]],
+	) -> int:
+		if not isinstance(prompt, dict):
+			return 0
+		total_characters = sum(len(str(prompt.get(key) or "")) for key in ("system", "user"))
+		if total_characters <= 0:
+			return 0
+		return max(
+			1,
+			math.ceil(total_characters / KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN),
+		)
 
 	def _consume_streaming_llm_response(
 		self,
@@ -524,7 +560,9 @@ class MethodSynthesisLLMTransportMixin:
 		if request_id:
 			metadata["llm_request_id"] = request_id
 		parts: list[str] = []
-		reasoning_parts: list[str] = []
+		reasoning_preview = ""
+		reasoning_characters = 0
+		reasoning_preview_limit = 10
 		finish_reason: Optional[str] = None
 		close_stream = getattr(response, "close", None)
 		stream_start = time.monotonic()
@@ -628,6 +666,10 @@ class MethodSynthesisLLMTransportMixin:
 			):
 				extracted_reasoning = self._normalise_response_content(reasoning_candidate)
 				if extracted_reasoning is not None:
+					reasoning_characters += len(extracted_reasoning)
+					if len(reasoning_preview) < reasoning_preview_limit:
+						remaining_preview_characters = reasoning_preview_limit - len(reasoning_preview)
+						reasoning_preview += extracted_reasoning[:remaining_preview_characters]
 					if not first_chunk_recorded:
 						metadata["llm_first_chunk_seconds"] = round(
 							time.monotonic() - stream_start,
@@ -640,7 +682,6 @@ class MethodSynthesisLLMTransportMixin:
 						self._emit_method_synthesis_progress(
 							f"first_chunk_seconds={metadata['llm_first_chunk_seconds']}",
 						)
-					reasoning_parts.append(extracted_reasoning)
 			current_text = "".join(parts).strip()
 			complete_payload = self._extract_complete_json_payload_text(current_text)
 			if complete_payload is not None:
@@ -691,10 +732,9 @@ class MethodSynthesisLLMTransportMixin:
 				partial_text=text,
 				finish_reason=finish_reason,
 			)
-			reasoning_preview = "\n".join(reasoning_parts).strip()
 			if reasoning_preview:
-				metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
-				metadata["llm_reasoning_characters"] = len(reasoning_preview)
+				metadata["llm_reasoning_preview"] = reasoning_preview
+				metadata["llm_reasoning_characters"] = reasoning_characters
 			try:
 				setattr(error, "transport_metadata", dict(metadata))
 			except Exception:
@@ -705,10 +745,9 @@ class MethodSynthesisLLMTransportMixin:
 			f"finish_reason={finish_reason!r}",
 			finish_reason=finish_reason,
 		)
-		reasoning_preview = "\n".join(reasoning_parts).strip()
 		if reasoning_preview:
-			metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
-			metadata["llm_reasoning_characters"] = len(reasoning_preview)
+			metadata["llm_reasoning_preview"] = reasoning_preview
+			metadata["llm_reasoning_characters"] = reasoning_characters
 		try:
 			setattr(error, "transport_metadata", dict(metadata))
 		except Exception:

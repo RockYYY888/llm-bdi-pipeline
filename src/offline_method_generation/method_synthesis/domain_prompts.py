@@ -718,11 +718,11 @@ def _render_method_blueprint_blocks(method_blueprints: Sequence[Dict[str, Any]])
 		if family_schemas:
 			serializable["method_family_schemas"] = family_schemas
 		else:
-			values = [
-				str(item).strip()
-				for item in (payload.get("direct_primitive_achievers") or ())
-				if str(item).strip() and str(item).strip() != "none"
-			]
+			values = []
+			for item in (payload.get("direct_primitive_achievers") or ()):
+				compact_value = _compact_direct_primitive_achiever(item)
+				if compact_value is not None:
+					values.append(compact_value)
 			if values:
 				serializable["direct_primitive_achievers"] = values
 		serializable_payloads.append(serializable)
@@ -738,8 +738,26 @@ def _compact_uncovered_prerequisite_family(item: object) -> Dict[str, str] | Non
 		return {"need": text}
 	return {
 		"need": match.group(1).strip(),
-		"acquire": match.group(2).strip(),
+		"primitive_action": match.group(2).strip(),
+		"support_kind": "primitive_support",
 	}
+
+
+def _compact_direct_primitive_achiever(item: object) -> Dict[str, str] | None:
+	text = str(item or "").strip()
+	if not text or text == "none":
+		return None
+	match = re.fullmatch(r"(.+?)(?: \[needs (.+)\])?", text)
+	if match is None:
+		return {"primitive_action": text, "support_kind": "primitive_leaf"}
+	serializable = {
+		"primitive_action": match.group(1).strip(),
+		"support_kind": "primitive_leaf",
+	}
+	needs = str(match.group(2) or "").strip()
+	if needs:
+		serializable["needs"] = needs
+	return serializable
 
 
 def _compact_method_family_schema(family: Dict[str, Any]) -> Dict[str, Any]:
@@ -1011,6 +1029,20 @@ def _render_domain_action_schema_blocks(domain: Any) -> str:
 		)
 	return "\n\n".join(blocks).strip()
 
+
+def _render_declared_compound_task_blocks(domain: Any) -> str:
+	blocks: list[str] = []
+	for task in getattr(domain, "tasks", []):
+		task_name = str(getattr(task, "name", "")).strip()
+		if not task_name:
+			continue
+		parameter_signature = ", ".join(
+			f"{_parameter_token(parameter)}:{_parameter_type(parameter)}"
+			for parameter in getattr(task, "parameters", ())
+		)
+		blocks.append(f"{task_name}({parameter_signature})")
+	return "\n".join(blocks).strip()
+
 def build_domain_htn_system_prompt() -> str:
 	"""System prompt for one-shot domain-complete method synthesis."""
 
@@ -1025,17 +1057,23 @@ def build_domain_htn_system_prompt() -> str:
 		"\n"
 		"CONSTRAINTS:\n"
 		"- Use only declared compound tasks, declared primitive actions, declared predicates, and typed symbolic variables.\n"
+		"- Primitive action names are never compound-task names unless the same name is explicitly listed as a declared compound task.\n"
+		"- Primitive action names are operators, not predicates. Never use an action name as a context literal, precondition literal, effect literal, or negated literal such as `notnoop(...)`.\n"
 		"- Stay domain-level and query-independent.\n"
 		"- Prefer the smallest method set that still covers the declared tasks.\n"
 		"- Use one method family per real decomposition pattern, not one branch per local prerequisite permutation.\n"
 		"- Prefer declared support tasks over local primitive repair when a declared task already stabilizes the needed literal.\n"
 		"- Keep tasks with the same headline predicate distinct by task name.\n"
+		"- Distinct AUX witness names encode distinct witness roles; never merge two different AUX roles into one symbol.\n"
+		"- MUST give each variable exactly one declared type; use fresh variables for different typed roles.\n"
 			"- Method preconditions are conjunctions only.\n"
 			"- Use equality only as ARG1 == ARG2 or ARG1 != ARG2.\n"
 			"- For negative literals, use exactly `not predicate(ARGS)` with one space after `not`.\n"
 			"- Never fuse negation into predicate names such as `noton(...)` or `notclear(...)`.\n"
 			"- Never use `!predicate(...)` or boolean wrappers such as `predicate(...) == false`.\n"
 			"- Use explicit step objects and explicit pairwise ordering edges.\n"
+			"- The only allowed ordering syntax is an array of two-element step-id arrays such as [[\"s1\", \"s2\"], [\"s2\", \"s3\"]].\n"
+			"- Do not use object-shaped ordering edges such as {\"pre\":\"s1\",\"post\":\"s2\"} or localized key variants.\n"
 		"- Every compound child must be another declared compound task.\n"
 		"- Every constructive method must end at a final achiever child or primitive that establishes the task headline.\n"
 		"- Recursive methods must change at least one witness argument.\n"
@@ -1043,6 +1081,7 @@ def build_domain_htn_system_prompt() -> str:
 		"OUTPUT:\n"
 		"- Emit JSON only.\n"
 		"- Emit one object with top-level keys compound_tasks and methods.\n"
+		"- The final JSON answer must be emitted in visible completion content, not only in hidden reasoning.\n"
 		"- Do not emit primitive_tasks, markdown, commentary, or reasoning text.\n"
 		"- Return minified JSON only.\n"
 	)
@@ -1066,27 +1105,34 @@ def build_domain_htn_user_prompt(
 	)
 	method_blueprints = list(prompt_analysis.get("method_blueprints") or ())
 	action_schema_block = _render_domain_action_schema_blocks(domain)
+	declared_task_block = _render_declared_compound_task_blocks(domain)
 	method_blueprint_block = _render_method_blueprint_blocks(method_blueprints)
 	domain_summary_block = "\n".join(
 		[
 			f"domain: {domain.name}",
+			"declared_compound_tasks:",
+			declared_task_block or "none",
 			"primitive_action_schemas:",
 			action_schema_block or "none",
 		]
 	)
 	instructions_block = "\n".join(
 		[
-			"1. Emit a minimal HDDL-aligned method library, not task-level branch shorthand.",
-			"2. Define exactly the declared compound tasks in compound_tasks.",
-			"3. Read method_blueprints as the canonical task-support tree for each task.",
-			"4. Use a two-step procedure: first choose the decomposition program from family_archetypes, then emit only the smallest method set that realizes it.",
-			"5. Family meanings are fixed: direct_leaf = primitive wrapper; support_then_leaf = prerequisite support then final primitive; recursive_refinement = noop plus witness-changing recursion; hierarchical_orchestration = compound delegation or mission composition.",
-			"6. Treat method_family_schemas as concrete evidence and use direct_primitive_achievers plus uncovered_prerequisite_families only to fill real support gaps.",
-			"7. If headline_support_tasks is non-empty for a supported state-goal task, route at least one method through that declared support task instead of exposing only the terminal primitive.",
-			"8. If witness_binding_required=true, bind auxiliary witnesses explicitly in method parameters, context, subtasks, and ordering; never place them in task_args.",
-			"9. Respect declared slot typing exactly: never reuse one AUX or task variable across argument positions whose declared types are incompatible; introduce a fresh witness variable for each distinct type-constrained role.",
-			"10. If redundant_if_noop_holds=true, omit that constructive method; if recursive_support_calls are listed, place them before final_step; if cleanup_steps are listed, place them after final_step.",
-			"11. Use explicit step objects with pairwise ordering edges and never invent undeclared compound helpers, predicates, or schema fields.",
+			"1. Emit a minimal HDDL-aligned method library and define exactly the declared compound tasks listed in domain_summary.",
+			"2. Read method_blueprints as the canonical task-support tree: first choose the decomposition program from family_archetypes, then emit only the smallest method set that realizes it.",
+			"3. Family meanings are fixed: direct_leaf = primitive wrapper; support_then_leaf = prerequisite support then final primitive; recursive_refinement = noop plus witness-changing recursion; hierarchical_orchestration = compound delegation or mission composition.",
+			"4. Treat method_family_schemas as the primary decomposition evidence. Use direct_primitive_achievers and uncovered_prerequisite_families only for primitive support or primitive leaf steps.",
+			"5. Every action named in primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families is primitive-only. Such names may appear only in subtasks with kind=primitive and must never be declared in compound_tasks or used as methods.task_name unless they also appear in declared_compound_tasks.",
+			"6. Preserve witness-role separation exactly. Distinct AUX names denote distinct witness roles; never merge, rename, or co-bind two different AUX roles, and never reuse one symbol across incompatible typed slots.",
+			"7. MUST give each variable exactly one declared type; if two roles require different types, use two variables.",
+			"8. If witness_binding_required=true, bind every auxiliary witness explicitly in method parameters, context, subtasks, and ordering; never place witnesses in task_args.",
+			"9. If headline_support_tasks is non-empty for a supported state-goal task, route at least one method through that declared support task instead of exposing only the terminal primitive.",
+			"10. A non-noop method must contain at least one real subtask. Only noop methods may use empty subtasks and empty ordering.",
+			"11. If a direct_leaf or primitive leaf method is emitted, include the primitive achiever itself as a subtask with kind=primitive; never encode a constructive leaf method as context-only with empty subtasks.",
+			"12. If redundant_if_noop_holds=true, omit that constructive method; if recursive_support_calls are listed, place them before final_step; if cleanup_steps are listed, place them after final_step.",
+			"13. Use explicit step objects with pairwise ordering edges only, and encode ordering only as arrays of two-element step-id arrays like [[\"s1\", \"s2\"]]. Do not use object-shaped ordering edges or localized ordering keys.",
+			"14. Never invent undeclared compound helpers, predicates, or schema fields.",
+			"14. Always emit the final JSON library in visible completion content. Never stop in reasoning without returning the JSON answer.",
 		]
 	)
 	sections = [
@@ -1106,6 +1152,7 @@ def build_domain_htn_user_prompt(
 			"Emit one JSON object with keys compound_tasks and methods.\n"
 			"compound_tasks entries use: name, parameters, optional source_predicates, optional source_name.\n"
 			"methods entries use: method_name, task_name, parameters, task_args, context, subtasks, ordering.\n"
+			"ordering must be an array of two-element step-id arrays such as [[\"s1\", \"s2\"]].\n"
 			"Each subtask entry uses: step_id, task_name, args, kind.\n"
 			"Use empty subtasks plus empty ordering for noop methods.\n"
 			f"schema_hint: {schema_hint}",

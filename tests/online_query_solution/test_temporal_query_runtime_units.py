@@ -1778,7 +1778,7 @@ def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences(
 	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
 
 
-def test_goal_grounding_kimi_request_profile_uses_streaming_without_reasoning_override() -> None:
+def test_goal_grounding_kimi_request_profile_uses_streaming_with_reasoning_cap() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
@@ -1797,9 +1797,10 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_without_reasoning_ov
 	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["stream_response"] is True
 	assert profile["first_chunk_timeout_seconds"] == 300.0
-	assert profile["context_window_tokens"] == 196_608
+	assert profile["context_window_tokens"] == 262_144
 	assert profile["prompt_token_estimate"] == expected_prompt_estimate
-	assert profile["reasoning_max_tokens"] is None
+	assert profile["reasoning_max_tokens"] == 157_286
+	assert profile["reasoning_context_ratio"] == 0.60
 	assert profile["session_id"] == "online-ltlf-generation"
 
 
@@ -1841,6 +1842,10 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_comple
 	assert request_kwargs["extra_body"] == {
 		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},
 		"session_id": "online-ltlf-generation",
+		"reasoning": {
+			"max_tokens": 157_286,
+			"exclude": False,
+		},
 	}
 
 

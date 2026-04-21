@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from offline_method_generation.artifacts import (
 	DomainLibraryArtifact,
@@ -21,6 +21,9 @@ from offline_method_generation.domain_gate.validator import OfflineDomainGateVal
 from offline_method_generation.method_synthesis.domain_materialization import (
 	write_generated_domain_file,
 	write_masked_domain_file,
+)
+from offline_method_generation.method_synthesis.minimal_validation import (
+	validate_typed_structural_soundness,
 )
 from offline_method_generation.method_synthesis.naming import sanitize_identifier
 from offline_method_generation.method_synthesis.synthesizer import HTNMethodSynthesizer
@@ -96,7 +99,10 @@ class OfflineDomainSynthesisOrchestrator:
 			masked_domain_text=str(masked_domain_inputs["masked_domain_text"]),
 			method_library=method_library,
 		)
-		domain_gate_data = self.validate_domain_library(method_library)
+		domain_gate_data = self.validate_domain_library(
+			method_library,
+			generated_domain_file=str(generated_domain_outputs["generated_domain_file"]),
+		)
 		if domain_gate_data is None:
 			return {
 				"success": False,
@@ -216,7 +222,7 @@ class OfflineDomainSynthesisOrchestrator:
 
 		try:
 			synthesizer = HTNMethodSynthesizer(
-				api_key=self.context.config.openai_api_key,
+				api_key=self.context.config.offline_openai_api_key,
 				model=self.context.config.method_synthesis_model,
 				base_url=self.context.config.openai_base_url,
 				timeout=float(self.context.config.method_synthesis_timeout),
@@ -228,7 +234,7 @@ class OfflineDomainSynthesisOrchestrator:
 			)
 			synthesis_seconds = time.perf_counter() - synthesis_start
 			validation_start = time.perf_counter()
-			self.context._validate_method_library_typing(method_library)
+			validate_typed_structural_soundness(domain_for_synthesis, method_library)
 			typing_validation_seconds = time.perf_counter() - validation_start
 			summary = {
 				"used_llm": synthesis_meta["used_llm"],
@@ -322,8 +328,11 @@ class OfflineDomainSynthesisOrchestrator:
 			print(f"✗ Method synthesis failed: {exc}")
 			return None, {}
 
-	def validate_domain_library(self, method_library):
-		return self.domain_gate_validator.validate(method_library)
+	def validate_domain_library(self, method_library, *, generated_domain_file: Optional[str] = None):
+		return self.domain_gate_validator.validate(
+			method_library,
+			generated_domain_file=generated_domain_file,
+		)
 
 	def validate_domain_library_cases(self, method_library):
 		return self.domain_gate_validator.build_cases(method_library)

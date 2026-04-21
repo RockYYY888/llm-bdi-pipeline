@@ -13,6 +13,8 @@ DEFAULT_GOAL_GROUNDING_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_METHOD_SYNTHESIS_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_SHARED_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_ONLINE_DOMAIN_SOURCE = "benchmark"
+DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 600
+DEFAULT_PLANNING_TIMEOUT_SECONDS = 600
 
 
 class Config:
@@ -41,6 +43,10 @@ class Config:
 	@property
 	def openai_api_key(self) -> Optional[str]:
 		return os.getenv("OPENAI_API_KEY")
+
+	@property
+	def offline_openai_api_key(self) -> Optional[str]:
+		return os.getenv("OFFLINE_OPENAI_API_KEY") or self.openai_api_key
 
 	@property
 	def openai_model(self) -> str:
@@ -78,7 +84,15 @@ class Config:
 
 	@property
 	def method_synthesis_timeout(self) -> int:
-		return max(int(os.getenv("METHOD_SYNTHESIS_TIMEOUT", "600")), 1)
+		return max(
+			int(
+				os.getenv(
+					"METHOD_SYNTHESIS_TIMEOUT",
+					str(DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS),
+				),
+			),
+			1,
+		)
 
 	@property
 	def method_synthesis_max_tokens(self) -> int:
@@ -86,7 +100,15 @@ class Config:
 
 	@property
 	def planning_timeout(self) -> int:
-		return max(int(os.getenv("PLANNING_TIMEOUT", "600")), 1)
+		return max(
+			int(
+				os.getenv(
+					"PLANNING_TIMEOUT",
+					str(DEFAULT_PLANNING_TIMEOUT_SECONDS),
+				),
+			),
+			1,
+		)
 
 	@property
 	def goal_grounding_max_tokens(self) -> int:

@@ -83,10 +83,25 @@ def test_domain_prompt_is_query_independent_and_does_not_leak_official_methods(t
 	assert "target_task_bindings" not in user_prompt
 	assert "Do not condition the library on any benchmark query." in user_prompt
 	assert "primitive_action_schemas:" in user_prompt
+	assert "declared_compound_tasks:" in user_prompt
 	assert "method_blueprints" in user_prompt
 	assert '"method_family_schemas"' in user_prompt
 	assert '"uncovered_prerequisite_families"' in user_prompt
-	assert "never reuse one AUX or task variable across argument positions whose declared types are incompatible" in user_prompt
+	assert '"primitive_action"' in user_prompt
+	assert "Distinct AUX names denote distinct witness roles" in user_prompt
+	assert "never reuse one symbol across incompatible typed slots" in user_prompt
+	assert "MUST give each variable exactly one declared type" in system_prompt
+	assert "if two roles require different types, use two variables" in user_prompt
+	assert "Every action named in primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families is primitive-only." in user_prompt
+	assert "Primitive action names are operators, not predicates." in system_prompt
+	assert 'The only allowed ordering syntax is an array of two-element step-id arrays such as [["s1", "s2"], ["s2", "s3"]].' in system_prompt
+	assert 'Do not use object-shaped ordering edges such as {"pre":"s1","post":"s2"} or localized key variants.' in system_prompt
+	assert "The final JSON answer must be emitted in visible completion content" in system_prompt
+	assert "A non-noop method must contain at least one real subtask." in user_prompt
+	assert "never encode a constructive leaf method as context-only with empty subtasks." in user_prompt
+	assert "Always emit the final JSON library in visible completion content." in user_prompt
+	assert 'encode ordering only as arrays of two-element step-id arrays like [["s1", "s2"]].' in user_prompt
+	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt
 	assert "primitive_actions:" not in user_prompt
 	assert "<silent_self_check>" not in user_prompt
 	assert "Emit one JSON object with keys compound_tasks and methods." in user_prompt
@@ -248,7 +263,8 @@ def test_rendered_method_blueprints_use_compact_prompt_shape() -> None:
 	assert isinstance(rendered["uncovered_prerequisite_families"], list)
 	assert isinstance(rendered["uncovered_prerequisite_families"][0], dict)
 	assert "need" in rendered["uncovered_prerequisite_families"][0]
-	assert "acquire" in rendered["uncovered_prerequisite_families"][0]
+	assert "primitive_action" in rendered["uncovered_prerequisite_families"][0]
+	assert rendered["uncovered_prerequisite_families"][0]["support_kind"] == "primitive_support"
 	assert "support_call_palette" not in rendered
 
 
@@ -273,6 +289,7 @@ def test_rendered_helper_only_transport_leaf_tasks_omit_fake_headlines(tmp_path:
 		assert "headlines" not in entry
 		assert entry["preferred_family_shape"] == "direct_leaf"
 		assert "direct_primitive_achievers" in entry
+		assert all("primitive_action" in item for item in entry["direct_primitive_achievers"])
 
 
 def test_library_postprocess_bound_helpers_are_callable_via_synthesizer_instance() -> None:
@@ -341,23 +358,15 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	expected_prompt_tokens = synthesizer._estimate_method_synthesis_prompt_token_budget(prompt)
 
 	assert profile["name"] == "kimi_stream_single_pass"
-	assert profile["context_window_tokens"] == 196608
+	assert profile["context_window_tokens"] == 262144
 	assert profile["prompt_token_estimate"] == expected_prompt_tokens
-	assert profile["answer_token_reserve"] == 5805
-	assert profile["context_margin_tokens"] == 19661
-	assert profile["reasoning_headroom_tokens"] == (
-		196608 - 19661 - 5805 - 2048 - expected_prompt_tokens
-	)
-	assert profile["reasoning_headroom_ratio"] == 0.70
-	assert profile["transport_overhead_tokens"] == 2048
-	assert profile["reasoning_max_tokens"] == int(
-		(196608 - 19661 - 5805 - 2048 - expected_prompt_tokens) * 0.70,
-	)
-	assert profile["first_chunk_timeout_seconds"] == 300.0
+	assert profile["reasoning_max_tokens"] == 157286
+	assert profile["reasoning_context_ratio"] == 0.60
+	assert profile["first_chunk_timeout_seconds"] == 400.0
 	assert profile["session_id"] == "offline-method-generation"
 
 
-def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() -> None:
+def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None:
 	synthesizer = HTNMethodSynthesizer(
 		model="moonshotai/kimi-k2.6",
 		base_url="https://openrouter.ai/api/v1",
@@ -365,20 +374,24 @@ def test_method_synthesis_transport_omits_reasoning_field_when_budget_is_zero() 
 
 	extra_body = synthesizer._openrouter_provider_routing_body(
 		request_profile={
-			"name": "kimi_stream_single_pass",
-			"stream_response": True,
-			"reasoning_max_tokens": 0,
-			"first_chunk_timeout_seconds": 300.0,
-		},
-	)
+				"name": "kimi_stream_single_pass",
+				"stream_response": True,
+				"reasoning_max_tokens": 157286,
+				"first_chunk_timeout_seconds": 400.0,
+			},
+		)
 
 	assert extra_body == {
-		"provider": {
-			"only": ["minimax"],
-			"allow_fallbacks": False,
-		},
-		"session_id": "offline-method-generation",
-	}
+			"provider": {
+				"only": ["moonshotai"],
+				"allow_fallbacks": False,
+			},
+			"session_id": "offline-method-generation",
+			"reasoning": {
+				"max_tokens": 157286,
+				"exclude": False,
+			},
+		}
 
 
 def test_method_synthesis_transport_keeps_response_format_off_openrouter_streaming_path() -> None:
@@ -433,7 +446,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 		request_profile={
 			"name": "kimi_stream_single_pass",
 			"stream_response": True,
-			"reasoning_max_tokens": 8,
+			"reasoning_max_tokens": None,
 			"first_chunk_timeout_seconds": 90.0,
 		},
 		request_timeout_seconds=90.0,
@@ -473,10 +486,10 @@ def test_method_synthesis_transport_omits_max_tokens_for_kimi_requests() -> None
 		request_profile={
 			"name": "kimi_stream_single_pass",
 			"stream_response": True,
-			"reasoning_max_tokens": 0,
-			"first_chunk_timeout_seconds": 300.0,
+			"reasoning_max_tokens": None,
+			"first_chunk_timeout_seconds": 400.0,
 		},
-		request_timeout_seconds=300.0,
+		request_timeout_seconds=400.0,
 	)
 
 	assert "max_tokens" not in captured_request["request_kwargs"]
@@ -512,7 +525,7 @@ def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
 			request_profile={
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				"reasoning_max_tokens": 8,
+				"reasoning_max_tokens": None,
 				"first_chunk_timeout_seconds": 0.01,
 			},
 			request_timeout_seconds=0.01,
@@ -545,19 +558,15 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 	assert getattr(exc_info.value, "transport_metadata", {}) == {
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "streaming",
-		"llm_request_profile": "kimi_stream_single_pass",
-		"llm_reasoning_budget": 123526,
-		"llm_first_chunk_timeout_seconds": 300.0,
-		"llm_context_window_tokens": 204800,
-		"llm_prompt_token_estimate": 1,
-		"llm_answer_token_reserve": 5805,
-		"llm_context_margin_tokens": 20480,
-		"llm_reasoning_headroom_tokens": 176466,
-		"llm_reasoning_headroom_ratio": 0.70,
-		"llm_transport_overhead_tokens": 2048,
-		"llm_session_id": "offline-method-generation",
-		"llm_request_timeout_seconds": 0.01,
-	}
+			"llm_request_profile": "kimi_stream_single_pass",
+			"llm_reasoning_budget": 122880,
+			"llm_first_chunk_timeout_seconds": 400.0,
+			"llm_context_window_tokens": 204800,
+			"llm_prompt_token_estimate": 1,
+			"llm_reasoning_context_ratio": 0.60,
+			"llm_session_id": "offline-method-generation",
+			"llm_request_timeout_seconds": 0.01,
+		}
 
 
 def test_method_synthesis_transport_streaming_captures_request_id_and_timings() -> None:
@@ -627,6 +636,7 @@ def test_method_synthesis_transport_enforces_first_chunk_deadline_during_stream_
 	assert transport_metadata["llm_first_chunk_timeout_seconds"] == 0.01
 	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
+
 def test_method_synthesis_transport_counts_reasoning_as_stream_activity() -> None:
 	class FakeDelta:
 		def __init__(self, reasoning=None):
@@ -677,8 +687,8 @@ def test_method_synthesis_transport_counts_reasoning_as_stream_activity() -> Non
 	assert "llm_first_content_chunk_seconds" not in transport_metadata
 
 
-def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
-	class SinglePassSynthesizer(HTNMethodSynthesizer):
+def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
+	class RetryingSynthesizer(HTNMethodSynthesizer):
 		def __init__(self):
 			super().__init__(model="moonshotai/kimi-k2.6")
 			self.call_count = 0
@@ -690,13 +700,13 @@ def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
 				finish_reason="length",
 			)
 			error.transport_metadata = {
-				"llm_request_id": "req_retry_1",
+				"llm_request_id": f"req_retry_{self.call_count}",
 				"llm_response_mode": "streaming",
 				"llm_request_profile": "kimi_stream_single_pass",
 			}
 			raise error
 
-	synthesizer = SinglePassSynthesizer()
+	synthesizer = RetryingSynthesizer()
 	metadata = {}
 	with pytest.raises(HTNSynthesisError, match="LLM request failed"):
 		synthesizer._request_complete_llm_library(
@@ -706,10 +716,67 @@ def test_method_synthesis_fails_immediately_on_stream_failure() -> None:
 			max_tokens=256,
 		)
 
-	assert synthesizer.call_count == 1
-	assert metadata["llm_attempts"] == 1
-	assert metadata["llm_attempt_trace"][0]["request_id"] == "req_retry_1"
-	assert metadata["llm_attempt_trace"][0]["request_profile"] == "kimi_stream_single_pass"
+	assert synthesizer.call_count == 6
+	assert metadata["llm_attempts"] == 6
+	assert metadata["llm_generation_attempts"] == 6
+	assert [attempt["request_id"] for attempt in metadata["llm_attempt_trace"]] == [
+		"req_retry_1",
+		"req_retry_2",
+		"req_retry_3",
+		"req_retry_4",
+		"req_retry_5",
+		"req_retry_6",
+	]
+	assert all(
+		attempt["request_profile"] == "kimi_stream_single_pass"
+		for attempt in metadata["llm_attempt_trace"]
+	)
+
+
+def test_method_synthesis_retries_then_accepts_successful_response() -> None:
+	class EventuallySuccessfulSynthesizer(HTNMethodSynthesizer):
+		def __init__(self):
+			super().__init__(model="moonshotai/kimi-k2.6")
+			self.call_count = 0
+
+		def _call_llm(self, prompt, *, max_tokens=None):
+			self.call_count += 1
+			if self.call_count < 6:
+				error = TimeoutError("first attempt timed out")
+				error.transport_metadata = {
+					"llm_request_id": f"req_retry_{self.call_count}",
+					"llm_response_mode": "streaming",
+					"llm_request_profile": "kimi_stream_single_pass",
+				}
+				raise error
+			return (
+				'{"compound_tasks":[],"methods":[]}',
+				"stop",
+				{
+					"llm_request_id": "req_retry_6",
+					"llm_response_mode": "streaming",
+					"llm_request_profile": "kimi_stream_single_pass",
+				},
+			)
+
+	synthesizer = EventuallySuccessfulSynthesizer()
+	metadata = {}
+	library, response_text, finish_reason = synthesizer._request_complete_llm_library(
+		{"system": "x", "user": "y"},
+		domain=type("FakeDomain", (), {"actions": [], "tasks": [], "predicates": []})(),
+		metadata=metadata,
+		max_tokens=256,
+	)
+
+	assert synthesizer.call_count == 6
+	assert finish_reason == "stop"
+	assert response_text == '{"compound_tasks":[],"methods":[]}'
+	assert library.compound_tasks == []
+	assert library.methods == []
+	assert metadata["llm_attempts"] == 6
+	assert metadata["llm_generation_attempts"] == 6
+	assert metadata["llm_request_id"] == "req_retry_6"
+	assert metadata["llm_attempt_trace"][-1]["request_id"] == "req_retry_6"
 
 
 def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arrives() -> None:
@@ -752,8 +819,9 @@ def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arr
 	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
 	assert transport_metadata["llm_request_id"] == "req_reasoning_only"
 	assert transport_metadata["llm_response_mode"] == "streaming"
-	assert transport_metadata["llm_reasoning_characters"] > 0
-	assert "top-level keys compound_tasks and methods" in transport_metadata["llm_reasoning_preview"]
+	assert transport_metadata["llm_reasoning_characters"] > 10
+	assert transport_metadata["llm_reasoning_preview"] == "We need to"
+	assert len(transport_metadata["llm_reasoning_preview"]) == 10
 
 
 def test_method_synthesis_transport_returns_raw_json_like_text_for_downstream_salvage() -> None:
@@ -919,6 +987,37 @@ def test_parse_llm_library_accepts_precedent_subsequent_ordering_edges() -> None
 		'{"step_id":"s1","task_name":"unstack","args":["?x","?z"],"kind":"primitive"},'
 		'{"step_id":"s2","task_name":"put-down","args":["?x"],"kind":"primitive"}],'
 		'"ordering":[{"precedent":"s1","subsequent":"s2"}]}]}'
+	)
+
+	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_accepts_sup_sub_ordering_edges() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"calibrate_abs","parameters":["?i:instrument"]}],'
+		'"methods":[{"method_name":"m_calibrate_abs_chain","task_name":"calibrate_abs",'
+		'"parameters":["?i:instrument","?s:satellite"],"task_args":["?i"],'
+		'"context":[],"subtasks":['
+		'{"step_id":"s1","task_name":"switch_on","args":["?i","?s"],"kind":"primitive"},'
+		'{"step_id":"s2","task_name":"calibrate","args":["?s","?i","?d"],"kind":"primitive"}],'
+		'"ordering":[{"sup":"s1","sub":"s2"}]}]}'
+	)
+
+	assert library.methods[0].ordering == (("s1", "s2"),)
+
+
+def test_parse_llm_library_accepts_localized_ordering_edges() -> None:
+	synthesizer = HTNMethodSynthesizer()
+	library = synthesizer._parse_llm_library(
+		'{"compound_tasks":[{"name":"do_observation","parameters":["?d:image_direction","?m:mode"]}],'
+		'"methods":[{"method_name":"m_do_observation_chain","task_name":"do_observation",'
+		'"parameters":["?d:image_direction","?m:mode","?s:satellite","?i:instrument"],'
+		'"task_args":["?d","?m"],"context":[],'
+		'"subtasks":['
+		'{"step_id":"s1","task_name":"switch_on","args":["?i","?s"],"kind":"primitive"},'
+		'{"step_id":"s2","task_name":"take_image","args":["?s","?d","?i","?m"],"kind":"primitive"}],'
+		'"ordering":[{"先行":"s1","后继":"s2"}]}]}'
 	)
 
 	assert library.methods[0].ordering == (("s1", "s2"),)
@@ -1107,7 +1206,7 @@ def test_build_domain_library_synthesizes_from_masked_domain_only(tmp_path: Path
 
 	orchestrator = pipeline._orchestrator
 	orchestrator.synthesise_domain_methods = fake_synthesise_domain_methods  # type: ignore[method-assign]
-	orchestrator.validate_domain_library = lambda method_library: {  # type: ignore[method-assign]
+	orchestrator.validate_domain_library = lambda method_library, **kwargs: {  # type: ignore[method-assign]
 		"validated_task_count": len(method_library.compound_tasks),
 	}
 
@@ -1128,7 +1227,7 @@ def test_offline_public_entrypoint_does_not_import_domain_complete_pipeline() ->
 	assert "DomainCompletePipeline" not in pipeline_source
 
 
-def test_offline_domain_gate_is_legality_only_and_does_not_plan() -> None:
+def test_offline_domain_gate_reports_structural_admissibility_and_does_not_plan() -> None:
 	class FakeContext:
 		def __init__(self, domain):
 			self.domain = domain
@@ -1178,9 +1277,21 @@ def test_offline_domain_gate_is_legality_only_and_does_not_plan() -> None:
 
 	summary = validator.validate(method_library)
 
-	assert summary["gate_profile"] == "legality_only"
+	assert summary["gate_profile"] == "structural_admissibility"
+	for layer_name in (
+		"signature_conformance",
+		"typed_structural_soundness",
+		"decomposition_admissibility",
+		"materialized_parseability",
+	):
+		layer = summary[layer_name]
+		assert set(layer) == {"passed", "checked_count", "failure_reason", "warnings"}
+		assert layer["passed"] is True
 	assert summary["validated_task_count"] == len(method_library.compound_tasks)
-	assert all(record["validation_mode"] == "legality_only" for record in summary["task_validations"])
+	assert all(
+		record["validation_mode"] == "structural_admissibility"
+		for record in summary["task_validations"]
+	)
 	assert all("plan" not in record for record in summary["task_validations"])
 
 

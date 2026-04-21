@@ -30,7 +30,7 @@ from offline_method_generation.method_synthesis.prompts import (
 	_render_producer_mode_options_for_predicate,
 )
 from offline_method_generation.method_synthesis.ast_compilation import MethodSynthesisAstCompilationMixin
-from offline_method_generation.method_synthesis.errors import HTNSynthesisError, LLMStreamingResponseError
+from offline_method_generation.method_synthesis.errors import HTNSynthesisError
 from offline_method_generation.method_synthesis.library_postprocess import MethodSynthesisLibraryPostprocessMixin
 from offline_method_generation.method_synthesis.llm_transport import MethodSynthesisLLMTransportMixin
 from offline_method_generation.method_synthesis.minimal_validation import (
@@ -39,6 +39,8 @@ from offline_method_generation.method_synthesis.minimal_validation import (
 )
 from utils.config import DEFAULT_METHOD_SYNTHESIS_MODEL
 from utils.hddl_condition_parser import HDDLConditionParser
+
+OFFLINE_METHOD_SYNTHESIS_MAX_RETRIES = 5
 
 
 class HTNMethodSynthesizer(
@@ -143,7 +145,8 @@ class HTNMethodSynthesizer(
 				metadata,
 				"preflight",
 				(
-					"Method synthesis requires a configured OPENAI_API_KEY. "
+					"Method synthesis requires a configured OFFLINE_OPENAI_API_KEY "
+					"(or OPENAI_API_KEY fallback). "
 					"HTN method synthesis only accepts live LLM output."
 				),
 			)
@@ -163,7 +166,7 @@ class HTNMethodSynthesizer(
 			6,
 		)
 		metadata["llm_prompt"] = prompt
-		metadata["llm_request_count"] = 1
+		metadata["llm_request_count"] = OFFLINE_METHOD_SYNTHESIS_MAX_RETRIES + 1
 		if str(self.model or "").strip().lower().startswith("moonshotai/"):
 			request_max_tokens = None
 		else:
@@ -174,7 +177,7 @@ class HTNMethodSynthesizer(
 			)
 		request_max_tokens = self._apply_method_synthesis_provider_token_ceiling(request_max_tokens)
 		metadata["llm_request_max_tokens"] = request_max_tokens
-		metadata["llm_generation_attempts"] = 1
+		metadata["llm_generation_attempts"] = 0
 
 		llm_library, response_text, finish_reason = self._request_complete_llm_library(
 			prompt,
@@ -438,20 +441,16 @@ class HTNMethodSynthesizer(
 	) -> Tuple[HTNMethodLibrary, str, Optional[str]]:
 		total_start = time.monotonic()
 		metadata.setdefault("timing_profile", {})
-		max_attempts = self._method_synthesis_max_attempts()
 		attempt_durations: List[float] = []
 		attempt_trace: List[Dict[str, Any]] = []
-		last_exc: Optional[Exception] = None
 		response_text: Optional[str] = None
 		finish_reason: Optional[str] = None
 		transport_metadata: Dict[str, Any] = {}
-
+		attempt_max_tokens = max_tokens
+		max_attempts = OFFLINE_METHOD_SYNTHESIS_MAX_RETRIES + 1
+		last_exception: Optional[Exception] = None
 		for attempt_index in range(1, max_attempts + 1):
 			attempt_start = time.monotonic()
-			attempt_max_tokens = self._method_synthesis_attempt_max_tokens(
-				max_tokens,
-				attempt_index=attempt_index,
-			)
 			self._emit_method_synthesis_progress(
 				f"attempt={attempt_index}/{max_attempts} start model={self.model} max_tokens={attempt_max_tokens}",
 			)
@@ -459,7 +458,6 @@ class HTNMethodSynthesizer(
 				response_text, finish_reason, transport_metadata = self._call_llm(
 					prompt,
 					max_tokens=attempt_max_tokens,
-					attempt_index=attempt_index,
 				)
 				llm_roundtrip_seconds = time.monotonic() - attempt_start
 				attempt_durations.append(round(llm_roundtrip_seconds, 3))
@@ -479,7 +477,7 @@ class HTNMethodSynthesizer(
 				)
 				break
 			except Exception as exc:
-				last_exc = exc
+				last_exception = exc
 				transport_metadata = dict(getattr(exc, "transport_metadata", None) or {})
 				llm_roundtrip_seconds = time.monotonic() - attempt_start
 				attempt_durations.append(round(llm_roundtrip_seconds, 3))
@@ -502,19 +500,28 @@ class HTNMethodSynthesizer(
 					metadata["llm_response"] = str(partial_response)
 				if partial_finish_reason is not None:
 					metadata["llm_finish_reason"] = partial_finish_reason
-				for key in (
-					"llm_request_id",
-					"llm_response_mode",
-					"llm_first_chunk_seconds",
-					"llm_complete_json_seconds",
-					"llm_reasoning_preview",
-					"llm_reasoning_characters",
-				):
-					if transport_metadata.get(key) is not None:
-						metadata[key] = transport_metadata.get(key)
-				if attempt_index >= max_attempts or not self._should_retry_method_synthesis_call(exc):
+				if attempt_index >= max_attempts:
+					for key in (
+						"llm_request_id",
+						"llm_response_mode",
+						"llm_first_chunk_seconds",
+						"llm_complete_json_seconds",
+						"llm_reasoning_preview",
+						"llm_reasoning_characters",
+						"llm_context_window_tokens",
+						"llm_prompt_token_estimate",
+						"llm_answer_token_reserve",
+						"llm_context_margin_tokens",
+						"llm_reasoning_headroom_tokens",
+						"llm_reasoning_headroom_ratio",
+						"llm_transport_overhead_tokens",
+						"llm_session_id",
+					):
+						if transport_metadata.get(key) is not None:
+							metadata[key] = transport_metadata.get(key)
 					metadata["llm_request_max_tokens"] = attempt_max_tokens
-					metadata["llm_attempts"] = attempt_index
+					metadata["llm_attempts"] = len(attempt_durations)
+					metadata["llm_generation_attempts"] = len(attempt_durations)
 					metadata["llm_attempt_durations_seconds"] = list(attempt_durations)
 					metadata["llm_attempt_trace"] = list(attempt_trace)
 					metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
@@ -527,21 +534,16 @@ class HTNMethodSynthesizer(
 						"llm_call",
 						f"LLM request failed: {exc}",
 					) from exc
-				retry_delay_seconds = self._method_synthesis_retry_delay_seconds(
-					attempt_index=attempt_index,
-					exc=exc,
-				)
-				if retry_delay_seconds > 0:
-					time.sleep(retry_delay_seconds)
 
 		if response_text is None:
 			raise self._build_synthesis_error(
 				metadata,
 				"llm_call",
-				f"LLM request failed: {last_exc}",
+				f"LLM request failed: {last_exception or 'unknown failure'}",
 			)
 
 		metadata["llm_attempts"] = len(attempt_durations)
+		metadata["llm_generation_attempts"] = len(attempt_durations)
 		metadata["llm_attempt_durations_seconds"] = list(attempt_durations)
 		metadata["llm_attempt_trace"] = list(attempt_trace)
 		metadata["llm_response_time_seconds"] = round(time.monotonic() - total_start, 3)
@@ -554,6 +556,14 @@ class HTNMethodSynthesizer(
 			"llm_complete_json_seconds",
 			"llm_reasoning_preview",
 			"llm_reasoning_characters",
+			"llm_context_window_tokens",
+			"llm_prompt_token_estimate",
+			"llm_answer_token_reserve",
+			"llm_context_margin_tokens",
+			"llm_reasoning_headroom_tokens",
+			"llm_reasoning_headroom_ratio",
+			"llm_transport_overhead_tokens",
+			"llm_session_id",
 		):
 			if transport_metadata.get(key) is not None:
 				metadata[key] = transport_metadata.get(key)
@@ -590,52 +600,6 @@ class HTNMethodSynthesizer(
 			domain,
 			prompt_analysis=prompt_analysis,
 		), response_text, finish_reason
-
-	def _method_synthesis_max_attempts(self) -> int:
-		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("moonshotai/"):
-			return 3
-		return 1
-
-	def _method_synthesis_attempt_max_tokens(
-		self,
-		base_max_tokens: Optional[int],
-		*,
-		attempt_index: int,
-	) -> Optional[int]:
-		if base_max_tokens is None:
-			return None
-		requested = max(int(base_max_tokens or 0), 1)
-		return requested
-
-	def _method_synthesis_retry_delay_seconds(
-		self,
-		*,
-		attempt_index: int,
-		exc: Exception,
-	) -> float:
-		_ = exc
-		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("moonshotai/"):
-			return float(20 * max(attempt_index, 1))
-		return float(max(attempt_index, 1))
-
-	@staticmethod
-	def _should_retry_method_synthesis_call(exc: Exception) -> bool:
-		if isinstance(exc, TimeoutError):
-			return True
-		if isinstance(exc, LLMStreamingResponseError):
-			return not bool(getattr(exc, "partial_text", None))
-		reason = str(exc or "").lower()
-		return any(
-			signal in reason
-			for signal in (
-				"connection error",
-				"unexpected eof",
-				"eof occurred in violation",
-				"temporarily unavailable",
-			)
-		)
 
 	@staticmethod
 	def _method_synthesis_attempt_trace(

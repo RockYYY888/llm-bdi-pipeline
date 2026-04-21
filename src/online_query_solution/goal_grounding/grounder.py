@@ -26,8 +26,9 @@ from online_query_solution.goal_grounding.canonical_ordered_formula import (
 from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
 from utils.symbol_normalizer import SymbolNormalizer
 
-KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 196_608
+KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
 KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
+KIMI_REASONING_CONTEXT_RATIO = 0.60
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
 ONLINE_LTLF_GENERATION_SESSION_ID = "online-ltlf-generation"
@@ -35,6 +36,7 @@ GOAL_GROUNDING_MAX_TRANSPORT_RETRIES = 3
 GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
 	"exceeded the configured wall-clock timeout before a response chunk was created",
 	"exceeded the configured first-chunk deadline before any streaming content arrived",
+	"exceeded the configured first-chunk deadline before any streaming chunk arrived",
 	"llm response did not include any choices",
 	"llm response choice did not include a message payload",
 	"llm response did not contain any textual completion content",
@@ -986,6 +988,14 @@ class NLToLTLfGenerator:
 			},
 			"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 		}
+		reasoning_max_tokens = int(
+			(request_profile or {}).get("reasoning_max_tokens") or 0,
+		)
+		if reasoning_max_tokens > 0:
+			extra_body["reasoning"] = {
+				"max_tokens": reasoning_max_tokens,
+				"exclude": False,
+			}
 		return extra_body
 
 	def _goal_grounding_request_profile(
@@ -997,13 +1007,18 @@ class NLToLTLfGenerator:
 		if model_name.startswith("moonshotai/"):
 			context_window_tokens = self._goal_grounding_total_context_tokens()
 			prompt_token_estimate = self._estimate_goal_grounding_prompt_token_budget(messages)
+			reasoning_max_tokens = math.floor(
+				context_window_tokens * KIMI_REASONING_CONTEXT_RATIO,
+			)
 			return {
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				"reasoning_max_tokens": None,
+				# Keep visible completion uncapped; cap hidden reasoning to avoid timeout-only runs.
+				"reasoning_max_tokens": reasoning_max_tokens,
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
+				"reasoning_context_ratio": KIMI_REASONING_CONTEXT_RATIO,
 				"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 			}
 		return {
@@ -1030,6 +1045,7 @@ class NLToLTLfGenerator:
 			("llm_context_margin_tokens", "context_margin_tokens"),
 			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
 			("llm_reasoning_headroom_ratio", "reasoning_headroom_ratio"),
+			("llm_reasoning_context_ratio", "reasoning_context_ratio"),
 			("llm_transport_overhead_tokens", "transport_overhead_tokens"),
 			("llm_session_id", "session_id"),
 		):
@@ -1166,7 +1182,9 @@ class NLToLTLfGenerator:
 		if request_id:
 			transport_metadata["llm_request_id"] = request_id
 		parts: list[str] = []
-		reasoning_parts: list[str] = []
+		reasoning_preview = ""
+		reasoning_characters = 0
+		reasoning_preview_limit = 10
 		complete_payload: str | None = None
 		finish_reason = ""
 		close_stream = getattr(response, "close", None)
@@ -1267,6 +1285,10 @@ class NLToLTLfGenerator:
 					extracted_reasoning = self._normalise_response_content(reasoning_candidate)
 					if extracted_reasoning is None:
 						continue
+					reasoning_characters += len(extracted_reasoning)
+					if len(reasoning_preview) < reasoning_preview_limit:
+						remaining_preview_characters = reasoning_preview_limit - len(reasoning_preview)
+						reasoning_preview += extracted_reasoning[:remaining_preview_characters]
 					if not first_chunk_recorded:
 						transport_metadata["llm_first_chunk_seconds"] = round(
 							time.monotonic() - stream_start,
@@ -1276,7 +1298,6 @@ class NLToLTLfGenerator:
 							transport_metadata["llm_first_chunk_seconds"]
 						)
 						first_chunk_recorded = True
-					reasoning_parts.append(extracted_reasoning)
 				current_text = "".join(parts).strip()
 				candidate_payload = self._extract_complete_json_payload_text(current_text)
 				if candidate_payload is not None and complete_payload is None:
@@ -1320,10 +1341,9 @@ class NLToLTLfGenerator:
 					"LLM response text did not contain a complete usable JSON object. "
 					f"finish_reason={finish_reason!r}",
 				)
-				reasoning_preview = "\n".join(reasoning_parts).strip()
 				if reasoning_preview:
-					transport_metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
-					transport_metadata["llm_reasoning_characters"] = len(reasoning_preview)
+					transport_metadata["llm_reasoning_preview"] = reasoning_preview
+					transport_metadata["llm_reasoning_characters"] = reasoning_characters
 				try:
 					setattr(error, "transport_metadata", dict(transport_metadata))
 				except Exception:
@@ -1333,10 +1353,9 @@ class NLToLTLfGenerator:
 				"LLM response returned empty textual completion content. "
 				f"finish_reason={finish_reason!r}",
 			)
-			reasoning_preview = "\n".join(reasoning_parts).strip()
 			if reasoning_preview:
-				transport_metadata["llm_reasoning_preview"] = reasoning_preview[:2000]
-				transport_metadata["llm_reasoning_characters"] = len(reasoning_preview)
+				transport_metadata["llm_reasoning_preview"] = reasoning_preview
+				transport_metadata["llm_reasoning_characters"] = reasoning_characters
 			try:
 				setattr(error, "transport_metadata", dict(transport_metadata))
 			except Exception:

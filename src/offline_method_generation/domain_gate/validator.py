@@ -9,18 +9,25 @@ it does not solve benchmark problem instances.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from offline_method_generation.context import OfflineSynthesisContext
+from offline_method_generation.method_synthesis.minimal_validation import (
+	validate_decomposition_admissibility,
+	validate_signature_conformance,
+	validate_typed_structural_soundness,
+)
+from utils.hddl_parser import HDDLParser
 
 
 class OfflineDomainGateValidator:
-	"""Run one legality-only preflight per declared compound task."""
+	"""Run one structural-admissibility preflight per declared compound task."""
 
 	def __init__(self, pipeline_context: OfflineSynthesisContext) -> None:
 		self.context = pipeline_context
 
-	def validate(self, method_library):
+	def validate(self, method_library, *, generated_domain_file: str | None = None):
 		print("\n[DOMAIN GATE]")
 		print("-"*80)
 		stage_start = time.perf_counter()
@@ -51,11 +58,6 @@ class OfflineDomainGateValidator:
 				if task_name not in normalized_library_names
 				and self.context._sanitize_name(task_name) not in normalized_library_names
 			)
-			if missing_tasks:
-				raise ValueError(
-					"Domain gate missing declared compound tasks: "
-					f"{missing_tasks}",
-				)
 
 			referenced_child_names = sorted(
 				{
@@ -72,13 +74,13 @@ class OfflineDomainGateValidator:
 				if child_name not in normalized_library_names
 				and self.context._sanitize_name(child_name) not in normalized_library_names
 			)
-			if undefined_child_names:
-				raise ValueError(
-					"Domain gate found undefined compound children: "
-					f"{undefined_child_names}",
-				)
 
-			gate_cases = self.build_cases(method_library)
+			layer_results = self._build_layer_results(
+				method_library,
+				generated_domain_file=generated_domain_file,
+			)
+			gate_passed = all(bool(layer.get("passed")) for layer in layer_results.values())
+			gate_cases = self.build_cases(method_library) if gate_passed else ()
 			gate_results: List[Dict[str, Any]] = []
 			object_scope_seconds = 0.0
 
@@ -104,18 +106,23 @@ class OfflineDomainGateValidator:
 						"object_types": dict(case_object_types),
 						"object_pool": list(case_object_pool),
 						"parameter_count": len(task_args),
-						"validation_mode": "legality_only",
+						"validation_mode": "structural_admissibility",
 					}
 				)
 
 			summary = {
 				"gate_type": "domain_complete",
-				"gate_profile": "legality_only",
+				"gate_profile": "structural_admissibility",
+				"signature_conformance": layer_results["signature_conformance"],
+				"typed_structural_soundness": layer_results["typed_structural_soundness"],
+				"decomposition_admissibility": layer_results["decomposition_admissibility"],
+				"materialized_parseability": layer_results["materialized_parseability"],
+				"layers": layer_results,
 				"declared_compound_task_count": len(declared_compound_names),
 				"validated_task_count": len(gate_results),
 				"validated_tasks": [record["task_name"] for record in gate_results],
-				"undefined_child_task_count": 0,
-				"missing_declared_task_count": 0,
+				"undefined_child_task_count": len(undefined_child_names),
+				"missing_declared_task_count": len(missing_tasks),
 				"query_specific_runtime_records": 0,
 				"task_validations": gate_results,
 			}
@@ -127,20 +134,25 @@ class OfflineDomainGateValidator:
 				},
 				metadata={
 					"gate_type": "domain_complete",
-					"gate_profile": "legality_only",
+					"gate_profile": "structural_admissibility",
 					"validated_task_count": len(gate_results),
 				},
 			)
+			status = "Success" if gate_passed else "Failed"
 			self.context.logger.log_domain_gate(
 				summary,
-				"Success",
+				status,
+				error=None if gate_passed else self._first_failure_reason(layer_results),
 				metadata={
 					"gate_type": "domain_complete",
-					"gate_profile": "legality_only",
+					"gate_profile": "structural_admissibility",
 					"validated_task_count": len(gate_results),
 				},
 			)
 
+			if not gate_passed:
+				print(f"✗ Domain gate failed: {self._first_failure_reason(layer_results)}")
+				return None
 			print("✓ Domain gate complete")
 			print(f"  Declared compound tasks: {len(declared_compound_names)}")
 			print(f"  Validated tasks: {len(gate_results)}")
@@ -157,6 +169,93 @@ class OfflineDomainGateValidator:
 			import traceback
 			traceback.print_exc()
 			return None
+
+	def _build_layer_results(
+		self,
+		method_library,
+		*,
+		generated_domain_file: str | None,
+	) -> Dict[str, Dict[str, Any]]:
+		return {
+			"signature_conformance": self._run_layer(
+				checked_count=(
+					len(getattr(method_library, "compound_tasks", ()) or ())
+					+ len(getattr(method_library, "methods", ()) or ())
+				),
+				check=lambda: validate_signature_conformance(self.context.domain, method_library),
+			),
+			"typed_structural_soundness": self._run_layer(
+				checked_count=len(getattr(method_library, "methods", ()) or ()),
+				check=lambda: validate_typed_structural_soundness(
+					self.context.domain,
+					method_library,
+				),
+			),
+			"decomposition_admissibility": self._run_layer(
+				checked_count=(
+					len(getattr(method_library, "compound_tasks", ()) or ())
+					+ len(getattr(method_library, "methods", ()) or ())
+				),
+				check=lambda: validate_decomposition_admissibility(
+					self.context.domain,
+					method_library,
+				),
+			),
+			"materialized_parseability": self._materialized_parseability_layer(
+				generated_domain_file,
+			),
+		}
+
+	@staticmethod
+	def _run_layer(*, checked_count: int, check) -> Dict[str, Any]:
+		try:
+			warnings = check() or []
+			return {
+				"passed": True,
+				"checked_count": checked_count,
+				"failure_reason": None,
+				"warnings": list(warnings),
+			}
+		except Exception as exc:
+			return {
+				"passed": False,
+				"checked_count": checked_count,
+				"failure_reason": str(exc),
+				"warnings": [],
+			}
+
+	@staticmethod
+	def _materialized_parseability_layer(generated_domain_file: str | None) -> Dict[str, Any]:
+		if not str(generated_domain_file or "").strip():
+			return {
+				"passed": True,
+				"checked_count": 0,
+				"failure_reason": None,
+				"warnings": ["No materialized generated_domain.hddl path was provided."],
+			}
+		try:
+			domain_path = Path(str(generated_domain_file)).expanduser().resolve()
+			HDDLParser.parse_domain(str(domain_path))
+			return {
+				"passed": True,
+				"checked_count": 1,
+				"failure_reason": None,
+				"warnings": [],
+			}
+		except Exception as exc:
+			return {
+				"passed": False,
+				"checked_count": 1,
+				"failure_reason": str(exc),
+				"warnings": [],
+			}
+
+	@staticmethod
+	def _first_failure_reason(layer_results: Dict[str, Dict[str, Any]]) -> str:
+		for layer_name, layer_result in layer_results.items():
+			if not bool(layer_result.get("passed")):
+				return f"{layer_name}: {layer_result.get('failure_reason')}"
+		return "unknown gate failure"
 
 	def build_cases(self, method_library) -> Tuple[Dict[str, Any], ...]:
 		candidate_root_types = sorted(

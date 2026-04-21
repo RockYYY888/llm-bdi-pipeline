@@ -14,7 +14,7 @@ from typing import Dict, List, TextIO
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
-RUNS_ROOT = PROJECT_ROOT / "tests" / "generated" / "generated_masked_full"
+RUNS_ROOT = PROJECT_ROOT / "tests" / "offline_method_generation" / "generated" / "generated_masked_full"
 DOMAIN_KEYS = ("blocksworld", "marsrover", "satellite", "transport")
 
 
@@ -33,7 +33,7 @@ def _timestamp() -> str:
 
 
 def _build_env() -> Dict[str, str]:
-	from tests.support.ground_truth_baseline_support import apply_generated_runtime_defaults
+	from tests.support.offline_generation_support import apply_generated_runtime_defaults
 
 	env = os.environ.copy()
 	env["PYTHONPATH"] = os.pathsep.join(
@@ -187,11 +187,13 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 
 
 def _run_single_domain(domain_key: str, run_dir: Path) -> int:
-	from tests.support.ground_truth_baseline_support import (
+	from tests.support.htn_evaluation_support import (
+		run_generated_problem_root_baseline_for_domain,
+		run_generated_problem_root_case,
+	)
+	from tests.support.offline_generation_support import (
 		load_domain_query_cases,
 		query_id_sort_key,
-		run_generated_problem_root_case,
-		run_generated_problem_root_baseline_for_domain,
 	)
 
 	if _RUN_GENERATED_DOMAIN_FILE:

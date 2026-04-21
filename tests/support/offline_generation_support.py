@@ -25,6 +25,10 @@ from offline_method_generation.method_synthesis.schema import (
 )
 from offline_method_generation.method_synthesis.synthesizer import HTNMethodSynthesizer
 from pipeline.execution_logger import ExecutionLogger
+from utils.config import (
+	DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS,
+	DEFAULT_PLANNING_TIMEOUT_SECONDS,
+)
 from utils.benchmark_query_dataset import (
 	DEFAULT_BENCHMARK_QUERY_DOMAIN_PATTERNS,
 	DEFAULT_BENCHMARK_QUERY_DOMAIN_PROBLEM_DIRS,
@@ -35,7 +39,7 @@ from utils.hddl_parser import HDDLParser
 
 
 TESTS_ROOT = PROJECT_ROOT / "tests"
-GENERATED_ROOT = TESTS_ROOT / "generated"
+GENERATED_ROOT = TESTS_ROOT / "offline_method_generation" / "generated"
 GENERATED_ROOT.mkdir(parents=True, exist_ok=True)
 GENERATED_LOGS_DIR = GENERATED_ROOT / "logs"
 GENERATED_LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,8 +56,8 @@ DOMAIN_FILES = {
 	domain_key: str((PROJECT_ROOT / "src" / "domains" / domain_key / "domain.hddl").resolve())
 	for domain_key in ("blocksworld", "marsrover", "satellite", "transport")
 }
-DEFAULT_GENERATED_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 360
-DEFAULT_GENERATED_PLANNING_TIMEOUT_SECONDS = 60
+DEFAULT_GENERATED_METHOD_SYNTHESIS_TIMEOUT_SECONDS = DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS
+DEFAULT_GENERATED_PLANNING_TIMEOUT_SECONDS = DEFAULT_PLANNING_TIMEOUT_SECONDS
 
 
 def _coerce_timeout_seconds(value: object, fallback: int) -> int:
@@ -84,6 +88,8 @@ def apply_generated_runtime_defaults(
 	)
 	target_env["METHOD_SYNTHESIS_TIMEOUT"] = str(method_synthesis_timeout)
 	target_env["PLANNING_TIMEOUT"] = str(planning_timeout)
+	target_env.setdefault("METHOD_SYNTHESIS_PROGRESS", "1")
+	target_env.setdefault("DOMAIN_GATE_PROGRESS", "1")
 	return target_env
 
 

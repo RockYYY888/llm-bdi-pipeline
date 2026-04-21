@@ -13,7 +13,8 @@ if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests.offline_method_generation.run_generated_problem_root_baseline as generated_baseline_runner
-from tests.support.ground_truth_baseline_support import (
+import tests.offline_method_generation.run_generated_domain_build_sweep as generated_domain_sweep_runner
+from tests.support.offline_generation_support import (
 	DEFAULT_GENERATED_METHOD_SYNTHESIS_TIMEOUT_SECONDS,
 	DEFAULT_GENERATED_PLANNING_TIMEOUT_SECONDS,
 	apply_generated_runtime_defaults,
@@ -21,9 +22,9 @@ from tests.support.ground_truth_baseline_support import (
 	load_domain_query_cases,
 	query_id_sort_key,
 	run_generated_domain_build,
-	run_generated_problem_root_case,
 )
-import tests.support.ground_truth_baseline_support as generated_support
+from tests.support.htn_evaluation_support import run_generated_problem_root_case
+import tests.support.htn_evaluation_support as generated_support
 
 
 LIVE_GENERATED_SMOKE_ENABLED = bool(os.getenv("RUN_LIVE_GENERATED_BASELINE_SMOKE")) and bool(
@@ -87,6 +88,20 @@ def test_generated_full_sweep_defaults_to_four_domain_parallelism() -> None:
 	)
 
 
+def test_generated_domain_build_sweep_defaults_to_four_domain_parallelism() -> None:
+	with patch.object(generated_domain_sweep_runner, "_run_full_sweep", return_value=0) as run_full:
+		with patch.object(
+			sys,
+			"argv",
+			["run_generated_domain_build_sweep.py"],
+		):
+			assert generated_domain_sweep_runner.main() == 0
+
+	run_full.assert_called_once_with(
+		max_concurrent_domains=len(generated_domain_sweep_runner.DOMAIN_KEYS),
+	)
+
+
 def test_generated_single_domain_can_reuse_existing_generated_domain_file() -> None:
 	with patch.object(
 		generated_support,
@@ -144,6 +159,8 @@ def test_generated_runtime_defaults_raise_short_timeouts() -> None:
 	assert normalised["PLANNING_TIMEOUT"] == str(
 		DEFAULT_GENERATED_PLANNING_TIMEOUT_SECONDS,
 	)
+	assert normalised["METHOD_SYNTHESIS_PROGRESS"] == "1"
+	assert normalised["DOMAIN_GATE_PROGRESS"] == "1"
 
 
 def test_generated_full_sweep_env_enforces_stable_timeouts() -> None:
@@ -156,3 +173,5 @@ def test_generated_full_sweep_env_enforces_stable_timeouts() -> None:
 	assert env["PLANNING_TIMEOUT"] == str(
 		DEFAULT_GENERATED_PLANNING_TIMEOUT_SECONDS,
 	)
+	assert env["METHOD_SYNTHESIS_PROGRESS"] == "1"
+	assert env["DOMAIN_GATE_PROGRESS"] == "1"

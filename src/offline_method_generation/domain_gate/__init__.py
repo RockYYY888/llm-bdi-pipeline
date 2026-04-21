@@ -1,8 +1,5 @@
-"""
-Domain-gate models and helpers.
-"""
+"""Offline legality-only domain-gate helpers."""
 
-from .cases import DomainGateCase
-from .validator import DomainGateSummary
+from .validator import DomainGateSummary, OfflineDomainGateValidator
 
-__all__ = ["DomainGateCase", "DomainGateSummary"]
+__all__ = ["DomainGateSummary", "OfflineDomainGateValidator"]
