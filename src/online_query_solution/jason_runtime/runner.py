@@ -1797,16 +1797,10 @@ class JasonRunner:
 				)
 				via_like_method = "via" in trace_method_name.lower() or has_self_recursive_goal
 				variable_safe = self._chunk_runtime_variables_are_safe(lines)
-				if str(item.get("task_name") or "").strip() == "get_to" and via_like_method:
-					has_current_position_context = any(
-						(parsed.get("kind") == "atom" and str(parsed.get("predicate")) == "at")
-						for parsed in (
-							self._parse_asl_context_conjunct(str(part))
-							for part in tuple(item.get("context_parts") or ())
-						)
-						if parsed is not None
-					)
-					variable_safe = variable_safe and has_current_position_context
+				action_setup_penalty = self._runtime_method_action_setup_penalty(
+					context_parts=tuple(item.get("context_parts") or ()),
+					body_goals=body_goals,
+				)
 				weighted_noop_support = 0
 				for goal_index, goal in enumerate(body_goals, start=1):
 					if self._goal_has_noop_runtime_support(
@@ -1853,6 +1847,7 @@ class JasonRunner:
 				item["sort_key"] = (
 					0 if self._chunk_is_noop_method_plan(body_lines) else 1,
 					0 if variable_safe else 1,
+					action_setup_penalty,
 					0 if not has_self_recursive_goal else 1,
 					0 if not via_like_method else 1,
 					body_goal_count,
@@ -1871,6 +1866,66 @@ class JasonRunner:
 			ordered_chunks.extend(str(item["chunk"]) for item in group_items)
 
 		return ordered_chunks
+
+	def _runtime_method_action_setup_penalty(
+		self,
+		*,
+		context_parts: Sequence[str],
+		body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
+	) -> int:
+		penalty = 0
+		for goal_index, (goal_name, goal_args) in enumerate(body_goals):
+			if str(goal_name) != "take_image" or len(goal_args) < 2:
+				continue
+			satellite = str(goal_args[0])
+			image_direction = str(goal_args[1])
+			if self._context_contains_runtime_atom(
+				context_parts,
+				"pointing",
+				(satellite, image_direction),
+			):
+				continue
+			if self._prior_body_goal_contains_turn_to(
+				body_goals[:goal_index],
+				satellite=satellite,
+				image_direction=image_direction,
+			):
+				continue
+			penalty += 1
+		return penalty
+
+	def _context_contains_runtime_atom(
+		self,
+		context_parts: Sequence[str],
+		predicate: str,
+		args: Sequence[str],
+	) -> bool:
+		for part in context_parts:
+			parsed = self._parse_asl_context_conjunct(str(part))
+			if parsed is None or parsed.get("kind") != "atom":
+				continue
+			if str(parsed.get("predicate") or "") != predicate:
+				continue
+			parsed_args = tuple(str(arg) for arg in tuple(parsed.get("args") or ()))
+			if len(parsed_args) != len(tuple(args)):
+				continue
+			if all(str(left) == str(right) for left, right in zip(parsed_args, args)):
+				return True
+		return False
+
+	@staticmethod
+	def _prior_body_goal_contains_turn_to(
+		prior_body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
+		*,
+		satellite: str,
+		image_direction: str,
+	) -> bool:
+		for goal_name, goal_args in prior_body_goals:
+			if str(goal_name) != "turn_to" or len(goal_args) < 2:
+				continue
+			if str(goal_args[0]) == satellite and str(goal_args[1]) == image_direction:
+				return True
+		return False
 
 	def _runtime_fact_arg_pair_index(
 		self,

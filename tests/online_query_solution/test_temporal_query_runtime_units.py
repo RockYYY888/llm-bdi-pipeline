@@ -834,7 +834,7 @@ def test_jason_runner_orders_noop_then_direct_then_via_chunks() -> None:
 	assert '"m-drive-to-via"' in ordered_chunks[2]
 
 
-def test_jason_runner_filters_transport_via_chunks_without_current_position_context() -> None:
+def test_jason_runner_keeps_recursive_transport_via_after_current_context_via() -> None:
 	runner = JasonRunner()
 	chunks = [
 		"\n".join(
@@ -864,9 +864,49 @@ def test_jason_runner_filters_transport_via_chunks_without_current_position_cont
 		type_domains={},
 	)
 
-	assert len(ordered_chunks) == 1
-	assert '"m-drive-to-via"' in ordered_chunks[0]
+	assert len(ordered_chunks) == 2
 	assert "at(V, MID)" in ordered_chunks[0]
+	assert "road(MID, DEST) <-" in ordered_chunks[1]
+
+
+def test_jason_runner_orders_satellite_observation_methods_with_required_turn_before_image() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!do_observation(DIR, MODE) : supports(I, MODE) & on_board(I, SAT) & power_avail(SAT) <-",
+				'\t.print("runtime trace method flat ", "method_without_turn");',
+				"\t!activate_instrument(SAT, I);",
+				"\t!take_image(SAT, DIR, I, MODE).",
+			],
+		),
+		"\n".join(
+			[
+				"+!do_observation(DIR, MODE) : supports(I, MODE) & on_board(I, SAT) & power_avail(SAT) & pointing(SAT, OLD_DIR) <-",
+				'\t.print("runtime trace method flat ", "method_with_turn");',
+				"\t!activate_instrument(SAT, I);",
+				"\t!turn_to(SAT, DIR, OLD_DIR);",
+				"\t!take_image(SAT, DIR, I, MODE).",
+			],
+		),
+		"\n".join(
+			[
+				"+!do_observation(DIR, MODE) : supports(I, MODE) & on_board(I, SAT) & calibrated(I) & power_on(I) & pointing(SAT, DIR) <-",
+				'\t.print("runtime trace method flat ", "method_already_pointing");',
+				"\t!take_image(SAT, DIR, I, MODE).",
+			],
+		),
+	]
+
+	ordered_chunks = runner._order_runtime_method_plan_chunks(
+		chunks,
+		fact_index={},
+		type_domains={},
+	)
+
+	assert "method_already_pointing" in ordered_chunks[0]
+	assert "method_with_turn" in ordered_chunks[1]
+	assert "method_without_turn" in ordered_chunks[2]
 
 
 def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
@@ -902,7 +942,7 @@ def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
 	)
 
 	assert "m-drive-to" in runner_asl
-	assert "m-drive-to-via-unsafe" not in runner_asl
+	assert runner_asl.index("m-drive-to") < runner_asl.index("m-drive-to-via-unsafe")
 
 
 def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions() -> None:
