@@ -19,6 +19,8 @@ from tests.support.online_query_solution_benchmark_support import (
 )
 import tests.support.online_query_solution_benchmark_support as benchmark_support
 from tests.run_online_query_solution_benchmark import (
+	DomainRun,
+	_collect_domain_run_result,
 	_load_failed_query_ids_for_run,
 	_write_latest_run_manifest,
 	_write_run_summary_snapshot,
@@ -305,6 +307,9 @@ def test_full_sweep_summary_snapshot_writes_incremental_run_state(tmp_path: Path
 				"plan_verification_failures": 5,
 				"hierarchical_rejection_failures": 0,
 				"unknown_failures": 0,
+				"complete": True,
+				"completed_query_ids": ["query_1", "query_2"],
+				"remaining_query_ids": [],
 			},
 		},
 		internal_failures=["transport"],
@@ -313,11 +318,104 @@ def test_full_sweep_summary_snapshot_writes_incremental_run_state(tmp_path: Path
 
 	assert summary["run_id"] == "20260420_220000"
 	assert summary["completed_domains"] == ["blocksworld"]
+	assert summary["partial_domains"] == []
+	assert summary["completed_query_count"] == 2
 	assert "transport" in summary["internal_failures"]
 	assert (tmp_path / "20260420_220000" / "summary.json").exists()
 	assert (tmp_path / "20260420_220000" / "summary.txt").read_text().startswith(
 		"run_id: 20260420_220000\n",
 	)
+
+
+def test_full_sweep_summary_snapshot_tracks_partial_domains(tmp_path: Path) -> None:
+	summary = _write_run_summary_snapshot(
+		run_dir=tmp_path / "20260420_230000",
+		run_id="20260420_230000",
+		domain_summaries={
+			"transport": {
+				"total_queries": 40,
+				"verified_successes": 16,
+				"goal_grounding_failures": 0,
+				"temporal_compilation_failures": 0,
+				"agentspeak_rendering_failures": 0,
+				"runtime_execution_failures": 8,
+				"plan_verification_failures": 0,
+				"hierarchical_rejection_failures": 0,
+				"unknown_failures": 0,
+				"complete": False,
+				"completed_query_ids": [f"query_{index}" for index in range(1, 25)],
+				"remaining_query_ids": [f"query_{index}" for index in range(25, 41)],
+			},
+		},
+		internal_failures=["transport"],
+		max_concurrent_domains=4,
+	)
+
+	assert summary["completed_domains"] == []
+	assert summary["partial_domains"] == ["transport"]
+	assert "transport" in summary["pending_domains"]
+	assert summary["total_queries"] == 40
+	assert summary["completed_query_count"] == 24
+	assert summary["remaining_query_count"] == 16
+	assert summary["complete"] is False
+
+
+def test_collect_domain_run_result_keeps_partial_summary_on_child_failure(
+	tmp_path: Path,
+) -> None:
+	class FakeProcess:
+		def wait(self) -> int:
+			return 9
+
+	class FakeOutputHandle:
+		def __init__(self) -> None:
+			self.closed = False
+
+		def close(self) -> None:
+			self.closed = True
+
+	output_handle = FakeOutputHandle()
+	summary_path = tmp_path / "transport.summary.json"
+	output_path = tmp_path / "transport.out"
+	summary_path.write_text(
+		json.dumps(
+			{
+				"domain_key": "transport",
+				"total_queries": 40,
+				"complete": False,
+				"completed_query_ids": ["query_1"],
+				"remaining_query_ids": ["query_2"],
+				"verified_successes": 1,
+				"goal_grounding_failures": 0,
+				"temporal_compilation_failures": 0,
+				"agentspeak_rendering_failures": 0,
+				"runtime_execution_failures": 0,
+				"plan_verification_failures": 0,
+				"hierarchical_rejection_failures": 0,
+				"unknown_failures": 0,
+			},
+			indent=2,
+		),
+	)
+	run = DomainRun(
+		name="transport",
+		command=["python", "runner.py"],
+		output_path=output_path,
+		summary_path=summary_path,
+		output_handle=output_handle,  # type: ignore[arg-type]
+		process=FakeProcess(),  # type: ignore[arg-type]
+	)
+	domain_summaries: dict[str, dict[str, object]] = {}
+	internal_failures: list[str] = []
+
+	_collect_domain_run_result(run, domain_summaries, internal_failures)
+
+	assert output_handle.closed is True
+	assert internal_failures == ["transport"]
+	assert domain_summaries["transport"]["process_return_code"] == 9
+	assert domain_summaries["transport"]["process_failed"] is True
+	assert domain_summaries["transport"]["process_output_path"] == str(output_path)
+	assert domain_summaries["transport"]["completed_query_ids"] == ["query_1"]
 
 
 def test_load_failed_query_ids_for_run_collects_failed_queries(tmp_path: Path) -> None:

@@ -57,6 +57,8 @@ def _start_domain_run(run_dir: Path, domain_key: str, env: Dict[str, str]) -> Do
 		domain_key,
 		"--run-dir",
 		str(run_dir),
+		"--library-source",
+		_RUN_LIBRARY_SOURCE,
 	]
 	for query_id in _RUN_FAILED_ONLY_QUERY_IDS.get(domain_key, ()):
 		command.extend(["--query-id", str(query_id)])
@@ -103,13 +105,17 @@ def _collect_domain_run_result(
 		return_code = run.process.wait()
 	finally:
 		run.output_handle.close()
-	if return_code != 0:
-		internal_failures.append(run.name)
-		return
 	if not run.summary_path.exists():
-		internal_failures.append(run.name)
+		if run.name not in internal_failures:
+			internal_failures.append(run.name)
 		return
-	domain_summaries[run.name] = json.loads(run.summary_path.read_text())
+	summary = json.loads(run.summary_path.read_text())
+	summary["process_return_code"] = return_code
+	summary["process_failed"] = return_code != 0
+	summary["process_output_path"] = str(run.output_path)
+	domain_summaries[run.name] = summary
+	if return_code != 0 and run.name not in internal_failures:
+		internal_failures.append(run.name)
 
 
 def _load_existing_domain_summaries(run_dir: Path) -> Dict[str, Dict[str, object]]:
@@ -160,11 +166,21 @@ def _aggregate_domain_summaries(
 	domain_summaries: Dict[str, Dict[str, object]],
 ) -> Dict[str, object]:
 	total_queries = sum(int(summary.get("total_queries", 0)) for summary in domain_summaries.values())
+	completed_query_count = sum(
+		len(summary.get("completed_query_ids") or summary.get("query_results") or [])
+		for summary in domain_summaries.values()
+	)
+	remaining_query_count = sum(
+		len(summary.get("remaining_query_ids") or [])
+		for summary in domain_summaries.values()
+	)
 	return {
 		"run_dir": str(run_dir),
 		"online_domain_source": "benchmark",
 		"library_source": _RUN_LIBRARY_SOURCE,
 		"total_queries": total_queries,
+		"completed_query_count": completed_query_count,
+		"remaining_query_count": remaining_query_count,
 		"verified_successes": sum(
 			int(summary.get("verified_successes", 0))
 			for summary in domain_summaries.values()
@@ -208,6 +224,8 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 		f"online_domain_source: {summary['online_domain_source']}",
 		f"library_source: {summary['library_source']}",
 		f"total_queries: {summary['total_queries']}",
+		f"completed_query_count: {summary.get('completed_query_count', 0)}",
+		f"remaining_query_count: {summary.get('remaining_query_count', 0)}",
 		f"verified_successes: {summary['verified_successes']}",
 		f"goal_grounding_failures: {summary['goal_grounding_failures']}",
 		f"temporal_compilation_failures: {summary['temporal_compilation_failures']}",
@@ -220,6 +238,8 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 	for domain_key, domain_summary in dict(summary.get("domains") or {}).items():
 		lines.append(
 			f"{domain_key}: queries={domain_summary.get('total_queries')}, "
+			f"completed={len(domain_summary.get('completed_query_ids') or domain_summary.get('query_results') or [])}, "
+			f"remaining={len(domain_summary.get('remaining_query_ids') or [])}, "
 			f"verified={domain_summary.get('verified_successes')}, "
 			f"grounding_failed={domain_summary.get('goal_grounding_failures')}, "
 			f"runtime_failed={domain_summary.get('runtime_execution_failures')}, "
@@ -239,6 +259,8 @@ def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> Non
 		"online_domain_source": summary.get("online_domain_source"),
 		"library_source": summary.get("library_source"),
 		"total_queries": summary.get("total_queries"),
+		"completed_query_count": summary.get("completed_query_count"),
+		"remaining_query_count": summary.get("remaining_query_count"),
 		"verified_successes": summary.get("verified_successes"),
 		"completed_domains": list(summary.get("completed_domains") or []),
 		"internal_failures": list(summary.get("internal_failures") or []),
@@ -265,13 +287,26 @@ def _write_run_summary_snapshot(
 	summary["run_id"] = run_id
 	summary["max_concurrent_domains"] = max_concurrent_domains
 	summary["internal_failures"] = list(internal_failures)
-	summary["completed_domains"] = sorted(domain_summaries)
+	summary["completed_domains"] = sorted(
+		domain_key
+		for domain_key, domain_summary in domain_summaries.items()
+		if bool(domain_summary.get("complete"))
+	)
+	summary["partial_domains"] = sorted(
+		domain_key
+		for domain_key, domain_summary in domain_summaries.items()
+		if not bool(domain_summary.get("complete"))
+	)
 	summary["pending_domains"] = [
 		domain_key
 		for domain_key in DOMAIN_KEYS
 		if domain_key not in domain_summaries
+		or not bool(domain_summaries[domain_key].get("complete"))
 	]
-	summary["complete"] = len(domain_summaries) == len(DOMAIN_KEYS) and not internal_failures
+	summary["complete"] = (
+		len(summary["completed_domains"]) == len(DOMAIN_KEYS)
+		and not internal_failures
+	)
 	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 	_write_human_summary(run_dir, summary)
 	_write_latest_run_manifest(run_dir, summary)
