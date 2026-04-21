@@ -1804,7 +1804,7 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_with_reasoning_cap()
 	assert profile["session_id"] == "online-ltlf-generation"
 
 
-def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_completion_cap() -> None:
+def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_full_output_budget() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	captured_request: dict[str, object] = {}
 
@@ -1837,7 +1837,7 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_comple
 	assert captured_request["request_timeout_seconds"] == 123.0
 	assert request_kwargs["timeout"] == 123.0
 	assert request_kwargs["stream"] is True
-	assert "max_tokens" not in request_kwargs
+	assert request_kwargs["max_tokens"] == 262_144
 	assert "response_format" not in request_kwargs
 	assert request_kwargs["extra_body"] == {
 		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},

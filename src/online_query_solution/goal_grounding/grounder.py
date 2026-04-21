@@ -1083,7 +1083,7 @@ class NLToLTLfGenerator:
 	) -> int | None:
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			return None
+			return self._goal_grounding_total_context_tokens()
 		requested = max(int(requested_max_tokens or self.response_max_tokens or 0), 1)
 		return requested
 

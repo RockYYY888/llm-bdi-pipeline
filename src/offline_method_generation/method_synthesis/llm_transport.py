@@ -181,12 +181,13 @@ class MethodSynthesisLLMTransportMixin:
 		"""
 		Keep provider-specific handling explicit even when no extra cap is applied.
 
-		For Kimi method synthesis, avoid an application-side completion ceiling so
-		the provider can stream the complete method library response.
+		For Kimi method synthesis, request the provider's full output window. Kimi
+		defaults to a much smaller output cap when max_tokens is omitted, and
+		reasoning.max_tokens must remain lower than the total output budget.
 		"""
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			return None
+			return self._method_synthesis_total_context_tokens()
 		requested = max(int(requested_max_tokens or 0), 1)
 		return requested
 

@@ -338,10 +338,10 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 	assert "response_format" not in captured_kwargs
 
 
-def test_method_synthesis_transport_omits_kimi_completion_ceiling() -> None:
+def test_method_synthesis_transport_requests_kimi_full_output_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(model="moonshotai/kimi-k2.6")
 
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(48000) is None
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) == 204800
 
 
 def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
@@ -459,7 +459,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
 
 
-def test_method_synthesis_transport_omits_max_tokens_for_kimi_requests() -> None:
+def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_supplied() -> None:
 	captured_request = {}
 
 	class FakeSynthesizer(HTNMethodSynthesizer):
