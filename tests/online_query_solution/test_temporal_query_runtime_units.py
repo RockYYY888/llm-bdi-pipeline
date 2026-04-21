@@ -909,6 +909,41 @@ def test_jason_runner_orders_satellite_observation_methods_with_required_turn_be
 	assert "method_without_turn" in ordered_chunks[2]
 
 
+def test_jason_runner_prefers_turn_source_created_by_prior_activation() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!do_observation(DIR, MODE) : supports(instrument0, MODE) & on_board(instrument0, satellite0) & power_avail(satellite0) <-",
+				'\t.print("runtime trace method flat ", "method_bad_source");',
+				"\t!activate_instrument(satellite0, instrument0);",
+				"\t!turn_to(satellite0, DIR, old_direction);",
+				"\t!take_image(satellite0, DIR, instrument0, MODE).",
+			],
+		),
+		"\n".join(
+			[
+				"+!do_observation(DIR, MODE) : supports(instrument0, MODE) & on_board(instrument0, satellite0) & power_avail(satellite0) <-",
+				'\t.print("runtime trace method flat ", "method_calibration_source");',
+				"\t!activate_instrument(satellite0, instrument0);",
+				"\t!turn_to(satellite0, DIR, calib_direction0);",
+				"\t!take_image(satellite0, DIR, instrument0, MODE).",
+			],
+		),
+	]
+
+	ordered_chunks = runner._order_runtime_method_plan_chunks(
+		chunks,
+		fact_index={
+			("calibration_target", 2): (("instrument0", "calib_direction0"),),
+		},
+		type_domains={},
+	)
+
+	assert "method_calibration_source" in ordered_chunks[0]
+	assert "method_bad_source" in ordered_chunks[1]
+
+
 def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(

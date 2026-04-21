@@ -1800,6 +1800,7 @@ class JasonRunner:
 				action_setup_penalty = self._runtime_method_action_setup_penalty(
 					context_parts=tuple(item.get("context_parts") or ()),
 					body_goals=body_goals,
+					fact_index=fact_index,
 				)
 				weighted_noop_support = 0
 				for goal_index, goal in enumerate(body_goals, start=1):
@@ -1872,26 +1873,33 @@ class JasonRunner:
 		*,
 		context_parts: Sequence[str],
 		body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
 	) -> int:
 		penalty = 0
 		for goal_index, (goal_name, goal_args) in enumerate(body_goals):
-			if str(goal_name) != "take_image" or len(goal_args) < 2:
-				continue
-			satellite = str(goal_args[0])
-			image_direction = str(goal_args[1])
-			if self._context_contains_runtime_atom(
-				context_parts,
-				"pointing",
-				(satellite, image_direction),
-			):
-				continue
-			if self._prior_body_goal_contains_turn_to(
-				body_goals[:goal_index],
-				satellite=satellite,
-				image_direction=image_direction,
-			):
-				continue
-			penalty += 1
+			if str(goal_name) == "take_image" and len(goal_args) >= 2:
+				satellite = str(goal_args[0])
+				image_direction = str(goal_args[1])
+				if self._context_contains_runtime_atom(
+					context_parts,
+					"pointing",
+					(satellite, image_direction),
+				):
+					continue
+				if self._prior_body_goal_contains_turn_to(
+					body_goals[:goal_index],
+					satellite=satellite,
+					image_direction=image_direction,
+				):
+					continue
+				penalty += 1
+			if str(goal_name) == "turn_to" and len(goal_args) >= 3:
+				penalty += self._turn_to_source_after_activation_penalty(
+					body_goals[:goal_index],
+					satellite=str(goal_args[0]),
+					source_direction=str(goal_args[2]),
+					fact_index=fact_index,
+				)
 		return penalty
 
 	def _context_contains_runtime_atom(
@@ -1926,6 +1934,32 @@ class JasonRunner:
 			if str(goal_args[0]) == satellite and str(goal_args[1]) == image_direction:
 				return True
 		return False
+
+	def _turn_to_source_after_activation_penalty(
+		self,
+		prior_body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
+		*,
+		satellite: str,
+		source_direction: str,
+		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
+	) -> int:
+		source_token = self._canonical_runtime_token(source_direction)
+		for goal_name, goal_args in prior_body_goals:
+			if str(goal_name) != "activate_instrument" or len(goal_args) < 2:
+				continue
+			if self._canonical_runtime_token(str(goal_args[0])) != self._canonical_runtime_token(satellite):
+				continue
+			instrument = self._canonical_runtime_token(str(goal_args[1]))
+			if self._looks_like_asl_variable(instrument):
+				continue
+			targets = {
+				self._canonical_runtime_token(str(target))
+				for actual_instrument, target in fact_index.get(("calibration_target", 2), ())
+				if self._canonical_runtime_token(str(actual_instrument)) == instrument
+			}
+			if targets and source_token not in targets:
+				return 1
+		return 0
 
 	def _runtime_fact_arg_pair_index(
 		self,
