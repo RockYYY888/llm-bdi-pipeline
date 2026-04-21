@@ -401,7 +401,7 @@ class JasonRunner:
 				if token.startswith("?"):
 					bindings[token[1:]] = str(value)
 
-			for effect in schema.get("effects") or []:
+			for effect in self._ordered_runtime_effects(schema.get("effects") or []):
 				predicate = str(effect.get("predicate", "")).strip()
 				if not predicate or predicate == "=":
 					continue
@@ -524,8 +524,15 @@ class JasonRunner:
 			type_parent_map=type_parent_map or {},
 		)
 		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
-		trace_ready_code = self._instrument_method_plans(
+		lowered_code = self._ground_local_witness_method_plans(
 			environment_ready_code,
+			seed_facts=seed_facts,
+			runtime_objects=runtime_objects,
+			object_types=object_types or {},
+			type_parent_map=type_parent_map or {},
+		)
+		trace_ready_code = self._instrument_method_plans(
+			lowered_code,
 			method_library,
 		)
 		lines = [
@@ -1201,7 +1208,19 @@ class JasonRunner:
 			if not statements or not statements[0]:
 				rewritten_chunks.append("\n".join(chunk))
 				continue
-			statements.append(".perceive")
+			action_statement = statements[0]
+			effect_statements = statements[1:]
+			ordered_effect_statements = [
+				statement
+				for statement in effect_statements
+				if statement.startswith("-")
+			]
+			ordered_effect_statements.extend(
+				statement
+				for statement in effect_statements
+				if not statement.startswith("-")
+			)
+			statements = [action_statement, *ordered_effect_statements, ".perceive"]
 			rewritten_body = [
 				f"\t{statement}{'.' if index == len(statements) - 1 else ';'}"
 				for index, statement in enumerate(statements)
@@ -2761,7 +2780,7 @@ public class no_ancestor_goal extends DefaultInternalAction {
 			precondition_clauses = list(schema.get("precondition_clauses") or [])
 			if not precondition_clauses:
 				precondition_clauses = [preconditions] if preconditions else [[]]
-			effects = list(schema.get("effects") or [])
+			effects = list(self._ordered_runtime_effects(schema.get("effects") or []))
 			action_blocks.append(
 				"""
 		register(new ActionSchema(
@@ -2943,12 +2962,21 @@ public class {self.environment_class_name} extends Environment {{
 			if ("=".equals(pattern.predicate)) {{
 				continue;
 			}}
-			String grounded = ground(pattern.predicate, pattern.args, bindings);
 			if (pattern.positive) {{
-				world.add(grounded);
-			}} else {{
-				world.remove(grounded);
+				continue;
 			}}
+			String grounded = ground(pattern.predicate, pattern.args, bindings);
+			world.remove(grounded);
+		}}
+		for (Pattern pattern : effects) {{
+			if ("=".equals(pattern.predicate)) {{
+				continue;
+			}}
+			if (!pattern.positive) {{
+				continue;
+			}}
+			String grounded = ground(pattern.predicate, pattern.args, bindings);
+			world.add(grounded);
 		}}
 	}}
 
@@ -3469,7 +3497,7 @@ public class {self.environment_class_name} extends Environment {{
 					"world_facts": sorted(world),
 				}
 
-			for effect in schema.get("effects") or []:
+			for effect in self._ordered_runtime_effects(schema.get("effects") or []):
 				predicate = str(effect.get("predicate", "")).strip()
 				if not predicate or predicate == "=":
 					continue
@@ -3570,6 +3598,25 @@ public class {self.environment_class_name} extends Environment {{
 			if not holds:
 				return False
 		return True
+
+	@staticmethod
+	def _ordered_runtime_effects(effects: Sequence[Dict[str, Any]]) -> Tuple[Dict[str, Any], ...]:
+		"""
+		Apply delete effects before add effects.
+
+		PDDL state-transition semantics treats a fact that is both deleted and added
+		by the same action instance as true in the successor state. This matters for
+		no-op-like grounded calls such as ``turn_to(s, d, d)``.
+		"""
+
+		normalized_effects = tuple(dict(effect) for effect in effects)
+		negative_effects = tuple(
+			effect for effect in normalized_effects if not bool(effect.get("is_positive", True))
+		)
+		positive_effects = tuple(
+			effect for effect in normalized_effects if bool(effect.get("is_positive", True))
+		)
+		return (*negative_effects, *positive_effects)
 
 	@staticmethod
 	def _parse_runtime_action_step(step: str) -> Optional[Tuple[str, Tuple[str, ...]]]:

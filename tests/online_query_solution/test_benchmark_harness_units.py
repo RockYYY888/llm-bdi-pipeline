@@ -21,6 +21,7 @@ import tests.support.online_query_solution_benchmark_support as benchmark_suppor
 from tests.run_online_query_solution_benchmark import (
 	DomainRun,
 	_collect_domain_run_result,
+	_load_existing_domain_summaries,
 	_load_failed_query_ids_for_run,
 	_write_latest_run_manifest,
 	_write_run_summary_snapshot,
@@ -358,6 +359,27 @@ def test_full_sweep_summary_snapshot_tracks_partial_domains(tmp_path: Path) -> N
 	assert summary["completed_query_count"] == 24
 	assert summary["remaining_query_count"] == 16
 	assert summary["complete"] is False
+
+
+def test_full_sweep_resume_loads_partial_domain_summaries(tmp_path: Path) -> None:
+	run_dir = tmp_path / "20260420_230000"
+	run_dir.mkdir(parents=True)
+	(run_dir / "transport.summary.json").write_text(
+		json.dumps(
+			{
+				"total_queries": 40,
+				"complete": False,
+				"completed_query_ids": ["query_1"],
+				"remaining_query_ids": ["query_2"],
+			},
+			indent=2,
+		),
+	)
+
+	summaries = _load_existing_domain_summaries(run_dir)
+
+	assert "transport" in summaries
+	assert summaries["transport"]["complete"] is False
 
 
 def test_collect_domain_run_result_keeps_partial_summary_on_child_failure(

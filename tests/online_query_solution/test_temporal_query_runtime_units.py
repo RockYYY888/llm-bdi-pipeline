@@ -220,6 +220,22 @@ def test_goal_grounding_validator_rejects_lifted_arguments() -> None:
 		)
 
 
+def test_goal_grounding_validator_rejects_formula_with_json_braces() -> None:
+	generator = NLToLTLfGenerator()
+
+	with pytest.raises(ValueError, match="JSON braces"):
+		generator._validate_payload(
+			query_text="stack block b on a",
+			payload={
+				"ltlf_formula": "F(stack(b, a))}",
+			},
+			method_library=_sample_method_library(),
+			typed_objects={"a": "block", "b": "block"},
+			task_type_map={"stack": ("block", "block")},
+			type_parent_map={"block": "object", "object": None},
+		)
+
+
 def test_goal_grounding_formula_atom_extractor_accepts_operator_sequences() -> None:
 	atoms = NLToLTLfGenerator._extract_formula_atoms("XF(stack(b, a))")
 
@@ -290,6 +306,48 @@ def test_goal_grounding_prompt_requires_explicit_order_preservation() -> None:
 	assert "MUST NOT leave the final answer only in hidden reasoning content" in system_prompt
 	assert "MUST NOT return an empty completion response" in system_prompt
 	assert "goal_facts" not in system_prompt
+
+
+def test_goal_grounding_prompt_compacts_large_object_inventory_without_changing_validation() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+	typed_objects = {f"b{index}": "block" for index in range(1, 301)}
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="do_clear", parameters=("x",), is_primitive=False),
+			HTNTask(name="do_on_table", parameters=("x",), is_primitive=False),
+		],
+		primitive_tasks=[],
+		methods=[],
+	)
+
+	system_prompt, _ = generator._build_prompts(
+		query_text=(
+			"Using blocks b18 and b24, complete the tasks "
+			"do_clear(b18), then do_on_table(b18), then do_clear(b24)."
+		),
+		method_library=method_library,
+		typed_objects=typed_objects,
+		task_type_map={
+			"do_clear": ("block",),
+			"do_on_table": ("block",),
+		},
+	)
+	result = generator._validate_payload(
+		query_text="do_clear(b300)",
+		payload={"ltlf_formula": "F(do_clear(b300))"},
+		method_library=method_library,
+		typed_objects=typed_objects,
+		task_type_map={"do_clear": ("block",)},
+		type_parent_map={"block": "object", "object": None},
+	)
+
+	assert "Grounded problem objects relevant to this query:" in system_prompt
+	assert "b18" in system_prompt
+	assert "b24" in system_prompt
+	assert "b300" not in system_prompt
+	assert "omitted_objects" in system_prompt
+	assert result.subgoals[0].args == ("b300",)
 
 
 def test_goal_grounding_prompt_uses_rover_local_examples_without_do_prefix_bias() -> None:
@@ -809,6 +867,71 @@ def test_jason_runner_filters_transport_via_chunks_without_current_position_cont
 	assert len(ordered_chunks) == 1
 	assert '"m-drive-to-via"' in ordered_chunks[0]
 	assert "at(V, MID)" in ordered_chunks[0]
+
+
+def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
+	runner = JasonRunner()
+	agentspeak_code = "\n".join(
+		[
+			"/* Initial Beliefs */",
+			"at(truck, loc0).",
+			"road(loc0, loc1).",
+			"",
+			"/* Primitive Action Plans */",
+			"",
+			"/* HTN Method Plans */",
+			"+!get_to(V, DEST) : at(V, SRC) & road(SRC, DEST) <-",
+			'\t.print("runtime trace method flat ", "m-drive-to");',
+			"\t!drive(V, SRC, DEST).",
+			"",
+			"+!get_to(V, DEST) : road(MID, DEST) <-",
+			'\t.print("runtime trace method flat ", "m-drive-to-via-unsafe");',
+			"\t!get_to(V, MID);",
+			"\t!drive(V, MID, DEST).",
+			"",
+			"/* DFA Transition Wrappers */",
+		],
+	)
+
+	runner_asl = runner._build_runner_asl(
+		agentspeak_code,
+		seed_facts=("at(truck, loc0)", "road(loc0, loc1)"),
+		runtime_objects=("truck", "loc0", "loc1"),
+		object_types={"truck": "vehicle", "loc0": "location", "loc1": "location"},
+		type_parent_map={"vehicle": "object", "location": "object", "object": None},
+	)
+
+	assert "m-drive-to" in runner_asl
+	assert "m-drive-to-via-unsafe" not in runner_asl
+
+
+def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions() -> None:
+	runner = JasonRunner()
+	agentspeak_code = "\n".join(
+		[
+			"/* Initial Beliefs */",
+			"",
+			"/* Primitive Action Plans */",
+			"+!turn_to(SAT, TO, FROM) : pointing(SAT, FROM) <-",
+			"\tturn_to(SAT, TO, FROM);",
+			"\t+pointing(SAT, TO);",
+			"\t-pointing(SAT, FROM).",
+			"",
+			"/* HTN Method Plans */",
+			"",
+			"/* DFA Transition Wrappers */",
+		],
+	)
+
+	rewritten = runner._rewrite_primitive_wrappers_for_environment(agentspeak_code)
+
+	assert rewritten.index("-pointing(SAT, FROM)") < rewritten.index("+pointing(SAT, TO)")
+	assert runner._ordered_runtime_effects(
+		(
+			{"predicate": "pointing", "args": ("sat0", "star0"), "is_positive": True},
+			{"predicate": "pointing", "args": ("sat0", "star0"), "is_positive": False},
+		),
+	)[-1]["is_positive"] is True
 
 
 def test_dfa_builder_always_uses_ltlf2dfa_for_large_ordered_sequence(
@@ -1514,7 +1637,7 @@ def test_goal_grounding_prompt_attempts_keep_single_strict_mode_for_huge_queries
 	)
 
 	assert [attempt["mode"] for attempt in attempts] == ["few_shot_strict"]
-	assert "Available grounded problem objects:" in attempts[0]["system"]
+	assert "Grounded problem objects relevant to this query:" in attempts[0]["system"]
 	assert attempts[0]["request_timeout"] >= 120.0
 
 

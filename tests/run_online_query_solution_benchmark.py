@@ -128,8 +128,7 @@ def _load_existing_domain_summaries(run_dir: Path) -> Dict[str, Dict[str, object
 			summary = json.loads(summary_path.read_text())
 		except json.JSONDecodeError:
 			continue
-		if summary.get("complete", True):
-			domain_summaries[domain_key] = summary
+		domain_summaries[domain_key] = summary
 	return domain_summaries
 
 
@@ -349,7 +348,10 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1, run_id: str | None =
 	pending_domains = [
 		domain_key
 		for domain_key in DOMAIN_KEYS
-		if domain_key not in domain_summaries
+		if (
+			domain_key not in domain_summaries
+			or not bool(domain_summaries[domain_key].get("complete"))
+		)
 		and (
 			not _RUN_FAILED_ONLY_QUERY_IDS
 			or _RUN_FAILED_ONLY_QUERY_IDS.get(domain_key)

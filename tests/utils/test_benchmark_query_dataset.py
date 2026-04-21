@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,6 +14,22 @@ if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
 import utils.benchmark_query_dataset as benchmark_query_dataset
+
+
+def test_canonical_benchmark_queries_use_explicit_ordered_task_text() -> None:
+	dataset_path = PROJECT_ROOT / "src" / "benchmark_data" / "benchmark_queries.json"
+	dataset = json.loads(dataset_path.read_text())
+	call_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\([^()]*\)")
+
+	for domain_key, domain_record in dict(dataset["domains"]).items():
+		for query_id, case in dict(domain_record["cases"]).items():
+			instruction = str(case["instruction"])
+			assert "?" not in instruction, f"{domain_key}:{query_id} contains lifted variables"
+			task_text = instruction.split("complete the tasks ", 1)[1].rsplit(".", 1)[0]
+			task_calls = call_pattern.findall(task_text)
+			if len(task_calls) > 1:
+				assert " and " not in task_text, f"{domain_key}:{query_id} has ambiguous task conjunction"
+				assert ", then " in task_text, f"{domain_key}:{query_id} lacks explicit ordered separators"
 
 
 def test_load_problem_query_cases_reads_explicit_json_binding_only(

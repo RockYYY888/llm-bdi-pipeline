@@ -307,7 +307,7 @@ class NLToLTLfGenerator:
 		task_type_map: Dict[str, Tuple[str, ...]],
 	) -> Tuple[str, str]:
 		task_lines = self._task_inventory_lines(method_library, task_type_map)
-		object_lines = self._object_inventory_lines(typed_objects)
+		object_lines = self._prompt_object_inventory_lines(query_text, typed_objects)
 		few_shot_lines = self._few_shot_prompt_lines(
 			typed_objects=typed_objects,
 			task_type_map=task_type_map,
@@ -331,7 +331,7 @@ class NLToLTLfGenerator:
 				"Callable grounded online tasks:",
 				task_lines or "- none",
 				"",
-				"Available grounded problem objects:",
+				"Grounded problem objects relevant to this query:",
 				object_lines or "- none",
 				"",
 				"Output contract:",
@@ -347,7 +347,8 @@ class NLToLTLfGenerator:
 				"- If the same grounded task call must occur multiple times, each repeated occurrence must use a distinct grounded task-event identity by appending an occurrence suffix to the task name, such as task__e1(arg1, arg2) and task__e2(arg1, arg2).",
 				"- Never reuse the exact same task-event atom twice in one formula.",
 				"- Do not use placeholder atoms such as subgoal_1, query_step_1, goal_1, or event_1.",
-				'- Do not output lifted variables such as ?x. All args must be grounded problem objects from the provided inventory.',
+				'- Do not output lifted variables such as ?x. All args must be grounded problem objects from the current problem.',
+				"- For large problems, the prompt may list only objects explicitly named in the query; validation still checks every argument against the full problem object set.",
 				'- Do not invent tasks or objects.',
 				"- Do not derive new task names from object inventories, setup inventories, or domain descriptions.",
 				"- If the query begins with an object inventory such as 'Using ...' or any other setup inventory, treat that inventory as context only, not as task-event atoms.",
@@ -357,6 +358,7 @@ class NLToLTLfGenerator:
 				"- If that listed task sequence repeats the same grounded task call multiple times, preserve the repeated order and count, but distinguish each repeated occurrence with a unique __eN suffix on the task name.",
 				"- Treat a comma-separated task list after 'complete the tasks' as ordered by default. Preserve the listed order in ltlf_formula unless the query explicitly states that order does not matter or may be arbitrary.",
 				"- If the query is ambiguous, still return your best grounded interpretation as one formula. Do not add extra fields.",
+				'- The formula string must not contain JSON braces "{" or "}".',
 				"",
 				"Formula syntax reminders:",
 				"- Atoms: grounded task-event calls using exact callable inventory names.",
@@ -543,6 +545,56 @@ class NLToLTLfGenerator:
 			lines.append(f"- {type_name}: {', '.join(objects)}")
 		return "\n".join(lines)
 
+	@classmethod
+	def _prompt_object_inventory_lines(
+		cls,
+		query_text: str,
+		typed_objects: Dict[str, str],
+		*,
+		max_listed_objects: int = 80,
+	) -> str:
+		"""
+		Render a compact object inventory for the prompt without changing validation.
+
+		Large benchmark problems can contain hundreds of objects even when the natural
+		language query mentions only a small subset. Listing the full object set makes
+		the grounding prompt unnecessarily long and has caused provider timeouts. The
+		validator still receives the complete ``typed_objects`` dictionary.
+		"""
+
+		if len(typed_objects) <= max_listed_objects:
+			return cls._object_inventory_lines(typed_objects)
+
+		query_tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_-]*", str(query_text or "")))
+		referenced_objects = {
+			object_name: type_name
+			for object_name, type_name in typed_objects.items()
+			if str(object_name).strip() in query_tokens
+		}
+		if not referenced_objects:
+			group_counts: Dict[str, int] = defaultdict(int)
+			for type_name in typed_objects.values():
+				group_counts[str(type_name).strip() or "object"] += 1
+			lines = [
+				f"- {type_name}: {count} total objects available; none are explicitly named in the query text"
+				for type_name, count in sorted(group_counts.items())
+			]
+			lines.append(
+				f"- omitted_objects: {len(typed_objects)} objects are available for validation but not listed",
+			)
+			return "\n".join(lines)
+
+		rendered = cls._object_inventory_lines(referenced_objects)
+		omitted_count = max(0, len(typed_objects) - len(referenced_objects))
+		if omitted_count:
+			rendered = "\n".join(
+				[
+					rendered,
+					f"- omitted_objects: {omitted_count} additional objects are available for validation but not listed because they are not referenced by the query text",
+				],
+			)
+		return rendered
+
 	def _validate_payload(
 		self,
 		*,
@@ -556,6 +608,8 @@ class NLToLTLfGenerator:
 		ltlf_formula = self._normalise_ltlf_formula(str(payload.get("ltlf_formula") or ""))
 		if not ltlf_formula:
 			raise ValueError('Goal grounding response omitted required field "ltlf_formula".')
+		if "{" in ltlf_formula or "}" in ltlf_formula:
+			raise ValueError("LTLf formula string may not contain JSON braces.")
 		unexpected_keys = sorted(
 			key
 			for key in payload.keys()
