@@ -27,7 +27,11 @@ from online_query_solution.goal_grounding.canonical_ordered_formula import (
 	build_ordered_benchmark_formula,
 	select_canonical_benchmark_ordered_formula_style,
 )
-from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
+from online_query_solution.goal_grounding.grounder import (
+	GoalGroundingEmptyResponseError,
+	GoalGroundingProviderUnavailable,
+	NLToLTLfGenerator,
+)
 from online_query_solution.goal_grounding.grounding_map import GroundingMap
 from online_query_solution.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from online_query_solution.jason_runtime.runner import JasonRunner, JasonValidationResult
@@ -563,7 +567,9 @@ def test_goal_grounding_retries_after_empty_response_extraction_and_then_succeed
 		del response
 		call_count["extract"] += 1
 		if call_count["extract"] < 3:
-			raise RuntimeError("LLM response did not contain usable textual JSON content.")
+			raise GoalGroundingEmptyResponseError(
+				"LLM response did not contain any textual completion content.",
+			)
 		return '{"ltlf_formula":"F(do_put_on(b1, b2))"}'
 
 	monkeypatch = pytest.MonkeyPatch()
@@ -623,7 +629,7 @@ def test_goal_grounding_retries_timeout_before_first_chunk_and_then_succeeds() -
 	assert len(generator.last_generation_metadata["attempt_errors"]) == 2
 
 
-def test_goal_grounding_stops_after_three_transport_retries() -> None:
+def test_goal_grounding_marks_provider_unavailable_after_transport_retries() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(domain_file=domain_file)
 	generator.client = object()
@@ -640,7 +646,7 @@ def test_goal_grounding_stops_after_three_transport_retries() -> None:
 	monkeypatch = pytest.MonkeyPatch()
 	monkeypatch.setattr(NLToLTLfGenerator, "_create_chat_completion", fake_create)
 	try:
-		with pytest.raises(TimeoutError, match="before a response chunk was created"):
+		with pytest.raises(GoalGroundingProviderUnavailable, match="did not return usable"):
 			generator.generate(
 				"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
 				method_library=_sample_method_library(),
@@ -653,7 +659,37 @@ def test_goal_grounding_stops_after_three_transport_retries() -> None:
 
 	assert call_count["create"] == 4
 	assert generator.last_generation_metadata["attempt_count"] == 4
-	assert len(generator.last_generation_metadata["attempt_errors"]) == 4
+
+
+def test_goal_grounding_does_not_retry_malformed_text_response() -> None:
+	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
+	generator = NLToLTLfGenerator(domain_file=domain_file)
+	generator.client = object()
+	call_count = {"create": 0}
+
+	def fake_create(self, messages, **_kwargs):
+		del messages
+		call_count["create"] += 1
+		return "this is not json"
+
+	monkeypatch = pytest.MonkeyPatch()
+	monkeypatch.setattr(NLToLTLfGenerator, "_create_chat_completion", fake_create)
+	monkeypatch.setattr(NLToLTLfGenerator, "_extract_response_text", lambda self, response: str(response))
+	try:
+		with pytest.raises(Exception):
+			generator.generate(
+				"Using blocks b1 and b2, complete the tasks do_put_on(b1, b2).",
+				method_library=_sample_method_library(),
+				typed_objects={"b1": "block", "b2": "block"},
+				task_type_map={"do_put_on": ("block", "block")},
+				type_parent_map={"block": "object", "object": None},
+			)
+	finally:
+		monkeypatch.undo()
+
+	assert call_count["create"] == 1
+	assert len(generator.last_generation_metadata["attempt_errors"]) == 1
+	assert generator.last_generation_metadata["attempt_errors"][0]["retryable"] == "false"
 
 
 def test_dfa_builder_wraps_converter_output(monkeypatch: pytest.MonkeyPatch) -> None:

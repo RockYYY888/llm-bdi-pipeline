@@ -41,7 +41,8 @@ GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
 	"exceeded the configured first-chunk deadline before any streaming content arrived",
 	"llm response did not include any choices",
 	"llm response choice did not include a message payload",
-	"llm response did not contain usable textual json content",
+	"llm response did not contain any textual completion content",
+	"llm response returned empty textual completion content",
 )
 GOAL_GROUNDING_RETRYABLE_ERROR_CLASS_NAMES = {
 	"timeouterror",
@@ -55,6 +56,31 @@ GOAL_GROUNDING_RETRYABLE_ERROR_CLASS_NAMES = {
 	"remoteprotocolerror",
 	"networkerror",
 }
+
+
+class GoalGroundingEmptyResponseError(RuntimeError):
+	"""The provider returned no usable completion text for a grounding request."""
+
+
+class GoalGroundingMalformedResponseError(ValueError):
+	"""The model returned text, but it was not valid goal-grounding JSON."""
+
+
+class GoalGroundingProviderUnavailable(RuntimeError):
+	"""All retry attempts were exhausted before the provider returned usable text."""
+
+	def __init__(
+		self,
+		message: str,
+		*,
+		attempt_count: int,
+		attempt_errors: Sequence[Dict[str, str]],
+		last_error: Exception,
+	) -> None:
+		super().__init__(message)
+		self.attempt_count = attempt_count
+		self.attempt_errors = tuple(dict(error) for error in attempt_errors)
+		self.last_error = last_error
 
 
 class NLToLTLfGenerator:
@@ -248,6 +274,23 @@ class NLToLTLfGenerator:
 			"last_finish_reason": last_finish_reason,
 			**response_transport_metadata,
 		}
+		if self._is_retryable_goal_grounding_error(last_error):
+			provider_error = GoalGroundingProviderUnavailable(
+				"Goal-grounding provider did not return usable completion text after "
+				f"{attempt_count} attempts: {last_error}",
+				attempt_count=attempt_count,
+				attempt_errors=attempt_errors,
+				last_error=last_error,
+			)
+			try:
+				setattr(
+					provider_error,
+					"transport_metadata",
+					dict(getattr(last_error, "transport_metadata", {}) or {}),
+				)
+			except Exception:
+				pass
+			raise provider_error from last_error
 		raise last_error
 
 	@staticmethod
@@ -879,11 +922,13 @@ class NLToLTLfGenerator:
 	def _extract_response_text(self, response: object) -> str:
 		choices = getattr(response, "choices", None) or ()
 		if not choices:
-			raise RuntimeError("LLM response did not include any choices.")
+			raise GoalGroundingEmptyResponseError("LLM response did not include any choices.")
 
 		message = getattr(choices[0], "message", None)
 		if message is None:
-			raise RuntimeError("LLM response choice did not include a message payload.")
+			raise GoalGroundingEmptyResponseError(
+				"LLM response choice did not include a message payload.",
+			)
 
 		for candidate in (
 			getattr(message, "content", None),
@@ -904,7 +949,9 @@ class NLToLTLfGenerator:
 			extracted = self._extract_response_text_from_response_dump(response_dump)
 			if extracted is not None:
 				return extracted
-		raise RuntimeError("LLM response did not contain usable textual JSON content.")
+		raise GoalGroundingEmptyResponseError(
+			"LLM response did not contain any textual completion content.",
+		)
 
 	@staticmethod
 	def _extract_finish_reason(response: object) -> str:
@@ -1277,8 +1324,8 @@ class NLToLTLfGenerator:
 			if complete_payload is not None:
 				return complete_payload, finish_reason or "stop", transport_metadata
 			if text:
-				error = RuntimeError(
-					"LLM response did not contain usable textual JSON content. "
+				error = GoalGroundingMalformedResponseError(
+					"LLM response text did not contain a complete usable JSON object. "
 					f"finish_reason={finish_reason!r}",
 				)
 				try:
@@ -1286,8 +1333,8 @@ class NLToLTLfGenerator:
 				except Exception:
 					pass
 				raise error
-			error = RuntimeError(
-				"LLM response did not contain usable textual JSON content. "
+			error = GoalGroundingEmptyResponseError(
+				"LLM response returned empty textual completion content. "
 				f"finish_reason={finish_reason!r}",
 			)
 			try:

@@ -23,7 +23,10 @@ from online_query_solution.domain_selection import (
 	OnlineDomainContext,
 	normalize_online_domain_source,
 )
-from online_query_solution.goal_grounding.grounder import NLToLTLfGenerator
+from online_query_solution.goal_grounding.grounder import (
+	GoalGroundingProviderUnavailable,
+	NLToLTLfGenerator,
+)
 from online_query_solution.jason_runtime import JasonRunner
 from online_query_solution.jason_runtime.runner import JasonValidationError
 from online_query_solution.runtime_context import (
@@ -102,6 +105,8 @@ class OnlineQuerySolutionOrchestrator:
 		)
 
 		self.output_dir: Optional[Path] = None
+		self._last_goal_grounding_failure_class = ""
+		self._last_goal_grounding_error = ""
 
 	def run_query(self, nl_instruction: str) -> Dict[str, Any]:
 		"""
@@ -192,10 +197,12 @@ class OnlineQuerySolutionOrchestrator:
 			online_domain=online_domain,
 		)
 		if grounding_result is None:
+			failure_class = self._last_goal_grounding_failure_class or "goal_grounding_failed"
 			return {
 				"success": False,
 				"step": "goal_grounding",
-				"error": "Temporal goal grounding failed",
+				"error": self._last_goal_grounding_error or "Temporal goal grounding failed",
+				"failure_class": failure_class,
 				"method_library": domain_library.to_dict(),
 			}
 
@@ -317,6 +324,8 @@ class OnlineQuerySolutionOrchestrator:
 		print("-" * 80)
 		stage_start = time.perf_counter()
 		generator: Optional[NLToLTLfGenerator] = None
+		self._last_goal_grounding_failure_class = ""
+		self._last_goal_grounding_error = ""
 
 		try:
 			generator = NLToLTLfGenerator(
@@ -363,6 +372,13 @@ class OnlineQuerySolutionOrchestrator:
 			print(f"  LTLf: {grounding_result.ltlf_formula}")
 			return grounding_result, llm_prompt, llm_response
 		except Exception as exc:
+			failure_class = (
+				"goal_grounding_provider_unavailable"
+				if isinstance(exc, GoalGroundingProviderUnavailable)
+				else "goal_grounding_failed"
+			)
+			self._last_goal_grounding_failure_class = failure_class
+			self._last_goal_grounding_error = str(exc)
 			generation_metadata = dict(getattr(generator, "last_generation_metadata", {}) or {})
 			llm_prompt = generation_metadata.get("last_prompt")
 			self.logger.log_goal_grounding_error(
@@ -372,6 +388,7 @@ class OnlineQuerySolutionOrchestrator:
 				llm_response=str(generation_metadata.get("last_response") or "") or None,
 				metadata={
 					"online_domain_source": online_domain.source,
+					"failure_class": failure_class,
 					"attempt_mode": generation_metadata.get("attempt_mode"),
 					"attempt_count": generation_metadata.get("attempt_count"),
 					"attempt_errors": generation_metadata.get("attempt_errors"),

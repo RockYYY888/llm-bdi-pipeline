@@ -11,8 +11,10 @@ if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
 from tests.support.online_query_solution_benchmark_support import (
+	GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET,
 	ONLINE_BENCHMARK_DOMAIN_SOURCE,
 	ONLINE_BENCHMARK_LIBRARY_SOURCE,
+	_classify_online_query_failure,
 	_extract_reported_online_domain_source,
 	apply_online_query_runtime_defaults,
 	run_online_query_solution_benchmark_for_domain,
@@ -37,6 +39,42 @@ def test_online_benchmark_runtime_defaults_pin_benchmark_domain_source() -> None
 
 def test_online_benchmark_execution_source_defaults_to_benchmark_when_metadata_missing() -> None:
 	assert _extract_reported_online_domain_source({}) == "benchmark"
+
+
+def test_goal_grounding_provider_unavailable_has_separate_bucket() -> None:
+	bucket = _classify_online_query_failure(
+		{
+			"success": False,
+			"step": "goal_grounding",
+			"failure_class": "goal_grounding_provider_unavailable",
+		},
+		{
+			"goal_grounding": {
+				"metadata": {"failure_class": "goal_grounding_provider_unavailable"},
+				"error": "Goal-grounding provider did not return usable completion text.",
+			},
+		},
+	)
+
+	assert bucket == GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET
+
+
+def test_goal_grounding_validation_error_remains_grounding_failed() -> None:
+	bucket = _classify_online_query_failure(
+		{
+			"success": False,
+			"step": "goal_grounding",
+			"error": 'LTLf formula references unknown grounded task "do_fake".',
+		},
+		{
+			"goal_grounding": {
+				"metadata": {"failure_class": "goal_grounding_failed"},
+				"error": 'LTLf formula references unknown grounded task "do_fake".',
+			},
+		},
+	)
+
+	assert bucket == "goal_grounding_failed"
 
 
 def test_online_benchmark_standard_library_source_is_benchmark() -> None:
@@ -196,6 +234,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 		"success": True,
 		"result": {"success": True, "step": ""},
 		"outcome_bucket": "hierarchical_plan_verified",
+		"goal_grounding_failure_class": "",
 		"log_dir": str((domain_root / "logs" / "q2").resolve()),
 		"execution": {
 			"runtime_execution": {

@@ -36,6 +36,7 @@ ONLINE_BENCHMARK_RESULTS_DIR = PROJECT_ROOT / "tests" / "generated" / "online_qu
 ONLINE_BENCHMARK_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 ONLINE_BENCHMARK_DOMAIN_SOURCE = "benchmark"
 ONLINE_BENCHMARK_LIBRARY_SOURCE = "benchmark"
+GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
 
 
 def apply_online_query_runtime_defaults(
@@ -73,6 +74,8 @@ def _classify_online_query_failure(result: Dict[str, Any], execution: Dict[str, 
 
 	step = str(result.get("step") or "").strip()
 	if step == "goal_grounding":
+		if _is_goal_grounding_provider_unavailable(result, execution):
+			return GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET
 		return "goal_grounding_failed"
 	if step == "temporal_compilation":
 		return "temporal_compilation_failed"
@@ -92,6 +95,31 @@ def _classify_online_query_failure(result: Dict[str, Any], execution: Dict[str, 
 	if verification_payload.get("status") == "failed":
 		return "hierarchical_rejection_failed"
 	return "unknown_failure"
+
+
+def _is_goal_grounding_provider_unavailable(
+	result: Dict[str, Any],
+	execution: Dict[str, Any],
+) -> bool:
+	if str(result.get("failure_class") or "").strip() == "goal_grounding_provider_unavailable":
+		return True
+	goal_grounding_payload = dict(execution.get("goal_grounding") or {})
+	metadata = dict(goal_grounding_payload.get("metadata") or {})
+	if str(metadata.get("failure_class") or "").strip() == "goal_grounding_provider_unavailable":
+		return True
+	error_text = str(goal_grounding_payload.get("error") or result.get("error") or "").lower()
+	if not error_text:
+		return False
+	transport_fragments = (
+		"provider did not return usable completion text",
+		"exceeded the configured wall-clock timeout before a response chunk was created",
+		"exceeded the configured first-chunk deadline before any streaming content arrived",
+		"did not include any choices",
+		"did not include a message payload",
+		"did not contain any textual completion content",
+		"returned empty textual completion content",
+	)
+	return any(fragment in error_text for fragment in transport_fragments)
 
 
 def _extract_failure_signature(
@@ -285,6 +313,7 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		or ((report.get("case") or {}).get("instruction") or ""),
 	).strip()
 	log_dir = report.get("log_dir")
+	result_payload = dict(report.get("result") or {})
 	return {
 		"run_id": report.get("run_id"),
 		"domain_key": str(report.get("domain_key") or ""),
@@ -293,8 +322,13 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		"problem_file": problem_file,
 		"library_source": str(report.get("library_source") or ""),
 		"success": bool(report.get("success")),
-		"result": dict(report.get("result") or {}),
+		"result": result_payload,
 		"outcome_bucket": str(report.get("outcome_bucket") or "unknown_failure"),
+		"goal_grounding_failure_class": str(
+			report.get("goal_grounding_failure_class")
+			or result_payload.get("failure_class")
+			or "",
+		),
 		"log_dir": str(log_dir) if log_dir else None,
 		"execution": dict(report.get("execution") or {}),
 		"failure_signature": dict(report.get("failure_signature") or {}),
@@ -344,6 +378,7 @@ def _count_query_outcomes(query_reports: Sequence[Dict[str, Any]]) -> Dict[str, 
 	counts = {
 		"hierarchical_plan_verified": 0,
 		"goal_grounding_failed": 0,
+		GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET: 0,
 		"temporal_compilation_failed": 0,
 		"agentspeak_rendering_failed": 0,
 		"runtime_execution_failed": 0,
@@ -398,6 +433,10 @@ def _build_domain_summary(
 		"complete": not remaining_query_ids,
 		"verified_successes": counts.get("hierarchical_plan_verified", 0),
 		"goal_grounding_failures": counts.get("goal_grounding_failed", 0),
+		"goal_grounding_provider_failures": counts.get(
+			GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET,
+			0,
+		),
 		"temporal_compilation_failures": counts.get("temporal_compilation_failed", 0),
 		"agentspeak_rendering_failures": counts.get("agentspeak_rendering_failed", 0),
 		"runtime_execution_failures": counts.get("runtime_execution_failed", 0),
@@ -418,6 +457,10 @@ def _build_domain_summary(
 				),
 				"success": bool(report.get("success")),
 				"outcome_bucket": str(report.get("outcome_bucket") or ""),
+				"goal_grounding_failure_class": str(
+					report.get("goal_grounding_failure_class")
+					or ((report.get("result") or {}).get("failure_class") or ""),
+				),
 				"step": str((report.get("result") or {}).get("step") or ""),
 				"verification_mode": str(
 					(((report.get("execution") or {}).get("runtime_execution") or {}).get("metadata") or {}).get(
