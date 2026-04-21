@@ -29,6 +29,7 @@ from utils.symbol_normalizer import SymbolNormalizer
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
 KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
 KIMI_REASONING_CONTEXT_RATIO = 0.60
+KIMI_CONTEXT_MARGIN_TOKENS = 1_024
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
 ONLINE_LTLF_GENERATION_SESSION_ID = "online-ltlf-generation"
@@ -870,9 +871,12 @@ class NLToLTLfGenerator:
 	):
 		profile = dict(request_profile or self._goal_grounding_request_profile(messages=messages))
 		stream_response = bool(profile.get("stream_response"))
-		capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
-			response_max_tokens,
-		)
+		if str(self.model or "").strip().lower().startswith("moonshotai/"):
+			capped_response_max_tokens = int(profile["completion_max_tokens"])
+		else:
+			capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
+				response_max_tokens,
+			)
 		request_kwargs = {
 			"model": self.model,
 			"messages": messages,
@@ -1007,6 +1011,10 @@ class NLToLTLfGenerator:
 		if model_name.startswith("moonshotai/"):
 			context_window_tokens = self._goal_grounding_total_context_tokens()
 			prompt_token_estimate = self._estimate_goal_grounding_prompt_token_budget(messages)
+			completion_max_tokens = max(
+				context_window_tokens - prompt_token_estimate - KIMI_CONTEXT_MARGIN_TOKENS,
+				1,
+			)
 			reasoning_max_tokens = math.floor(
 				context_window_tokens * KIMI_REASONING_CONTEXT_RATIO,
 			)
@@ -1018,6 +1026,7 @@ class NLToLTLfGenerator:
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
+				"completion_max_tokens": completion_max_tokens,
 				"reasoning_context_ratio": KIMI_REASONING_CONTEXT_RATIO,
 				"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 			}
@@ -1041,6 +1050,7 @@ class NLToLTLfGenerator:
 		for metadata_key, profile_key in (
 			("llm_context_window_tokens", "context_window_tokens"),
 			("llm_prompt_token_estimate", "prompt_token_estimate"),
+			("llm_completion_max_tokens", "completion_max_tokens"),
 			("llm_answer_token_reserve", "answer_token_reserve"),
 			("llm_context_margin_tokens", "context_margin_tokens"),
 			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
@@ -1083,7 +1093,12 @@ class NLToLTLfGenerator:
 	) -> int | None:
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			return self._goal_grounding_total_context_tokens()
+			if requested_max_tokens is not None:
+				return max(int(requested_max_tokens), 1)
+			return max(
+				self._goal_grounding_total_context_tokens() - KIMI_CONTEXT_MARGIN_TOKENS,
+				1,
+			)
 		requested = max(int(requested_max_tokens or self.response_max_tokens or 0), 1)
 		return requested
 

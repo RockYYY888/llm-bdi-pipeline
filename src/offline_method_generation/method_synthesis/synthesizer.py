@@ -168,7 +168,8 @@ class HTNMethodSynthesizer(
 		metadata["llm_prompt"] = prompt
 		metadata["llm_request_count"] = OFFLINE_METHOD_SYNTHESIS_MAX_RETRIES + 1
 		if str(self.model or "").strip().lower().startswith("moonshotai/"):
-			request_max_tokens = None
+			request_profile = self._method_synthesis_request_profile(prompt=prompt)
+			request_max_tokens = int(request_profile["completion_max_tokens"])
 		else:
 			request_max_tokens = self._estimate_method_synthesis_response_token_budget(
 				prompt_analysis=prompt_analysis,

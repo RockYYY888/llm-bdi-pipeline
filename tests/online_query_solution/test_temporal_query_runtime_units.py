@@ -1799,6 +1799,7 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_with_reasoning_cap()
 	assert profile["first_chunk_timeout_seconds"] == 300.0
 	assert profile["context_window_tokens"] == 262_144
 	assert profile["prompt_token_estimate"] == expected_prompt_estimate
+	assert profile["completion_max_tokens"] == 262_144 - expected_prompt_estimate - 1_024
 	assert profile["reasoning_max_tokens"] == 157_286
 	assert profile["reasoning_context_ratio"] == 0.60
 	assert profile["session_id"] == "online-ltlf-generation"
@@ -1826,8 +1827,9 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_full_outp
 		api_key="sk-test",
 	)
 
+	messages = [{"role": "system", "content": "Return JSON."}]
 	response = generator._create_chat_completion(
-		[{"role": "system", "content": "Return JSON."}],
+		messages,
 		response_max_tokens=321,
 		request_timeout=123.0,
 	)
@@ -1837,7 +1839,8 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_full_outp
 	assert captured_request["request_timeout_seconds"] == 123.0
 	assert request_kwargs["timeout"] == 123.0
 	assert request_kwargs["stream"] is True
-	assert request_kwargs["max_tokens"] == 262_144
+	expected_prompt_estimate = generator._estimate_goal_grounding_prompt_token_budget(messages)
+	assert request_kwargs["max_tokens"] == 262_144 - expected_prompt_estimate - 1_024
 	assert "response_format" not in request_kwargs
 	assert request_kwargs["extra_body"] == {
 		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},

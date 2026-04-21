@@ -341,7 +341,7 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 def test_method_synthesis_transport_requests_kimi_full_output_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(model="moonshotai/kimi-k2.6")
 
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) == 204800
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) == 203776
 
 
 def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
@@ -360,6 +360,7 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["context_window_tokens"] == 262144
 	assert profile["prompt_token_estimate"] == expected_prompt_tokens
+	assert profile["completion_max_tokens"] == 262144 - expected_prompt_tokens - 1024
 	assert profile["reasoning_max_tokens"] == 157286
 	assert profile["reasoning_context_ratio"] == 0.60
 	assert profile["first_chunk_timeout_seconds"] == 400.0
@@ -563,6 +564,7 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 			"llm_first_chunk_timeout_seconds": 400.0,
 			"llm_context_window_tokens": 204800,
 			"llm_prompt_token_estimate": 1,
+			"llm_completion_max_tokens": 203775,
 			"llm_reasoning_context_ratio": 0.60,
 			"llm_session_id": "offline-method-generation",
 			"llm_request_timeout_seconds": 0.01,
