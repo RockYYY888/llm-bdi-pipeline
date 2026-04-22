@@ -21,7 +21,7 @@ from planning.process_capture import (
 	read_full_process_output,
 	run_subprocess_to_files,
 )
-from planning.representations import PlanningRepresentation
+from planning.representations import PlanningRepresentation, RepresentationBuildResult
 from htn_evaluation.pipeline import HTNEvaluationPipeline
 from htn_evaluation.problem_root_evaluator import HTNProblemRootEvaluator
 import htn_evaluation.problem_root_evaluator as problem_root_evaluator
@@ -1385,6 +1385,48 @@ def test_planning_tasks_can_filter_to_one_requested_planner() -> None:
 
 	assert tasks
 	assert all(task.backend_name == "lifted_panda_sat" for task in tasks)
+
+
+def test_lifted_planner_forces_linearized_representation_for_total_order_problem(
+	tmp_path: Path,
+) -> None:
+	original_representation = PlanningRepresentation(
+		representation_id="original_total_order",
+		representation_source="original",
+		ordering_kind="total_order",
+		domain_file=str(tmp_path / "domain.hddl"),
+		problem_file=str(tmp_path / "problem.hddl"),
+		compilation_profile="identity",
+		metadata={"requires_linearization": False},
+	)
+	context = SimpleNamespace(
+		output_dir=tmp_path,
+		domain_file=str(tmp_path / "domain.hddl"),
+		problem_file=str(tmp_path / "problem.hddl"),
+		_build_problem_representations=Mock(
+			return_value=RepresentationBuildResult(
+				structure=SimpleNamespace(requires_linearization=False),
+				representations=(original_representation,),
+			),
+		),
+	)
+	linearized_domain = tmp_path / "domain.linearized.hddl"
+	linearized_problem = tmp_path / "problem.linearized.hddl"
+	with patch.object(problem_root_evaluator, "LiftedLinearPlanner") as planner_cls:
+		planner_cls.return_value.linearize_hddl_files.return_value = {
+			"linearized_domain_file": str(linearized_domain),
+			"linearized_problem_file": str(linearized_problem),
+			"linearizer_seconds": 0.1,
+		}
+
+		tasks = HTNProblemRootEvaluator(context).planning_tasks(
+			planner_id="lifted_panda_sat",
+		)
+
+	assert len(tasks) == 1
+	assert tasks[0].backend_name == "lifted_panda_sat"
+	assert tasks[0].representation.representation_id == "linearized_total_order"
+	assert tasks[0].representation.metadata["forced_for_backend_capability"] is True
 
 
 def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressure(

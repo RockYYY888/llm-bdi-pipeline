@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
+from planning.linearization import LiftedLinearPlanner
 from planning.official_benchmark import OFFICIAL_BACKEND_SELECTION_RULE
+from planning.representations import PlanningRepresentation, RepresentationBuildResult
 from .problem_root_runtime import official_problem_root_planning_task_worker
 from .result_tables import (
 	PLANNER_OR_RACE_MODE,
@@ -52,9 +54,77 @@ class HTNProblemRootEvaluator:
 		)
 		if planner_id is not None and not selected_backends:
 			raise ValueError(f"Unknown official planning backend '{planner_id}'.")
-		return expand_backend_tasks_for_representations(
+		tasks = expand_backend_tasks_for_representations(
 			representations=build_result.representations,
 			backends=selected_backends,
+		)
+		if tasks:
+			return tasks
+		if not self._selected_backends_require_linearized_input(selected_backends):
+			return tasks
+		return expand_backend_tasks_for_representations(
+			representations=(
+				*self._representations_without_duplicate_linearized(build_result),
+				self._build_linearized_representation_for_backend(
+					build_result=build_result,
+					timeout_seconds=timeout_seconds,
+				),
+			),
+			backends=selected_backends,
+		)
+
+	@staticmethod
+	def _selected_backends_require_linearized_input(
+		selected_backends: Sequence[Any],
+	) -> bool:
+		return any(
+			"linearized" in set(getattr(backend, "supported_sources", frozenset()))
+			for backend in selected_backends
+		)
+
+	@staticmethod
+	def _representations_without_duplicate_linearized(
+		build_result: RepresentationBuildResult,
+	) -> tuple[PlanningRepresentation, ...]:
+		return tuple(
+			representation
+			for representation in build_result.representations
+			if representation.representation_id != "linearized_total_order"
+		)
+
+	def _build_linearized_representation_for_backend(
+		self,
+		*,
+		build_result: RepresentationBuildResult,
+		timeout_seconds: Optional[float],
+	) -> PlanningRepresentation:
+		if self.context.output_dir is None:
+			raise ValueError("Linearized backend representation requires an output directory.")
+		workspace = Path(self.context.output_dir).resolve() / "representations"
+		linearizer = LiftedLinearPlanner(workspace=workspace)
+		artifacts = linearizer.linearize_hddl_files(
+			domain_file=self.context.domain_file,
+			problem_file=self.context.problem_file,
+			transition_name="official_problem_root_backend_linearization",
+			timeout_seconds=timeout_seconds,
+		)
+		metadata = dict(artifacts)
+		metadata.update(
+			{
+				"forced_for_backend_capability": True,
+				"original_requires_linearization": bool(
+					build_result.structure.requires_linearization,
+				),
+			},
+		)
+		return PlanningRepresentation(
+			representation_id="linearized_total_order",
+			representation_source="linearized",
+			ordering_kind="total_order",
+			domain_file=str(Path(artifacts["linearized_domain_file"]).resolve()),
+			problem_file=str(Path(artifacts["linearized_problem_file"]).resolve()),
+			compilation_profile="semantics_preserving_linearization",
+			metadata=metadata,
 		)
 
 	def run_backend_evaluation(
