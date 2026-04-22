@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -741,6 +742,61 @@ def test_method_synthesis_transport_ignores_reasoning_payload_without_storing_it
 	assert "llm_reasoning_preview" not in transport_metadata
 	assert "llm_reasoning_characters" not in transport_metadata
 	assert "llm_first_content_chunk_seconds" not in transport_metadata
+
+
+def test_method_synthesis_streaming_total_timeout_survives_off_main_thread() -> None:
+	class FakeDelta:
+		content = None
+		reasoning = "thinking"
+
+	class FakeChoice:
+		delta = FakeDelta()
+		finish_reason = None
+
+	class FakeChunk:
+		id = "req_off_main_timeout"
+		choices = [FakeChoice()]
+
+	class ReasoningThenBlockingStream:
+		def __init__(self):
+			self.index = 0
+
+		def __iter__(self):
+			return self
+
+		def __next__(self):
+			self.index += 1
+			if self.index == 1:
+				return FakeChunk()
+			time.sleep(0.05)
+			raise AssertionError("deadline timer should convert this into a timeout")
+
+		def close(self):
+			return None
+
+	synthesizer = HTNMethodSynthesizer()
+	result: dict[str, BaseException] = {}
+
+	def consume_stream() -> None:
+		try:
+			synthesizer._consume_streaming_llm_response(
+				ReasoningThenBlockingStream(),
+				transport_metadata={"llm_first_chunk_timeout_seconds": 0.01},
+				total_timeout_seconds=0.02,
+			)
+		except BaseException as exc:
+			result["exception"] = exc
+
+	thread = threading.Thread(target=consume_stream)
+	thread.start()
+	thread.join(timeout=1.0)
+
+	assert not thread.is_alive()
+	exception = result.get("exception")
+	assert isinstance(exception, TimeoutError)
+	transport_metadata = getattr(exception, "transport_metadata", {})
+	assert transport_metadata["llm_request_id"] == "req_off_main_timeout"
+	assert transport_metadata["llm_reasoning_chunks_ignored"] == 1
 
 
 def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:

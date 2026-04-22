@@ -584,142 +584,181 @@ class MethodSynthesisLLMTransportMixin:
 		reasoning_chunks_ignored = 0
 		finish_reason: Optional[str] = None
 		close_stream = getattr(response, "close", None)
+		deadline_expired = threading.Event()
+		deadline_timer: Optional[threading.Timer] = None
+
+		def _timeout_error() -> TimeoutError:
+			error = TimeoutError(
+				"Method-synthesis LLM call exceeded the configured timeout before "
+				"returning a usable response.",
+			)
+			try:
+				setattr(error, "transport_metadata", dict(metadata))
+			except Exception:
+				pass
+			return error
+
+		def _close_stream_after_deadline() -> None:
+			deadline_expired.set()
+			if callable(close_stream):
+				try:
+					close_stream()
+				except Exception:
+					pass
+
 		stream_start = time.monotonic()
 		first_stream_chunk_recorded = False
 		first_content_chunk_recorded = False
 		first_chunk_timeout_seconds = float(
 			metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
 		)
-		response_iterator = iter(response)
-		while True:
-			elapsed_seconds = time.monotonic() - stream_start
-			remaining_total_timeout_seconds = (
-				total_timeout_seconds - elapsed_seconds
-				if total_timeout_seconds > 0.0
-				else 0.0
+		if total_timeout_seconds > 0.0:
+			deadline_timer = threading.Timer(
+				total_timeout_seconds,
+				_close_stream_after_deadline,
 			)
-			next_chunk_timeout_seconds: Optional[float] = None
-			if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0:
-				next_chunk_timeout_seconds = first_chunk_timeout_seconds - elapsed_seconds
-				if total_timeout_seconds > 0.0:
-					next_chunk_timeout_seconds = min(
-						next_chunk_timeout_seconds,
-						remaining_total_timeout_seconds,
+			deadline_timer.daemon = True
+			deadline_timer.start()
+		response_iterator = iter(response)
+		try:
+			while True:
+				elapsed_seconds = time.monotonic() - stream_start
+				if deadline_expired.is_set():
+					raise _timeout_error()
+				remaining_total_timeout_seconds = (
+					total_timeout_seconds - elapsed_seconds
+					if total_timeout_seconds > 0.0
+					else 0.0
+				)
+				next_chunk_timeout_seconds: Optional[float] = None
+				if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0:
+					next_chunk_timeout_seconds = first_chunk_timeout_seconds - elapsed_seconds
+					if total_timeout_seconds > 0.0:
+						next_chunk_timeout_seconds = min(
+							next_chunk_timeout_seconds,
+							remaining_total_timeout_seconds,
+						)
+				elif total_timeout_seconds > 0.0:
+					next_chunk_timeout_seconds = remaining_total_timeout_seconds
+				if next_chunk_timeout_seconds is not None and next_chunk_timeout_seconds <= 0.0:
+					timeout_error = TimeoutError(
+						"Method-synthesis LLM call exceeded the configured first-chunk "
+						"deadline before any streaming chunk arrived."
+						if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0
+						else "Method-synthesis LLM call exceeded the configured timeout "
+						"before returning a usable response.",
 					)
-			elif total_timeout_seconds > 0.0:
-				next_chunk_timeout_seconds = remaining_total_timeout_seconds
-			if next_chunk_timeout_seconds is not None and next_chunk_timeout_seconds <= 0.0:
-				timeout_error = TimeoutError(
-					"Method-synthesis LLM call exceeded the configured first-chunk "
-					"deadline before any streaming chunk arrived."
-					if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0
-					else "Method-synthesis LLM call exceeded the configured timeout "
-					"before returning a usable response.",
-				)
+					try:
+						setattr(timeout_error, "transport_metadata", dict(metadata))
+					except Exception:
+						pass
+					if callable(close_stream):
+						close_stream()
+					raise timeout_error
 				try:
-					setattr(timeout_error, "transport_metadata", dict(metadata))
-				except Exception:
-					pass
-				if callable(close_stream):
-					close_stream()
-				raise timeout_error
-			try:
-				chunk = self._run_with_wall_clock_timeout(
-					next_chunk_timeout_seconds,
-					lambda: next(response_iterator),
-				)
-			except StopIteration:
-				break
-			except TimeoutError as exc:
-				timeout_error = TimeoutError(
-					"Method-synthesis LLM call exceeded the configured first-chunk "
-					"deadline before any streaming chunk arrived."
-					if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0
-					else "Method-synthesis LLM call exceeded the configured timeout "
-					"before returning a usable response.",
-				)
-				try:
-					setattr(timeout_error, "transport_metadata", dict(metadata))
-				except Exception:
-					pass
-				if callable(close_stream):
-					close_stream()
-				raise timeout_error from exc
-			request_id = self._extract_transport_request_id(chunk)
-			if request_id:
-				metadata["llm_request_id"] = request_id
-			if not first_stream_chunk_recorded:
-				first_stream_chunk_seconds = round(time.monotonic() - stream_start, 6)
-				metadata["llm_first_stream_chunk_seconds"] = first_stream_chunk_seconds
-				metadata["llm_first_chunk_seconds"] = first_stream_chunk_seconds
-				first_stream_chunk_recorded = True
-				self._emit_method_synthesis_progress(
-					f"first_stream_chunk_seconds={first_stream_chunk_seconds}",
-				)
-			choices = getattr(chunk, "choices", None) or ()
-			if not choices:
-				continue
-			choice = choices[0]
-			finish_reason = getattr(choice, "finish_reason", None) or finish_reason
-			delta = getattr(choice, "delta", None)
-			for candidate in (
-				getattr(delta, "content", None) if delta is not None else None,
-				getattr(delta, "parsed", None) if delta is not None else None,
-				getattr(choice, "message", None),
-			):
-				extracted = self._normalise_response_content(candidate)
-				if extracted is not None:
-					if not first_content_chunk_recorded:
-						metadata["llm_first_content_chunk_seconds"] = round(
+					chunk = self._run_with_wall_clock_timeout(
+						next_chunk_timeout_seconds,
+						lambda: next(response_iterator),
+					)
+				except StopIteration:
+					if deadline_expired.is_set():
+						raise _timeout_error()
+					break
+				except TimeoutError as exc:
+					timeout_error = TimeoutError(
+						"Method-synthesis LLM call exceeded the configured first-chunk "
+						"deadline before any streaming chunk arrived."
+						if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0
+						else "Method-synthesis LLM call exceeded the configured timeout "
+						"before returning a usable response.",
+					)
+					try:
+						setattr(timeout_error, "transport_metadata", dict(metadata))
+					except Exception:
+						pass
+					if callable(close_stream):
+						close_stream()
+					raise timeout_error from exc
+				except Exception as exc:
+					if deadline_expired.is_set():
+						raise _timeout_error() from exc
+					raise
+				request_id = self._extract_transport_request_id(chunk)
+				if request_id:
+					metadata["llm_request_id"] = request_id
+				if not first_stream_chunk_recorded:
+					first_stream_chunk_seconds = round(time.monotonic() - stream_start, 6)
+					metadata["llm_first_stream_chunk_seconds"] = first_stream_chunk_seconds
+					metadata["llm_first_chunk_seconds"] = first_stream_chunk_seconds
+					first_stream_chunk_recorded = True
+					self._emit_method_synthesis_progress(
+						f"first_stream_chunk_seconds={first_stream_chunk_seconds}",
+					)
+				choices = getattr(chunk, "choices", None) or ()
+				if not choices:
+					continue
+				choice = choices[0]
+				finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+				delta = getattr(choice, "delta", None)
+				for candidate in (
+					getattr(delta, "content", None) if delta is not None else None,
+					getattr(delta, "parsed", None) if delta is not None else None,
+					getattr(choice, "message", None),
+				):
+					extracted = self._normalise_response_content(candidate)
+					if extracted is not None:
+						if not first_content_chunk_recorded:
+							metadata["llm_first_content_chunk_seconds"] = round(
+								time.monotonic() - stream_start,
+								6,
+							)
+							self._emit_method_synthesis_progress(
+								"first_content_chunk_seconds="
+								f"{metadata['llm_first_content_chunk_seconds']}",
+							)
+							first_content_chunk_recorded = True
+						parts.append(extracted)
+				for reasoning_candidate in (
+					getattr(delta, "reasoning", None) if delta is not None else None,
+					getattr(delta, "reasoning_content", None) if delta is not None else None,
+					getattr(delta, "reasoning_details", None) if delta is not None else None,
+					getattr(choice, "reasoning", None),
+				):
+					if reasoning_candidate is None:
+						continue
+					reasoning_chunks_ignored += 1
+					metadata["llm_reasoning_chunks_ignored"] = reasoning_chunks_ignored
+					if "llm_first_reasoning_chunk_seconds" not in metadata:
+						metadata["llm_first_reasoning_chunk_seconds"] = round(
 							time.monotonic() - stream_start,
 							6,
 						)
-						self._emit_method_synthesis_progress(
-							"first_content_chunk_seconds="
-							f"{metadata['llm_first_content_chunk_seconds']}",
-						)
-						first_content_chunk_recorded = True
-					parts.append(extracted)
-			for reasoning_candidate in (
-				getattr(delta, "reasoning", None) if delta is not None else None,
-				getattr(delta, "reasoning_content", None) if delta is not None else None,
-				getattr(delta, "reasoning_details", None) if delta is not None else None,
-				getattr(choice, "reasoning", None),
-			):
-				if reasoning_candidate is None:
-					continue
-				reasoning_chunks_ignored += 1
-				metadata["llm_reasoning_chunks_ignored"] = reasoning_chunks_ignored
-				if "llm_first_reasoning_chunk_seconds" not in metadata:
-					metadata["llm_first_reasoning_chunk_seconds"] = round(
+				current_text = "".join(parts).strip()
+				complete_payload = self._extract_complete_json_payload_text(current_text)
+				if complete_payload is not None:
+					metadata["llm_complete_json_seconds"] = round(
 						time.monotonic() - stream_start,
 						6,
 					)
-			current_text = "".join(parts).strip()
-			complete_payload = self._extract_complete_json_payload_text(current_text)
-			if complete_payload is not None:
-				metadata["llm_complete_json_seconds"] = round(
-					time.monotonic() - stream_start,
-					6,
-				)
-				self._emit_method_synthesis_progress(
-					f"complete_json_seconds={metadata['llm_complete_json_seconds']}",
-				)
-				if callable(close_stream):
-					close_stream()
-				return complete_payload, finish_reason or "stop", dict(metadata)
-			if total_timeout_seconds > 0.0 and (time.monotonic() - stream_start) >= total_timeout_seconds:
-				timeout_error = TimeoutError(
-					"Method-synthesis LLM call exceeded the configured timeout before "
-					"returning a usable response.",
-				)
-				try:
-					setattr(timeout_error, "transport_metadata", dict(metadata))
-				except Exception:
-					pass
-				if callable(close_stream):
-					close_stream()
-				raise timeout_error
+					self._emit_method_synthesis_progress(
+						f"complete_json_seconds={metadata['llm_complete_json_seconds']}",
+					)
+					if callable(close_stream):
+						close_stream()
+					return complete_payload, finish_reason or "stop", dict(metadata)
+				if (
+					deadline_expired.is_set()
+					or (
+						total_timeout_seconds > 0.0
+						and (time.monotonic() - stream_start) >= total_timeout_seconds
+					)
+				):
+					if callable(close_stream):
+						close_stream()
+					raise _timeout_error()
+		finally:
+			if deadline_timer is not None:
+				deadline_timer.cancel()
 
 		text = "".join(parts).strip()
 		complete_payload = self._extract_complete_json_payload_text(text)

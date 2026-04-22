@@ -1199,16 +1199,47 @@ class NLToLTLfGenerator:
 		complete_payload: str | None = None
 		finish_reason = ""
 		close_stream = getattr(response, "close", None)
+		deadline_expired = threading.Event()
+		deadline_timer: Optional[threading.Timer] = None
+
+		def _timeout_error() -> TimeoutError:
+			error = TimeoutError(
+				"Goal-grounding LLM call exceeded the configured timeout before "
+				"returning a usable response.",
+			)
+			try:
+				setattr(error, "transport_metadata", dict(transport_metadata))
+			except Exception:
+				pass
+			return error
+
+		def _close_stream_after_deadline() -> None:
+			deadline_expired.set()
+			if callable(close_stream):
+				try:
+					close_stream()
+				except Exception:
+					pass
+
 		stream_start = time.monotonic()
 		first_stream_chunk_recorded = False
 		first_content_chunk_recorded = False
 		first_chunk_timeout_seconds = float(
 			transport_metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
 		)
+		if total_timeout_seconds > 0.0:
+			deadline_timer = threading.Timer(
+				total_timeout_seconds,
+				_close_stream_after_deadline,
+			)
+			deadline_timer.daemon = True
+			deadline_timer.start()
 		response_iterator = iter(response)
 		try:
 			while True:
 				elapsed_seconds = time.monotonic() - stream_start
+				if deadline_expired.is_set():
+					raise _timeout_error()
 				remaining_total_timeout_seconds = (
 					total_timeout_seconds - elapsed_seconds
 					if total_timeout_seconds > 0.0
@@ -1243,6 +1274,8 @@ class NLToLTLfGenerator:
 						lambda: next(response_iterator),
 					)
 				except StopIteration:
+					if deadline_expired.is_set():
+						raise _timeout_error()
 					break
 				except TimeoutError as exc:
 					timeout_error = TimeoutError(
@@ -1257,6 +1290,10 @@ class NLToLTLfGenerator:
 					except Exception:
 						pass
 					raise timeout_error from exc
+				except Exception as exc:
+					if deadline_expired.is_set():
+						raise _timeout_error() from exc
+					raise
 				request_id = self._extract_transport_request_id(chunk)
 				if request_id:
 					transport_metadata["llm_request_id"] = request_id
@@ -1312,15 +1349,7 @@ class NLToLTLfGenerator:
 					)
 					complete_payload = candidate_payload
 				if total_timeout_seconds > 0.0 and (time.monotonic() - stream_start) >= total_timeout_seconds:
-					timeout_error = TimeoutError(
-						"Goal-grounding LLM call exceeded the configured timeout before "
-						"returning a usable response.",
-					)
-					try:
-						setattr(timeout_error, "transport_metadata", dict(transport_metadata))
-					except Exception:
-						pass
-					raise timeout_error
+					raise _timeout_error()
 			text = "".join(parts).strip()
 			if complete_payload is None:
 				complete_payload = self._extract_complete_json_payload_text(text)
@@ -1361,6 +1390,8 @@ class NLToLTLfGenerator:
 				pass
 			raise error
 		finally:
+			if deadline_timer is not None:
+				deadline_timer.cancel()
 			if callable(close_stream):
 				close_stream()
 
