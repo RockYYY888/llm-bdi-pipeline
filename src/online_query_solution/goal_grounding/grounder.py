@@ -28,6 +28,8 @@ from utils.symbol_normalizer import SymbolNormalizer
 
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
 KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
+KIMI_COMPLETION_MAX_TOKENS = 65_536
+KIMI_REASONING_MAX_TOKENS = 8_192
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 300.0
 ONLINE_LTLF_GENERATION_SESSION_ID = "online-ltlf-generation"
@@ -870,7 +872,7 @@ class NLToLTLfGenerator:
 		profile = dict(request_profile or self._goal_grounding_request_profile(messages=messages))
 		stream_response = bool(profile.get("stream_response"))
 		if str(self.model or "").strip().lower().startswith("moonshotai/"):
-			capped_response_max_tokens = None
+			capped_response_max_tokens = int(profile["completion_max_tokens"])
 		else:
 			capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
 				response_max_tokens,
@@ -990,7 +992,12 @@ class NLToLTLfGenerator:
 			},
 			"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 		}
+		reasoning_max_tokens = int(
+			(request_profile or {}).get("reasoning_max_tokens") or 0,
+		)
 		extra_body["reasoning"] = {"exclude": False}
+		if reasoning_max_tokens > 0:
+			extra_body["reasoning"]["max_tokens"] = reasoning_max_tokens
 		return extra_body
 
 	def _goal_grounding_request_profile(
@@ -1005,16 +1012,15 @@ class NLToLTLfGenerator:
 			return {
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				# Keep Kimi on provider defaults: no max_tokens and no reasoning token cap.
 				# Reasoning chunks are streamed as heartbeat events but not stored locally.
-				"reasoning_max_tokens": None,
+				"reasoning_max_tokens": KIMI_REASONING_MAX_TOKENS,
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
-				"completion_max_tokens": None,
+				"completion_max_tokens": KIMI_COMPLETION_MAX_TOKENS,
 				"reasoning_excluded": False,
 				"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
-				"max_tokens_policy": "provider_default",
+				"max_tokens_policy": "fixed_65536",
 			}
 		return {
 			"name": "default_profile",
@@ -1080,7 +1086,7 @@ class NLToLTLfGenerator:
 	) -> int | None:
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			return None
+			return max(int(requested_max_tokens or KIMI_COMPLETION_MAX_TOKENS), 1)
 		requested = max(int(requested_max_tokens or self.response_max_tokens or 0), 1)
 		return requested
 

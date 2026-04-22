@@ -338,11 +338,11 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 	assert "response_format" not in captured_kwargs
 
 
-def test_method_synthesis_transport_omits_kimi_output_budget() -> None:
+def test_method_synthesis_transport_uses_kimi_output_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(model="moonshotai/kimi-k2.6")
 
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) is None
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(32768) is None
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) == 65536
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(32768) == 32768
 
 
 def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
@@ -361,12 +361,12 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["context_window_tokens"] == 262144
 	assert profile["prompt_token_estimate"] == expected_prompt_tokens
-	assert profile["completion_max_tokens"] is None
-	assert profile["reasoning_max_tokens"] is None
+	assert profile["completion_max_tokens"] == 65536
+	assert profile["reasoning_max_tokens"] == 8192
 	assert profile["reasoning_excluded"] is False
 	assert profile["first_chunk_timeout_seconds"] == 400.0
 	assert profile["session_id"] == "offline-method-generation"
-	assert profile["max_tokens_policy"] == "provider_default"
+	assert profile["max_tokens_policy"] == "fixed_65536"
 
 
 def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None:
@@ -377,12 +377,12 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 
 	extra_body = synthesizer._openrouter_provider_routing_body(
 		request_profile={
-				"name": "kimi_stream_single_pass",
-				"stream_response": True,
-				"reasoning_max_tokens": None,
-				"first_chunk_timeout_seconds": 400.0,
-			},
-		)
+					"name": "kimi_stream_single_pass",
+					"stream_response": True,
+					"reasoning_max_tokens": 8192,
+					"first_chunk_timeout_seconds": 400.0,
+				},
+			)
 
 	assert extra_body == {
 			"provider": {
@@ -390,7 +390,7 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 				"allow_fallbacks": False,
 			},
 			"session_id": "offline-method-generation",
-			"reasoning": {"exclude": False},
+			"reasoning": {"exclude": False, "max_tokens": 8192},
 		}
 
 
@@ -444,21 +444,24 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 		{"system": "x", "user": "y"},
 		max_tokens=16,
 		request_profile={
-			"name": "kimi_stream_single_pass",
-			"stream_response": True,
-			"reasoning_max_tokens": None,
-			"first_chunk_timeout_seconds": 90.0,
-		},
-		request_timeout_seconds=90.0,
+				"name": "kimi_stream_single_pass",
+				"stream_response": True,
+				"reasoning_max_tokens": 8192,
+				"first_chunk_timeout_seconds": 90.0,
+			},
+			request_timeout_seconds=90.0,
 	)
 
 	assert response is not None
 	assert captured_request["request_kwargs"]["stream"] is True
 	assert "response_format" not in captured_request["request_kwargs"]
-	assert "max_tokens" not in captured_request["request_kwargs"]
+	assert captured_request["request_kwargs"]["max_tokens"] == 16
 	assert captured_request["request_timeout_seconds"] == 90.0
 	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
-	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {"exclude": False}
+	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {
+		"exclude": False,
+		"max_tokens": 8192,
+	}
 
 
 def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_supplied() -> None:
@@ -486,13 +489,13 @@ def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_sup
 		{"system": "x", "user": "y"},
 		max_tokens=None,
 		request_profile={
-			"name": "kimi_stream_single_pass",
-			"stream_response": True,
-			"reasoning_max_tokens": None,
-			"first_chunk_timeout_seconds": 400.0,
-		},
-		request_timeout_seconds=400.0,
-	)
+				"name": "kimi_stream_single_pass",
+				"stream_response": True,
+				"reasoning_max_tokens": 8192,
+				"first_chunk_timeout_seconds": 400.0,
+			},
+			request_timeout_seconds=400.0,
+		)
 
 	assert "max_tokens" not in captured_request["request_kwargs"]
 	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
@@ -561,13 +564,14 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "streaming",
 			"llm_request_profile": "kimi_stream_single_pass",
-			"llm_reasoning_budget": None,
+			"llm_reasoning_budget": 8192,
 			"llm_first_chunk_timeout_seconds": 400.0,
 			"llm_context_window_tokens": 204800,
 			"llm_prompt_token_estimate": 1,
+			"llm_completion_max_tokens": 65536,
 			"llm_reasoning_excluded": False,
 			"llm_session_id": "offline-method-generation",
-			"llm_max_tokens_policy": "provider_default",
+			"llm_max_tokens_policy": "fixed_65536",
 			"llm_request_timeout_seconds": 0.01,
 		}
 

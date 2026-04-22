@@ -1778,7 +1778,7 @@ def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences(
 	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
 
 
-def test_goal_grounding_kimi_request_profile_uses_streaming_without_token_caps() -> None:
+def test_goal_grounding_kimi_request_profile_uses_streaming_with_token_caps() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
@@ -1799,14 +1799,14 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_without_token_caps()
 	assert profile["first_chunk_timeout_seconds"] == 300.0
 	assert profile["context_window_tokens"] == 262_144
 	assert profile["prompt_token_estimate"] == expected_prompt_estimate
-	assert profile["completion_max_tokens"] is None
-	assert profile["reasoning_max_tokens"] is None
+	assert profile["completion_max_tokens"] == 65536
+	assert profile["reasoning_max_tokens"] == 8192
 	assert profile["reasoning_excluded"] is False
 	assert profile["session_id"] == "online-ltlf-generation"
-	assert profile["max_tokens_policy"] == "provider_default"
+	assert profile["max_tokens_policy"] == "fixed_65536"
 
 
-def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_token_caps() -> None:
+def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_token_caps() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	captured_request: dict[str, object] = {}
 
@@ -1840,12 +1840,12 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_token_
 	assert captured_request["request_timeout_seconds"] == 123.0
 	assert request_kwargs["timeout"] == 123.0
 	assert request_kwargs["stream"] is True
-	assert "max_tokens" not in request_kwargs
+	assert request_kwargs["max_tokens"] == 65536
 	assert "response_format" not in request_kwargs
 	assert request_kwargs["extra_body"] == {
 		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},
 		"session_id": "online-ltlf-generation",
-		"reasoning": {"exclude": False},
+		"reasoning": {"exclude": False, "max_tokens": 8192},
 	}
 
 

@@ -18,6 +18,8 @@ from .errors import LLMStreamingResponseError
 
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
 KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
+KIMI_COMPLETION_MAX_TOKENS = 65_536
+KIMI_REASONING_MAX_TOKENS = 8_192
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 400.0
 OFFLINE_METHOD_GENERATION_SESSION_ID = "offline-method-generation"
@@ -187,13 +189,13 @@ class MethodSynthesisLLMTransportMixin:
 		"""
 		Keep provider-specific handling explicit even when no extra cap is applied.
 
-		For Kimi method synthesis, omit application-side max_tokens entirely. Kimi
-		controls thinking and completion under its provider defaults; sending a
-		large cap can invite long reasoning-only runs without improving JSON return.
+		For Kimi method synthesis, use an explicit output ceiling and a smaller
+		reasoning ceiling so final JSON has enough budget while reasoning remains
+		stream-visible as heartbeat events.
 		"""
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			return None
+			return max(int(requested_max_tokens or KIMI_COMPLETION_MAX_TOKENS), 1)
 		requested = max(int(requested_max_tokens or 0), 1)
 		return requested
 
@@ -380,8 +382,7 @@ class MethodSynthesisLLMTransportMixin:
 			"timeout": request_timeout_seconds if request_timeout_seconds is not None else self.timeout,
 			"stream": stream_response,
 		}
-		is_kimi_model = str(self.model or "").strip().lower().startswith("moonshotai/")
-		if max_tokens is not None and not is_kimi_model:
+		if max_tokens is not None:
 			request_kwargs["max_tokens"] = max_tokens
 		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
 			request_kwargs["response_format"] = {"type": "json_object"}
@@ -501,7 +502,12 @@ class MethodSynthesisLLMTransportMixin:
 			},
 			"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
 		}
+		reasoning_max_tokens = int(
+			(request_profile or {}).get("reasoning_max_tokens") or 0,
+		)
 		extra_body["reasoning"] = {"exclude": False}
+		if reasoning_max_tokens > 0:
+			extra_body["reasoning"]["max_tokens"] = reasoning_max_tokens
 		return extra_body
 
 	def _method_synthesis_request_profile(
@@ -516,18 +522,17 @@ class MethodSynthesisLLMTransportMixin:
 			return {
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				# Do not send max_tokens or reasoning.max_tokens for Kimi. We only ask
-				# OpenRouter to stream reasoning chunks as heartbeat events; they are
-				# counted but never stored locally.
-				"reasoning_max_tokens": None,
+				# Keep reasoning chunks visible as heartbeat events, but cap requested
+				# reasoning so final JSON has enough output budget.
+				"reasoning_max_tokens": KIMI_REASONING_MAX_TOKENS,
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"response_healing_plugin": False,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
-				"completion_max_tokens": None,
+				"completion_max_tokens": KIMI_COMPLETION_MAX_TOKENS,
 				"reasoning_excluded": False,
 				"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
-				"max_tokens_policy": "provider_default",
+				"max_tokens_policy": "fixed_65536",
 			}
 		return {
 			"name": "default_profile",
