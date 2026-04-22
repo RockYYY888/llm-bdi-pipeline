@@ -1796,7 +1796,7 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_with_token_caps() ->
 
 	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["stream_response"] is True
-	assert profile["first_chunk_timeout_seconds"] == 300.0
+	assert profile["first_chunk_timeout_seconds"] == 1000.0
 	assert profile["context_window_tokens"] == 262_144
 	assert profile["prompt_token_estimate"] == expected_prompt_estimate
 	assert profile["completion_max_tokens"] == 65536

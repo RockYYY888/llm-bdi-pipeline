@@ -58,7 +58,7 @@ def test_method_synthesis_timeout_defaults_to_longer_one_shot_budget(monkeypatch
 
     config = Config()
 
-    assert config.method_synthesis_timeout == 700
+    assert config.method_synthesis_timeout == 1000
 
 
 def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):

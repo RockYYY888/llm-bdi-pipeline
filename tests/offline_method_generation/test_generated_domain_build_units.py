@@ -364,7 +364,7 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	assert profile["completion_max_tokens"] == 65536
 	assert profile["reasoning_max_tokens"] == 8192
 	assert profile["reasoning_excluded"] is False
-	assert profile["first_chunk_timeout_seconds"] == 400.0
+	assert profile["first_chunk_timeout_seconds"] == 1000.0
 	assert profile["session_id"] == "offline-method-generation"
 	assert profile["max_tokens_policy"] == "fixed_65536"
 
@@ -380,7 +380,7 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 					"name": "kimi_stream_single_pass",
 					"stream_response": True,
 					"reasoning_max_tokens": 8192,
-					"first_chunk_timeout_seconds": 400.0,
+					"first_chunk_timeout_seconds": 1000.0,
 				},
 			)
 
@@ -492,9 +492,9 @@ def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_sup
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
 				"reasoning_max_tokens": 8192,
-				"first_chunk_timeout_seconds": 400.0,
+				"first_chunk_timeout_seconds": 1000.0,
 			},
-			request_timeout_seconds=400.0,
+			request_timeout_seconds=1000.0,
 		)
 
 	assert "max_tokens" not in captured_request["request_kwargs"]
@@ -565,7 +565,7 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 		"llm_response_mode": "streaming",
 			"llm_request_profile": "kimi_stream_single_pass",
 			"llm_reasoning_budget": 8192,
-			"llm_first_chunk_timeout_seconds": 400.0,
+			"llm_first_chunk_timeout_seconds": 1000.0,
 			"llm_context_window_tokens": 204800,
 			"llm_prompt_token_estimate": 1,
 			"llm_completion_max_tokens": 65536,
