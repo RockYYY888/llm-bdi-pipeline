@@ -13,6 +13,7 @@ DEFAULT_GOAL_GROUNDING_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_METHOD_SYNTHESIS_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_SHARED_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_ONLINE_DOMAIN_SOURCE = "benchmark"
+DEFAULT_OPENAI_TIMEOUT_SECONDS = 1000
 DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 1000
 DEFAULT_PLANNING_TIMEOUT_SECONDS = 600
 
@@ -80,7 +81,7 @@ class Config:
 
 	@property
 	def openai_timeout(self) -> int:
-		return int(os.getenv("OPENAI_TIMEOUT", "30"))
+		return max(int(os.getenv("OPENAI_TIMEOUT", str(DEFAULT_OPENAI_TIMEOUT_SECONDS))), 1)
 
 	@property
 	def method_synthesis_timeout(self) -> int:

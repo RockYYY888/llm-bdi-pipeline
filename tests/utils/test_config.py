@@ -52,6 +52,15 @@ def test_method_synthesis_max_tokens_defaults_to_one_shot_library_budget(monkeyp
     assert config.method_synthesis_max_tokens == 48000
 
 
+def test_openai_timeout_defaults_to_kimi_long_reasoning_budget(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("OPENAI_TIMEOUT", raising=False)
+
+    config = Config()
+
+    assert config.openai_timeout == 1000
+
+
 def test_method_synthesis_timeout_defaults_to_longer_one_shot_budget(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("METHOD_SYNTHESIS_TIMEOUT", raising=False)

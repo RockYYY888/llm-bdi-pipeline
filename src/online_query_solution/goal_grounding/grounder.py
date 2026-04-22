@@ -24,6 +24,7 @@ from online_query_solution.goal_grounding.canonical_ordered_formula import (
 	ordered_formula_style_prompt_guidance,
 )
 from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
+from utils.config import DEFAULT_OPENAI_TIMEOUT_SECONDS
 from utils.symbol_normalizer import SymbolNormalizer
 
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
@@ -115,7 +116,7 @@ class NLToLTLfGenerator:
 		self.model = model or DEFAULT_GOAL_GROUNDING_MODEL
 		self.base_url = base_url
 		self.domain_file = domain_file
-		self.request_timeout = float(request_timeout or 60.0)
+		self.request_timeout = float(request_timeout or DEFAULT_OPENAI_TIMEOUT_SECONDS)
 		self.response_max_tokens = int(response_max_tokens or 12000)
 		self.client = None
 		self.last_generation_metadata: Dict[str, Any] = {}
