@@ -341,6 +341,61 @@ def _write_track_outputs(
 	return summary
 
 
+def _write_planner_or_race_aggregate_outputs(
+	root_run_dir: Path,
+	track_summaries: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, Any]:
+	from htn_evaluation.result_tables import (
+		PLANNER_OR_RACE_MODE,
+		build_planner_capability_rows,
+		build_planner_or_race_track_summary_from_single_planner_tracks,
+		build_problem_capability_rows,
+		write_planner_capability_matrix,
+		write_problem_capability_matrix,
+	)
+
+	run_dir = root_run_dir / PLANNER_OR_RACE_MODE
+	run_dir.mkdir(parents=True, exist_ok=True)
+	track_summary = build_planner_or_race_track_summary_from_single_planner_tracks(
+		run_dir=run_dir,
+		track_summaries=track_summaries,
+		domain_keys=DOMAIN_KEYS,
+	)
+	track_summary["track_id"] = PLANNER_OR_RACE_MODE
+	track_summary["completed_domains"] = sorted(track_summary.get("domains") or {})
+	track_summary["complete"] = len(track_summary["completed_domains"]) == len(DOMAIN_KEYS)
+	for domain_key, domain_summary in dict(track_summary.get("domains") or {}).items():
+		(run_dir / f"{domain_key}.summary.json").write_text(
+			json.dumps(dict(domain_summary), indent=2),
+		)
+	(run_dir / "track_summary.json").write_text(json.dumps(track_summary, indent=2))
+	planner_paths = write_planner_capability_matrix(
+		run_dir,
+		rows=build_planner_capability_rows((track_summary,)),
+	)
+	problem_paths = write_problem_capability_matrix(
+		run_dir,
+		rows=build_problem_capability_rows((track_summary,)),
+	)
+	summary = {
+		"run_dir": str(run_dir),
+		"track_id": PLANNER_OR_RACE_MODE,
+		"evaluation_mode": PLANNER_OR_RACE_MODE,
+		"requested_planner_id": None,
+		"completed_domains": sorted(track_summary.get("domains") or {}),
+		"complete": bool(track_summary.get("complete")),
+		"internal_failures": [],
+		"track_summary": track_summary,
+		"output_paths": {
+			**planner_paths,
+			**problem_paths,
+		},
+	}
+	(run_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+	_write_text_summary(run_dir, summary)
+	return summary
+
+
 def _cleanup_htn_evaluation_resources() -> None:
 	result = subprocess.run(
 		[
@@ -539,15 +594,9 @@ _RUN_PLANNER_ID: str | None = None
 
 
 def _track_specs() -> List[Dict[str, str | None]]:
-	from htn_evaluation.result_tables import HTN_PLANNER_IDS, PLANNER_OR_RACE_MODE
+	from htn_evaluation.result_tables import HTN_PLANNER_IDS
 
-	specs: List[Dict[str, str | None]] = [
-		{
-			"track_id": PLANNER_OR_RACE_MODE,
-			"evaluation_mode": PLANNER_OR_RACE_MODE,
-			"planner_id": None,
-		},
-	]
+	specs: List[Dict[str, str | None]] = []
 	for planner_id in HTN_PLANNER_IDS:
 		specs.append(
 			{
@@ -560,6 +609,8 @@ def _track_specs() -> List[Dict[str, str | None]]:
 
 
 def _run_all_tracks(run_dir: Optional[Path] = None) -> int:
+	from htn_evaluation.result_tables import PLANNER_OR_RACE_MODE
+
 	root_run_dir = run_dir or (RUNS_ROOT / _timestamp())
 	root_run_dir.mkdir(parents=True, exist_ok=True)
 	track_summaries: Dict[str, Dict[str, Any]] = {}
@@ -599,12 +650,22 @@ def _run_all_tracks(run_dir: Optional[Path] = None) -> int:
 		_write_track_pass_matrix(root_run_dir, track_summaries)
 		_write_all_tracks_state(root_run_dir, track_summaries)
 
+	planner_or_race_summary = _write_planner_or_race_aggregate_outputs(
+		root_run_dir,
+		track_summaries,
+	)
+	ordered_track_summaries: Dict[str, Dict[str, Any]] = {
+		PLANNER_OR_RACE_MODE: planner_or_race_summary,
+		**track_summaries,
+	}
+	_write_track_pass_matrix(root_run_dir, ordered_track_summaries)
+	_write_all_tracks_state(root_run_dir, ordered_track_summaries)
 	combined_summary = {
 		"run_dir": str(root_run_dir),
-		"tracks": track_summaries,
+		"tracks": ordered_track_summaries,
 		"complete": all(
 			bool(track_summary.get("complete"))
-			for track_summary in track_summaries.values()
+			for track_summary in ordered_track_summaries.values()
 		),
 	}
 	(root_run_dir / "summary.json").write_text(json.dumps(combined_summary, indent=2))

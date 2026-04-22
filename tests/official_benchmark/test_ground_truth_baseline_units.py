@@ -32,6 +32,7 @@ from htn_evaluation.result_tables import (
 	PLANNER_OR_RACE_MODE,
 	SINGLE_PLANNER_MODE,
 	build_planner_capability_rows,
+	build_planner_or_race_track_summary_from_single_planner_tracks,
 	build_problem_capability_rows,
 	build_problem_result_row,
 	build_track_summary,
@@ -864,6 +865,188 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	assert Path(problem_paths["problem_capability_matrix_json"]).exists()
 	assert Path(problem_paths["problem_capability_matrix_csv"]).exists()
 	assert "query_id" in Path(problem_paths["problem_capability_matrix_csv"]).read_text()
+
+
+def test_planner_or_race_aggregate_is_union_of_single_planner_successes(
+	tmp_path: Path,
+) -> None:
+	def domain_summary(planner_id: str, query_results: list[dict[str, object]]) -> dict[str, object]:
+		return {
+			"domain_key": "transport",
+			"evaluation_mode": SINGLE_PLANNER_MODE,
+			"requested_planner_id": planner_id,
+			"attempted_problem_count": len(query_results),
+			"execution_time_seconds_total": sum(
+				float(query_result["execution_time_seconds"])
+				for query_result in query_results
+			),
+			"execution_time_seconds_average": 1.0,
+			"plan_solve_time_seconds_total": 0.0,
+			"plan_solve_time_seconds_average": 0.0,
+			"plan_verification_time_seconds_total": 0.0,
+			"plan_verification_time_seconds_average": 0.0,
+			"verified_success_count": sum(
+				1
+				for query_result in query_results
+				if bool(query_result["success"])
+			),
+			"bucket_counts": {
+				"hierarchical_plan_verified": sum(
+					1
+					for query_result in query_results
+					if bool(query_result["success"])
+				),
+				"primitive_plan_valid_but_hierarchical_rejected": 0,
+				"primitive_plan_invalid": 0,
+				"no_plan_from_solver": sum(
+					1
+					for query_result in query_results
+					if not bool(query_result["success"])
+				),
+				"unknown_failure": 0,
+			},
+			"query_results": query_results,
+			"total_queries": len(query_results),
+			"verified_successes": sum(
+				1
+				for query_result in query_results
+				if bool(query_result["success"])
+			),
+			"hierarchical_rejection_failures": 0,
+			"primitive_invalid_failures": 0,
+			"solver_no_plan_failures": sum(
+				1
+				for query_result in query_results
+				if not bool(query_result["success"])
+			),
+			"unknown_failures": 0,
+		}
+
+	def query_result(
+		query_id: str,
+		*,
+		success: bool,
+		planner_id: str,
+		seconds: float,
+	) -> dict[str, object]:
+		return {
+			"query_id": query_id,
+			"problem_file": f"{query_id}.hddl",
+			"log_dir": f"/tmp/{planner_id}/{query_id}",
+			"success": success,
+			"outcome_bucket": "hierarchical_plan_verified" if success else "no_plan_from_solver",
+			"execution_time_seconds": seconds,
+			"plan_solve_time_seconds": seconds,
+			"plan_verification_time_seconds": 0.0,
+			"representation_build_seconds": 0.0,
+			"solver_race_wallclock_seconds": seconds,
+			"plan_solve_status": "success" if success else "failed",
+			"plan_verification_status": "success" if success else "failed",
+			"selected_solver_id": planner_id,
+			"selected_backend_name": planner_id,
+			"selected_representation_id": "linearized_total_order",
+		}
+
+	track_summaries = {
+		"panda_pi_portfolio": {
+			"track_summary": {
+				"track_id": "panda_pi_portfolio",
+				"evaluation_mode": SINGLE_PLANNER_MODE,
+				"requested_planner_id": "panda_pi_portfolio",
+				"complete": True,
+				"domains": {
+					"transport": domain_summary(
+						"panda_pi_portfolio",
+						[
+							query_result(
+								"query_1",
+								success=True,
+								planner_id="panda_pi_portfolio",
+								seconds=10.0,
+							),
+							query_result(
+								"query_2",
+								success=False,
+								planner_id="panda_pi_portfolio",
+								seconds=1800.0,
+							),
+						],
+					),
+				},
+			},
+		},
+		"pandadealer_agile_lama": {
+			"track_summary": {
+				"track_id": "pandadealer_agile_lama",
+				"evaluation_mode": SINGLE_PLANNER_MODE,
+				"requested_planner_id": "pandadealer_agile_lama",
+				"complete": True,
+				"domains": {
+					"transport": domain_summary(
+						"pandadealer_agile_lama",
+						[
+							query_result(
+								"query_1",
+								success=False,
+								planner_id="pandadealer_agile_lama",
+								seconds=1.0,
+							),
+							query_result(
+								"query_2",
+								success=False,
+								planner_id="pandadealer_agile_lama",
+								seconds=1.0,
+							),
+						],
+					),
+				},
+			},
+		},
+		"lifted_panda_sat": {
+			"track_summary": {
+				"track_id": "lifted_panda_sat",
+				"evaluation_mode": SINGLE_PLANNER_MODE,
+				"requested_planner_id": "lifted_panda_sat",
+				"complete": True,
+				"domains": {
+					"transport": domain_summary(
+						"lifted_panda_sat",
+						[
+							query_result(
+								"query_1",
+								success=False,
+								planner_id="lifted_panda_sat",
+								seconds=5.0,
+							),
+							query_result(
+								"query_2",
+								success=True,
+								planner_id="lifted_panda_sat",
+								seconds=30.0,
+							),
+						],
+					),
+				},
+			},
+		},
+	}
+
+	aggregate = build_planner_or_race_track_summary_from_single_planner_tracks(
+		run_dir=tmp_path,
+		track_summaries=track_summaries,
+		domain_keys=("transport",),
+	)
+
+	transport = aggregate["domains"]["transport"]
+	query_results = {
+		query_result["query_id"]: query_result
+		for query_result in transport["query_results"]
+	}
+	assert aggregate["verified_success_count"] == 2
+	assert transport["verified_success_count"] == 2
+	assert query_results["query_1"]["selected_planner_track_id"] == "panda_pi_portfolio"
+	assert query_results["query_2"]["selected_planner_track_id"] == "lifted_panda_sat"
+	assert query_results["query_2"]["successful_planner_ids"] == ["lifted_panda_sat"]
 
 
 def test_sequential_full_baseline_writes_incremental_track_outputs(
