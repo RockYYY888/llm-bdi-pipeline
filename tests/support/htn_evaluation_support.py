@@ -86,6 +86,7 @@ def run_domain_problem_root_case(
 	*,
 	evaluation_mode: str = PLANNER_OR_RACE_MODE,
 	planner_id: Optional[str] = None,
+	logs_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
 	mode = validate_evaluation_mode(evaluation_mode)
 	normalized_planner_id = validate_planner_id(
@@ -99,7 +100,9 @@ def run_domain_problem_root_case(
 		domain_file=domain_file,
 		problem_file=str(case["problem_file"]),
 	)
-	pipeline.logger = ExecutionLogger(logs_dir=str(GENERATED_LOGS_DIR), run_origin="tests")
+	case_logs_dir = Path(logs_dir).resolve() if logs_dir is not None else GENERATED_LOGS_DIR
+	case_logs_dir.mkdir(parents=True, exist_ok=True)
+	pipeline.logger = ExecutionLogger(logs_dir=str(case_logs_dir), run_origin="tests")
 	pipeline.logger.start_pipeline(
 		case["instruction"],
 		mode="official_problem_root_execution",
@@ -107,7 +110,7 @@ def run_domain_problem_root_case(
 		problem_file=str(case["problem_file"]),
 		domain_name=pipeline.domain.name,
 		problem_name=pipeline.problem.name if pipeline.problem else None,
-		output_dir=str(GENERATED_LOGS_DIR),
+		output_dir=str(case_logs_dir),
 	)
 	pipeline.output_dir = pipeline.logger.current_log_dir
 	if pipeline.logger.current_record is not None and pipeline.output_dir is not None:
@@ -211,6 +214,7 @@ def run_official_problem_root_baseline_for_domain(
 			query_id,
 			evaluation_mode=mode,
 			planner_id=normalized_planner_id,
+			logs_dir=output_root / "query_logs",
 		)
 		existing_problem_rows[query_id] = build_problem_result_row(
 			domain_key=domain_key,

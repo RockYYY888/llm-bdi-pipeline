@@ -9,6 +9,7 @@ online runtime.
 from __future__ import annotations
 
 import copy
+import json
 import multiprocessing
 import os
 import queue
@@ -20,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
 from planning.linearization import LiftedLinearPlanner
 from planning.official_benchmark import OFFICIAL_BACKEND_SELECTION_RULE
+from planning.panda_portfolio import PANDAPlanningError
 from planning.representations import PlanningRepresentation, RepresentationBuildResult
 from .problem_root_runtime import official_problem_root_planning_task_worker
 from .result_tables import (
@@ -142,14 +144,32 @@ class HTNProblemRootEvaluator:
 			evaluation_mode=mode,
 		)
 		planning_timeout_seconds = self.context._official_problem_root_planning_timeout_seconds()
-		representation_build_start = time.perf_counter()
-		planning_tasks = self.planning_tasks(
-			timeout_seconds=planning_timeout_seconds,
-			planner_id=normalized_planner_id,
-		)
-		representation_build_seconds = time.perf_counter() - representation_build_start
 		backend_root = Path(self.context.output_dir) / "backend_race"
 		backend_root.mkdir(parents=True, exist_ok=True)
+		representation_build_start = time.perf_counter()
+		try:
+			planning_tasks = self.planning_tasks(
+				timeout_seconds=planning_timeout_seconds,
+				planner_id=normalized_planner_id,
+			)
+		except Exception as exc:
+			representation_build_seconds = time.perf_counter() - representation_build_start
+			selected_attempt = self.representation_build_failure_attempt(
+				exc,
+				backend_root=backend_root,
+				planner_id=normalized_planner_id,
+				total_seconds=representation_build_seconds,
+			)
+			return {
+				"evaluation_mode": mode,
+				"requested_planner_id": normalized_planner_id,
+				"planning_tasks": [],
+				"attempts": [selected_attempt],
+				"selected_attempt": selected_attempt,
+				"representation_build_seconds": representation_build_seconds,
+				"race_wallclock_seconds": 0.0,
+			}
+		representation_build_seconds = time.perf_counter() - representation_build_start
 		context = multiprocessing.get_context("spawn")
 		attempts: List[Dict[str, Any]] = []
 		race_start = time.perf_counter()
@@ -282,6 +302,98 @@ class HTNProblemRootEvaluator:
 			"representation_build_seconds": representation_build_seconds,
 			"race_wallclock_seconds": time.perf_counter() - race_start,
 		}
+
+	def representation_build_failure_attempt(
+		self,
+		exc: Exception,
+		*,
+		backend_root: Path,
+		planner_id: Optional[str],
+		total_seconds: float,
+	) -> Dict[str, Any]:
+		"""Convert representation build failures into one checkpointable query result."""
+		failure_metadata = dict(getattr(exc, "metadata", {}) or {})
+		backend_name = str(planner_id or failure_metadata.get("backend") or "unknown")
+		representation_id = (
+			"linearized_total_order"
+			if backend_name == "lifted_panda_sat"
+			or "linearizer" in failure_metadata
+			or isinstance(exc, PANDAPlanningError)
+			else "representation_build"
+		)
+		task_id = f"{backend_name}@{representation_id}"
+		output_dir = backend_root / "representation_build_failure"
+		output_dir.mkdir(parents=True, exist_ok=True)
+		failure_reason = f"representation_build_failed: {exc}"
+		if failure_metadata:
+			(output_dir / "representation_build_failure_metadata.json").write_text(
+				self._safe_json_dump(failure_metadata),
+			)
+		return {
+			"message_type": BACKEND_RESULT_MESSAGE,
+			"backend_name": backend_name,
+			"task_id": task_id,
+			"representation_id": representation_id,
+			"output_dir": str(output_dir.resolve()),
+			"plan_solve_data": {
+				"summary": {
+					"backend": backend_name,
+					"status": "failed",
+					"planning_mode": "official_problem_root",
+					"failure_bucket": "no_plan_from_solver",
+					"failure_stage": "representation_build",
+					"failure_reason": failure_reason,
+					"solver_id": backend_name,
+					"representation_id": representation_id,
+				},
+				"artifacts": {
+					"backend": backend_name,
+					"status": "failed",
+					"planning_mode": "official_problem_root",
+					"failure_bucket": "no_plan_from_solver",
+					"failure_stage": "representation_build",
+					"failure_reason": failure_reason,
+					"failure_metadata": failure_metadata,
+					"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
+				},
+			},
+			"plan_verification_data": {
+				"summary": {
+					"backend": "pandaPIparser",
+					"status": "failed",
+					"selection_rule": "first_hierarchical_verification_success",
+					"failure_bucket": "no_plan_from_solver",
+					"failure_stage": "representation_build",
+					"failure_reason": failure_reason,
+				},
+				"artifacts": {
+					"backend": backend_name,
+					"status": "failed",
+					"selection_rule": "first_hierarchical_verification_success",
+					"failure_bucket": "no_plan_from_solver",
+					"failure_stage": "representation_build",
+					"failure_reason": failure_reason,
+					"selected_solver_id": backend_name,
+					"selected_backend_name": backend_name,
+					"selected_representation_id": representation_id,
+					"selected_bucket": "no_plan_from_solver",
+					"failure_metadata": failure_metadata,
+					"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
+				},
+			},
+			"plan_solve_seconds": 0.0,
+			"plan_verification_seconds": 0.0,
+			"total_seconds": total_seconds,
+			"success": False,
+			"selected_bucket": "no_plan_from_solver",
+			"resource_profile": {},
+			"stdout": str(failure_metadata.get("linearizer_stdout") or ""),
+			"stderr": str(failure_metadata.get("linearizer_stderr") or ""),
+		}
+
+	@staticmethod
+	def _safe_json_dump(payload: Dict[str, Any]) -> str:
+		return json.dumps(payload, indent=2, default=str)
 
 	def run_backend_race(self) -> Dict[str, Any]:
 		return self.run_backend_evaluation(

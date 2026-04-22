@@ -110,6 +110,7 @@ def build_problem_result_row(
 	plan_solve = dict(report.get("plan_solve") or {})
 	plan_verification = dict(report.get("plan_verification") or {})
 	plan_solve_summary = dict(plan_solve.get("summary") or {})
+	plan_solve_artifacts = dict(plan_solve.get("artifacts") or {})
 	plan_verification_summary = dict(plan_verification.get("summary") or {})
 	plan_verification_artifacts = dict(plan_verification.get("artifacts") or {})
 	execution = dict(report.get("execution") or {})
@@ -123,6 +124,13 @@ def build_problem_result_row(
 	outcome_bucket = str(report.get("outcome_bucket") or "unknown_failure")
 	if outcome_bucket not in HTN_OUTCOME_BUCKETS:
 		outcome_bucket = "unknown_failure"
+	failure_reason = (
+		plan_verification_artifacts.get("failure_reason")
+		or plan_verification_summary.get("failure_reason")
+		or plan_solve_artifacts.get("failure_reason")
+		or plan_solve_summary.get("failure_reason")
+		or ""
+	)
 
 	return {
 		"domain_key": domain_key,
@@ -154,6 +162,7 @@ def build_problem_result_row(
 		"selected_representation_id": plan_verification_artifacts.get(
 			"selected_representation_id",
 		),
+		"failure_reason": str(failure_reason),
 	}
 
 
@@ -246,6 +255,7 @@ def build_domain_summary(
 				"selected_solver_id": row.get("selected_solver_id"),
 				"selected_backend_name": row.get("selected_backend_name"),
 				"selected_representation_id": row.get("selected_representation_id"),
+				"failure_reason": row.get("failure_reason"),
 			}
 			for row in problem_rows
 		],
@@ -424,6 +434,7 @@ def build_problem_capability_rows(
 					"selected_solver_id": query_result.get("selected_solver_id"),
 					"selected_backend_name": query_result.get("selected_backend_name"),
 					"selected_representation_id": query_result.get("selected_representation_id"),
+					"failure_reason": str(query_result.get("failure_reason") or ""),
 				}
 				rows.append(row)
 	return tuple(rows)
@@ -495,6 +506,7 @@ def write_problem_capability_matrix(
 		"selected_solver_id",
 		"selected_backend_name",
 		"selected_representation_id",
+		"failure_reason",
 	]
 	with csv_path.open("w", newline="") as handle:
 		writer = csv.DictWriter(handle, fieldnames=fieldnames)

@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from planning.backends import LiftedPandaBackend, PandaDealerBackend
 from planning.official_benchmark import OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
+from planning.panda_portfolio import PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
 from planning.process_capture import (
 	PROCESS_OUTPUT_PREVIEW_BYTE_LIMIT,
@@ -222,6 +223,9 @@ def test_run_official_problem_root_baseline_for_domain_filters_query_ids(
 	assert summary["solver_no_plan_failures"] == 1
 	assert run_case.call_args_list[0].args == ("transport", "query_01")
 	assert run_case.call_args_list[1].args == ("transport", "query_03")
+	assert run_case.call_args_list[0].kwargs["logs_dir"] == (
+		tmp_path / "planner_or_race" / "transport" / "query_logs"
+	)
 
 
 def test_merge_official_backend_output_dir_skips_unreadable_backend_root(
@@ -567,6 +571,7 @@ def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries
 
 	run_case.assert_called_once()
 	assert run_case.call_args.args[:2] == ("transport", "query_02")
+	assert run_case.call_args.kwargs["logs_dir"] == output_root / "query_logs"
 	assert summary["attempted_problem_count"] == 2
 	assert summary["verified_success_count"] == 1
 	problem_rows = json.loads((output_root / "problem_results.json").read_text())
@@ -1427,6 +1432,58 @@ def test_lifted_planner_forces_linearized_representation_for_total_order_problem
 	assert tasks[0].backend_name == "lifted_panda_sat"
 	assert tasks[0].representation.representation_id == "linearized_total_order"
 	assert tasks[0].representation.metadata["forced_for_backend_capability"] is True
+
+
+def test_backend_evaluation_records_representation_build_failure_as_query_failure(
+	tmp_path: Path,
+) -> None:
+	original_representation = PlanningRepresentation(
+		representation_id="original_total_order",
+		representation_source="original",
+		ordering_kind="total_order",
+		domain_file=str(tmp_path / "domain.hddl"),
+		problem_file=str(tmp_path / "problem.hddl"),
+		compilation_profile="identity",
+		metadata={"requires_linearization": False},
+	)
+	context = SimpleNamespace(
+		output_dir=tmp_path,
+		domain_file=str(tmp_path / "domain.hddl"),
+		problem_file=str(tmp_path / "problem.hddl"),
+		_build_problem_representations=Mock(
+			return_value=RepresentationBuildResult(
+				structure=SimpleNamespace(requires_linearization=False),
+				representations=(original_representation,),
+			),
+		),
+		_official_problem_root_planning_timeout_seconds=Mock(return_value=1800.0),
+	)
+	with patch.object(problem_root_evaluator, "LiftedLinearPlanner") as planner_cls:
+		planner_cls.return_value.linearize_hddl_files.side_effect = PANDAPlanningError(
+			"Lifted Linear linearization failed.",
+			metadata={
+				"linearizer_stdout": "linearizer out",
+				"linearizer_stderr": "linearizer err",
+				"engine_attempts": [{"solver_id": "lifted_linear_config_2"}],
+			},
+		)
+
+		result = HTNProblemRootEvaluator(context).run_backend_evaluation(
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id="lifted_panda_sat",
+		)
+
+	assert result["planning_tasks"] == []
+	assert len(result["attempts"]) == 1
+	selected_attempt = result["selected_attempt"]
+	assert selected_attempt["backend_name"] == "lifted_panda_sat"
+	assert selected_attempt["representation_id"] == "linearized_total_order"
+	assert selected_attempt["selected_bucket"] == "no_plan_from_solver"
+	assert selected_attempt["plan_solve_data"]["summary"]["status"] == "failed"
+	assert selected_attempt["plan_solve_data"]["summary"]["failure_stage"] == "representation_build"
+	assert "Lifted Linear linearization failed" in selected_attempt["plan_solve_data"]["summary"]["failure_reason"]
+	assert selected_attempt["stdout"] == "linearizer out"
+	assert selected_attempt["stderr"] == "linearizer err"
 
 
 def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressure(
