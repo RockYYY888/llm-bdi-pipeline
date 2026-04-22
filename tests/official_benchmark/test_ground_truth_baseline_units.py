@@ -1262,23 +1262,34 @@ def test_track_pass_matrix_writes_compact_pass_status(
 				"requested_planner_id": None,
 				"complete": True,
 				"completed_domains": ["blocksworld", "marsrover", "satellite", "transport"],
-				"track_summary": {"verified_success_count": 115},
+				"track_summary": {
+					"total_queries": 115,
+					"verified_success_count": 115,
+				},
 			},
 			"panda_pi_portfolio": {
 				"evaluation_mode": "single_planner",
 				"requested_planner_id": "panda_pi_portfolio",
-				"complete": False,
-				"completed_domains": ["blocksworld"],
-				"track_summary": {"verified_success_count": 27},
+				"complete": True,
+				"completed_domains": ["blocksworld", "marsrover", "satellite", "transport"],
+				"track_summary": {
+					"total_queries": 115,
+					"verified_success_count": 80,
+				},
 			},
 		},
 	)
 	rows = json.loads(Path(paths["track_pass_matrix_json"]).read_text())
 	assert rows[0]["track_id"] == "planner_or_race"
 	assert rows[0]["pass"] is True
+	assert rows[0]["all_queries_verified"] is True
 	assert rows[1]["track_id"] == "panda_pi_portfolio"
 	assert rows[1]["pass"] is False
+	assert rows[1]["sweep_complete"] is True
+	assert rows[1]["all_queries_verified"] is False
+	assert rows[1]["total_query_count"] == 115
 	assert "verified_success_count" in Path(paths["track_pass_matrix_csv"]).read_text()
+	assert "all_queries_verified" in Path(paths["track_pass_matrix_csv"]).read_text()
 
 
 def test_cleanup_reclaims_only_live_project_planning_processes() -> None:

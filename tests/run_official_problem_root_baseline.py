@@ -449,15 +449,24 @@ def _build_track_pass_rows(
 	rows: List[Dict[str, Any]] = []
 	for track_id, summary in track_summaries.items():
 		track_summary = dict(summary.get("track_summary") or {})
+		total_query_count = int(track_summary.get("total_queries") or 0)
+		verified_success_count = int(track_summary.get("verified_success_count") or 0)
+		sweep_complete = bool(summary.get("complete"))
+		all_queries_verified = sweep_complete and total_query_count > 0 and (
+			verified_success_count == total_query_count
+		)
 		rows.append(
 			{
 				"track_id": track_id,
 				"evaluation_mode": summary.get("evaluation_mode"),
 				"requested_planner_id": summary.get("requested_planner_id"),
-				"complete": bool(summary.get("complete")),
-				"pass": bool(summary.get("complete")),
+				"complete": sweep_complete,
+				"sweep_complete": sweep_complete,
+				"all_queries_verified": all_queries_verified,
+				"pass": all_queries_verified,
 				"completed_domain_count": len(summary.get("completed_domains") or []),
-				"verified_success_count": track_summary.get("verified_success_count", 0),
+				"total_query_count": total_query_count,
+				"verified_success_count": verified_success_count,
 			},
 		)
 	return rows
@@ -477,8 +486,11 @@ def _write_track_pass_matrix(
 		"evaluation_mode",
 		"requested_planner_id",
 		"complete",
+		"sweep_complete",
+		"all_queries_verified",
 		"pass",
 		"completed_domain_count",
+		"total_query_count",
 		"verified_success_count",
 	]
 	with csv_path.open("w", newline="") as handle:
