@@ -363,7 +363,7 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	assert profile["prompt_token_estimate"] == expected_prompt_tokens
 	assert profile["completion_max_tokens"] is None
 	assert profile["reasoning_max_tokens"] is None
-	assert profile["reasoning_excluded"] is True
+	assert profile["reasoning_excluded"] is False
 	assert profile["first_chunk_timeout_seconds"] == 400.0
 	assert profile["session_id"] == "offline-method-generation"
 	assert profile["max_tokens_policy"] == "provider_default"
@@ -390,7 +390,7 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 				"allow_fallbacks": False,
 			},
 			"session_id": "offline-method-generation",
-			"reasoning": {"exclude": True},
+			"reasoning": {"exclude": False},
 		}
 
 
@@ -458,7 +458,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 	assert "max_tokens" not in captured_request["request_kwargs"]
 	assert captured_request["request_timeout_seconds"] == 90.0
 	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
-	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {"exclude": True}
+	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {"exclude": False}
 
 
 def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_supplied() -> None:
@@ -565,7 +565,7 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 			"llm_first_chunk_timeout_seconds": 400.0,
 			"llm_context_window_tokens": 204800,
 			"llm_prompt_token_estimate": 1,
-			"llm_reasoning_excluded": True,
+			"llm_reasoning_excluded": False,
 			"llm_session_id": "offline-method-generation",
 			"llm_max_tokens_policy": "provider_default",
 			"llm_request_timeout_seconds": 0.01,

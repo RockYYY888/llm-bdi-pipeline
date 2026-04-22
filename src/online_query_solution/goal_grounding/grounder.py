@@ -990,7 +990,7 @@ class NLToLTLfGenerator:
 			},
 			"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 		}
-		extra_body["reasoning"] = {"exclude": True}
+		extra_body["reasoning"] = {"exclude": False}
 		return extra_body
 
 	def _goal_grounding_request_profile(
@@ -1006,13 +1006,13 @@ class NLToLTLfGenerator:
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
 				# Keep Kimi on provider defaults: no max_tokens and no reasoning token cap.
-				# OpenRouter is asked not to stream reasoning payloads back to us.
+				# Reasoning chunks are streamed as heartbeat events but not stored locally.
 				"reasoning_max_tokens": None,
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
 				"completion_max_tokens": None,
-				"reasoning_excluded": True,
+				"reasoning_excluded": False,
 				"session_id": ONLINE_LTLF_GENERATION_SESSION_ID,
 				"max_tokens_policy": "provider_default",
 			}

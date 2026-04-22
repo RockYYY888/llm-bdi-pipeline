@@ -501,7 +501,7 @@ class MethodSynthesisLLMTransportMixin:
 			},
 			"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
 		}
-		extra_body["reasoning"] = {"exclude": True}
+		extra_body["reasoning"] = {"exclude": False}
 		return extra_body
 
 	def _method_synthesis_request_profile(
@@ -517,14 +517,15 @@ class MethodSynthesisLLMTransportMixin:
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
 				# Do not send max_tokens or reasoning.max_tokens for Kimi. We only ask
-				# OpenRouter not to forward reasoning payloads back to this process.
+				# OpenRouter to stream reasoning chunks as heartbeat events; they are
+				# counted but never stored locally.
 				"reasoning_max_tokens": None,
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"response_healing_plugin": False,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
 				"completion_max_tokens": None,
-				"reasoning_excluded": True,
+				"reasoning_excluded": False,
 				"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
 				"max_tokens_policy": "provider_default",
 			}
