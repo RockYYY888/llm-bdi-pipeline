@@ -1778,7 +1778,7 @@ def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences(
 	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
 
 
-def test_goal_grounding_kimi_request_profile_uses_streaming_with_reasoning_cap() -> None:
+def test_goal_grounding_kimi_request_profile_uses_streaming_without_token_caps() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
@@ -1799,13 +1799,14 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_with_reasoning_cap()
 	assert profile["first_chunk_timeout_seconds"] == 300.0
 	assert profile["context_window_tokens"] == 262_144
 	assert profile["prompt_token_estimate"] == expected_prompt_estimate
-	assert profile["completion_max_tokens"] == 262_144 - expected_prompt_estimate - 1_024
-	assert profile["reasoning_max_tokens"] == 157_286
-	assert profile["reasoning_context_ratio"] == 0.60
+	assert profile["completion_max_tokens"] is None
+	assert profile["reasoning_max_tokens"] is None
+	assert profile["reasoning_excluded"] is True
 	assert profile["session_id"] == "online-ltlf-generation"
+	assert profile["max_tokens_policy"] == "provider_default"
 
 
-def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_full_output_budget() -> None:
+def test_goal_grounding_chat_completion_uses_openrouter_streaming_without_token_caps() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	captured_request: dict[str, object] = {}
 
@@ -1839,16 +1840,12 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_full_outp
 	assert captured_request["request_timeout_seconds"] == 123.0
 	assert request_kwargs["timeout"] == 123.0
 	assert request_kwargs["stream"] is True
-	expected_prompt_estimate = generator._estimate_goal_grounding_prompt_token_budget(messages)
-	assert request_kwargs["max_tokens"] == 262_144 - expected_prompt_estimate - 1_024
+	assert "max_tokens" not in request_kwargs
 	assert "response_format" not in request_kwargs
 	assert request_kwargs["extra_body"] == {
 		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},
 		"session_id": "online-ltlf-generation",
-		"reasoning": {
-			"max_tokens": 157_286,
-			"exclude": False,
-		},
+		"reasoning": {"exclude": True},
 	}
 
 
@@ -1929,6 +1926,7 @@ def test_goal_grounding_streaming_rejects_length_finish_even_when_json_is_comple
 	assert transport_metadata["llm_request_id"] == "req_goal_123"
 	assert transport_metadata["llm_response_mode"] == "streaming"
 	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_stream_chunk_seconds"] >= 0.0
 	assert transport_metadata["llm_complete_json_seconds"] >= 0.0
 	assert transport_metadata["llm_finish_reason"] == "length"
 
@@ -1960,7 +1958,7 @@ def test_goal_grounding_streaming_enforces_first_chunk_deadline() -> None:
 	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
 
-def test_goal_grounding_streaming_counts_reasoning_as_stream_activity() -> None:
+def test_goal_grounding_streaming_ignores_reasoning_payload_without_storing_it() -> None:
 	class FakeDelta:
 		def __init__(self, reasoning=None):
 			self.content = None
@@ -2006,7 +2004,11 @@ def test_goal_grounding_streaming_counts_reasoning_as_stream_activity() -> None:
 	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
 	assert transport_metadata["llm_request_id"] == "req_goal_reasoning"
 	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_stream_chunk_seconds"] >= 0.0
 	assert transport_metadata["llm_first_reasoning_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_reasoning_chunks_ignored"] == 2
+	assert "llm_reasoning_preview" not in transport_metadata
+	assert "llm_reasoning_characters" not in transport_metadata
 	assert "llm_first_content_chunk_seconds" not in transport_metadata
 
 

@@ -243,13 +243,28 @@ class OfflineDomainSynthesisOrchestrator:
 				"llm_request_id": synthesis_meta.get("llm_request_id"),
 				"llm_request_profile": synthesis_meta.get("llm_request_profile"),
 				"llm_response_mode": synthesis_meta.get("llm_response_mode"),
+				"llm_stream_handshake_seconds": synthesis_meta.get(
+					"llm_stream_handshake_seconds",
+				),
+				"llm_first_stream_chunk_seconds": synthesis_meta.get(
+					"llm_first_stream_chunk_seconds",
+				),
 				"llm_first_chunk_seconds": synthesis_meta.get("llm_first_chunk_seconds"),
+				"llm_first_content_chunk_seconds": synthesis_meta.get(
+					"llm_first_content_chunk_seconds",
+				),
+				"llm_first_reasoning_chunk_seconds": synthesis_meta.get(
+					"llm_first_reasoning_chunk_seconds",
+				),
 				"llm_first_chunk_timeout_seconds": synthesis_meta.get(
 					"llm_first_chunk_timeout_seconds",
 				),
 				"llm_complete_json_seconds": synthesis_meta.get("llm_complete_json_seconds"),
-				"llm_reasoning_preview": synthesis_meta.get("llm_reasoning_preview"),
-				"llm_reasoning_characters": synthesis_meta.get("llm_reasoning_characters"),
+				"llm_reasoning_chunks_ignored": synthesis_meta.get(
+					"llm_reasoning_chunks_ignored",
+				),
+				"llm_reasoning_excluded": synthesis_meta.get("llm_reasoning_excluded"),
+				"llm_max_tokens_policy": synthesis_meta.get("llm_max_tokens_policy"),
 				"llm_attempts": synthesis_meta.get("llm_attempts"),
 				"llm_response_time_seconds": synthesis_meta.get("llm_response_time_seconds"),
 				"llm_attempt_durations_seconds": synthesis_meta.get(

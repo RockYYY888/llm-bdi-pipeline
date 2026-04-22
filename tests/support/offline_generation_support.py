@@ -218,7 +218,16 @@ def run_generated_domain_build(domain_key: str) -> Dict[str, Any]:
 		),
 		"llm_request_id": str(method_synthesis_metadata.get("llm_request_id") or ""),
 		"llm_response_mode": str(method_synthesis_metadata.get("llm_response_mode") or ""),
+		"llm_stream_handshake_seconds": method_synthesis_metadata.get(
+			"llm_stream_handshake_seconds",
+		),
+		"llm_first_stream_chunk_seconds": method_synthesis_metadata.get(
+			"llm_first_stream_chunk_seconds",
+		),
 		"llm_first_chunk_seconds": method_synthesis_metadata.get("llm_first_chunk_seconds"),
+		"llm_first_content_chunk_seconds": method_synthesis_metadata.get(
+			"llm_first_content_chunk_seconds",
+		),
 		"llm_complete_json_seconds": method_synthesis_metadata.get("llm_complete_json_seconds"),
 		"llm_attempted": bool(method_synthesis_metadata.get("llm_attempted")),
 		"llm_generation_attempts": int(method_synthesis_metadata.get("llm_generation_attempts") or 0),

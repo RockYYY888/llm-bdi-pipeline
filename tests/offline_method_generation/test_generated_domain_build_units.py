@@ -338,10 +338,11 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 	assert "response_format" not in captured_kwargs
 
 
-def test_method_synthesis_transport_requests_kimi_full_output_budget() -> None:
+def test_method_synthesis_transport_omits_kimi_output_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(model="moonshotai/kimi-k2.6")
 
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) == 203776
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) is None
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(32768) is None
 
 
 def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
@@ -360,11 +361,12 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	assert profile["name"] == "kimi_stream_single_pass"
 	assert profile["context_window_tokens"] == 262144
 	assert profile["prompt_token_estimate"] == expected_prompt_tokens
-	assert profile["completion_max_tokens"] == 262144 - expected_prompt_tokens - 1024
-	assert profile["reasoning_max_tokens"] == 157286
-	assert profile["reasoning_context_ratio"] == 0.60
+	assert profile["completion_max_tokens"] is None
+	assert profile["reasoning_max_tokens"] is None
+	assert profile["reasoning_excluded"] is True
 	assert profile["first_chunk_timeout_seconds"] == 400.0
 	assert profile["session_id"] == "offline-method-generation"
+	assert profile["max_tokens_policy"] == "provider_default"
 
 
 def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None:
@@ -377,7 +379,7 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 		request_profile={
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				"reasoning_max_tokens": 157286,
+				"reasoning_max_tokens": None,
 				"first_chunk_timeout_seconds": 400.0,
 			},
 		)
@@ -388,10 +390,7 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 				"allow_fallbacks": False,
 			},
 			"session_id": "offline-method-generation",
-			"reasoning": {
-				"max_tokens": 157286,
-				"exclude": False,
-			},
+			"reasoning": {"exclude": True},
 		}
 
 
@@ -456,8 +455,10 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 	assert response is not None
 	assert captured_request["request_kwargs"]["stream"] is True
 	assert "response_format" not in captured_request["request_kwargs"]
+	assert "max_tokens" not in captured_request["request_kwargs"]
 	assert captured_request["request_timeout_seconds"] == 90.0
 	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "offline-method-generation"
+	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {"exclude": True}
 
 
 def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_supplied() -> None:
@@ -560,13 +561,13 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "streaming",
 			"llm_request_profile": "kimi_stream_single_pass",
-			"llm_reasoning_budget": 122880,
+			"llm_reasoning_budget": None,
 			"llm_first_chunk_timeout_seconds": 400.0,
 			"llm_context_window_tokens": 204800,
 			"llm_prompt_token_estimate": 1,
-			"llm_completion_max_tokens": 203775,
-			"llm_reasoning_context_ratio": 0.60,
+			"llm_reasoning_excluded": True,
 			"llm_session_id": "offline-method-generation",
+			"llm_max_tokens_policy": "provider_default",
 			"llm_request_timeout_seconds": 0.01,
 		}
 
@@ -609,7 +610,52 @@ def test_method_synthesis_transport_streaming_captures_request_id_and_timings() 
 	assert transport_metadata["llm_request_id"] == "req_stream_123"
 	assert transport_metadata["llm_response_mode"] == "streaming"
 	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_stream_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_content_chunk_seconds"] >= 0.0
 	assert transport_metadata["llm_complete_json_seconds"] >= 0.0
+
+
+def test_method_synthesis_transport_counts_empty_stream_chunk_before_content() -> None:
+	class FakeDelta:
+		def __init__(self, content=None):
+			self.content = content
+
+	class FakeChoice:
+		def __init__(self, content=None, finish_reason=None):
+			self.delta = FakeDelta(content)
+			self.finish_reason = finish_reason
+
+	class FakeChunk:
+		def __init__(self, chunk_id, content=None, finish_reason=None):
+			self.id = chunk_id
+			self.choices = [FakeChoice(content, finish_reason=finish_reason)]
+
+	class FakeStream:
+		handshake_seconds = 1.25
+
+		def __iter__(self):
+			yield FakeChunk("req_empty_first", "")
+			yield FakeChunk("req_empty_first", '{"compound_tasks":[],"methods":[]}', "stop")
+
+		def close(self):
+			return None
+
+	synthesizer = HTNMethodSynthesizer()
+
+	response_text, finish_reason, transport_metadata = synthesizer._consume_streaming_llm_response(
+		FakeStream(),
+		transport_metadata={"llm_first_chunk_timeout_seconds": 0.01},
+		total_timeout_seconds=1.0,
+	)
+
+	assert response_text == '{"compound_tasks":[],"methods":[]}'
+	assert finish_reason == "stop"
+	assert transport_metadata["llm_stream_handshake_seconds"] == 1.25
+	assert transport_metadata["llm_first_stream_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_chunk_seconds"] == transport_metadata[
+		"llm_first_stream_chunk_seconds"
+	]
+	assert transport_metadata["llm_first_content_chunk_seconds"] >= 0.0
 
 
 def test_method_synthesis_transport_enforces_first_chunk_deadline_during_stream_consumption() -> None:
@@ -639,7 +685,7 @@ def test_method_synthesis_transport_enforces_first_chunk_deadline_during_stream_
 	assert transport_metadata.get("llm_first_chunk_seconds") is None
 
 
-def test_method_synthesis_transport_counts_reasoning_as_stream_activity() -> None:
+def test_method_synthesis_transport_ignores_reasoning_payload_without_storing_it() -> None:
 	class FakeDelta:
 		def __init__(self, reasoning=None):
 			self.content = None
@@ -685,7 +731,11 @@ def test_method_synthesis_transport_counts_reasoning_as_stream_activity() -> Non
 	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
 	assert transport_metadata["llm_request_id"] == "req_reasoning_stream"
 	assert transport_metadata["llm_first_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_first_stream_chunk_seconds"] >= 0.0
 	assert transport_metadata["llm_first_reasoning_chunk_seconds"] >= 0.0
+	assert transport_metadata["llm_reasoning_chunks_ignored"] == 2
+	assert "llm_reasoning_preview" not in transport_metadata
+	assert "llm_reasoning_characters" not in transport_metadata
 	assert "llm_first_content_chunk_seconds" not in transport_metadata
 
 
@@ -781,7 +831,7 @@ def test_method_synthesis_retries_then_accepts_successful_response() -> None:
 	assert metadata["llm_attempt_trace"][-1]["request_id"] == "req_retry_6"
 
 
-def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arrives() -> None:
+def test_method_synthesis_transport_does_not_store_reasoning_when_no_json_arrives() -> None:
 	class FakeDelta:
 		def __init__(self, reasoning=None):
 			self.content = None
@@ -821,9 +871,9 @@ def test_method_synthesis_transport_preserves_reasoning_preview_when_no_json_arr
 	transport_metadata = getattr(exc_info.value, "transport_metadata", {})
 	assert transport_metadata["llm_request_id"] == "req_reasoning_only"
 	assert transport_metadata["llm_response_mode"] == "streaming"
-	assert transport_metadata["llm_reasoning_characters"] > 10
-	assert transport_metadata["llm_reasoning_preview"] == "We need to"
-	assert len(transport_metadata["llm_reasoning_preview"]) == 10
+	assert transport_metadata["llm_reasoning_chunks_ignored"] == 4
+	assert "llm_reasoning_characters" not in transport_metadata
+	assert "llm_reasoning_preview" not in transport_metadata
 
 
 def test_method_synthesis_transport_returns_raw_json_like_text_for_downstream_salvage() -> None:

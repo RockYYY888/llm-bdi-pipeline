@@ -161,7 +161,9 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 			f"{domain_key}: build_success={bool(domain_build.get('success'))}, "
 			f"gate_success={bool(domain_gate.get('success'))}, "
 			f"llm_generation_attempts={int(domain_summary.get('llm_generation_attempts_total', 0))}, "
-			f"first_chunk={domain_build.get('llm_first_chunk_seconds')}, "
+			f"stream_handshake={domain_build.get('llm_stream_handshake_seconds')}, "
+			f"first_stream_chunk={domain_build.get('llm_first_stream_chunk_seconds')}, "
+			f"first_content_chunk={domain_build.get('llm_first_content_chunk_seconds')}, "
 			f"complete_json={domain_build.get('llm_complete_json_seconds')}, "
 			f"methods={domain_build.get('generated_method_count')}",
 		)
@@ -189,7 +191,10 @@ def _run_single_domain(domain_key: str, run_dir: Path) -> int:
 			"llm_attempts": int(report.get("llm_attempts") or 0),
 			"llm_request_id": str(report.get("llm_request_id") or ""),
 			"llm_response_mode": str(report.get("llm_response_mode") or ""),
+			"llm_stream_handshake_seconds": report.get("llm_stream_handshake_seconds"),
+			"llm_first_stream_chunk_seconds": report.get("llm_first_stream_chunk_seconds"),
 			"llm_first_chunk_seconds": report.get("llm_first_chunk_seconds"),
+			"llm_first_content_chunk_seconds": report.get("llm_first_content_chunk_seconds"),
 			"llm_complete_json_seconds": report.get("llm_complete_json_seconds"),
 			"method_synthesis_model": str(report.get("method_synthesis_model") or ""),
 			"generated_method_count": int(report.get("generated_method_count") or 0),

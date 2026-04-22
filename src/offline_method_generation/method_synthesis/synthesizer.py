@@ -129,10 +129,15 @@ class HTNMethodSynthesizer(
 			"llm_finish_reason": None,
 			"llm_request_id": None,
 			"llm_response_mode": None,
+			"llm_stream_handshake_seconds": None,
+			"llm_first_stream_chunk_seconds": None,
 			"llm_first_chunk_seconds": None,
+			"llm_first_content_chunk_seconds": None,
+			"llm_first_reasoning_chunk_seconds": None,
 			"llm_complete_json_seconds": None,
-			"llm_reasoning_preview": None,
-			"llm_reasoning_characters": None,
+			"llm_reasoning_chunks_ignored": None,
+			"llm_reasoning_excluded": None,
+			"llm_max_tokens_policy": None,
 			"llm_attempts": 0,
 			"llm_generation_attempts": 0,
 			"pruned_constructive_siblings": 0,
@@ -168,8 +173,7 @@ class HTNMethodSynthesizer(
 		metadata["llm_prompt"] = prompt
 		metadata["llm_request_count"] = OFFLINE_METHOD_SYNTHESIS_MAX_RETRIES + 1
 		if str(self.model or "").strip().lower().startswith("moonshotai/"):
-			request_profile = self._method_synthesis_request_profile(prompt=prompt)
-			request_max_tokens = int(request_profile["completion_max_tokens"])
+			request_max_tokens = None
 		else:
 			request_max_tokens = self._estimate_method_synthesis_response_token_budget(
 				prompt_analysis=prompt_analysis,
@@ -505,18 +509,23 @@ class HTNMethodSynthesizer(
 					for key in (
 						"llm_request_id",
 						"llm_response_mode",
+						"llm_stream_handshake_seconds",
+						"llm_first_stream_chunk_seconds",
 						"llm_first_chunk_seconds",
+						"llm_first_content_chunk_seconds",
+						"llm_first_reasoning_chunk_seconds",
 						"llm_complete_json_seconds",
-						"llm_reasoning_preview",
-						"llm_reasoning_characters",
+						"llm_reasoning_chunks_ignored",
 						"llm_context_window_tokens",
 						"llm_prompt_token_estimate",
 						"llm_answer_token_reserve",
 						"llm_context_margin_tokens",
 						"llm_reasoning_headroom_tokens",
 						"llm_reasoning_headroom_ratio",
+						"llm_reasoning_excluded",
 						"llm_transport_overhead_tokens",
 						"llm_session_id",
+						"llm_max_tokens_policy",
 					):
 						if transport_metadata.get(key) is not None:
 							metadata[key] = transport_metadata.get(key)
@@ -553,18 +562,23 @@ class HTNMethodSynthesizer(
 		for key in (
 			"llm_request_id",
 			"llm_response_mode",
+			"llm_stream_handshake_seconds",
+			"llm_first_stream_chunk_seconds",
 			"llm_first_chunk_seconds",
+			"llm_first_content_chunk_seconds",
+			"llm_first_reasoning_chunk_seconds",
 			"llm_complete_json_seconds",
-			"llm_reasoning_preview",
-			"llm_reasoning_characters",
+			"llm_reasoning_chunks_ignored",
 			"llm_context_window_tokens",
 			"llm_prompt_token_estimate",
 			"llm_answer_token_reserve",
 			"llm_context_margin_tokens",
 			"llm_reasoning_headroom_tokens",
 			"llm_reasoning_headroom_ratio",
+			"llm_reasoning_excluded",
 			"llm_transport_overhead_tokens",
 			"llm_session_id",
+			"llm_max_tokens_policy",
 		):
 			if transport_metadata.get(key) is not None:
 				metadata[key] = transport_metadata.get(key)
@@ -627,7 +641,19 @@ class HTNMethodSynthesizer(
 			),
 			"request_id": transport_metadata.get("llm_request_id"),
 			"response_mode": transport_metadata.get("llm_response_mode"),
+			"stream_handshake_seconds": transport_metadata.get(
+				"llm_stream_handshake_seconds",
+			),
+			"first_stream_chunk_seconds": transport_metadata.get(
+				"llm_first_stream_chunk_seconds",
+			),
 			"first_chunk_seconds": transport_metadata.get("llm_first_chunk_seconds"),
+			"first_content_chunk_seconds": transport_metadata.get(
+				"llm_first_content_chunk_seconds",
+			),
+			"first_reasoning_chunk_seconds": transport_metadata.get(
+				"llm_first_reasoning_chunk_seconds",
+			),
 			"complete_json_seconds": transport_metadata.get("llm_complete_json_seconds"),
 			"finish_reason": finish_reason,
 			"error": error,

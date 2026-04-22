@@ -18,8 +18,6 @@ from .errors import LLMStreamingResponseError
 
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
 KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
-KIMI_REASONING_CONTEXT_RATIO = 0.60
-KIMI_CONTEXT_MARGIN_TOKENS = 1_024
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 400.0
 OFFLINE_METHOD_GENERATION_SESSION_ID = "offline-method-generation"
@@ -39,9 +37,16 @@ def _namespace_from_json_like(value: object) -> object:
 
 
 class _RawOpenRouterStreamingResponse:
-	def __init__(self, *, client: Any, response: Any) -> None:
+	def __init__(
+		self,
+		*,
+		client: Any,
+		response: Any,
+		handshake_seconds: Optional[float] = None,
+	) -> None:
 		self._client = client
 		self._response = response
+		self.handshake_seconds = handshake_seconds
 		self.id = (
 			response.headers.get("x-request-id")
 			or response.headers.get("request-id")
@@ -182,18 +187,13 @@ class MethodSynthesisLLMTransportMixin:
 		"""
 		Keep provider-specific handling explicit even when no extra cap is applied.
 
-		For Kimi method synthesis, request the provider's full output window. Kimi
-		defaults to a much smaller output cap when max_tokens is omitted, and
-		reasoning.max_tokens must remain lower than the total output budget.
+		For Kimi method synthesis, omit application-side max_tokens entirely. Kimi
+		controls thinking and completion under its provider defaults; sending a
+		large cap can invite long reasoning-only runs without improving JSON return.
 		"""
 		model_name = str(self.model or "").strip().lower()
 		if model_name.startswith("moonshotai/"):
-			if requested_max_tokens is not None:
-				return max(int(requested_max_tokens), 1)
-			return max(
-				self._method_synthesis_total_context_tokens() - KIMI_CONTEXT_MARGIN_TOKENS,
-				1,
-			)
+			return None
 		requested = max(int(requested_max_tokens or 0), 1)
 		return requested
 
@@ -218,9 +218,10 @@ class MethodSynthesisLLMTransportMixin:
 			("llm_context_margin_tokens", "context_margin_tokens"),
 			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
 			("llm_reasoning_headroom_ratio", "reasoning_headroom_ratio"),
-			("llm_reasoning_context_ratio", "reasoning_context_ratio"),
+			("llm_reasoning_excluded", "reasoning_excluded"),
 			("llm_transport_overhead_tokens", "transport_overhead_tokens"),
 			("llm_session_id", "session_id"),
+			("llm_max_tokens_policy", "max_tokens_policy"),
 		):
 			if request_profile.get(profile_key) is not None:
 				transport_metadata[metadata_key] = request_profile.get(profile_key)
@@ -379,7 +380,8 @@ class MethodSynthesisLLMTransportMixin:
 			"timeout": request_timeout_seconds if request_timeout_seconds is not None else self.timeout,
 			"stream": stream_response,
 		}
-		if max_tokens is not None:
+		is_kimi_model = str(self.model or "").strip().lower().startswith("moonshotai/")
+		if max_tokens is not None and not is_kimi_model:
 			request_kwargs["max_tokens"] = max_tokens
 		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
 			request_kwargs["response_format"] = {"type": "json_object"}
@@ -445,15 +447,21 @@ class MethodSynthesisLLMTransportMixin:
 				},
 				json=payload,
 			)
+			handshake_start = time.monotonic()
 			response = self._run_with_wall_clock_timeout(
 				request_timeout_seconds,
 				lambda: client.send(request, stream=True),
 			)
+			handshake_seconds = round(time.monotonic() - handshake_start, 6)
 			response.raise_for_status()
 		except Exception:
 			client.close()
 			raise
-		return _RawOpenRouterStreamingResponse(client=client, response=response)
+		return _RawOpenRouterStreamingResponse(
+			client=client,
+			response=response,
+			handshake_seconds=handshake_seconds,
+		)
 
 	def _should_stream_method_synthesis_response(self) -> bool:
 		base_url = str(self.base_url or "").strip().lower()
@@ -493,14 +501,7 @@ class MethodSynthesisLLMTransportMixin:
 			},
 			"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
 		}
-		reasoning_max_tokens = int(
-			(request_profile or {}).get("reasoning_max_tokens") or 0,
-		)
-		if reasoning_max_tokens > 0:
-			extra_body["reasoning"] = {
-				"max_tokens": reasoning_max_tokens,
-				"exclude": False,
-			}
+		extra_body["reasoning"] = {"exclude": True}
 		return extra_body
 
 	def _method_synthesis_request_profile(
@@ -512,25 +513,20 @@ class MethodSynthesisLLMTransportMixin:
 		if model_name.startswith("moonshotai/"):
 			context_window_tokens = self._method_synthesis_total_context_tokens()
 			prompt_token_estimate = self._estimate_method_synthesis_prompt_token_budget(prompt)
-			completion_max_tokens = max(
-				context_window_tokens - prompt_token_estimate - KIMI_CONTEXT_MARGIN_TOKENS,
-				1,
-			)
-			reasoning_max_tokens = math.floor(
-				context_window_tokens * KIMI_REASONING_CONTEXT_RATIO,
-			)
 			return {
 				"name": "kimi_stream_single_pass",
 				"stream_response": True,
-				# Do not cap the visible answer; cap hidden reasoning to avoid timeout-only runs.
-				"reasoning_max_tokens": reasoning_max_tokens,
+				# Do not send max_tokens or reasoning.max_tokens for Kimi. We only ask
+				# OpenRouter not to forward reasoning payloads back to this process.
+				"reasoning_max_tokens": None,
 				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
 				"response_healing_plugin": False,
 				"context_window_tokens": context_window_tokens,
 				"prompt_token_estimate": prompt_token_estimate,
-				"completion_max_tokens": completion_max_tokens,
-				"reasoning_context_ratio": KIMI_REASONING_CONTEXT_RATIO,
+				"completion_max_tokens": None,
+				"reasoning_excluded": True,
 				"session_id": OFFLINE_METHOD_GENERATION_SESSION_ID,
+				"max_tokens_policy": "provider_default",
 			}
 		return {
 			"name": "default_profile",
@@ -572,14 +568,18 @@ class MethodSynthesisLLMTransportMixin:
 		request_id = self._extract_transport_request_id(response)
 		if request_id:
 			metadata["llm_request_id"] = request_id
+		handshake_seconds = getattr(response, "handshake_seconds", None)
+		if handshake_seconds is not None:
+			metadata["llm_stream_handshake_seconds"] = handshake_seconds
+			self._emit_method_synthesis_progress(
+				f"stream_handshake_seconds={handshake_seconds}",
+			)
 		parts: list[str] = []
-		reasoning_preview = ""
-		reasoning_characters = 0
-		reasoning_preview_limit = 10
+		reasoning_chunks_ignored = 0
 		finish_reason: Optional[str] = None
 		close_stream = getattr(response, "close", None)
 		stream_start = time.monotonic()
-		first_chunk_recorded = False
+		first_stream_chunk_recorded = False
 		first_content_chunk_recorded = False
 		first_chunk_timeout_seconds = float(
 			metadata.get("llm_first_chunk_timeout_seconds") or 0.0,
@@ -593,7 +593,7 @@ class MethodSynthesisLLMTransportMixin:
 				else 0.0
 			)
 			next_chunk_timeout_seconds: Optional[float] = None
-			if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0:
+			if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0:
 				next_chunk_timeout_seconds = first_chunk_timeout_seconds - elapsed_seconds
 				if total_timeout_seconds > 0.0:
 					next_chunk_timeout_seconds = min(
@@ -606,7 +606,7 @@ class MethodSynthesisLLMTransportMixin:
 				timeout_error = TimeoutError(
 					"Method-synthesis LLM call exceeded the configured first-chunk "
 					"deadline before any streaming chunk arrived."
-					if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
+					if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0
 					else "Method-synthesis LLM call exceeded the configured timeout "
 					"before returning a usable response.",
 				)
@@ -628,7 +628,7 @@ class MethodSynthesisLLMTransportMixin:
 				timeout_error = TimeoutError(
 					"Method-synthesis LLM call exceeded the configured first-chunk "
 					"deadline before any streaming chunk arrived."
-					if not first_chunk_recorded and first_chunk_timeout_seconds > 0.0
+					if not first_stream_chunk_recorded and first_chunk_timeout_seconds > 0.0
 					else "Method-synthesis LLM call exceeded the configured timeout "
 					"before returning a usable response.",
 				)
@@ -642,6 +642,14 @@ class MethodSynthesisLLMTransportMixin:
 			request_id = self._extract_transport_request_id(chunk)
 			if request_id:
 				metadata["llm_request_id"] = request_id
+			if not first_stream_chunk_recorded:
+				first_stream_chunk_seconds = round(time.monotonic() - stream_start, 6)
+				metadata["llm_first_stream_chunk_seconds"] = first_stream_chunk_seconds
+				metadata["llm_first_chunk_seconds"] = first_stream_chunk_seconds
+				first_stream_chunk_recorded = True
+				self._emit_method_synthesis_progress(
+					f"first_stream_chunk_seconds={first_stream_chunk_seconds}",
+				)
 			choices = getattr(chunk, "choices", None) or ()
 			if not choices:
 				continue
@@ -655,19 +663,14 @@ class MethodSynthesisLLMTransportMixin:
 			):
 				extracted = self._normalise_response_content(candidate)
 				if extracted is not None:
-					if not first_chunk_recorded:
-						metadata["llm_first_chunk_seconds"] = round(
-							time.monotonic() - stream_start,
-							6,
-						)
-						first_chunk_recorded = True
-						self._emit_method_synthesis_progress(
-							f"first_chunk_seconds={metadata['llm_first_chunk_seconds']}",
-						)
 					if not first_content_chunk_recorded:
 						metadata["llm_first_content_chunk_seconds"] = round(
 							time.monotonic() - stream_start,
 							6,
+						)
+						self._emit_method_synthesis_progress(
+							"first_content_chunk_seconds="
+							f"{metadata['llm_first_content_chunk_seconds']}",
 						)
 						first_content_chunk_recorded = True
 					parts.append(extracted)
@@ -677,24 +680,15 @@ class MethodSynthesisLLMTransportMixin:
 				getattr(delta, "reasoning_details", None) if delta is not None else None,
 				getattr(choice, "reasoning", None),
 			):
-				extracted_reasoning = self._normalise_response_content(reasoning_candidate)
-				if extracted_reasoning is not None:
-					reasoning_characters += len(extracted_reasoning)
-					if len(reasoning_preview) < reasoning_preview_limit:
-						remaining_preview_characters = reasoning_preview_limit - len(reasoning_preview)
-						reasoning_preview += extracted_reasoning[:remaining_preview_characters]
-					if not first_chunk_recorded:
-						metadata["llm_first_chunk_seconds"] = round(
-							time.monotonic() - stream_start,
-							6,
-						)
-						metadata["llm_first_reasoning_chunk_seconds"] = metadata[
-							"llm_first_chunk_seconds"
-						]
-						first_chunk_recorded = True
-						self._emit_method_synthesis_progress(
-							f"first_chunk_seconds={metadata['llm_first_chunk_seconds']}",
-						)
+				if reasoning_candidate is None:
+					continue
+				reasoning_chunks_ignored += 1
+				metadata["llm_reasoning_chunks_ignored"] = reasoning_chunks_ignored
+				if "llm_first_reasoning_chunk_seconds" not in metadata:
+					metadata["llm_first_reasoning_chunk_seconds"] = round(
+						time.monotonic() - stream_start,
+						6,
+					)
 			current_text = "".join(parts).strip()
 			complete_payload = self._extract_complete_json_payload_text(current_text)
 			if complete_payload is not None:
@@ -745,9 +739,6 @@ class MethodSynthesisLLMTransportMixin:
 				partial_text=text,
 				finish_reason=finish_reason,
 			)
-			if reasoning_preview:
-				metadata["llm_reasoning_preview"] = reasoning_preview
-				metadata["llm_reasoning_characters"] = reasoning_characters
 			try:
 				setattr(error, "transport_metadata", dict(metadata))
 			except Exception:
@@ -758,9 +749,6 @@ class MethodSynthesisLLMTransportMixin:
 			f"finish_reason={finish_reason!r}",
 			finish_reason=finish_reason,
 		)
-		if reasoning_preview:
-			metadata["llm_reasoning_preview"] = reasoning_preview
-			metadata["llm_reasoning_characters"] = reasoning_characters
 		try:
 			setattr(error, "transport_metadata", dict(metadata))
 		except Exception:
