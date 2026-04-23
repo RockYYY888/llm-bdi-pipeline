@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary
-from method_library.synthesis.naming import query_root_alias_task_name
+from method_library.synthesis.naming import query_root_alias_task_name, sanitize_identifier
 from utils.hddl_parser import HDDLParser
 
 
@@ -710,7 +710,7 @@ class IPCPlanVerifier:
 							f"runtime action path ended before primitive step '{expected_action_name}'",
 						)
 					actual_action_name, actual_action_args = actions[next_action_index]
-					if actual_action_name != expected_action_name:
+					if not self._action_names_match(expected_action_name, actual_action_name):
 						raise ValueError(
 							f"primitive step mismatch for '{expected_action_name}': "
 							f"expected action '{expected_action_name}', got '{actual_action_name}'",
@@ -1190,6 +1190,14 @@ class IPCPlanVerifier:
 			raise ValueError(f"Invalid action_path step for IPC verifier: {action_step}")
 		args = tuple(arg.strip() for arg in match.group(2).split(",") if arg.strip())
 		return match.group(1), args
+
+	@staticmethod
+	def _action_names_match(expected_action_name: str, actual_action_name: str) -> bool:
+		expected = str(expected_action_name or "").strip()
+		actual = str(actual_action_name or "").strip()
+		if expected == actual:
+			return True
+		return sanitize_identifier(expected) == sanitize_identifier(actual)
 
 	@staticmethod
 	def _render_hierarchical_plan(root_nodes: Sequence[_AbstractNode]) -> str:

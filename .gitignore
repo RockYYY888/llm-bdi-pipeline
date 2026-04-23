@@ -80,6 +80,7 @@ AGENTS.md
 dissertation/
 latex_code/
 tests/logs/
+tmp/
 
 fast-downward/
 archive/

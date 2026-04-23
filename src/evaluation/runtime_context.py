@@ -410,17 +410,23 @@ def resolve_evaluation_domain_context(
 	domain = source_domain
 
 	if source == EVALUATION_DOMAIN_SOURCE_GENERATED:
-		generated_domain_file = ""
-		if artifact_bundle is not None and str(getattr(artifact_bundle, "artifact_root", "") or "").strip():
-			generated_domain_file = str(
-				Path(str(artifact_bundle.artifact_root)).expanduser().resolve()
-				/ "generated_domain.hddl",
+		generated_domain_path = None
+		if output_dir is not None:
+			generated_domain_path = (
+				Path(output_dir).resolve()
+				/ "evaluation_domain_artifact"
+				/ "generated_domain.hddl"
 			)
-		generated_domain_path = (
-			Path(generated_domain_file).expanduser().resolve()
-			if generated_domain_file
-			else None
-		)
+		elif (
+			generated_domain_path is None
+			and artifact_bundle is not None
+			and str(getattr(artifact_bundle, "artifact_root", "") or "").strip()
+		):
+			artifact_domain_path = (
+				Path(str(artifact_bundle.artifact_root)).expanduser().resolve()
+				/ "generated_domain.hddl"
+			)
+			generated_domain_path = artifact_domain_path
 		if generated_domain_path is None or not generated_domain_path.exists():
 			generated_domain_path = materialize_generated_evaluation_domain_artifact(
 				source_domain_file=source_domain_file,
@@ -462,16 +468,17 @@ def materialize_generated_evaluation_domain_artifact(
 		)
 
 	artifact_root = (
-		Path(str(artifact_bundle.artifact_root)).expanduser().resolve()
-		if getattr(artifact_bundle, "artifact_root", None)
+		Path(output_dir).resolve() / "evaluation_domain_artifact"
+		if output_dir is not None
 		else (
-			Path(output_dir).resolve() / "evaluation_domain_artifact"
-			if output_dir is not None
+			Path(str(artifact_bundle.artifact_root)).expanduser().resolve()
+			if getattr(artifact_bundle, "artifact_root", None)
 			else (
 				project_root
-				/ "artifacts"
+				/ "tmp"
 				/ "evaluation"
 				/ sanitize_identifier(source_domain.name)
+				/ "evaluation_domain_artifact"
 			)
 		)
 	)

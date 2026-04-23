@@ -916,12 +916,14 @@ class PANDAPlanner:
 			lines.append("  )")
 			lines.append("")
 
+		action_name_map = self._action_export_name_map(domain, method_library)
 		task_lookup = {task.name: task for task in method_library.compound_tasks}
 		for method in method_library.methods:
 			lines.extend(
 				self._render_method(
 					method,
 					task_lookup,
+					action_name_map,
 					domain.types,
 					task_type_map,
 					self._predicate_type_map(domain),
@@ -948,6 +950,7 @@ class PANDAPlanner:
 		self,
 		method: HTNMethod,
 		task_lookup: Dict[str, Any],
+		action_name_map: Dict[str, str],
 		domain_types: Sequence[str],
 		task_type_map: Dict[str, Tuple[str, ...]],
 		predicate_types: Dict[str, Tuple[str, ...]],
@@ -987,15 +990,14 @@ class PANDAPlanner:
 		subtasks_keyword = ":subtasks" if method.ordering else ":ordered-subtasks"
 		lines.append(f"    {subtasks_keyword} (and")
 		for step in method.subtasks:
-			step_name = self._render_method_step_name(step, task_lookup)
+			step_name = self._render_method_step_name(step, task_lookup, action_name_map)
 			if step.kind == "compound":
 				step_name = self._render_method_step_name(
 					step,
 					task_lookup,
+					action_name_map,
 					export_source_names=export_source_names,
 				)
-			else:
-				step_name = self._render_method_step_name(step, task_lookup)
 			lines.append(
 				f"      ({step.step_id} ({step_name}"
 				f"{self._render_invocation_tokens(step.args, variable_map)}))"
@@ -1030,15 +1032,63 @@ class PANDAPlanner:
 		self,
 		step: Any,
 		task_lookup: Dict[str, Any],
+		action_name_map: Dict[str, str],
 		*,
 		export_source_names: bool = False,
 	) -> str:
 		if getattr(step, "kind", None) == "primitive":
-			if getattr(step, "action_name", None):
-				return step.action_name
-			return step.task_name.replace("_", "-")
+			action_name = str(
+				getattr(step, "action_name", None) or getattr(step, "task_name", "") or "",
+			).strip()
+			if not action_name:
+				return ""
+			if action_name in action_name_map:
+				return action_name_map[action_name]
+			sanitized_name = self._sanitize_name(action_name)
+			if sanitized_name in action_name_map:
+				return action_name_map[sanitized_name]
+			return action_name.replace("_", "-")
 		task_schema = task_lookup.get(step.task_name)
 		return self._export_task_name(task_schema, export_source_names, fallback=step.task_name)
+
+	def _action_export_name_map(
+		self,
+		domain: Any,
+		method_library: HTNMethodLibrary,
+	) -> Dict[str, str]:
+		mapping: Dict[str, str] = {}
+
+		def register(alias: str, export_name: str) -> None:
+			alias_text = str(alias or "").strip()
+			export_text = str(export_name or "").strip()
+			if not alias_text or not export_text:
+				return
+			mapping.setdefault(alias_text, export_text)
+
+		for action in domain.actions:
+			action_name = str(getattr(action, "name", "") or "").strip()
+			if not action_name:
+				continue
+			register(action_name, action_name)
+			register(self._sanitize_name(action_name), action_name)
+
+		for task in getattr(method_library, "primitive_tasks", ()) or ():
+			task_name = str(getattr(task, "name", "") or "").strip()
+			source_name = str(getattr(task, "source_name", "") or "").strip()
+			export_name = (
+				mapping.get(source_name)
+				or mapping.get(task_name)
+				or mapping.get(self._sanitize_name(task_name))
+				or source_name
+				or task_name.replace("_", "-")
+			)
+			register(task_name, export_name)
+			register(self._sanitize_name(task_name), export_name)
+			if source_name:
+				register(source_name, export_name)
+				register(self._sanitize_name(source_name), export_name)
+
+		return mapping
 
 	@staticmethod
 	def _export_task_name(task_schema: Any, export_source_names: bool, *, fallback: str = "") -> str:

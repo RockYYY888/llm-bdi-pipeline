@@ -184,3 +184,46 @@ def test_ad_hoc_evaluation_with_explicit_formula_skips_live_grounding(
 	assert grounding_result.subgoals[0].task_name == "do_put_on"
 	report = json.loads(Path(result["evaluation_report_path"]).read_text())
 	assert report["evaluation_mode"] == "ad_hoc_temporal_specification"
+
+
+def test_evaluation_report_falls_back_to_tmp_root_without_log_path(
+	tmp_path: Path,
+	monkeypatch,
+) -> None:
+	def fake_execute_query_with_library(
+		self,
+		nl_query,
+		*,
+		library_artifact,
+		execution_mode="plan_library_evaluation",
+	):
+		_ = self
+		_ = nl_query
+		_ = library_artifact
+		_ = execution_mode
+		return {"success": True}
+
+	monkeypatch.setattr(
+		PlanLibraryEvaluationOrchestrator,
+		"execute_query_with_library",
+		fake_execute_query_with_library,
+	)
+
+	problem_file = Path(DOMAIN_FILES["blocksworld"]).resolve().parent / "problems" / "p01.hddl"
+	bundle = _sample_bundle()
+	pipeline = PlanLibraryEvaluationPipeline(domain_file=DOMAIN_FILES["blocksworld"])
+	result = pipeline.evaluate_instruction(
+		library_artifact=bundle,
+		instruction="Put block b4 on block b2.",
+		problem_file=str(problem_file),
+	)
+
+	report_path = Path(result["evaluation_report_path"]).resolve()
+	assert report_path == (
+		PROJECT_ROOT
+		/ "tmp"
+		/ "evaluation"
+		/ str(bundle.domain_name)
+		/ "evaluation_report.json"
+	).resolve()
+	assert json.loads(report_path.read_text())["evaluation_mode"] == "ad_hoc_live_grounding"

@@ -12,7 +12,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
-from method_library.synthesis.schema import HTNMethodLibrary, HTNTask
+from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
 from evaluation.artifacts import DFACompilationResult, GroundedSubgoal, TemporalGroundingResult
 from evaluation.agentspeak import (
 	AgentSpeakRenderer,
@@ -48,7 +48,7 @@ from plan_library import (
 )
 from utils.benchmark_query_dataset import load_problem_query_cases
 from utils.hddl_parser import HDDLParser
-from verification.official_plan_verifier import IPCPrimitivePlanVerificationResult
+from verification.official_plan_verifier import IPCPlanVerifier, IPCPrimitivePlanVerificationResult
 from evaluation import official_verification as evaluation_official_verification_module
 from evaluation import orchestrator as evaluation_orchestrator_module
 
@@ -1441,6 +1441,16 @@ def test_evaluation_domain_source_defaults_to_benchmark_domain() -> None:
 	assert context.domain.name == orchestrator.domain.name
 
 
+def test_evaluation_orchestrator_defaults_runtime_logs_to_tmp_root() -> None:
+	orchestrator = PlanLibraryEvaluationOrchestrator(
+		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
+		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
+	)
+
+	assert orchestrator.evaluation_tmp_root == (PROJECT_ROOT / "tmp" / "evaluation").resolve()
+	assert orchestrator.logger.logs_dir == orchestrator.evaluation_tmp_root
+
+
 def test_benchmark_evaluation_path_uses_benchmark_domain_for_verification() -> None:
 	orchestrator = PlanLibraryEvaluationOrchestrator(
 		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
@@ -1501,6 +1511,58 @@ def test_evaluation_domain_source_materializes_generated_domain_from_bundle(
 	assert Path(context.domain_file).exists()
 	assert Path(artifact_root / "masked_domain.hddl").exists()
 	assert Path(artifact_root / "generated_domain.hddl").exists()
+
+
+def test_generated_evaluation_domain_uses_runtime_tmp_root_and_source_action_names(
+	tmp_path: Path,
+) -> None:
+	artifact_root = tmp_path / "artifact_bundle"
+	runtime_output_dir = tmp_path / "runtime_output"
+	orchestrator = PlanLibraryEvaluationOrchestrator(
+		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
+		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
+		evaluation_domain_source="generated",
+	)
+	orchestrator.output_dir = runtime_output_dir
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="do_put_on", parameters=("?x", "?y"), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="pick_up", parameters=("?x",), is_primitive=True),
+			HTNTask(name="stack", parameters=("?x", "?y"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_serial",
+				task_name="do_put_on",
+				parameters=("?x", "?y"),
+				task_args=("?x", "?y"),
+				subtasks=(
+					HTNMethodStep("s1", "pick_up", ("?x",), "primitive", action_name="pick_up"),
+					HTNMethodStep("s2", "stack", ("?x", "?y"), "primitive", action_name="stack"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+	artifact = _artifact_bundle(
+		method_library=method_library,
+		artifact_root=str(artifact_root),
+	)
+
+	context = orchestrator._resolve_evaluation_domain_context(artifact)
+	generated_domain_path = Path(context.domain_file).resolve()
+	generated_domain_text = generated_domain_path.read_text(encoding="utf-8")
+
+	assert generated_domain_path == (
+		runtime_output_dir / "evaluation_domain_artifact" / "generated_domain.hddl"
+	).resolve()
+	assert not (artifact_root / "generated_domain.hddl").exists()
+	assert "(s1 (pick-up ?x))" in generated_domain_text
+	assert "(s1 (pick_up ?x))" not in generated_domain_text
 
 
 def test_evaluation_orchestrator_uses_fixed_jason_runtime_timeout_budget() -> None:
@@ -1802,6 +1864,81 @@ accepting_state(q0).
 	assert result.consistency_checks["diagnostics_only"] is True
 	assert result.consistency_checks["failure_class"] == "consistency_diagnostics_exception"
 	assert result.consistency_checks["message"] == "diagnostic boom"
+
+
+def test_method_trace_reconstruction_accepts_hyphenated_runtime_action_names(
+	tmp_path: Path,
+) -> None:
+	problem_file = tmp_path / "blocksworld_simple_put_on.hddl"
+	problem_file.write_text(
+		"""(define (problem BW-simple-put-on)
+(:domain BLOCKS)
+(:objects b2 b4 - block)
+(:htn :parameters () :ordered-subtasks (and
+(task1 (do_put_on b4 b2))
+))
+(:init
+(handempty)
+(ontable b2)
+(ontable b4)
+(clear b2)
+(clear b4)
+)
+\t(:goal (and
+(on b4 b2)
+\t))
+)
+""",
+		encoding="utf-8",
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="do_put_on", parameters=("?x", "?y"), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="pick_up", parameters=("?x",), is_primitive=True),
+			HTNTask(name="stack", parameters=("?x", "?y"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_serial",
+				task_name="do_put_on",
+				parameters=("?x", "?y"),
+				task_args=("?x", "?y"),
+				subtasks=(
+					HTNMethodStep("s1", "pick_up", ("?x",), "primitive", action_name="pick_up"),
+					HTNMethodStep("s2", "stack", ("?x", "?y"), "primitive", action_name="stack"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+	runner = JasonRunner()
+
+	reconstruction = runner._check_method_trace_reconstruction(
+		action_path=("pick-up(b4)", "stack(b4,b2)"),
+		method_trace=({"method_name": "m_do_put_on_serial", "task_args": ("b4", "b2")},),
+		method_library=method_library,
+		problem_file=problem_file,
+	)
+	rendered_plan = IPCPlanVerifier()._render_supported_hierarchical_plan(
+		domain_file=problem_file,
+		problem_file=problem_file,
+		action_path=("pick-up(b4)", "stack(b4,b2)"),
+		method_library=method_library,
+		method_trace=({"method_name": "m_do_put_on_serial", "task_args": ("b4", "b2")},),
+	)
+
+	assert reconstruction == {
+		"passed": True,
+		"failure_class": None,
+		"message": None,
+	}
+	assert rendered_plan is not None
+	assert "pick-up b4" in rendered_plan
+	assert "stack b4 b2" in rendered_plan
 
 
 def test_goal_grounding_raises_immediately_after_invalid_json_without_retry() -> None:

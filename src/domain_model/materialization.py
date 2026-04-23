@@ -87,12 +87,14 @@ def render_generated_domain_text(
 	task_type_map = planner._infer_task_type_map(domain, method_library)
 	predicate_types = planner._predicate_type_map(domain)
 	action_types = planner._action_type_map(domain)
+	action_name_map = planner._action_export_name_map(domain, method_library)
 	rendered_methods: list[str] = []
 	for method in method_library.methods:
 		rendered_methods.extend(
 			planner._render_method(
 				method,
 				task_lookup,
+				action_name_map,
 				domain.types,
 				task_type_map,
 				predicate_types,

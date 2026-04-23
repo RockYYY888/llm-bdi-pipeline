@@ -26,6 +26,7 @@ class PlanLibraryEvaluationPipeline:
 	"""Evaluate a generated plan-library bundle on stored benchmark cases or ad hoc instructions."""
 
 	def __init__(self, *, domain_file: str) -> None:
+		self.project_root = Path(__file__).resolve().parents[2]
 		self.domain_file = str(Path(domain_file).expanduser().resolve())
 		self.domain = HDDLParser.parse_domain(self.domain_file)
 
@@ -171,8 +172,8 @@ class PlanLibraryEvaluationPipeline:
 			report_root = Path(log_path_text).expanduser().resolve().parent
 		else:
 			report_root = (
-				Path(__file__).resolve().parents[2]
-				/ "artifacts"
+				self.project_root
+				/ "tmp"
 				/ "evaluation"
 				/ str(bundle.domain_name or "unknown").strip()
 			)

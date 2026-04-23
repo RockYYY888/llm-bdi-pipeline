@@ -71,7 +71,8 @@ class PlanLibraryEvaluationOrchestrator:
 	) -> None:
 		self.config = get_config()
 		self.project_root = Path(__file__).resolve().parents[2]
-		self.logger = ExecutionLogger(logs_dir=str(self.project_root / "artifacts" / "runs"))
+		self.evaluation_tmp_root = self.project_root / "tmp" / "evaluation"
+		self.logger = ExecutionLogger(logs_dir=str(self.evaluation_tmp_root))
 
 		if not domain_file:
 			raise ValueError("domain_file is required for plan-library evaluation.")
@@ -177,7 +178,7 @@ class PlanLibraryEvaluationOrchestrator:
 			problem_file=self.problem_file,
 			domain_name=self.domain.name,
 			problem_name=self.problem.name if self.problem is not None else None,
-			output_dir="artifacts/runs",
+			output_dir=str(self.evaluation_tmp_root),
 		)
 		self.output_dir = Path(self.logger.current_log_dir).resolve()
 		if self.logger.current_record is not None:
