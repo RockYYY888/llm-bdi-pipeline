@@ -19,6 +19,7 @@ __all__ = [
 	"PlanLibraryGenerationPipeline",
 	"TranslationCoverage",
 	"build_plan_library",
+	"build_library_validation_record",
 	"load_plan_library_artifact_bundle",
 	"persist_plan_library_artifact_bundle",
 	"render_plan_library_asl",
@@ -79,4 +80,8 @@ def __getattr__(name: str) -> Any:
 		from .translation import build_plan_library
 
 		return build_plan_library
+	if name == "build_library_validation_record":
+		from .validation import build_library_validation_record
+
+		return build_library_validation_record
 	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

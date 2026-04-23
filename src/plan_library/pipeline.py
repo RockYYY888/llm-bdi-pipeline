@@ -17,9 +17,9 @@ from .artifacts import (
 	PlanLibraryArtifactBundle,
 	persist_plan_library_artifact_bundle,
 )
-from .models import LibraryValidationRecord
 from .rendering import render_plan_library_asl
 from .translation import build_plan_library
+from .validation import build_library_validation_record
 
 
 class PlanLibraryGenerationPipeline:
@@ -114,8 +114,9 @@ class PlanLibraryGenerationPipeline:
 			)
 
 			method_validation = self._orchestrator.validate_method_library(method_library)
-			library_validation = _build_library_validation_record(
+			library_validation = build_library_validation_record(
 				domain_name=self._context.domain.name,
+				domain=self._context.domain,
 				method_library=method_library,
 				plan_library=plan_library,
 				translation_coverage=translation_coverage,
@@ -167,63 +168,3 @@ class PlanLibraryGenerationPipeline:
 				"error": str(exc),
 				"log_path": str(log_path),
 			}
-
-
-def _build_library_validation_record(
-	*,
-	domain_name: str,
-	method_library,
-	plan_library,
-	translation_coverage,
-	method_validation,
-) -> LibraryValidationRecord:
-	layer_results = dict((method_validation or {}).get("layers") or {})
-	checked_layers = {
-		"signature_conformance": bool(
-			((layer_results.get("signature_conformance") or {}).get("passed"))
-		),
-		"typed_structure": bool(
-			((layer_results.get("typed_structural_soundness") or {}).get("passed"))
-		),
-		"body_symbol_validity": bool(
-			((layer_results.get("decomposition_admissibility") or {}).get("passed"))
-		),
-		"groundability_precheck": bool(method_validation is not None),
-	}
-	warnings = []
-	for layer_name in (
-		"signature_conformance",
-		"typed_structural_soundness",
-		"decomposition_admissibility",
-		"materialized_parseability",
-	):
-		for warning in ((layer_results.get(layer_name) or {}).get("warnings") or ()):
-			warning_text = str(warning).strip()
-			if warning_text:
-				warnings.append(warning_text)
-	if translation_coverage.unsupported_buckets:
-		warnings.append(
-			"Unsupported method constructs were excluded from the generated plan library: "
-			+ ", ".join(
-				f"{bucket}={count}"
-				for bucket, count in sorted(translation_coverage.unsupported_buckets.items())
-			),
-		)
-	failure_reason = None
-	if not all(checked_layers.values()):
-		for layer_name, passed in checked_layers.items():
-			if passed:
-				continue
-			failure_reason = f"{layer_name} failed"
-			break
-	elif translation_coverage.accepted_translation <= 0:
-		failure_reason = "No HTN methods were accepted by the AgentSpeak(L) translation layer."
-	return LibraryValidationRecord(
-		library_id=domain_name,
-		passed=all(checked_layers.values()) and translation_coverage.accepted_translation > 0,
-		method_count=len(method_library.methods),
-		plan_count=len(plan_library.plans),
-		checked_layers=checked_layers,
-		warnings=tuple(dict.fromkeys(warnings)),
-		failure_reason=failure_reason,
-	)

@@ -5,7 +5,7 @@ HTN method-library to AgentSpeak(L) plan-library translation.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary
 
@@ -55,9 +55,13 @@ def build_plan_library(
 			task_schema=task_schema,
 			task_parameter_types=task_parameter_types,
 		)
+		variable_map = _method_variable_map(
+			method=method,
+			task_schema=task_schema,
+		)
 		plan_name = str(method.method_name).strip()
 		for variant_index, ordered_steps in enumerate(ordered_step_variants, start=1):
-			body = tuple(_translate_step(step) for step in ordered_steps)
+			body = tuple(_translate_step(step, variable_map=variable_map) for step in ordered_steps)
 			variant_plan_name = plan_name
 			if len(ordered_step_variants) > 1:
 				variant_plan_name = f"{plan_name}__variant_{variant_index}"
@@ -70,7 +74,7 @@ def build_plan_library(
 						arguments=trigger_arguments,
 					),
 					context=tuple(
-						literal.to_signature()
+						_translate_context_literal(literal, variable_map=variable_map)
 						for literal in tuple(getattr(method, "context", ()) or ())
 					),
 					body=body,
@@ -124,7 +128,7 @@ def _typed_trigger_arguments(
 	task_schema: Any | None,
 	task_parameter_types: Sequence[str],
 ) -> Tuple[str, ...]:
-	raw_arguments = tuple(getattr(method, "task_args", ()) or ())
+	raw_arguments = _trigger_argument_tokens(method=method, task_schema=task_schema)
 	if not raw_arguments and task_schema is not None:
 		raw_arguments = tuple(getattr(task_schema, "parameters", ()) or ())
 	if not raw_arguments:
@@ -133,15 +137,54 @@ def _typed_trigger_arguments(
 	parameter_types = list(task_parameter_types)
 	if len(parameter_types) < len(raw_arguments):
 		parameter_types.extend(["object"] * (len(raw_arguments) - len(parameter_types)))
+	used_names: set[str] = set()
 	for index, raw_argument in enumerate(raw_arguments):
-		argument_name = str(raw_argument).strip().lstrip("?") or f"ARG{index + 1}"
-		argument_name = argument_name.upper() if argument_name[0].isalpha() else f"ARG{index + 1}"
+		token = _symbol_token(raw_argument)
+		if _looks_like_variable(token):
+			argument_name = _canonical_symbol_name(
+				token,
+				used_names=used_names,
+				fallback=f"ARG{index + 1}",
+			)
+		else:
+			argument_name = token
 		type_name = parameter_types[index] if index < len(parameter_types) else "object"
 		typed_arguments.append(f"{argument_name}:{type_name}")
 	return tuple(typed_arguments)
 
 
-def _translate_step(step: Any) -> AgentSpeakBodyStep:
+def _method_variable_map(
+	*,
+	method: HTNMethod,
+	task_schema: Any | None,
+) -> Dict[str, str]:
+	mapping: Dict[str, str] = {}
+	used_names: set[str] = set()
+	for raw_argument in _trigger_argument_tokens(method=method, task_schema=task_schema):
+		token = _symbol_token(raw_argument)
+		if not _looks_like_variable(token):
+			continue
+		mapping[token] = _canonical_symbol_name(token, used_names=used_names)
+
+	for raw_parameter in tuple(getattr(method, "parameters", ()) or ()):
+		token = _symbol_token(raw_parameter)
+		if not _looks_like_variable(token) or token in mapping:
+			continue
+		mapping[token] = _canonical_symbol_name(token, used_names=used_names)
+
+	for token in _method_variable_tokens(method):
+		if token in mapping:
+			continue
+		mapping[token] = _canonical_symbol_name(token, used_names=used_names)
+
+	return mapping
+
+
+def _translate_step(
+	step: Any,
+	*,
+	variable_map: Dict[str, str],
+) -> AgentSpeakBodyStep:
 	is_primitive = str(getattr(step, "kind", "") or "").strip() == "primitive"
 	symbol = str(
 		getattr(step, "action_name", None)
@@ -152,11 +195,131 @@ def _translate_step(step: Any) -> AgentSpeakBodyStep:
 		kind="action" if is_primitive else "subgoal",
 		symbol=symbol,
 		arguments=tuple(
-			str(argument).strip()
+			_translate_term(argument, variable_map=variable_map)
 			for argument in (getattr(step, "args", ()) or ())
 			if str(argument).strip()
 		),
 	)
+
+
+def _translate_context_literal(
+	literal: Any,
+	*,
+	variable_map: Dict[str, str],
+) -> str:
+	predicate = str(getattr(literal, "predicate", "") or "").strip()
+	args = tuple(
+		_translate_term(argument, variable_map=variable_map)
+		for argument in (getattr(literal, "args", ()) or ())
+	)
+	is_positive = bool(getattr(literal, "is_positive", True))
+	if predicate == "=" and len(args) == 2:
+		operator = "==" if is_positive else "!="
+		return f"{args[0]} {operator} {args[1]}"
+	base = predicate
+	if args:
+		base = f"{base}({', '.join(args)})"
+	if is_positive:
+		return base
+	return f"!{base}"
+
+
+def _translate_term(
+	raw_term: Any,
+	*,
+	variable_map: Dict[str, str],
+) -> str:
+	token = _symbol_token(raw_term)
+	if not _looks_like_variable(token):
+		return token
+	return variable_map.get(token, token)
+
+
+def _trigger_argument_tokens(
+	*,
+	method: HTNMethod,
+	task_schema: Any | None,
+) -> Tuple[str, ...]:
+	raw_arguments = tuple(getattr(method, "task_args", ()) or ())
+	if raw_arguments:
+		return tuple(_symbol_token(argument) for argument in raw_arguments if _symbol_token(argument))
+	if task_schema is not None:
+		schema_arguments = tuple(getattr(task_schema, "parameters", ()) or ())
+		if schema_arguments:
+			return tuple(
+				_symbol_token(argument)
+				for argument in schema_arguments
+				if _symbol_token(argument)
+			)
+	return tuple(
+		_symbol_token(argument)
+		for argument in (getattr(method, "parameters", ()) or ())
+		if _symbol_token(argument)
+	)
+
+
+def _method_variable_tokens(method: HTNMethod) -> Tuple[str, ...]:
+	tokens: List[str] = []
+
+	def collect(values: Iterable[Any]) -> None:
+		for value in values:
+			token = _symbol_token(value)
+			if _looks_like_variable(token) and token not in tokens:
+				tokens.append(token)
+
+	collect(getattr(method, "parameters", ()) or ())
+	for literal in tuple(getattr(method, "context", ()) or ()):
+		collect(getattr(literal, "args", ()) or ())
+	for step in tuple(getattr(method, "subtasks", ()) or ()):
+		collect(getattr(step, "args", ()) or ())
+		step_literal = getattr(step, "literal", None)
+		if step_literal is not None:
+			collect(getattr(step_literal, "args", ()) or ())
+		for literal in tuple(getattr(step, "preconditions", ()) or ()):
+			collect(getattr(literal, "args", ()) or ())
+		for literal in tuple(getattr(step, "effects", ()) or ()):
+			collect(getattr(literal, "args", ()) or ())
+	return tuple(tokens)
+
+
+def _symbol_token(raw_value: Any) -> str:
+	text = str(raw_value or "").strip()
+	if not text:
+		return ""
+	if text.startswith("?") and " - " in text:
+		return text.split(" - ", 1)[0].strip()
+	if text.startswith("?") and ":" in text:
+		return text.split(":", 1)[0].strip()
+	return text
+
+
+def _looks_like_variable(symbol: str) -> bool:
+	text = str(symbol or "").strip()
+	if not text:
+		return False
+	if text.startswith("?"):
+		return len(text) > 1 and text[1].isalpha()
+	return text[0].isupper()
+
+
+def _canonical_symbol_name(
+	raw_symbol: str,
+	*,
+	used_names: set[str],
+	fallback: str | None = None,
+) -> str:
+	token = _symbol_token(raw_symbol).lstrip("?")
+	if token and token[0].isalpha():
+		base_name = token.upper()
+	else:
+		base_name = fallback or "VAR"
+	candidate = base_name
+	index = 2
+	while candidate in used_names:
+		candidate = f"{base_name}_{index}"
+		index += 1
+	used_names.add(candidate)
+	return candidate
 
 
 def _ordered_method_steps(method: HTNMethod) -> Tuple[Tuple[Tuple[Any, ...], ...], str | None]:

@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
-from method_library import HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
+from method_library import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
 from plan_library import build_plan_library, render_plan_library_asl
 
 
@@ -23,6 +23,9 @@ def _sample_domain():
 				name="deliver",
 				parameters=("?pkg:package", "?loc:location"),
 			),
+		),
+		predicates=(
+			SimpleNamespace(name="loaded", parameters=("?pkg:package",)),
 		),
 		actions=(
 			SimpleNamespace(name="load", parameters=("?pkg:package",)),
@@ -48,6 +51,9 @@ def _sample_method_library() -> HTNMethodLibrary:
 				task_name="deliver",
 				parameters=("?pkg", "?loc"),
 				task_args=("?pkg", "?loc"),
+				context=(
+					HTNLiteral(predicate="loaded", args=("?pkg",)),
+				),
 				subtasks=(
 					HTNMethodStep("s1", "load", ("?pkg",), "primitive", action_name="load"),
 					HTNMethodStep("s2", "move", ("?loc",), "primitive", action_name="move"),
@@ -85,10 +91,16 @@ def test_translation_reports_accepted_and_rejected_methods() -> None:
 	assert plan_library.plans[0].plan_name == "m_deliver_serial"
 	assert plan_library.plans[0].source_instruction_ids == ("query_7",)
 	assert plan_library.plans[0].trigger.arguments == ("PKG:package", "LOC:location")
+	assert plan_library.plans[0].context == ("loaded(PKG)",)
 	assert tuple(step.kind for step in plan_library.plans[0].body) == (
 		"action",
 		"action",
 		"action",
+	)
+	assert tuple(step.arguments for step in plan_library.plans[0].body) == (
+		("PKG",),
+		("LOC",),
+		("PKG", "LOC"),
 	)
 	assert coverage.methods_considered == 2
 	assert coverage.accepted_translation == 2
@@ -119,9 +131,57 @@ def test_rendering_emits_structured_agentspeak_library() -> None:
 	rendered = render_plan_library_asl(plan_library)
 
 	assert "source_instruction_ids=query_7" in rendered
-	assert "+!deliver(PKG, LOC) : true <-" in rendered
+	assert "+!deliver(PKG, LOC) : loaded(PKG) <-" in rendered
 	assert "plan=m_deliver_branching__variant_1" in rendered
 	assert "plan=m_deliver_branching__variant_2" in rendered
-	assert "\tload(?pkg);" in rendered
-	assert "\tmove(?loc);" in rendered
-	assert "\tdrop(?pkg, ?loc)." in rendered
+	assert "\tload(PKG);" in rendered
+	assert "\tmove(LOC);" in rendered
+	assert "\tdrop(PKG, LOC)." in rendered
+
+
+def test_translation_canonicalises_local_method_variables() -> None:
+	domain = SimpleNamespace(
+		name="courier",
+		tasks=(SimpleNamespace(name="deliver_via", parameters=("?pkg:package", "?loc:location")),),
+		predicates=(),
+		actions=(
+			SimpleNamespace(name="load", parameters=("?pkg:package",)),
+			SimpleNamespace(name="move", parameters=("?mid:location",)),
+			SimpleNamespace(name="drop", parameters=("?pkg:package", "?loc:location")),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="deliver_via", parameters=("?pkg", "?loc"), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="load", parameters=("?pkg",), is_primitive=True),
+			HTNTask(name="move", parameters=("?mid",), is_primitive=True),
+			HTNTask(name="drop", parameters=("?pkg", "?loc"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_deliver_via_midpoint",
+				task_name="deliver_via",
+				parameters=("?pkg", "?loc", "?mid"),
+				task_args=("?pkg", "?loc"),
+				subtasks=(
+					HTNMethodStep("s1", "load", ("?pkg",), "primitive", action_name="load"),
+					HTNMethodStep("s2", "move", ("?mid",), "primitive", action_name="move"),
+					HTNMethodStep("s3", "drop", ("?pkg", "?loc"), "primitive", action_name="drop"),
+				),
+				ordering=(("s1", "s2"), ("s2", "s3")),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
+
+	assert plan_library.plans[0].trigger.arguments == ("PKG:package", "LOC:location")
+	assert tuple(step.arguments for step in plan_library.plans[0].body) == (
+		("PKG",),
+		("MID",),
+		("PKG", "LOC"),
+	)
