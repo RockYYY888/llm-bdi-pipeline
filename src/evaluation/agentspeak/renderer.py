@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary
 from planning.plan_models import PANDAPlanResult
+from plan_library.models import AgentSpeakBodyStep, AgentSpeakPlan, PlanLibrary
 from utils.hddl_condition_parser import HDDLConditionParser
 
 
@@ -33,6 +34,7 @@ class AgentSpeakRenderer:
         objects: Sequence[str],
         method_library: HTNMethodLibrary,
         plan_records: Sequence[Dict[str, Any]],
+        plan_library: Optional[PlanLibrary] = None,
         typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
         ordered_query_sequence: bool = True,
         prompt_analysis: Optional[Dict[str, Any]] = None,
@@ -68,7 +70,10 @@ class AgentSpeakRenderer:
             ),
         )
         lines.extend(self._render_primitive_wrappers(domain))
-        lines.extend(self._render_method_plans(domain, method_library, plan_records))
+        if plan_library is not None:
+            lines.extend(self._render_structured_plan_library(plan_library))
+        else:
+            lines.extend(self._render_method_plans(domain, method_library, plan_records))
         if raw_dfa_mode:
             lines.extend(
                 self._render_raw_dfa_transition_plans(
@@ -140,6 +145,81 @@ class AgentSpeakRenderer:
 
         lines.append("")
         return lines
+
+    def _render_structured_plan_library(
+        self,
+        plan_library: PlanLibrary,
+    ) -> List[str]:
+        lines = ["/* HTN Method Plans */"]
+        for plan in plan_library.plans:
+            if not str(getattr(plan, "plan_name", "") or "").strip():
+                continue
+            lines.extend(self._render_structured_plan(plan))
+            lines.append("")
+        return lines
+
+    def _render_structured_plan(self, plan: AgentSpeakPlan) -> List[str]:
+        trigger = self._task_call(
+            plan.trigger.symbol,
+            tuple(self._strip_type_annotation(argument) for argument in plan.trigger.arguments),
+        )
+        context_literals = [
+            self._render_structured_context_literal(literal)
+            for literal in plan.context
+            if str(literal or "").strip()
+        ]
+        context = " & ".join(context_literals) if context_literals else "true"
+        body = [self._render_structured_body_step(step) for step in plan.body]
+        if not body:
+            body = ["true"]
+        lines = [f"+!{trigger} : {context} <-"]
+        lines.extend(self._indent_body(body))
+        return lines
+
+    def _render_structured_body_step(self, step: AgentSpeakBodyStep) -> str:
+        call = self._task_call(step.symbol, step.arguments)
+        if step.kind == "subgoal":
+            return f"!{call}"
+        return call
+
+    def _render_structured_context_literal(self, literal_text: str) -> str:
+        text = str(literal_text or "").strip()
+        if not text:
+            return "true"
+        if text.lower().startswith("not "):
+            rendered = self._render_structured_atom(text[4:].strip())
+            return f"not {rendered}"
+        if text.startswith("!"):
+            rendered = self._render_structured_atom(text[1:].strip())
+            return f"not {rendered}"
+        if "!=" in text:
+            left, right = text.split("!=", 1)
+            return f"{self._asl_term(left.strip())} \\== {self._asl_term(right.strip())}"
+        if "==" in text:
+            left, right = text.split("==", 1)
+            return f"{self._asl_term(left.strip())} == {self._asl_term(right.strip())}"
+        return self._render_structured_atom(text)
+
+    def _render_structured_atom(self, atom_text: str) -> str:
+        text = str(atom_text or "").strip()
+        if not text:
+            return "true"
+        if "(" not in text or not text.endswith(")"):
+            return self._sanitize_name(text)
+        functor, raw_args = text.split("(", 1)
+        args = [
+            value.strip()
+            for value in raw_args[:-1].split(",")
+            if value.strip()
+        ]
+        return self._call(functor.strip(), tuple(args))
+
+    @staticmethod
+    def _strip_type_annotation(argument: str) -> str:
+        text = str(argument or "").strip()
+        if ":" in text:
+            return text.split(":", 1)[0].strip()
+        return text
 
     def _render_primitive_wrappers(
         self,

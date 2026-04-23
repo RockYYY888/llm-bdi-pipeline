@@ -81,7 +81,7 @@ def test_translation_reports_accepted_and_rejected_methods() -> None:
 		method_library=_sample_method_library(),
 	)
 
-	assert len(plan_library.plans) == 1
+	assert len(plan_library.plans) == 3
 	assert plan_library.plans[0].plan_name == "m_deliver_serial"
 	assert plan_library.plans[0].source_instruction_ids == ("query_7",)
 	assert plan_library.plans[0].trigger.arguments == ("PKG:package", "LOC:location")
@@ -91,10 +91,23 @@ def test_translation_reports_accepted_and_rejected_methods() -> None:
 		"action",
 	)
 	assert coverage.methods_considered == 2
-	assert coverage.accepted_translation == 1
-	assert coverage.plans_generated == 1
-	assert coverage.unsupported_buckets == {"partial_order_not_sequentialisable": 1}
-	assert coverage.unsupported_methods[0]["method_name"] == "m_deliver_branching"
+	assert coverage.accepted_translation == 2
+	assert coverage.plans_generated == 3
+	assert coverage.unsupported_buckets == {}
+	assert coverage.unsupported_methods == ()
+
+	assert plan_library.plans[1].plan_name == "m_deliver_branching__variant_1"
+	assert tuple(step.symbol for step in plan_library.plans[1].body) == (
+		"load",
+		"move",
+		"drop",
+	)
+	assert plan_library.plans[2].plan_name == "m_deliver_branching__variant_2"
+	assert tuple(step.symbol for step in plan_library.plans[2].body) == (
+		"load",
+		"drop",
+		"move",
+	)
 
 
 def test_rendering_emits_structured_agentspeak_library() -> None:
@@ -107,6 +120,8 @@ def test_rendering_emits_structured_agentspeak_library() -> None:
 
 	assert "source_instruction_ids=query_7" in rendered
 	assert "+!deliver(PKG, LOC) : true <-" in rendered
+	assert "plan=m_deliver_branching__variant_1" in rendered
+	assert "plan=m_deliver_branching__variant_2" in rendered
 	assert "\tload(?pkg);" in rendered
 	assert "\tmove(?loc);" in rendered
 	assert "\tdrop(?pkg, ?loc)." in rendered

@@ -4,8 +4,8 @@ HTN method-library to AgentSpeak(L) plan-library translation.
 
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from collections import defaultdict
+from typing import Any, Dict, List, Sequence, Tuple
 
 from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary
 
@@ -31,11 +31,12 @@ def build_plan_library(
 		for task in [*list(method_library.compound_tasks), *list(method_library.primitive_tasks)]
 	}
 	plans: List[AgentSpeakPlan] = []
+	accepted_methods = 0
 	unsupported_buckets: Dict[str, int] = defaultdict(int)
 	unsupported_methods: List[Dict[str, Any]] = []
 
 	for method in method_library.methods:
-		ordered_steps, unsupported_reason = _ordered_method_steps(method)
+		ordered_step_variants, unsupported_reason = _ordered_method_steps(method)
 		if unsupported_reason is not None:
 			unsupported_buckets[unsupported_reason] += 1
 			unsupported_methods.append(
@@ -46,6 +47,7 @@ def build_plan_library(
 				},
 			)
 			continue
+		accepted_methods += 1
 		task_schema = task_lookup.get(method.task_name)
 		task_parameter_types = task_type_map.get(method.task_name, ())
 		trigger_arguments = _typed_trigger_arguments(
@@ -53,33 +55,38 @@ def build_plan_library(
 			task_schema=task_schema,
 			task_parameter_types=task_parameter_types,
 		)
-		body = tuple(_translate_step(step) for step in ordered_steps)
-		plans.append(
-			AgentSpeakPlan(
-				plan_name=str(method.method_name).strip(),
-				trigger=AgentSpeakTrigger(
-					event_type="achievement_goal",
-					symbol=str(method.task_name).strip(),
-					arguments=trigger_arguments,
+		plan_name = str(method.method_name).strip()
+		for variant_index, ordered_steps in enumerate(ordered_step_variants, start=1):
+			body = tuple(_translate_step(step) for step in ordered_steps)
+			variant_plan_name = plan_name
+			if len(ordered_step_variants) > 1:
+				variant_plan_name = f"{plan_name}__variant_{variant_index}"
+			plans.append(
+				AgentSpeakPlan(
+					plan_name=variant_plan_name,
+					trigger=AgentSpeakTrigger(
+						event_type="achievement_goal",
+						symbol=str(method.task_name).strip(),
+						arguments=trigger_arguments,
+					),
+					context=tuple(
+						literal.to_signature()
+						for literal in tuple(getattr(method, "context", ()) or ())
+					),
+					body=body,
+					source_instruction_ids=tuple(
+						str(value).strip()
+						for value in tuple(getattr(method, "source_instruction_ids", ()) or ())
+						if str(value).strip()
+					),
 				),
-				context=tuple(
-					literal.to_signature()
-					for literal in tuple(getattr(method, "context", ()) or ())
-				),
-				body=body,
-				source_instruction_ids=tuple(
-					str(value).strip()
-					for value in tuple(getattr(method, "source_instruction_ids", ()) or ())
-					if str(value).strip()
-				),
-			),
-		)
+			)
 
 	coverage = TranslationCoverage(
 		domain_name=str(getattr(domain, "name", "") or ""),
 		methods_considered=len(method_library.methods),
 		plans_generated=len(plans),
-		accepted_translation=len(plans),
+		accepted_translation=accepted_methods,
 		unsupported_buckets=dict(unsupported_buckets),
 		unsupported_methods=tuple(unsupported_methods),
 	)
@@ -152,10 +159,10 @@ def _translate_step(step: Any) -> AgentSpeakBodyStep:
 	)
 
 
-def _ordered_method_steps(method: HTNMethod) -> Tuple[Tuple[Any, ...], str | None]:
+def _ordered_method_steps(method: HTNMethod) -> Tuple[Tuple[Tuple[Any, ...], ...], str | None]:
 	steps = tuple(getattr(method, "subtasks", ()) or ())
 	if not steps:
-		return (), None
+		return ((),), None
 	step_index = {
 		str(getattr(step, "step_id", "") or "").strip(): index
 		for index, step in enumerate(steps)
@@ -165,7 +172,7 @@ def _ordered_method_steps(method: HTNMethod) -> Tuple[Tuple[Any, ...], str | Non
 		return (), "missing_step_identifier"
 	ordering = tuple(getattr(method, "ordering", ()) or ())
 	if not ordering:
-		return steps, None
+		return (steps,), None
 
 	successors: Dict[str, set[str]] = {step_id: set() for step_id in step_index}
 	indegree: Dict[str, int] = {step_id: 0 for step_id in step_index}
@@ -181,23 +188,59 @@ def _ordered_method_steps(method: HTNMethod) -> Tuple[Tuple[Any, ...], str | Non
 		successors[before_id].add(after_id)
 		indegree[after_id] += 1
 
-	ready = deque(
+	initial_ready = tuple(
 		sorted(
 			(step_id for step_id, degree in indegree.items() if degree == 0),
 			key=lambda step_id: step_index[step_id],
 		),
 	)
-	ordered_step_ids: List[str] = []
-	while ready:
-		if len(ready) > 1:
-			return (), "partial_order_not_sequentialisable"
-		current = ready.popleft()
-		ordered_step_ids.append(current)
-		for successor_id in sorted(successors[current], key=lambda step_id: step_index[step_id]):
-			indegree[successor_id] -= 1
-			if indegree[successor_id] == 0:
-				ready.append(successor_id)
-
-	if len(ordered_step_ids) != len(steps):
+	ordered_step_ids = _topological_linearizations(
+		ready=initial_ready,
+		indegree=indegree,
+		successors=successors,
+		step_index=step_index,
+		prefix=(),
+		total_steps=len(steps),
+	)
+	if not ordered_step_ids:
 		return (), "ordering_cycle"
-	return tuple(steps[step_index[step_id]] for step_id in ordered_step_ids), None
+	return tuple(
+		tuple(steps[step_index[step_id]] for step_id in step_ids)
+		for step_ids in ordered_step_ids
+	), None
+
+
+def _topological_linearizations(
+	*,
+	ready: Tuple[str, ...],
+	indegree: Dict[str, int],
+	successors: Dict[str, set[str]],
+	step_index: Dict[str, int],
+	prefix: Tuple[str, ...],
+	total_steps: int,
+) -> Tuple[Tuple[str, ...], ...]:
+	if len(prefix) == total_steps:
+		return (prefix,)
+	if not ready:
+		return ()
+
+	linearizations: List[Tuple[str, ...]] = []
+	for position, current in enumerate(ready):
+		next_indegree = dict(indegree)
+		next_ready = list(ready[:position] + ready[position + 1 :])
+		for successor_id in sorted(successors[current], key=lambda step_id: step_index[step_id]):
+			next_indegree[successor_id] -= 1
+			if next_indegree[successor_id] == 0:
+				next_ready.append(successor_id)
+		next_ready = sorted(next_ready, key=lambda step_id: step_index[step_id])
+		linearizations.extend(
+			_topological_linearizations(
+				ready=tuple(next_ready),
+				indegree=next_indegree,
+				successors=successors,
+				step_index=step_index,
+				prefix=prefix + (current,),
+				total_steps=total_steps,
+			)
+		)
+	return tuple(linearizations)

@@ -26,6 +26,7 @@ from evaluation.jason_runtime.environment_adapter import (
 	Stage6EnvironmentAdapter,
 	build_environment_adapter,
 )
+from plan_library.models import PlanLibrary
 
 
 class JasonValidationError(RuntimeError):
@@ -120,8 +121,9 @@ class JasonRunner:
 		self,
 		*,
 		agentspeak_code: str,
-		method_library: HTNMethodLibrary | None = None,
 		action_schemas: Sequence[Dict[str, Any]],
+		method_library: HTNMethodLibrary | None = None,
+		plan_library: PlanLibrary | None = None,
 		seed_facts: Sequence[str] = (),
 		runtime_objects: Sequence[str] = (),
 		object_types: Optional[Dict[str, str]] = None,
@@ -172,6 +174,7 @@ class JasonRunner:
 		runner_asl = self._build_runner_asl(
 			runtime_agentspeak_code,
 			method_library=method_library,
+			plan_library=plan_library,
 			seed_facts=seed_facts,
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
@@ -511,6 +514,7 @@ class JasonRunner:
 		agentspeak_code: str,
 		*,
 		method_library: HTNMethodLibrary | None = None,
+		plan_library: PlanLibrary | None = None,
 		seed_facts: Sequence[str] = (),
 		runtime_objects: Sequence[str] = (),
 		object_types: Optional[Dict[str, str]] = None,
@@ -534,6 +538,7 @@ class JasonRunner:
 		trace_ready_code = self._instrument_method_plans(
 			lowered_code,
 			method_library,
+			plan_library=plan_library,
 		)
 		lines = [
 			trace_ready_code.rstrip(),
@@ -2651,8 +2656,15 @@ class JasonRunner:
 		self,
 		agentspeak_code: str,
 		method_library: HTNMethodLibrary | None,
+		*,
+		plan_library: PlanLibrary | None = None,
 	) -> str:
-		if method_library is None or not method_library.methods:
+		trace_sources: List[Any] = []
+		if plan_library is not None and plan_library.plans:
+			trace_sources = list(plan_library.plans)
+		elif method_library is not None and method_library.methods:
+			trace_sources = list(method_library.methods)
+		if not trace_sources:
 			return agentspeak_code
 		if "runtime trace method" in agentspeak_code:
 			return agentspeak_code
@@ -2685,14 +2697,14 @@ class JasonRunner:
 		if current:
 			chunks.append(current)
 
-		if len(chunks) != len(method_library.methods):
+		if len(chunks) != len(trace_sources):
 			return agentspeak_code
 
 		instrumented_chunks: List[str] = []
-		for method, chunk in zip(method_library.methods, chunks):
+		for method_like, chunk in zip(trace_sources, chunks):
 			head_line = chunk[0]
 			body_lines = chunk[1:]
-			trace_line = self._render_method_trace_statement(method, head_line)
+			trace_line = self._render_method_trace_statement(method_like, head_line)
 			instrumented_chunks.append("\n".join([head_line, trace_line, *body_lines]))
 
 		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
@@ -2719,7 +2731,14 @@ class JasonRunner:
 
 	def _render_method_trace_statement(self, method: Any, head_line: str) -> str:
 		trigger_args = self._extract_trigger_args(head_line)
-		trace_line = self._render_flat_method_trace_statement(method.method_name, trigger_args)
+		method_name = str(
+			getattr(method, "method_name", None)
+			or getattr(method, "plan_name", None)
+			or "",
+		).strip()
+		if getattr(method, "plan_name", None) is not None:
+			method_name = re.sub(r"__variant_\d+$", "", method_name)
+		trace_line = self._render_flat_method_trace_statement(method_name, trigger_args)
 		return f"\t{trace_line};"
 
 	@classmethod

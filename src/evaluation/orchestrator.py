@@ -54,6 +54,7 @@ from evaluation.artifacts import (
 )
 from execution_logging.execution_logger import ExecutionLogger
 from plan_library.artifacts import PlanLibraryArtifactBundle, load_plan_library_artifact_bundle
+from plan_library.models import PlanLibrary
 from utils.config import get_config
 from utils.hddl_parser import HDDLParser
 
@@ -221,6 +222,7 @@ class PlanLibraryEvaluationOrchestrator:
 		"""Run the Jason query path with either live or precomputed temporal grounding."""
 
 		domain_library = artifact.method_library
+		plan_library = artifact.plan_library
 		evaluation_domain = self._resolve_evaluation_domain_context(artifact)
 		if self.logger.current_record is not None:
 			self.logger.current_record.domain_file = evaluation_domain.domain_file
@@ -275,6 +277,7 @@ class PlanLibraryEvaluationOrchestrator:
 			grounding_result=grounding_result,
 			dfa_result=dfa_result,
 			method_library=domain_library,
+			plan_library=plan_library,
 			evaluation_domain=evaluation_domain,
 		)
 		if agentspeak_render is None:
@@ -291,6 +294,7 @@ class PlanLibraryEvaluationOrchestrator:
 			grounding_result=grounding_result,
 			dfa_result=dfa_result,
 			method_library=domain_library,
+			plan_library=plan_library,
 			agentspeak_code=agentspeak_render["agentspeak_code"],
 			agentspeak_artifacts=agentspeak_render["artifacts"],
 			verification_problem_file=verification_problem_file,
@@ -560,6 +564,7 @@ class PlanLibraryEvaluationOrchestrator:
 		grounding_result: TemporalGroundingResult,
 		dfa_result: DFACompilationResult,
 		method_library: HTNMethodLibrary,
+		plan_library: PlanLibrary,
 		evaluation_domain: EvaluationDomainContext,
 	) -> Optional[Dict[str, Any]]:
 		print("\n[AGENTSPEAK RENDERING]")
@@ -583,6 +588,7 @@ class PlanLibraryEvaluationOrchestrator:
 				domain=evaluation_domain.domain,
 				objects=runtime_objects,
 				method_library=method_library,
+				plan_library=plan_library,
 				plan_records=(),
 				typed_objects=typed_objects,
 				ordered_query_sequence=False,
@@ -628,6 +634,7 @@ class PlanLibraryEvaluationOrchestrator:
 		grounding_result: TemporalGroundingResult,
 		dfa_result: DFACompilationResult,
 		method_library: HTNMethodLibrary,
+		plan_library: PlanLibrary,
 		agentspeak_code: str,
 		agentspeak_artifacts: Dict[str, Any],
 		verification_problem_file: str | Path,
@@ -663,6 +670,7 @@ class PlanLibraryEvaluationOrchestrator:
 			validation = runner.validate(
 				agentspeak_code=agentspeak_code,
 				method_library=method_library,
+				plan_library=plan_library,
 				action_schemas=action_schemas,
 				seed_facts=seed_facts,
 				runtime_objects=runtime_objects,

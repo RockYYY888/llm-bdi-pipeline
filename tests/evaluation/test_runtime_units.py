@@ -37,7 +37,15 @@ from evaluation.official_verification import resolve_verification_domain_file
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
 from evaluation.temporal_compilation import dfa_builder
 from evaluation.temporal_compilation import ltlf_to_dfa as ltlf_to_dfa_module
-from plan_library import LibraryValidationRecord, PlanLibrary, PlanLibraryArtifactBundle, TranslationCoverage
+from plan_library import (
+	AgentSpeakBodyStep,
+	AgentSpeakPlan,
+	AgentSpeakTrigger,
+	LibraryValidationRecord,
+	PlanLibrary,
+	PlanLibraryArtifactBundle,
+	TranslationCoverage,
+)
 from utils.benchmark_query_dataset import load_problem_query_cases
 from utils.hddl_parser import HDDLParser
 from verification.official_plan_verifier import IPCPrimitivePlanVerificationResult
@@ -48,6 +56,7 @@ from evaluation import orchestrator as evaluation_orchestrator_module
 def _artifact_bundle(
 	*,
 	method_library: HTNMethodLibrary,
+	plan_library: PlanLibrary | None = None,
 	artifact_root: str | None = None,
 	domain_name: str = "blocks",
 ) -> PlanLibraryArtifactBundle:
@@ -56,7 +65,7 @@ def _artifact_bundle(
 		query_sequence=(),
 		temporal_specifications=(),
 		method_library=method_library,
-		plan_library=PlanLibrary(domain_name=domain_name, plans=()),
+		plan_library=plan_library or PlanLibrary(domain_name=domain_name, plans=()),
 		translation_coverage=TranslationCoverage(
 			domain_name=domain_name,
 			methods_considered=len(tuple(method_library.methods or ())),
@@ -93,6 +102,28 @@ def _sample_method_library() -> HTNMethodLibrary:
 		],
 		primitive_tasks=[],
 		methods=[],
+	)
+
+
+def _sample_plan_library() -> PlanLibrary:
+	return PlanLibrary(
+		domain_name="blocks",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m_do_put_on_serial",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="do_put_on",
+					arguments=("X:block", "Y:block"),
+				),
+				context=("clear(X)", "X != Y"),
+				body=(
+					AgentSpeakBodyStep(kind="action", symbol="pick_up", arguments=("X",)),
+					AgentSpeakBodyStep(kind="subgoal", symbol="stack", arguments=("X", "Y")),
+				),
+				source_instruction_ids=("query_1",),
+			),
+		),
 	)
 
 
@@ -1044,6 +1075,65 @@ def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
 	assert runner_asl.index("m-drive-to") < runner_asl.index("m-drive-to-via-unsafe")
 
 
+def test_jason_runner_instruments_plan_library_variants_with_source_method_name() -> None:
+	runner = JasonRunner()
+	agentspeak_code = "\n".join(
+		[
+			"/* Initial Beliefs */",
+			"",
+			"/* Primitive Action Plans */",
+			"",
+			"/* HTN Method Plans */",
+			"+!deliver(PKG, LOC) : true <-",
+			"\tload(PKG);",
+			"\tmove(LOC);",
+			"\tdrop(PKG, LOC).",
+			"",
+			"+!deliver(PKG, LOC) : true <-",
+			"\tload(PKG);",
+			"\tdrop(PKG, LOC);",
+			"\tmove(LOC).",
+			"",
+			"/* DFA Transition Wrappers */",
+		],
+	)
+	plan_library = PlanLibrary(
+		domain_name="courier",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m_deliver_branching__variant_1",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="deliver",
+					arguments=("PKG:package", "LOC:location"),
+				),
+				context=(),
+				body=(),
+			),
+			AgentSpeakPlan(
+				plan_name="m_deliver_branching__variant_2",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="deliver",
+					arguments=("PKG:package", "LOC:location"),
+				),
+				context=(),
+				body=(),
+			),
+		),
+	)
+
+	instrumented = runner._instrument_method_plans(
+		agentspeak_code,
+		None,
+		plan_library=plan_library,
+	)
+
+	assert '"m_deliver_branching"' in instrumented
+	assert "__variant_1" not in instrumented
+	assert "__variant_2" not in instrumented
+
+
 def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(
@@ -1128,6 +1218,27 @@ def test_agentspeak_renderer_emits_subgoal_runtime_without_query_step() -> None:
 	assert "query_step" not in asl
 	assert "subgoal_cursor(1)." not in asl
 	assert 'dfa_edge_label(dfa_t1, "subgoal_1").' in asl
+
+
+def test_agentspeak_renderer_renders_structured_plan_library_as_method_plans() -> None:
+	domain = HDDLParser.parse_domain(str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"))
+	renderer = AgentSpeakRenderer()
+	asl = renderer.generate(
+		domain=domain,
+		objects=("a", "b"),
+		method_library=_sample_method_library(),
+		plan_library=_sample_plan_library(),
+		plan_records=(),
+		typed_objects=(("a", "block"), ("b", "block")),
+		ordered_query_sequence=False,
+		transition_specs=(),
+		subgoals=(),
+		subgoal_task_name_map={},
+	)
+
+	assert "+!do_put_on(X, Y) : clear(X) & X \\== Y <-" in asl
+	assert "\tpick_up(X);" in asl
+	assert "\t!stack(X, Y)." in asl
 
 
 def test_build_agentspeak_transition_specs_materialises_guard_groups() -> None:
@@ -2100,6 +2211,7 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 		grounding_result=grounding_result,
 		dfa_result=dfa_result,
 		method_library=_sample_method_library(),
+		plan_library=_sample_plan_library(),
 		agentspeak_code="!execute.",
 		agentspeak_artifacts={},
 		verification_problem_file=str(
@@ -2111,6 +2223,7 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 
 	assert result is None
 	assert len(validation_calls) == 1
+	assert validation_calls[0]["plan_library"] == _sample_plan_library()
 
 
 def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
@@ -2179,6 +2292,7 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 		grounding_result=grounding_result,
 		dfa_result=dfa_result,
 		method_library=_sample_method_library(),
+		plan_library=_sample_plan_library(),
 		agentspeak_code="!execute.",
 		agentspeak_artifacts={},
 		verification_problem_file=str(
