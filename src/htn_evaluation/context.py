@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Set, Tuple
 
-from pipeline.execution_logger import ExecutionLogger
+from execution_logging.execution_logger import ExecutionLogger
 from planning.official_benchmark import (
 	OFFICIAL_BENCHMARK_CPU_COUNT,
 	OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB,

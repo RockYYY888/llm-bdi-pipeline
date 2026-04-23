@@ -15,7 +15,7 @@ from utils.config import Config
 def test_shared_openai_config_reads_expected_fields(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
-    monkeypatch.setenv("OFFLINE_OPENAI_API_KEY", "sk-offline")
+    monkeypatch.setenv("METHOD_SYNTHESIS_OPENAI_API_KEY", "sk-method")
     monkeypatch.setenv("OPENAI_MODEL", "deepseek-chat")
     monkeypatch.setenv("GOAL_GROUNDING_MODEL", "deepseek/deepseek-chat-v3-0324")
     monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "legacy/provider-model")
@@ -25,12 +25,12 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     monkeypatch.setenv("PLANNING_TIMEOUT", "900")
     monkeypatch.setenv("GOAL_GROUNDING_MAX_TOKENS", "2048")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
-    monkeypatch.setenv("ONLINE_DOMAIN_SOURCE", "generated")
+    monkeypatch.setenv("EVALUATION_DOMAIN_SOURCE", "generated")
 
     config = Config()
 
     assert config.openai_api_key == "sk-shared"
-    assert config.offline_openai_api_key == "sk-offline"
+    assert config.method_synthesis_api_key == "sk-method"
     assert config.openai_model == "deepseek-chat"
     assert config.goal_grounding_model == "deepseek/deepseek-chat-v3-0324"
     assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
@@ -40,7 +40,7 @@ def test_shared_openai_config_reads_expected_fields(monkeypatch):
     assert config.planning_timeout == 900
     assert config.goal_grounding_max_tokens == 2048
     assert config.openai_base_url == "https://api.deepseek.com"
-    assert config.online_domain_source == "generated"
+    assert config.evaluation_domain_source == "generated"
 
 
 def test_method_synthesis_max_tokens_defaults_to_one_shot_library_budget(monkeypatch):
@@ -109,14 +109,14 @@ def test_method_synthesis_model_defaults_to_pinned_kimi_chat(monkeypatch):
     assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
-def test_offline_api_key_falls_back_to_shared_openai_api_key(monkeypatch):
+def test_method_synthesis_api_key_falls_back_to_shared_openai_api_key(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
-    monkeypatch.delenv("OFFLINE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("METHOD_SYNTHESIS_OPENAI_API_KEY", raising=False)
 
     config = Config()
 
-    assert config.offline_openai_api_key == "sk-shared"
+    assert config.method_synthesis_api_key == "sk-shared"
 
 
 def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
@@ -152,10 +152,10 @@ def test_method_synthesis_model_is_pinned_even_when_dotenv_sets_legacy_override(
     assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
-def test_online_domain_source_defaults_to_benchmark(monkeypatch):
+def test_evaluation_domain_source_defaults_to_benchmark(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.delenv("ONLINE_DOMAIN_SOURCE", raising=False)
+    monkeypatch.delenv("EVALUATION_DOMAIN_SOURCE", raising=False)
 
     config = Config()
 
-    assert config.online_domain_source == "benchmark"
+    assert config.evaluation_domain_source == "benchmark"

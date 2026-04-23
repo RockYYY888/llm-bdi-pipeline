@@ -3,7 +3,7 @@ Problem-root Hierarchical Task Network evaluation orchestration.
 
 This module owns the planner-based benchmark evaluation tracks for official and
 generated domains. It is a reference and diagnostic layer, not the deployed
-online runtime.
+evaluation runtime.
 """
 
 from __future__ import annotations

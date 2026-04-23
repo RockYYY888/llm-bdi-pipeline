@@ -1,58 +1,38 @@
-# Domain-Complete Hierarchical Task Network Pipeline
+# Chapter 4 Plan-Library Pipeline
 
-This repository now has two active paths:
+This repository now treats the dissertation methodology as the primary implementation contract:
 
-- offline masked-domain method generation
-- online natural-language query execution through `LTLf -> Deterministic Finite Automaton -> AgentSpeak -> Jason`
-- generated-domain benchmark evaluation on official `problem.hddl` files
+`D^- + L_s -> Φ_s -> M -> S`
 
-The current mainline is:
+- `D^-`: masked official HDDL domain with methods removed
+- `L_s`: stored domain-specific query sequence
+- `Φ_s`: validated temporal specifications from `queries_LTLf.json`
+- `M`: synthesized HTN method library
+- `S`: translated AgentSpeak(L) plan library
 
-- offline domain build:
-  `official domain.hddl -> strip official methods -> domain-complete method synthesis -> domain gate -> generated domain artifact`
-- online query execution:
-  `natural-language query -> large-language-model grounded LTLf + grounded subgoals -> Deterministic Finite Automaton -> AgentSpeak -> Jason -> official hierarchical verification`
-- generated benchmark evaluation:
-  `generated domain artifact + official problem.hddl root task network -> plan solve -> official verification`
-
-## Current Milestone Rules
-
-- all generation code must remain domain-agnostic
-- no domain-specific hard-coded shortcuts or projections
-- offline method generation is domain-level only
-- online query grounding is large-language-model driven; code only validates, compiles, executes, and verifies
-- online query grounding must emit grounded `subgoal_*` atoms only
-- one full generated sweep should issue exactly four large-model requests:
-  one per benchmark domain
-- benchmark query text in
-  [`src/benchmark_data/benchmark_queries.json`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/benchmark_data/benchmark_queries.json)
-  is used by the Jason online benchmark harness, not offline synthesis
-- generated benchmark failures are expected to drive prompt engineering, not
-  ad hoc domain-specific patches
+Grounding, Jason execution, planner runs, and verifier checks are evaluation evidence built on top of `S`. They are no longer the primary generation architecture.
 
 ## Repository Layout
 
 ```text
 .
 ├── src/
-│   ├── offline_method_generation/
-│   │   ├── method_synthesis/
-│   │   └── domain_gate/
-│   ├── online_query_solution/
-│   │   ├── goal_grounding/
-│   │   ├── temporal_compilation/
-│   │   ├── agentspeak/
-│   │   └── jason_runtime/
+│   ├── domain_model/
+│   ├── temporal_specification/
+│   ├── method_library/
+│   ├── plan_library/
+│   ├── evaluation/
+│   ├── compat/
 │   ├── planning/
-│   ├── pipeline/
+│   ├── execution_logging/
 │   ├── verification/
 │   ├── domains/
 │   ├── benchmark_data/
 │   └── utils/
 ├── tests/
-│   ├── offline_method_generation/
-│   ├── online_query_solution/
-│   ├── official_benchmark/
+│   ├── temporal_specification/
+│   ├── plan_library/
+│   ├── evaluation/
 │   ├── support/
 │   └── utils/
 └── TO-DO-LIST.md
@@ -62,60 +42,31 @@ The current mainline is:
 
 - command-line entry point:
   [`src/main.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/main.py)
-- offline entrypoint:
-  [`src/offline_method_generation/pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev-reorg/src/offline_method_generation/pipeline.py)
-- online entrypoint:
-  [`src/online_query_solution/pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev-reorg/src/online_query_solution/pipeline.py)
-- compatibility orchestrator:
-  [`src/pipeline/domain_complete_pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/pipeline/domain_complete_pipeline.py)
-- official verifier wrapper:
-  [`src/verification/official_plan_verifier.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/verification/official_plan_verifier.py)
-- official ground-truth sweep:
-  [`tests/run_official_problem_root_baseline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/tests/run_official_problem_root_baseline.py)
-- generated-domain sweep:
-  [`tests/offline_method_generation/run_generated_problem_root_baseline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/tests/offline_method_generation/run_generated_problem_root_baseline.py)
+- Chapter 4 generation pipeline:
+  [`src/plan_library/pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/plan_library/pipeline.py)
+- evaluation pipeline:
+  [`src/evaluation/pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/evaluation/pipeline.py)
+- compatibility helpers:
+  [`src/compat/__init__.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/compat/__init__.py)
 
-## Offline Build Artifacts
+## Persisted Generation Artifacts
 
-`build_domain_library(...)` now persists:
+`generate-library` persists one paper-aligned bundle:
 
-- `method_library.json`
-- `method_synthesis_metadata.json`
-- `domain_gate.json`
+- `artifact_metadata.json`
 - `masked_domain.hddl`
-- `generated_domain.hddl`
+- `query_sequence.json`
+- `temporal_specifications.json`
+- `method_library.json`
+- `plan_library.json`
+- `plan_library.asl`
+- `translation_coverage.json`
+- `library_validation.json`
+- `method_synthesis_metadata.json`
 
-The persisted artifact records whether the source domain was:
+`generated_domain.hddl` is no longer a core generation artifact. It is only materialized inside evaluation flows when a legacy planner path requires an HDDL adapter.
 
-- `official`
-- `masked_official`
-- `generated`
-
-For the active masked-generation path, the source kind is `masked_official`.
-
-## Prompting Strategy
-
-The active domain-complete synthesis prompt follows a constrained symbolic
-interface rather than free-form completion:
-
-- compact domain-wide task contracts instead of a full combinatorial tree
-- explicit output schema with one task entry per declared compound task
-- domain-summary blocks limited to task signatures, relevant primitive actions,
-  and reusable dynamic resources
-- instructions that enforce query independence, symbolic discipline, and
-  reusable decomposition structure
-
-This keeps the prompt interpretable, domain-agnostic, and small enough to stay
-inside a single request per domain.
-
-## Official Ground-Truth Baseline
-
-The official benchmark profile is pinned in code. The latest complete official
-ground-truth summary is here:
-
-- [`tests/generated/official_ground_truth_full/20260418_000457/summary.json`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/tests/generated/official_ground_truth_full/20260418_000457/summary.json)
-
-## Quick Start
+## Command-Line Interface
 
 Create the project environment with `uv`:
 
@@ -130,48 +81,53 @@ Prepare `.env`:
 cp .env.example .env
 ```
 
-Minimum configuration:
+Minimum configuration for synthesis or live ad hoc grounding:
 
 ```bash
 OPENAI_API_KEY=...
 OPENAI_BASE_URL=...
-OPENAI_MODEL=moonshotai/kimi-k2.6
 GOAL_GROUNDING_MODEL=moonshotai/kimi-k2.6
-ONLINE_DOMAIN_SOURCE=benchmark
+METHOD_SYNTHESIS_MODEL=moonshotai/kimi-k2.6
 ```
 
-Run one masked offline domain build:
+Generate a plan-library bundle:
 
 ```bash
-uv run python src/main.py \
-  --build-domain-library \
+uv run python src/main.py generate-library \
   --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
-Run one online Jason query:
+Evaluate a stored benchmark case from `queries_LTLf.json`:
 
 ```bash
-uv run python src/main.py \
-  "First put block b4 on block b2, then put block b1 on block b4." \
+uv run python src/main.py evaluate-library \
+  --library-artifact ./artifacts/plan_library/blocksworld \
   --domain-file ./src/domains/blocksworld/domain.hddl \
-  --problem-file ./src/domains/blocksworld/problems/p01.hddl
+  --query-id query_1
 ```
 
-Run the official ground-truth sweep:
+Evaluate an ad hoc instruction with an explicit LTLf formula:
 
 ```bash
-uv run python tests/run_official_problem_root_baseline.py
+uv run python src/main.py evaluate-library \
+  --library-artifact ./artifacts/plan_library/blocksworld \
+  --domain-file ./src/domains/blocksworld/domain.hddl \
+  --problem-file ./src/domains/blocksworld/problems/p01.hddl \
+  --instruction "Put block b4 on block b2." \
+  --ltlf-formula "do_put_on(b4, b2)"
 ```
 
-Run the generated-domain sweep:
+## Query Dataset
 
-```bash
-uv run python tests/offline_method_generation/run_generated_problem_root_baseline.py
-```
+The default stored temporal-specification dataset is:
+
+- [`src/benchmark_data/queries_LTLf.json`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/benchmark_data/queries_LTLf.json)
+
+Generation uses this dataset by default, filtered to the selected domain. Stored benchmark evaluation also uses it directly, rather than rerunning live grounding.
 
 ## Toolchains
 
-The active planning path expects:
+The evaluation path expects:
 
 - `pandaPIparser`
 - `pandaPIgrounder`
@@ -179,5 +135,4 @@ The active planning path expects:
 - `mona`
 - Java 17 to 23 for Jason runtime execution
 
-Optional local toolchains used by the current backend race can live under
-`.external/`. That directory is treated as local-only and is ignored by git.
+Optional local toolchains can live under `.external/`. That directory is treated as local-only and ignored by git.

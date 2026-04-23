@@ -47,6 +47,8 @@ output/
 logs/
 artifacts/
 tests/generated/
+tests/method_library/generated/
+.codex/
 
 # Temporary files
 *.tmp

@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from offline_method_generation.method_synthesis.schema import (
+from method_library.synthesis.schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,

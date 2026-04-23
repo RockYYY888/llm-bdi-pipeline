@@ -12,7 +12,7 @@ if str(SRC_ROOT) in sys.path:
 	sys.path.remove(str(SRC_ROOT))
 sys.path.insert(0, str(SRC_ROOT))
 
-from pipeline.execution_logger import ExecutionLogger
+from execution_logging.execution_logger import ExecutionLogger
 from htn_evaluation.pipeline import HTNEvaluationPipeline
 from htn_evaluation.result_tables import (
 	PLANNER_OR_RACE_MODE,
@@ -24,7 +24,7 @@ from htn_evaluation.result_tables import (
 	write_domain_results,
 )
 
-from tests.support.offline_generation_support import (
+from tests.support.plan_library_generation_support import (
 	DOMAIN_FILES,
 	GENERATED_BASELINE_DIR,
 	GENERATED_LOGS_DIR,
@@ -35,7 +35,7 @@ from tests.support.offline_generation_support import (
 	query_id_sort_key,
 	run_generated_domain_build,
 )
-from tests.support.offline_domain_gate_support import run_official_domain_gate_preflight
+from tests.support.method_library_validation_support import run_official_domain_gate_preflight
 
 
 def _load_existing_problem_rows(

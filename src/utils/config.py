@@ -12,7 +12,7 @@ from typing import Iterable, Optional
 DEFAULT_GOAL_GROUNDING_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_METHOD_SYNTHESIS_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_SHARED_MODEL = "moonshotai/kimi-k2.6"
-DEFAULT_ONLINE_DOMAIN_SOURCE = "benchmark"
+DEFAULT_EVALUATION_DOMAIN_SOURCE = "benchmark"
 DEFAULT_OPENAI_TIMEOUT_SECONDS = 1000
 DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 1000
 DEFAULT_PLANNING_TIMEOUT_SECONDS = 600
@@ -46,8 +46,8 @@ class Config:
 		return os.getenv("OPENAI_API_KEY")
 
 	@property
-	def offline_openai_api_key(self) -> Optional[str]:
-		return os.getenv("OFFLINE_OPENAI_API_KEY") or self.openai_api_key
+	def method_synthesis_api_key(self) -> Optional[str]:
+		return os.getenv("METHOD_SYNTHESIS_OPENAI_API_KEY") or self.openai_api_key
 
 	@property
 	def openai_model(self) -> str:
@@ -120,8 +120,8 @@ class Config:
 		return os.getenv("OPENAI_BASE_URL")
 
 	@property
-	def online_domain_source(self) -> str:
-		return os.getenv("ONLINE_DOMAIN_SOURCE", DEFAULT_ONLINE_DOMAIN_SOURCE)
+	def evaluation_domain_source(self) -> str:
+		return os.getenv("EVALUATION_DOMAIN_SOURCE", DEFAULT_EVALUATION_DOMAIN_SOURCE)
 
 	def validate(self) -> bool:
 		if not self.openai_api_key:

@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from pipeline.execution_logger import ExecutionLogger
+from execution_logging.execution_logger import ExecutionLogger
 
 from .context import HTNEvaluationContext
 from .problem_root_evaluator import HTNProblemRootEvaluator

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
-	from offline_method_generation.method_synthesis.schema import HTNLiteral
+	from method_library.synthesis.schema import HTNLiteral
 
 
 NegationMode = Literal["naf"]
@@ -54,7 +54,7 @@ class NegationResolution:
 			return literal
 		if literal.negation_mode == "naf":
 			return literal
-		from offline_method_generation.method_synthesis.schema import HTNLiteral
+		from method_library.synthesis.schema import HTNLiteral
 
 		return HTNLiteral(
 			predicate=literal.predicate,

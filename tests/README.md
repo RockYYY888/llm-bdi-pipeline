@@ -5,9 +5,9 @@ domain-complete pipeline mainline.
 
 ## Coverage Overview
 
-- `tests/online_query_solution/test_execution_logger.py`
+- `tests/evaluation/test_execution_logger.py`
   - semantic execution logger schema and active-step visibility
-- `tests/online_query_solution/test_structure.py`
+- `tests/evaluation/test_structure.py`
   - cleanup guards against retired imports and stage-numbered artifact keys
 - `tests/official_benchmark/test_ground_truth_baseline_units.py`
   - problem-structure and official method-library unit coverage
@@ -19,8 +19,8 @@ domain-complete pipeline mainline.
 ## Recommended Commands
 
 ```bash
-./.venv/bin/pytest -q tests/online_query_solution/test_execution_logger.py
-./.venv/bin/pytest -q tests/online_query_solution/test_structure.py
+./.venv/bin/pytest -q tests/evaluation/test_execution_logger.py
+./.venv/bin/pytest -q tests/evaluation/test_structure.py
 ./.venv/bin/pytest -q tests/official_benchmark/test_ground_truth_baseline_units.py
 ./.venv/bin/pytest -q tests/official_benchmark/test_ground_truth_baseline.py -k smoke
 ./.venv/bin/python tests/run_official_problem_root_baseline.py --domain blocksworld --run-dir tests/generated/tmp

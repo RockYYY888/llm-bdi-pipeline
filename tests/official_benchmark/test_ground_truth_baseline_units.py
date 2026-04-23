@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -42,7 +43,7 @@ from htn_evaluation.result_tables import (
 
 import tests.support.htn_evaluation_support as baseline_support
 import tests.run_official_problem_root_baseline as baseline_runner
-from tests.support.offline_generation_support import DOMAIN_FILES, build_official_method_library
+from tests.support.plan_library_generation_support import DOMAIN_FILES, build_official_method_library
 
 
 def test_official_method_library_clears_query_specific_targets() -> None:
@@ -1841,3 +1842,25 @@ def test_run_subprocess_to_files_spools_large_outputs_without_returning_full_pay
 	assert len(result["stderr"]) < len(large_stderr)
 	assert read_full_process_output(result["stdout_path"]) == large_stdout
 	assert read_full_process_output(result["stderr_path"]) == large_stderr
+
+
+def test_spawn_worker_import_path_stays_valid_for_htn_runtime() -> None:
+	env = dict(os.environ)
+	pythonpath_entries = [str(SRC_ROOT), str(PROJECT_ROOT)]
+	existing_pythonpath = env.get("PYTHONPATH", "")
+	if existing_pythonpath:
+		pythonpath_entries.append(existing_pythonpath)
+	env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+	result = subprocess.run(
+		[
+			sys.executable,
+			"-c",
+			"import htn_evaluation.problem_root_runtime",
+		],
+		cwd=PROJECT_ROOT,
+		env=env,
+		capture_output=True,
+		text=True,
+		check=False,
+	)
+	assert result.returncode == 0, result.stderr

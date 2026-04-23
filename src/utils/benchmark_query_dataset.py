@@ -118,7 +118,7 @@ def typed_object_phrase_for_objects(problem: Any, objects: List[str]) -> str:
 
 def build_stored_case_from_problem(problem_path: Path) -> Dict[str, Any] | None:
 	"""
-	Build one explicit benchmark-query record for offline dataset maintenance.
+	Build one explicit benchmark-query record for benchmark dataset maintenance.
 
 	This helper is not part of the runtime loading path. Runtime benchmark query
 	resolution must consume the stored JSON directly rather than reconstructing

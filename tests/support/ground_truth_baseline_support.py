@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 Compatibility re-export for legacy test imports.
 
-Offline domain generation helpers live in tests.support.offline_generation_support.
+Method-library generation helpers live in tests.support.plan_library_generation_support.
 Hierarchical Task Network evaluation helpers live in tests.support.htn_evaluation_support.
 """
 
@@ -15,8 +15,8 @@ from tests.support.htn_evaluation_support import (
 	run_generated_problem_root_case,
 	run_official_problem_root_baseline_for_domain,
 )
-from tests.support.offline_domain_gate_support import run_official_domain_gate_preflight
-from tests.support.offline_generation_support import (
+from tests.support.method_library_validation_support import run_official_domain_gate_preflight
+from tests.support.plan_library_generation_support import (
 	DEFAULT_GENERATED_METHOD_SYNTHESIS_TIMEOUT_SECONDS,
 	DEFAULT_GENERATED_PLANNING_TIMEOUT_SECONDS,
 	DOMAIN_FILES,

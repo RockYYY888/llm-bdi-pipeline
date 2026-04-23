@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from offline_method_generation.method_synthesis.schema import HTNLiteral
+from method_library.synthesis.schema import HTNLiteral
 
 
 @dataclass(frozen=True)
