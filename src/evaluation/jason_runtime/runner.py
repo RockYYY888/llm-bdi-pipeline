@@ -175,6 +175,7 @@ class JasonRunner:
 			runtime_agentspeak_code,
 			method_library=method_library,
 			plan_library=plan_library,
+			action_schemas=action_schemas,
 			seed_facts=seed_facts,
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
@@ -515,6 +516,7 @@ class JasonRunner:
 		*,
 		method_library: HTNMethodLibrary | None = None,
 		plan_library: PlanLibrary | None = None,
+		action_schemas: Sequence[Dict[str, Any]] = (),
 		seed_facts: Sequence[str] = (),
 		runtime_objects: Sequence[str] = (),
 		object_types: Optional[Dict[str, str]] = None,
@@ -543,7 +545,11 @@ class JasonRunner:
 		lines = [
 			trace_ready_code.rstrip(),
 			"",
-			*self._render_failure_handlers(method_library),
+			*self._render_failure_handlers(
+				method_library,
+				plan_library=plan_library,
+				action_schemas=action_schemas,
+			),
 			"",
 			"/* Execution Entry */",
 			"!execute.",
@@ -1131,9 +1137,19 @@ class JasonRunner:
 			rendered_args.append(token if count == 1 else f"{token}{count}")
 		return tuple(rendered_args)
 
+	@staticmethod
+	def _strip_type_annotation(parameter: str) -> str:
+		text = str(parameter or "").strip()
+		if ":" in text:
+			return text.split(":", 1)[0].strip()
+		return text
+
 	def _render_failure_handlers(
 		self,
 		method_library: HTNMethodLibrary | None,
+		*,
+		plan_library: PlanLibrary | None = None,
+		action_schemas: Sequence[Dict[str, Any]] = (),
 	) -> List[str]:
 		lines = ["/* Failure Handlers */"]
 		lines.append("-!run_dfa : true <-")
@@ -1143,19 +1159,21 @@ class JasonRunner:
 			),
 		)
 		lines.append("")
-		if method_library is None:
-			return lines
 		seen_triggers: set[str] = set()
-		for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
-			handler_args = self._failure_handler_args(task.parameters)
-			trigger = self._call(self._sanitize_name(task.name), handler_args)
+		for task_name, parameters in self._failure_handler_signatures(
+			method_library=method_library,
+			plan_library=plan_library,
+			action_schemas=action_schemas,
+		):
+			handler_args = self._failure_handler_args(parameters)
+			trigger = self._call(self._sanitize_name(task_name), handler_args)
 			if trigger in seen_triggers:
 				continue
 			seen_triggers.add(trigger)
-			fail_term = self._call("fail_goal", (self._asl_atom_or_string(task.name), *handler_args))
+			fail_term = self._call("fail_goal", (self._asl_atom_or_string(task_name), *handler_args))
 			blocked_goal = self._call(
 				"blocked_runtime_goal",
-				(self._asl_atom_or_string(self._sanitize_name(task.name)), *handler_args),
+				(self._asl_atom_or_string(self._sanitize_name(task_name)), *handler_args),
 			)
 			lines.append(f"-!{trigger} : true <-")
 			lines.extend(
@@ -1169,6 +1187,64 @@ class JasonRunner:
 			)
 			lines.append("")
 		return lines
+
+	def _failure_handler_signatures(
+		self,
+		*,
+		method_library: HTNMethodLibrary | None,
+		plan_library: PlanLibrary | None,
+		action_schemas: Sequence[Dict[str, Any]],
+	) -> List[Tuple[str, Tuple[str, ...]]]:
+		signatures: List[Tuple[str, Tuple[str, ...]]] = []
+		seen_names: set[str] = set()
+
+		def register(name: Any, parameters: Sequence[str]) -> None:
+			task_name = str(name or "").strip()
+			if not task_name or task_name in seen_names:
+				return
+			seen_names.add(task_name)
+			signatures.append(
+				(
+					task_name,
+					tuple(str(parameter).strip() for parameter in parameters if str(parameter).strip()),
+				),
+			)
+
+		if plan_library is not None:
+			trigger_signatures = {
+				str(getattr(plan.trigger, "symbol", "") or "").strip(): tuple(
+					self._strip_type_annotation(str(argument).strip())
+					for argument in (getattr(plan.trigger, "arguments", ()) or ())
+					if str(argument).strip()
+				)
+				for plan in tuple(plan_library.plans or ())
+				if getattr(plan, "trigger", None) is not None
+			}
+			for task_name, parameters in trigger_signatures.items():
+				register(task_name, parameters)
+			for plan in tuple(plan_library.plans or ()):
+				for step in tuple(getattr(plan, "body", ()) or ()):
+					if str(getattr(step, "kind", "") or "").strip() != "subgoal":
+						continue
+					register(
+						getattr(step, "symbol", ""),
+						trigger_signatures.get(
+							str(getattr(step, "symbol", "") or "").strip(),
+							tuple(getattr(step, "arguments", ()) or ()),
+						),
+					)
+
+		for schema in action_schemas or ():
+			register(
+				schema.get("source_name") or schema.get("functor") or "",
+				tuple(schema.get("parameters") or ()),
+			)
+
+		if method_library is not None:
+			for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
+				register(getattr(task, "name", ""), tuple(getattr(task, "parameters", ()) or ()))
+
+		return signatures
 
 	def _rewrite_primitive_wrappers_for_environment(self, agentspeak_code: str) -> str:
 		start_marker = "/* Primitive Action Plans */"

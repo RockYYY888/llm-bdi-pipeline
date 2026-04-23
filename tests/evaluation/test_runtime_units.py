@@ -1134,6 +1134,27 @@ def test_jason_runner_instruments_plan_library_variants_with_source_method_name(
 	assert "__variant_2" not in instrumented
 
 
+def test_jason_runner_renders_failure_handlers_from_plan_library_and_action_schemas() -> None:
+	runner = JasonRunner()
+
+	lines = runner._render_failure_handlers(
+		None,
+		plan_library=_sample_plan_library(),
+		action_schemas=(
+			{
+				"source_name": "pick_up",
+				"functor": "pick_up",
+				"parameters": ["?x"],
+			},
+		),
+	)
+	rendered = "\n".join(lines)
+
+	assert "-!do_put_on(X, Y) : true <-" in rendered
+	assert "-!stack(X, Y) : true <-" in rendered
+	assert "-!pick_up(X) : true <-" in rendered
+
+
 def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(
