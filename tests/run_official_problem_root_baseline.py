@@ -114,6 +114,7 @@ def _read_controller_state(run_dir: Path) -> Optional[Dict[str, Any]]:
 
 
 def _register_controller_runtime(run_dir: Path) -> None:
+	run_dir.mkdir(parents=True, exist_ok=True)
 	pid_path = _controller_pid_path(run_dir)
 	state_path = _controller_state_path(run_dir)
 	pid_path.write_text(f"{os.getpid()}\n")

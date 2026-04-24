@@ -1572,6 +1572,15 @@ def test_sequential_full_baseline_cleans_resources_between_domains(
 	assert len(cleanup_calls) == 6
 
 
+def test_register_controller_runtime_creates_missing_run_dir(tmp_path: Path) -> None:
+	run_dir = tmp_path / "missing" / "track"
+
+	baseline_runner._register_controller_runtime(run_dir)
+
+	assert run_dir.exists()
+	assert (run_dir / "controller.pid").exists()
+
+
 def test_supported_planner_ids_are_stable() -> None:
 	assert HTN_PLANNER_IDS == (
 		"panda_pi_portfolio",
