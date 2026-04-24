@@ -418,7 +418,18 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1, run_id: str | None =
 			_record_launch_metadata(launch_path, active_runs)
 		if not active_runs:
 			continue
-		run = active_runs.pop(0)
+		completed_index = next(
+			(
+				index
+				for index, candidate in enumerate(active_runs)
+				if candidate.process.poll() is not None
+			),
+			None,
+		)
+		if completed_index is None:
+			time.sleep(5)
+			continue
+		run = active_runs.pop(completed_index)
 		_collect_domain_run_result(run, domain_summaries, internal_failures)
 		_write_run_summary_snapshot(
 			run_dir=run_dir,
