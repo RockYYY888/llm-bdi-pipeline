@@ -15,6 +15,7 @@ from tests.support.plan_library_evaluation_support import (
 	BENCHMARK_EVALUATION_DOMAIN_SOURCE,
 	BENCHMARK_EVALUATION_LIBRARY_SOURCE,
 	_classify_evaluation_failure,
+	_extract_failure_signature,
 	_extract_reported_evaluation_domain_source,
 	apply_evaluation_runtime_defaults,
 	run_plan_library_evaluation_case,
@@ -360,6 +361,76 @@ def test_domain_benchmark_supports_single_query_runs(
 		/ "query_results"
 		/ "q2.json"
 	).exists()
+
+
+def test_query_report_checkpoint_compacts_long_query_and_formula_text() -> None:
+	long_instruction = " ".join("move_block" for _ in range(600))
+	long_formula = " & ".join(f"do_move(b{i},b{i + 1})" for i in range(500))
+
+	report = benchmark_support._serialize_query_report(
+		{
+			"run_id": "compact-run",
+			"domain_key": "blocksworld",
+			"query_id": "query_30",
+			"case": {
+				"instruction": long_instruction,
+				"problem_file": "/tmp/problem.hddl",
+			},
+			"library_source": "official",
+			"success": True,
+			"result": {"success": True},
+			"outcome_bucket": "runtime_goal_verified",
+			"execution": {
+				"ltlf_formula": long_formula,
+				"runtime_execution": {
+					"metadata": {"verification_mode": "original_problem"},
+				},
+			},
+			"failure_signature": {
+				"ltlf_formula": long_formula,
+				"ltlf_atom_count": 500,
+				"ltlf_operator_counts": {"&": 499},
+				"jason_failure_class": None,
+				"failed_goals": [],
+				"verifier_missing_goal_facts": [],
+			},
+			"evaluation_domain_source": "benchmark",
+		},
+	)
+
+	assert report["instruction_truncated"] is True
+	assert report["instruction_chars"] == len(long_instruction)
+	assert len(report["instruction_sha256"]) == 64
+	assert len(report["instruction"]) < len(long_instruction)
+	assert report["ltlf_formula_truncated"] is True
+	assert report["ltlf_formula_chars"] == len(long_formula)
+	assert len(report["ltlf_formula_sha256"]) == 64
+	assert len(report["ltlf_formula"]) < len(long_formula)
+	assert report["failure_signature"]["ltlf_formula_truncated"] is True
+
+
+def test_failure_signature_preserves_counts_when_formula_is_truncated() -> None:
+	signature = _extract_failure_signature(
+		{
+			"ltlf_formula": "do_move(b1,b2) & X(do_move(b2,b3))... [truncated]",
+			"ltlf_atom_count": 500,
+			"ltlf_operator_counts": {"X": 499, "&": 499},
+			"failure_signature": {
+				"ltlf_formula_truncated": True,
+				"ltlf_formula_chars": 12000,
+				"ltlf_formula_sha256": "a" * 64,
+				"ltlf_atom_count": 500,
+				"ltlf_operator_counts": {"X": 499, "&": 499},
+			},
+		},
+		{"success": True},
+	)
+
+	assert signature["ltlf_atom_count"] == 500
+	assert signature["ltlf_operator_counts"] == {"X": 499, "&": 499}
+	assert signature["ltlf_formula_truncated"] is True
+	assert signature["ltlf_formula_chars"] == 12000
+	assert signature["ltlf_formula_sha256"] == "a" * 64
 
 
 def test_evaluation_case_uses_stored_temporal_specification(

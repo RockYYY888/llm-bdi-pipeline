@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -77,6 +78,15 @@ EXECUTION_STEP_KEYS = (
 	"agentspeak_rendering",
 	"runtime_execution",
 	"plan_verification",
+)
+REPORT_TEXT_FIELD_LIMIT_CHARS = 2_000
+LONG_TEXT_KEYS = frozenset(
+	{
+		"instruction",
+		"natural_language",
+		"query_text",
+		"ltlf_formula",
+	}
 )
 
 
@@ -212,12 +222,25 @@ def _extract_failure_signature(
 			)
 			if str(fact).strip()
 		)
-	return build_failure_signature(
+	signature = build_failure_signature(
 		ltlf_formula=ltlf_formula,
 		jason_failure_class=jason_failure_class,
 		failed_goals=failed_goals,
 		verifier_missing_goal_facts=verifier_missing_goal_facts,
 	)
+	stored_signature = dict(execution.get("failure_signature") or {})
+	for key in (
+		"ltlf_atom_count",
+		"ltlf_operator_counts",
+		"ltlf_formula_chars",
+		"ltlf_formula_sha256",
+		"ltlf_formula_truncated",
+	):
+		if key in stored_signature:
+			signature[key] = stored_signature[key]
+		elif key in execution:
+			signature[key] = execution[key]
+	return signature
 
 
 def _compact_result_payload(result_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,7 +274,56 @@ def _compact_execution_summary(execution: Dict[str, Any]) -> Dict[str, Any]:
 		}
 		if step_summary:
 			summary[step_name] = step_summary
-	return summary
+	return _compact_nested_long_text(summary)
+
+
+def _compact_text_field(value: str) -> Dict[str, Any]:
+	text = str(value or "")
+	if len(text) <= REPORT_TEXT_FIELD_LIMIT_CHARS:
+		return {"value": text, "truncated": False}
+	return {
+		"value": text[:REPORT_TEXT_FIELD_LIMIT_CHARS],
+		"truncated": True,
+		"chars": len(text),
+		"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+	}
+
+
+def _set_compact_text(
+	payload: Dict[str, Any],
+	key: str,
+	value: Any,
+) -> None:
+	if value is None:
+		payload[key] = None
+		return
+	compact = _compact_text_field(str(value))
+	payload[key] = compact["value"]
+	if compact["truncated"]:
+		payload[f"{key}_truncated"] = True
+		payload[f"{key}_chars"] = compact["chars"]
+		payload[f"{key}_sha256"] = compact["sha256"]
+
+
+def _compact_failure_signature(signature: Dict[str, Any]) -> Dict[str, Any]:
+	compact = dict(signature)
+	if "ltlf_formula" in compact:
+		value = compact.pop("ltlf_formula")
+		_set_compact_text(compact, "ltlf_formula", value)
+	return compact
+
+
+def _compact_nested_long_text(value: Any, *, key: str = "") -> Any:
+	if isinstance(value, dict):
+		return {
+			item_key: _compact_nested_long_text(item_value, key=str(item_key))
+			for item_key, item_value in value.items()
+		}
+	if isinstance(value, list):
+		return [_compact_nested_long_text(item) for item in value]
+	if isinstance(value, str) and key in LONG_TEXT_KEYS:
+		return _compact_text_field(value)["value"]
+	return value
 
 
 def _execution_path_for_log_dir(log_dir: Any) -> str | None:
@@ -532,11 +604,13 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		str(report.get("verification_mode") or "").strip()
 		or _verification_mode_from_execution_summary(execution_summary)
 	)
-	return {
+	failure_signature = _compact_failure_signature(
+		dict(report.get("failure_signature") or {}),
+	)
+	payload = {
 		"run_id": report.get("run_id"),
 		"domain_key": str(report.get("domain_key") or ""),
 		"query_id": str(report.get("query_id") or ""),
-		"instruction": instruction,
 		"problem_file": problem_file,
 		"library_source": str(report.get("library_source") or ""),
 		"success": bool(report.get("success")),
@@ -554,19 +628,25 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		),
 		"execution_summary": execution_summary,
 		"verification_mode": verification_mode,
-		"failure_signature": dict(report.get("failure_signature") or {}),
-		"ltlf_formula": (report.get("failure_signature") or {}).get("ltlf_formula"),
-		"ltlf_atom_count": (report.get("failure_signature") or {}).get("ltlf_atom_count"),
+		"failure_signature": failure_signature,
+		"ltlf_formula": failure_signature.get("ltlf_formula"),
+		"ltlf_atom_count": failure_signature.get("ltlf_atom_count"),
 		"ltlf_operator_counts": dict(
-			((report.get("failure_signature") or {}).get("ltlf_operator_counts") or {}),
+			(failure_signature.get("ltlf_operator_counts") or {}),
 		),
-		"jason_failure_class": (report.get("failure_signature") or {}).get("jason_failure_class"),
-		"failed_goals": list(((report.get("failure_signature") or {}).get("failed_goals") or [])),
+		"jason_failure_class": failure_signature.get("jason_failure_class"),
+		"failed_goals": list((failure_signature.get("failed_goals") or [])),
 		"verifier_missing_goal_facts": list(
-			((report.get("failure_signature") or {}).get("verifier_missing_goal_facts") or []),
+			(failure_signature.get("verifier_missing_goal_facts") or []),
 		),
 		"evaluation_domain_source": str(report.get("evaluation_domain_source") or ""),
 	}
+	_set_compact_text(payload, "instruction", instruction)
+	if failure_signature.get("ltlf_formula_truncated"):
+		payload["ltlf_formula_truncated"] = True
+		payload["ltlf_formula_chars"] = failure_signature.get("ltlf_formula_chars")
+		payload["ltlf_formula_sha256"] = failure_signature.get("ltlf_formula_sha256")
+	return payload
 
 
 def _load_query_report_checkpoint(

@@ -335,7 +335,7 @@ class PlanLibraryEvaluationOrchestrator:
 		if not tuple(grounding_result.subgoals or ()):
 			raise ValueError("Precomputed temporal grounding requires at least one grounded subgoal.")
 		self.logger.log_goal_grounding_success(
-			grounding_result.to_dict(),
+			grounding_result.to_log_dict(),
 			used_llm=False,
 			model=None,
 			llm_prompt=None,
@@ -357,7 +357,7 @@ class PlanLibraryEvaluationOrchestrator:
 			},
 		)
 		print("✓ Loaded stored temporal specification")
-		print(f"  LTLf: {grounding_result.ltlf_formula}")
+		print(f"  LTLf: {self._preview_log_text(grounding_result.ltlf_formula)}")
 
 	def _resolve_evaluation_domain_context(
 		self,
@@ -415,7 +415,7 @@ class PlanLibraryEvaluationOrchestrator:
 				type_parent_map=evaluation_domain.type_parent_map,
 			)
 			self.logger.log_goal_grounding_success(
-				grounding_result.to_dict(),
+				grounding_result.to_log_dict(),
 				used_llm=True,
 				model=self.config.ltlf_generation_model,
 				llm_prompt=llm_prompt,
@@ -431,7 +431,7 @@ class PlanLibraryEvaluationOrchestrator:
 				},
 			)
 			print(f"✓ Grounded task events: {len(grounding_result.subgoals)}")
-			print(f"  LTLf: {grounding_result.ltlf_formula}")
+			print(f"  LTLf: {self._preview_log_text(grounding_result.ltlf_formula)}")
 			return grounding_result, llm_prompt, llm_response
 		except Exception as exc:
 			failure_class = (
@@ -619,7 +619,7 @@ class PlanLibraryEvaluationOrchestrator:
 				diagnostics=tuple(str(item) for item in validation.failed_goals),
 			)
 			self.logger.log_runtime_execution(
-				result.to_dict(),
+				result.to_log_dict(),
 				"Success",
 				backend="RunLocalMAS",
 				metadata={
@@ -844,6 +844,13 @@ class PlanLibraryEvaluationOrchestrator:
 				verifier_missing_goal_facts=tuple(verifier_missing_goal_facts),
 			),
 		)
+
+	@staticmethod
+	def _preview_log_text(value: str, *, limit: int = 400) -> str:
+		text = str(value or "")
+		if len(text) <= limit:
+			return text
+		return f"{text[:limit]}... [truncated, chars={len(text)}]"
 
 	def _record_step_timing(
 		self,

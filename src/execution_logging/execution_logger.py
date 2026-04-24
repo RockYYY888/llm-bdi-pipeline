@@ -5,6 +5,7 @@ Execution logger for the semantic domain-complete pipeline.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -23,6 +24,7 @@ STEP_TITLES = {
 }
 
 INLINE_LOG_SECTION_LIMIT_BYTES = 12_000
+INLINE_TEXT_FIELD_LIMIT_CHARS = 2_000
 LLM_PAYLOAD_KEYS = frozenset({"prompt", "response"})
 EXTERNAL_ARTIFACT_KEYS = frozenset(
 	{
@@ -106,7 +108,7 @@ class ExecutionLogger:
 
 		self.current_record = ExecutionRecord(
 			timestamp=timestamp,
-			natural_language=natural_language,
+			natural_language=self._compact_text_field(natural_language),
 			success=False,
 			mode=mode,
 			run_origin=self.run_origin,
@@ -143,6 +145,7 @@ class ExecutionLogger:
 		if self.current_record is None:
 			return
 		normalized_signature = self._sanitise_paths(dict(signature or {})) if signature is not None else {}
+		normalized_signature = self._compact_failure_signature(normalized_signature)
 		self.current_record.failure_signature = normalized_signature or None
 		self.current_record.ltlf_formula = normalized_signature.get("ltlf_formula")
 		self.current_record.ltlf_atom_count = normalized_signature.get("ltlf_atom_count")
@@ -612,6 +615,30 @@ class ExecutionLogger:
 		if isinstance(value, (str, int, float, bool)) or value is None:
 			return value
 		return str(value)
+
+	def _compact_failure_signature(self, signature: Dict[str, Any]) -> Dict[str, Any]:
+		compact = dict(signature)
+		ltlf_formula = compact.get("ltlf_formula")
+		if isinstance(ltlf_formula, str):
+			compact["ltlf_formula"] = self._compact_text_field(ltlf_formula)
+			if len(ltlf_formula) > INLINE_TEXT_FIELD_LIMIT_CHARS:
+				compact["ltlf_formula_chars"] = len(ltlf_formula)
+				compact["ltlf_formula_sha256"] = hashlib.sha256(
+					ltlf_formula.encode("utf-8"),
+				).hexdigest()
+				compact["ltlf_formula_truncated"] = True
+		return compact
+
+	@staticmethod
+	def _compact_text_field(value: str) -> str:
+		text = str(value or "")
+		if len(text) <= INLINE_TEXT_FIELD_LIMIT_CHARS:
+			return text
+		sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+		return (
+			f"{text[:INLINE_TEXT_FIELD_LIMIT_CHARS]}"
+			f"... [truncated, chars={len(text)}, sha256={sha256}]"
+		)
 
 	@staticmethod
 	def _slug_component(value: str | None) -> str:

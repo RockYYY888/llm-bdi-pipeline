@@ -5,6 +5,7 @@ Persisted artifact structures for domain builds and evaluation execution.
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -12,6 +13,35 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from method_library.synthesis.schema import (
 	HTNMethodLibrary,
 )
+
+
+INLINE_TEXT_PREVIEW_CHARS = 2_000
+INLINE_SEQUENCE_PREVIEW_ITEMS = 40
+
+
+def _compact_text_payload(key: str, value: str) -> Dict[str, Any]:
+	text = str(value or "")
+	if len(text) <= INLINE_TEXT_PREVIEW_CHARS:
+		return {key: text}
+	return {
+		key: text[:INLINE_TEXT_PREVIEW_CHARS],
+		f"{key}_truncated": True,
+		f"{key}_chars": len(text),
+		f"{key}_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+	}
+
+
+def _compact_sequence_payload(values: Sequence[Any]) -> Dict[str, Any]:
+	items = list(values)
+	if len(items) <= INLINE_SEQUENCE_PREVIEW_ITEMS:
+		return {"items": items, "count": len(items), "truncated": False}
+	edge_count = INLINE_SEQUENCE_PREVIEW_ITEMS // 2
+	return {
+		"items": items[:edge_count] + items[-edge_count:],
+		"count": len(items),
+		"truncated": True,
+		"omitted_middle_count": len(items) - (edge_count * 2),
+	}
 
 
 @dataclass(frozen=True)
@@ -61,6 +91,23 @@ class TemporalGroundingResult:
 			"subgoals": [subgoal.to_dict() for subgoal in self.subgoals],
 			"typed_objects": dict(self.typed_objects),
 			"query_object_inventory": [dict(entry) for entry in self.query_object_inventory],
+			"diagnostics": list(self.diagnostics),
+		}
+
+	def to_log_dict(self) -> Dict[str, Any]:
+		"""Return bounded grounding metadata for execution logs."""
+
+		subgoals = [subgoal.to_dict() for subgoal in self.subgoals]
+		query_object_inventory = [
+			dict(entry)
+			for entry in self.query_object_inventory
+		]
+		return {
+			**_compact_text_payload("query_text", self.query_text),
+			**_compact_text_payload("ltlf_formula", self.ltlf_formula),
+			"subgoals": _compact_sequence_payload(subgoals),
+			"typed_object_count": len(self.typed_objects),
+			"query_object_inventory": _compact_sequence_payload(query_object_inventory),
 			"diagnostics": list(self.diagnostics),
 		}
 
@@ -116,6 +163,26 @@ class JasonExecutionResult:
 			"action_path": list(self.action_path),
 			"method_trace": [dict(item) for item in self.method_trace],
 			"hierarchical_plan_text": self.hierarchical_plan_text,
+			"verification_problem_file": self.verification_problem_file,
+			"verification_mode": self.verification_mode,
+			"failed_goals": list(self.failed_goals),
+			"failure_class": self.failure_class,
+			"consistency_checks": dict(self.consistency_checks),
+			"artifacts": dict(self.artifacts),
+			"timing_profile": dict(self.timing_profile),
+			"diagnostics": list(self.diagnostics),
+		}
+
+	def to_log_dict(self) -> Dict[str, Any]:
+		"""Return bounded runtime metadata for execution logs."""
+
+		hierarchical_plan_text = str(self.hierarchical_plan_text or "")
+		return {
+			**_compact_text_payload("query_text", self.query_text),
+			**_compact_text_payload("ltlf_formula", self.ltlf_formula),
+			"action_path_count": len(self.action_path),
+			"method_trace_count": len(self.method_trace),
+			"hierarchical_plan_text_chars": len(hierarchical_plan_text),
 			"verification_problem_file": self.verification_problem_file,
 			"verification_mode": self.verification_mode,
 			"failed_goals": list(self.failed_goals),

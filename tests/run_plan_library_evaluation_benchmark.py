@@ -250,6 +250,35 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 	print("\n".join(lines))
 
 
+def _compact_summary_for_console(summary: Dict[str, object]) -> Dict[str, object]:
+	compact = {
+		key: value
+		for key, value in summary.items()
+		if key != "query_results"
+	}
+	query_results = []
+	for result in summary.get("query_results") or []:
+		if not isinstance(result, dict):
+			continue
+		query_results.append(
+			{
+				"query_id": result.get("query_id"),
+				"problem_file": result.get("problem_file"),
+				"success": result.get("success"),
+				"outcome_bucket": result.get("outcome_bucket"),
+				"step": result.get("step"),
+				"verification_mode": result.get("verification_mode"),
+				"execution_path": result.get("execution_path"),
+				"ltlf_atom_count": result.get("ltlf_atom_count"),
+				"jason_failure_class": result.get("jason_failure_class"),
+				"failed_goals": result.get("failed_goals"),
+				"verifier_missing_goal_facts": result.get("verifier_missing_goal_facts"),
+			},
+		)
+	compact["query_results"] = query_results
+	return compact
+
+
 def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> None:
 	latest_manifest = {
 		"run_id": summary.get("run_id"),
@@ -329,7 +358,7 @@ def _run_single_domain(domain_key: str, run_dir: Path, *, resume: bool = False) 
 	)
 	summary_path = run_dir / f"{domain_key}.summary.json"
 	summary_path.write_text(json.dumps(summary, indent=2))
-	print(json.dumps(summary, indent=2))
+	print(json.dumps(_compact_summary_for_console(summary), indent=2))
 	return 0
 
 

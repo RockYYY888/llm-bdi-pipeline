@@ -106,6 +106,38 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	assert execution["ltlf_operator_counts"] == {"F": 1}
 
 
+def test_execution_logger_compacts_long_query_and_formula_text(tmp_path) -> None:
+	logger = ExecutionLogger(logs_dir=str(tmp_path), run_origin="tests")
+	long_query = "move block " * 600
+	long_formula = " & ".join(f"do_move(b{i},b{i + 1})" for i in range(500))
+	logger.start_pipeline(
+		long_query,
+		mode="plan_library_evaluation",
+		domain_file="/tmp/domain.hddl",
+		problem_file="/tmp/problem.hddl",
+		domain_name="blocksworld",
+		problem_name="p30",
+	)
+	logger.record_failure_signature(
+		{
+			"ltlf_formula": long_formula,
+			"ltlf_atom_count": 500,
+			"ltlf_operator_counts": {"&": 499},
+		},
+	)
+	log_path = logger.end_pipeline(success=True)
+
+	execution = json.loads((log_path.parent / "execution.json").read_text())
+
+	assert len(execution["natural_language"]) < len(long_query)
+	assert "truncated" in execution["natural_language"]
+	assert len(execution["ltlf_formula"]) < len(long_formula)
+	assert execution["failure_signature"]["ltlf_formula_truncated"] is True
+	assert execution["failure_signature"]["ltlf_formula_chars"] == len(long_formula)
+	assert len(execution["failure_signature"]["ltlf_formula_sha256"]) == 64
+	assert execution["ltlf_atom_count"] == 500
+
+
 def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:
 	logger = ExecutionLogger(logs_dir=str(tmp_path), run_origin="tests")
 	logger.start_pipeline(
