@@ -1716,6 +1716,12 @@ class JasonRunner:
 		)
 		if specialised_chunks != pre_noop_prefix_context_chunks:
 			changed = True
+		pre_recursive_guard_chunks = list(specialised_chunks)
+		specialised_chunks = self._insert_self_recursive_no_ancestor_guards(
+			specialised_chunks,
+		)
+		if specialised_chunks != pre_recursive_guard_chunks:
+			changed = True
 		pre_guard_promotion_chunks = list(specialised_chunks)
 		specialised_chunks = self._promote_body_no_ancestor_guards_to_context(
 			specialised_chunks,
@@ -2120,6 +2126,39 @@ class JasonRunner:
 				rewritten_chunks.append(chunk)
 				continue
 			rewritten_chunks.append("\n".join([rewritten_head, *lines[1:]]))
+		return rewritten_chunks
+
+	def _insert_self_recursive_no_ancestor_guards(
+		self,
+		chunks: Sequence[str],
+	) -> List[str]:
+		rewritten_chunks: List[str] = []
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				rewritten_chunks.append(chunk)
+				continue
+			parsed_head = self._parse_asl_method_head(lines[0])
+			if parsed_head is None:
+				rewritten_chunks.append(chunk)
+				continue
+			task_name, _, _ = parsed_head
+			rewritten_lines = [lines[0]]
+			changed = False
+			for line in lines[1:]:
+				goal = self._parse_asl_goal_call(line)
+				if goal is None or str(goal[0]).strip() != task_name:
+					rewritten_lines.append(line)
+					continue
+				guard_args = ", ".join((self._asl_atom_or_string(task_name), *goal[1]))
+				guard = f"pipeline.no_ancestor_goal({guard_args})"
+				indent = re.match(r"^(\s*)", line).group(1) if re.match(r"^(\s*)", line) else ""
+				guard_line = f"{indent}{guard};"
+				if guard_line not in rewritten_lines:
+					rewritten_lines.append(guard_line)
+					changed = True
+				rewritten_lines.append(line)
+			rewritten_chunks.append("\n".join(rewritten_lines) if changed else chunk)
 		return rewritten_chunks
 
 	def _promote_body_blocked_goal_guards_to_context(

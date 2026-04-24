@@ -880,6 +880,31 @@ def test_jason_runner_keeps_recursive_transport_via_after_current_context_via() 
 	assert "road(MID, DEST) <-" in ordered_chunks[1]
 
 
+def test_jason_runner_inserts_no_ancestor_guard_for_self_recursive_methods() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!get_to(V, DEST) : road(MID, DEST) <-",
+				'\t.print("runtime trace method flat ", "m-drive-to-via");',
+				"\t!get_to(V, MID);",
+				"\t!drive(V, MID, DEST).",
+			],
+		),
+	]
+
+	guarded_chunks = runner._promote_body_no_ancestor_guards_to_context(
+		runner._insert_self_recursive_no_ancestor_guards(chunks),
+	)
+
+	assert len(guarded_chunks) == 1
+	assert (
+		"+!get_to(V, DEST) : road(MID, DEST) & "
+		"pipeline.no_ancestor_goal(get_to, V, MID) <-"
+	) in guarded_chunks[0]
+	assert "\t!get_to(V, MID);" in guarded_chunks[0]
+
+
 def test_jason_runner_lifts_nonrecursive_child_contexts_to_parent_candidates() -> None:
 	runner = JasonRunner()
 	chunks = [
