@@ -601,6 +601,89 @@ class PlanLibraryEvaluationOrchestrator:
 				)
 				if str(object_name).strip()
 			)
+			candidate_attempts: list[Dict[str, Any]] = []
+
+			def record_candidate_attempt(attempt: Dict[str, Any]) -> None:
+				if len(candidate_attempts) < 64:
+					candidate_attempts.append(dict(attempt))
+
+			def accept_candidate(
+				action_path: Tuple[str, ...],
+				method_trace: Tuple[Dict[str, Any], ...],
+				candidate_metadata: Dict[str, Any],
+			) -> bool:
+				candidate_index = int(candidate_metadata.get("candidate_index") or 0)
+				world_facts = tuple(
+					str(fact)
+					for fact in (candidate_metadata.get("world_facts") or ())
+				)
+				missing_goal_facts = infer_missing_goal_facts(
+					problem_file=verification_problem_file,
+					world_facts=world_facts,
+				)
+				attempt = {
+					"candidate_index": candidate_index,
+					"action_path_count": len(action_path),
+					"method_trace_count": len(method_trace),
+					"missing_goal_fact_count": len(missing_goal_facts),
+				}
+				if missing_goal_facts:
+					attempt["status"] = "rejected_goal_state"
+					attempt["missing_goal_facts"] = list(missing_goal_facts[:5])
+					record_candidate_attempt(attempt)
+					return False
+
+				hierarchical_plan_text = render_supported_hierarchical_plan(
+					action_path=action_path,
+					method_library=method_library,
+					method_trace=method_trace,
+					problem_file=str(Path(verification_problem_file).resolve()),
+					domain_file=evaluation_domain.domain_file,
+				)
+				outcome = verify_jason_hierarchical_plan(
+					method_library=method_library,
+					plan_solve_data={
+						"summary": {
+							"backend": "jadex",
+							"status": "success",
+							"planning_mode": "jadex_runtime",
+						},
+						"artifacts": {
+							"backend": "jadex",
+							"planning_mode": "jadex_runtime",
+							"verification_problem_file": str(
+								Path(verification_problem_file).resolve(),
+							),
+							"verification_mode": verification_mode,
+							"action_path": list(action_path),
+							"method_trace": list(method_trace),
+							"hierarchical_plan_text": hierarchical_plan_text,
+							"consistency_checks": {
+								"action_path_schema_replay": {
+									"world_facts": list(world_facts),
+								},
+							},
+						},
+					},
+					evaluation_domain=evaluation_domain,
+					problem_file=self.problem_file,
+					output_dir=output_dir,
+				)
+				summary = (outcome.data or {}).get("summary") or {}
+				attempt.update(
+					{
+						"status": "accepted" if outcome.success else "rejected_verifier",
+						"plan_kind": summary.get("plan_kind"),
+						"verification_result": summary.get("verification_result"),
+						"primitive_plan_executable": summary.get("primitive_plan_executable"),
+						"runtime_goal_reached": summary.get("runtime_goal_reached"),
+					},
+				)
+				if outcome.error:
+					attempt["error"] = str(outcome.error)
+				record_candidate_attempt(attempt)
+				return bool(outcome.success)
+
 			validation = runner.validate(
 				method_library=method_library,
 				plan_library=plan_library,
@@ -611,6 +694,8 @@ class PlanLibraryEvaluationOrchestrator:
 				type_parent_map=dict(evaluation_domain.type_parent_map),
 				query_goals=tuple(subgoal.to_dict() for subgoal in grounding_result.subgoals),
 				output_dir=output_dir,
+				accept_candidate=accept_candidate,
+				candidate_limit=2048,
 			)
 			hierarchical_plan_text = render_supported_hierarchical_plan(
 				action_path=validation.action_path,
@@ -633,6 +718,7 @@ class PlanLibraryEvaluationOrchestrator:
 				artifacts={
 					**agentspeak_artifacts,
 					**dict(validation.artifacts),
+					"jadex_candidate_attempts": candidate_attempts,
 				},
 				timing_profile=dict(validation.timing_profile),
 				diagnostics=tuple(str(item) for item in validation.failed_goals),

@@ -3034,3 +3034,67 @@ def test_jadex_runtime_prefers_low_side_effect_retry_candidates(tmp_path: Path) 
 	assert result.status == "success"
 	assert result.action_path == ("nop",)
 	assert result.method_trace == ({"method_name": "m-idempotent", "task_args": ["b1"]},)
+
+
+def test_jadex_runtime_retries_until_candidate_acceptor_passes(tmp_path: Path) -> None:
+	plan_library = PlanLibrary(
+		domain_name="retry",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m-first",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="choose",
+					arguments=(),
+				),
+				context=(),
+				body=(AgentSpeakBodyStep(kind="action", symbol="first", arguments=()),),
+			),
+			AgentSpeakPlan(
+				plan_name="m-second",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="choose",
+					arguments=(),
+				),
+				context=(),
+				body=(AgentSpeakBodyStep(kind="action", symbol="second", arguments=()),),
+			),
+		),
+	)
+	action_schemas = (
+		{
+			"functor": "first",
+			"source_name": "first",
+			"parameters": [],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		},
+		{
+			"functor": "second",
+			"source_name": "second",
+			"parameters": [],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		},
+	)
+	seen_candidates: list[tuple[str, ...]] = []
+
+	def accept_candidate(action_path, method_trace, candidate_metadata):
+		seen_candidates.append(tuple(action_path))
+		return tuple(action_path) == ("second",)
+
+	result = JadexBDIRunner(timeout_seconds=5).validate(
+		action_schemas=action_schemas,
+		plan_library=plan_library,
+		query_goals=({"task_name": "choose", "args": []},),
+		output_dir=tmp_path,
+		accept_candidate=accept_candidate,
+	)
+
+	assert seen_candidates == [("first",), ("second",)]
+	assert result.action_path == ("second",)
+	assert result.consistency_checks["candidates_considered"] == 2
+	assert result.consistency_checks["candidates_rejected"] == 1

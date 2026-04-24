@@ -16,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from evaluation.jason_runtime.runner import JasonRunner
 from method_library.synthesis.schema import HTNMethodLibrary
@@ -80,6 +80,7 @@ class JadexBDIRunner:
 	max_search_nodes = 300_000
 	max_goal_depth = 4_000
 	failed_goal_record_limit = 64
+	candidate_retry_limit = 512
 
 	def __init__(self, *, timeout_seconds: int = 1800) -> None:
 		self.timeout_seconds = timeout_seconds
@@ -105,6 +106,10 @@ class JadexBDIRunner:
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
 		query_goals: Sequence[Any] = (),
 		output_dir: str | Path,
+		accept_candidate: Optional[
+			Callable[[Tuple[str, ...], Tuple[Dict[str, Any], ...], Dict[str, Any]], bool]
+		] = None,
+		candidate_limit: Optional[int] = None,
 	) -> JadexValidationResult:
 		"""Execute query goals directly against the plan library."""
 
@@ -147,18 +152,38 @@ class JadexBDIRunner:
 
 		timing_profile: Dict[str, Any] = {}
 		search_start = time.perf_counter()
+		result_state: Optional[_SearchState] = None
+		candidates_considered = 0
+		candidates_rejected = 0
+		candidate_limit_value = max(1, int(candidate_limit or self.candidate_retry_limit))
 		try:
-			result_state = next(
-				self._execute_goal_sequence(
-					goals=tuple(self._normalise_query_goal(goal) for goal in query_goals),
-					index=0,
-					state=initial_state,
-					plan_library=plan_library,
-					goal_stack=(),
-				),
-			)
-		except StopIteration:
-			result_state = None
+			for candidate_state in self._execute_goal_sequence(
+				goals=tuple(self._normalise_query_goal(goal) for goal in query_goals),
+				index=0,
+				state=initial_state,
+				plan_library=plan_library,
+				goal_stack=(),
+			):
+				candidates_considered += 1
+				candidate_metadata = {
+					"candidate_index": candidates_considered,
+					"candidate_limit": candidate_limit_value,
+					"world_facts": list(self._render_world_facts(candidate_state.world)),
+					"nodes_expanded": self._nodes_expanded,
+				}
+				if accept_candidate is None or accept_candidate(
+					candidate_state.action_path,
+					candidate_state.method_trace,
+					candidate_metadata,
+				):
+					result_state = candidate_state
+					break
+				candidates_rejected += 1
+				self._debug_lines.append(
+					f"runtime candidate rejected candidate={candidates_considered}",
+				)
+				if candidates_considered >= candidate_limit_value:
+					break
 		except TimeoutError as exc:
 			metadata = self._failure_metadata(
 				status="failed",
@@ -168,17 +193,26 @@ class JadexBDIRunner:
 					"search_seconds": time.perf_counter() - search_start,
 					"total_seconds": time.perf_counter() - total_start,
 				},
+				candidates_considered=candidates_considered,
+				candidates_rejected=candidates_rejected,
 			)
 			raise JadexValidationError(str(exc), metadata=metadata) from exc
 		timing_profile["search_seconds"] = time.perf_counter() - search_start
 		timing_profile["total_seconds"] = time.perf_counter() - total_start
 
 		if result_state is None:
+			failure_class = (
+				"jadex_candidate_rejected"
+				if candidates_considered
+				else "jadex_goal_failure"
+			)
 			metadata = self._failure_metadata(
 				status="failed",
-				failure_class="jadex_goal_failure",
+				failure_class=failure_class,
 				output_path=output_path,
 				timing_profile=timing_profile,
+				candidates_considered=candidates_considered,
+				candidates_rejected=candidates_rejected,
 			)
 			raise JadexValidationError(
 				"Jadex-style BDI execution failed: no applicable retry path satisfied all goals.",
@@ -195,7 +229,10 @@ class JadexBDIRunner:
 			status="success",
 			failure_class=None,
 			timing_profile=timing_profile,
+			candidates_considered=candidates_considered,
+			candidates_rejected=candidates_rejected,
 		)
+		final_world_facts = tuple(self._render_world_facts(result_state.world))
 		return JadexValidationResult(
 			status="success",
 			backend=self.backend_name,
@@ -207,6 +244,11 @@ class JadexBDIRunner:
 				"success": True,
 				"runtime_semantics": "jadex_retry_exclude",
 				"nodes_expanded": self._nodes_expanded,
+				"candidates_considered": candidates_considered,
+				"candidates_rejected": candidates_rejected,
+				"action_path_schema_replay": {
+					"world_facts": list(final_world_facts),
+				},
 			},
 			artifacts=artifacts,
 			timing_profile=timing_profile,
@@ -219,6 +261,8 @@ class JadexBDIRunner:
 		failure_class: str,
 		output_path: Path,
 		timing_profile: Dict[str, Any],
+		candidates_considered: int = 0,
+		candidates_rejected: int = 0,
 	) -> Dict[str, Any]:
 		self._debug_lines.append("execute failed")
 		artifacts = self._write_artifacts(
@@ -230,6 +274,8 @@ class JadexBDIRunner:
 			status=status,
 			failure_class=failure_class,
 			timing_profile=timing_profile,
+			candidates_considered=candidates_considered,
+			candidates_rejected=candidates_rejected,
 		)
 		return {
 			"status": status,
@@ -242,6 +288,8 @@ class JadexBDIRunner:
 				"success": False,
 				"runtime_semantics": "jadex_retry_exclude",
 				"nodes_expanded": self._nodes_expanded,
+				"candidates_considered": candidates_considered,
+				"candidates_rejected": candidates_rejected,
 			},
 			"artifacts": artifacts,
 			"timing_profile": dict(timing_profile),
@@ -258,6 +306,8 @@ class JadexBDIRunner:
 		status: str,
 		failure_class: Optional[str],
 		timing_profile: Dict[str, Any],
+		candidates_considered: int = 0,
+		candidates_rejected: int = 0,
 	) -> Dict[str, Any]:
 		stdout_path = output_path / "jadex_stdout.txt"
 		stderr_path = output_path / "jadex_stderr.txt"
@@ -285,6 +335,8 @@ class JadexBDIRunner:
 			"stdout_sha256": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
 			"stderr_sha256": hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
 			"nodes_expanded": self._nodes_expanded,
+			"candidates_considered": candidates_considered,
+			"candidates_rejected": candidates_rejected,
 		}
 		validation_path.write_text(
 			json.dumps(
@@ -295,6 +347,8 @@ class JadexBDIRunner:
 					"action_path_count": len(action_path),
 					"method_trace_count": len(method_trace),
 					"failed_goals": list(self._failed_goals[: self.failed_goal_record_limit]),
+					"candidates_considered": candidates_considered,
+					"candidates_rejected": candidates_rejected,
 					"artifacts": artifacts,
 					"timing_profile": dict(timing_profile),
 				},
@@ -763,6 +817,12 @@ class JadexBDIRunner:
 		if predicate == "=":
 			return None
 		return predicate, tuple(tokens[1:])
+
+	def _render_world_facts(self, world: World) -> Tuple[str, ...]:
+		return tuple(
+			f"{predicate}({', '.join(args)})" if args else predicate
+			for predicate, args in sorted(world)
+		)
 
 	def _normalise_query_goal(self, goal: Any) -> Tuple[str, Tuple[str, ...]]:
 		if isinstance(goal, dict):
