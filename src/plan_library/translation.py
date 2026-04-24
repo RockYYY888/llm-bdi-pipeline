@@ -8,7 +8,8 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from method_library.synthesis.naming import sanitize_identifier
-from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary
+from method_library.synthesis.schema import HTNLiteral, HTNMethod, HTNMethodLibrary
+from utils.hddl_condition_parser import HDDLConditionParser
 
 from .models import (
 	AgentSpeakBodyStep,
@@ -27,6 +28,7 @@ def build_plan_library(
 	"""Translate HTN methods into structured AgentSpeak(L) plans."""
 
 	task_type_map = _task_type_map_for_domain(domain)
+	action_semantics_map = _action_semantics_map_for_domain(domain)
 	task_lookup = {
 		task.name: task
 		for task in [*list(method_library.compound_tasks), *list(method_library.primitive_tasks)]
@@ -60,6 +62,12 @@ def build_plan_library(
 			method=method,
 			task_schema=task_schema,
 		)
+		context_literals = _translated_context_literals(
+			method=method,
+			task_schema=task_schema,
+			variable_map=variable_map,
+			action_semantics_map=action_semantics_map,
+		)
 		plan_name = str(method.method_name).strip()
 		for variant_index, ordered_steps in enumerate(ordered_step_variants, start=1):
 			body = tuple(_translate_step(step, variable_map=variable_map) for step in ordered_steps)
@@ -74,10 +82,7 @@ def build_plan_library(
 						symbol=str(method.task_name).strip(),
 						arguments=trigger_arguments,
 					),
-					context=tuple(
-						_translate_context_literal(literal, variable_map=variable_map)
-						for literal in tuple(getattr(method, "context", ()) or ())
-					),
+					context=context_literals,
 					body=body,
 					source_instruction_ids=tuple(
 						str(value).strip()
@@ -113,6 +118,29 @@ def _task_type_map_for_domain(domain: Any) -> Dict[str, Tuple[str, ...]]:
 		)
 		mapping[task_name] = task_types
 		mapping.setdefault(sanitize_identifier(task_name), task_types)
+	return mapping
+
+
+def _action_semantics_map_for_domain(domain: Any) -> Dict[str, Dict[str, Any]]:
+	parser = HDDLConditionParser()
+	mapping: Dict[str, Dict[str, Any]] = {}
+	for action in getattr(domain, "actions", ()) or ():
+		action_name = str(getattr(action, "name", "") or "").strip()
+		if not action_name:
+			continue
+		if not hasattr(action, "preconditions") or not hasattr(action, "effects"):
+			continue
+		try:
+			parsed = parser.parse_action(action)
+		except Exception:
+			continue
+		entry = {
+			"preconditions": parsed.preconditions,
+			"effects": parsed.effects,
+			"parameters": parsed.parameters,
+		}
+		mapping[action_name] = entry
+		mapping.setdefault(sanitize_identifier(action_name), entry)
 	return mapping
 
 
@@ -225,6 +253,116 @@ def _translate_context_literal(
 	if is_positive:
 		return base
 	return f"!{base}"
+
+
+def _translated_context_literals(
+	*,
+	method: HTNMethod,
+	task_schema: Any | None,
+	variable_map: Dict[str, str],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+) -> Tuple[str, ...]:
+	trigger_variables = {
+		_symbol_token(argument)
+		for argument in _trigger_argument_tokens(method=method, task_schema=task_schema)
+		if _looks_like_variable(_symbol_token(argument))
+	}
+	local_variables = {
+		token
+		for token in _method_variable_tokens(method)
+		if token not in trigger_variables
+	}
+	context_literals = [
+		_translate_context_literal(literal, variable_map=variable_map)
+		for literal in tuple(getattr(method, "context", ()) or ())
+	]
+	for literal in _local_witness_binding_literals(
+		method=method,
+		local_variables=local_variables,
+		action_semantics_map=action_semantics_map,
+	):
+		rendered = _translate_context_literal(literal, variable_map=variable_map)
+		if rendered not in context_literals:
+			context_literals.append(rendered)
+	return tuple(context_literals)
+
+
+def _local_witness_binding_literals(
+	*,
+	method: HTNMethod,
+	local_variables: set[str],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+) -> Tuple[Any, ...]:
+	if not local_variables:
+		return ()
+	binding_literals: List[Any] = []
+	seen_signatures: set[str] = set()
+	produced_positive_signatures: set[str] = set()
+	previous_compound_arg_tuples: set[Tuple[str, ...]] = set()
+	for step in tuple(getattr(method, "subtasks", ()) or ()):
+		step_kind = str(getattr(step, "kind", "") or "").strip()
+		if step_kind == "compound":
+			previous_compound_arg_tuples.add(
+				tuple(str(argument) for argument in (getattr(step, "args", ()) or ())),
+			)
+			continue
+		if step_kind != "primitive":
+			continue
+		action_name = str(
+			getattr(step, "action_name", None)
+			or getattr(step, "task_name", "")
+			or "",
+		).strip()
+		action_entry = action_semantics_map.get(action_name) or action_semantics_map.get(
+			sanitize_identifier(action_name),
+		)
+		if action_entry is None:
+			continue
+		action_parameters = tuple(action_entry.get("parameters") or ())
+		step_args = tuple(getattr(step, "args", ()) or ())
+		bindings = {
+			str(parameter): str(argument)
+			for parameter, argument in zip(action_parameters, step_args)
+		}
+		for precondition in tuple(action_entry.get("preconditions") or ()):
+			if not bool(getattr(precondition, "is_positive", True)):
+				continue
+			predicate = str(getattr(precondition, "predicate", "") or "").strip()
+			if not predicate or predicate == "=":
+				continue
+			bound_args = tuple(
+				bindings.get(str(argument), str(argument))
+				for argument in (getattr(precondition, "args", ()) or ())
+			)
+			signature = f"{predicate}({','.join(bound_args)})"
+			if signature in produced_positive_signatures:
+				continue
+			if bound_args in previous_compound_arg_tuples:
+				continue
+			if not any(_symbol_token(argument) in local_variables for argument in bound_args):
+				continue
+			if signature in seen_signatures:
+				continue
+			seen_signatures.add(signature)
+			binding_literals.append(
+				HTNLiteral(
+					predicate=predicate,
+					args=bound_args,
+					is_positive=True,
+				),
+			)
+		for effect in tuple(action_entry.get("effects") or ()):
+			if not bool(getattr(effect, "is_positive", True)):
+				continue
+			predicate = str(getattr(effect, "predicate", "") or "").strip()
+			if not predicate or predicate == "=":
+				continue
+			bound_args = tuple(
+				bindings.get(str(argument), str(argument))
+				for argument in (getattr(effect, "args", ()) or ())
+			)
+			produced_positive_signatures.add(f"{predicate}({','.join(bound_args)})")
+	return tuple(binding_literals)
 
 
 def _translate_term(

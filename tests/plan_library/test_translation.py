@@ -13,6 +13,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from method_library import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
 from plan_library import build_plan_library, render_plan_library_asl
+from tests.support.plan_library_generation_support import (
+	DOMAIN_FILES,
+	build_official_method_library,
+)
+from utils.hddl_parser import HDDLParser
 
 
 def _sample_domain():
@@ -237,3 +242,20 @@ def test_translation_canonicalises_local_method_variables() -> None:
 		("MID",),
 		("PKG", "LOC"),
 	)
+
+
+def test_translation_lifts_local_witness_action_preconditions_into_context() -> None:
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
+	method_library = build_official_method_library(DOMAIN_FILES["blocksworld"])
+
+	plan_library, _coverage = build_plan_library(
+		domain=domain,
+		method_library=method_library,
+	)
+
+	plans_by_name = {plan.plan_name: plan for plan in plan_library.plans}
+	assert "on(X, Y)" in plans_by_name["m2_do_on_table"].context
+	assert "on(X, Z)" in plans_by_name["m5_do_move"].context
+	assert "on(Y, X)" in plans_by_name["m7_do_clear"].context
+	assert "clear(Y)" not in plans_by_name["m7_do_clear"].context
+	assert "holding(Y)" not in plans_by_name["m7_do_clear"].context

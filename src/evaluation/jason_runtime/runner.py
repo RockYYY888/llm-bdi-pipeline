@@ -530,20 +530,24 @@ class JasonRunner:
 			type_parent_map=type_parent_map or {},
 		)
 		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
-		lowered_code = self._ground_local_witness_method_plans(
+		method_goal_ready_code = self._rewrite_method_primitive_actions_to_goals(
 			environment_ready_code,
+			action_schemas=action_schemas,
+		)
+		trace_ready_code = self._instrument_method_plans(
+			method_goal_ready_code,
+			method_library,
+			plan_library=plan_library,
+		)
+		lowered_code = self._ground_local_witness_method_plans(
+			trace_ready_code,
 			seed_facts=seed_facts,
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 		)
-		trace_ready_code = self._instrument_method_plans(
-			lowered_code,
-			method_library,
-			plan_library=plan_library,
-		)
 		lines = [
-			trace_ready_code.rstrip(),
+			lowered_code.rstrip(),
 			"",
 			*self._render_failure_handlers(
 				method_library,
@@ -1310,6 +1314,76 @@ class JasonRunner:
 
 		rewritten_section = "\n\n".join([header, *rewritten_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _rewrite_method_primitive_actions_to_goals(
+		self,
+		agentspeak_code: str,
+		*,
+		action_schemas: Sequence[Dict[str, Any]],
+	) -> str:
+		action_functors = {
+			str(schema.get("functor") or "").strip()
+			for schema in action_schemas or ()
+			if str(schema.get("functor") or "").strip()
+		}
+		action_functors.update(
+			self._sanitize_name(str(schema.get("source_name") or "").strip())
+			for schema in action_schemas or ()
+			if str(schema.get("source_name") or "").strip()
+		)
+		action_functors.discard("")
+		if not action_functors:
+			return agentspeak_code
+
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* DFA Transition Wrappers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		rewritten_lines: List[str] = []
+		changed = False
+		for line in section.splitlines():
+			rewritten_line = self._rewrite_method_primitive_action_line_to_goal(
+				line,
+				action_functors=action_functors,
+			)
+			if rewritten_line != line:
+				changed = True
+			rewritten_lines.append(rewritten_line)
+		if not changed:
+			return agentspeak_code
+		rewritten_section = "\n".join(rewritten_lines)
+		return f"{prefix}{rewritten_section}\n{suffix}"
+
+	@staticmethod
+	def _rewrite_method_primitive_action_line_to_goal(
+		line: str,
+		*,
+		action_functors: Set[str],
+	) -> str:
+		match = re.match(r"^(\s*)(.*?)([;.])?\s*$", str(line))
+		if match is None:
+			return line
+		indent, statement, suffix = match.groups()
+		statement = statement.strip()
+		if not statement:
+			return line
+		if statement.startswith(("+", "-", "!", ".", "?")):
+			return line
+		if statement == "true":
+			return line
+		call_match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_]*)(?:\((.*)\))?", statement)
+		if call_match is None:
+			return line
+		functor = call_match.group(1).strip()
+		if functor not in action_functors:
+			return line
+		return f"{indent}!{statement}{suffix or ''}"
 
 	def _ground_local_witness_method_plans(
 		self,

@@ -1075,6 +1075,103 @@ def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
 	assert runner_asl.index("m-drive-to") < runner_asl.index("m-drive-to-via-unsafe")
 
 
+def test_jason_runner_rewrites_method_primitive_actions_to_wrapper_goals() -> None:
+	runner = JasonRunner()
+	agentspeak_code = "\n".join(
+		[
+			"/* Initial Beliefs */",
+			"",
+			"/* Primitive Action Plans */",
+			"+!unstack(BLOCK1, BLOCK2) : true <-",
+			"\tunstack(BLOCK1, BLOCK2).",
+			"",
+			"+!put_down(BLOCK) : true <-",
+			"\tput_down(BLOCK).",
+			"",
+			"/* HTN Method Plans */",
+			"+!do_on_table(X) : on(X, Y) <-",
+			"\tunstack(X, Y);",
+			"\tput_down(X).",
+			"",
+			"/* DFA Transition Wrappers */",
+		],
+	)
+
+	runner_asl = runner._build_runner_asl(
+		agentspeak_code,
+		action_schemas=(
+			{"functor": "unstack", "source_name": "unstack", "parameters": ["?x", "?y"]},
+			{"functor": "put_down", "source_name": "put-down", "parameters": ["?x"]},
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+	)
+	method_section = runner_asl.split("/* HTN Method Plans */", maxsplit=1)[1].split(
+		"/* DFA Transition Wrappers */",
+		maxsplit=1,
+	)[0]
+	primitive_section = runner_asl.split("/* Primitive Action Plans */", maxsplit=1)[1].split(
+		"/* HTN Method Plans */",
+		maxsplit=1,
+	)[0]
+
+	assert "\t!unstack(X, Y);" in method_section
+	assert "\t!put_down(X)." in method_section
+	assert "\tunstack(BLOCK1, BLOCK2);" in primitive_section
+	assert "\t!unstack(BLOCK1, BLOCK2);" not in primitive_section
+
+
+def test_jason_runner_instruments_before_runtime_specialisation() -> None:
+	runner = JasonRunner()
+	agentspeak_code = "\n".join(
+		[
+			"/* Initial Beliefs */",
+			"on(b1, b2).",
+			"",
+			"/* Primitive Action Plans */",
+			"",
+			"/* HTN Method Plans */",
+			"+!do_on_table(X) : on(X, Y) <-",
+			"\tunstack(X, Y).",
+			"",
+			"/* DFA Transition Wrappers */",
+		],
+	)
+	plan_library = PlanLibrary(
+		domain_name="blocks",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m2_do_on_table",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="do_on_table",
+					arguments=("X:block",),
+				),
+				context=("on(X, Y)",),
+				body=(AgentSpeakBodyStep(kind="action", symbol="unstack", arguments=("X", "Y")),),
+			),
+		),
+	)
+
+	runner_asl = runner._build_runner_asl(
+		agentspeak_code,
+		plan_library=plan_library,
+		action_schemas=(
+			{"functor": "unstack", "source_name": "unstack", "parameters": ["?x", "?y"]},
+		),
+		seed_facts=("(on b1 b2)",),
+		runtime_objects=("b1", "b2"),
+		object_types={"b1": "block", "b2": "block"},
+		type_parent_map={"block": "object", "object": None},
+	)
+
+	assert '"runtime trace method flat "' in runner_asl
+	assert '"m2_do_on_table"' in runner_asl
+	assert "+!do_on_table(b1)" in runner_asl
+
+
 def test_jason_runner_instruments_plan_library_variants_with_source_method_name() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(
