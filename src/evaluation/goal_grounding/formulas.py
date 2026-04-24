@@ -3,8 +3,6 @@ LTLf Formula Representation Module
 
 This module defines data structures for representing LTLf (Linear Temporal Logic on Finite Traces) formulas.
 
-**LTLf Syntax Reference**: http://ltlf2dfa.diag.uniroma1.it/ltlf_syntax
-
 Supported syntax (in order):
 
 1. Propositional Symbols:

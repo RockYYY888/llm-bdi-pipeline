@@ -16,10 +16,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from execution_logging.execution_logger import ExecutionLogger
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
 from evaluation.pipeline import _temporal_specification_to_grounding_result
-from evaluation.failure_signature import (
-	build_failure_signature,
-	extract_mona_failure_signature,
-)
+from evaluation.failure_signature import build_failure_signature
 from domain_model import load_query_sequence_records
 from plan_library import (
 	PlanLibraryArtifactBundle,
@@ -50,7 +47,7 @@ OFFICIAL_LIBRARY_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
-OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_order_runtime_goal_delete_guard_v1"
+OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v1"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
 COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
 EXECUTION_SUMMARY_KEYS = (
@@ -70,7 +67,6 @@ EXECUTION_SUMMARY_KEYS = (
 	"ltlf_formula",
 	"ltlf_atom_count",
 	"ltlf_operator_counts",
-	"mona_failure_signature",
 	"jason_failure_class",
 	"failed_goals",
 	"verifier_missing_goal_facts",
@@ -78,7 +74,6 @@ EXECUTION_SUMMARY_KEYS = (
 )
 EXECUTION_STEP_KEYS = (
 	"goal_grounding",
-	"temporal_compilation",
 	"agentspeak_rendering",
 	"runtime_execution",
 	"plan_verification",
@@ -96,7 +91,6 @@ def apply_evaluation_runtime_defaults(
 def _extract_reported_evaluation_domain_source(execution: Dict[str, Any]) -> str:
 	candidate_paths = (
 		("goal_grounding", "metadata", "evaluation_domain_source"),
-		("temporal_compilation", "metadata", "evaluation_domain_source"),
 		("agentspeak_rendering", "metadata", "evaluation_domain_source"),
 		("runtime_execution", "metadata", "evaluation_domain_source"),
 		("plan_verification", "metadata", "evaluation_domain_source"),
@@ -123,8 +117,6 @@ def _classify_evaluation_failure(result: Dict[str, Any], execution: Dict[str, An
 		if _is_goal_grounding_provider_unavailable(result, execution):
 			return GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET
 		return "goal_grounding_failed"
-	if step == "temporal_compilation":
-		return "temporal_compilation_failed"
 	if step == "agentspeak_rendering":
 		return "agentspeak_rendering_failed"
 	if step == "runtime_execution":
@@ -174,7 +166,7 @@ def _extract_failure_signature(
 ) -> Dict[str, Any]:
 	ltlf_formula = str(execution.get("ltlf_formula") or "").strip() or None
 	if not ltlf_formula:
-		for step_name in ("goal_grounding", "temporal_compilation", "runtime_execution"):
+		for step_name in ("goal_grounding", "runtime_execution"):
 			step_payload = execution.get(step_name)
 			if not isinstance(step_payload, dict):
 				continue
@@ -182,11 +174,6 @@ def _extract_failure_signature(
 			ltlf_formula = str(artifacts.get("ltlf_formula") or "").strip() or None
 			if ltlf_formula:
 				break
-
-	mona_failure_signature = str(execution.get("mona_failure_signature") or "").strip() or None
-	if not mona_failure_signature:
-		temporal_payload = dict(execution.get("temporal_compilation") or {})
-		mona_failure_signature = extract_mona_failure_signature(str(temporal_payload.get("error") or ""))
 
 	jason_failure_class = str(execution.get("jason_failure_class") or "").strip() or None
 	if not jason_failure_class:
@@ -217,7 +204,6 @@ def _extract_failure_signature(
 		)
 	return build_failure_signature(
 		ltlf_formula=ltlf_formula,
-		mona_failure_signature=mona_failure_signature,
 		jason_failure_class=jason_failure_class,
 		failed_goals=failed_goals,
 		verifier_missing_goal_facts=verifier_missing_goal_facts,
@@ -564,7 +550,6 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		"ltlf_operator_counts": dict(
 			((report.get("failure_signature") or {}).get("ltlf_operator_counts") or {}),
 		),
-		"mona_failure_signature": (report.get("failure_signature") or {}).get("mona_failure_signature"),
 		"jason_failure_class": (report.get("failure_signature") or {}).get("jason_failure_class"),
 		"failed_goals": list(((report.get("failure_signature") or {}).get("failed_goals") or [])),
 		"verifier_missing_goal_facts": list(
@@ -606,7 +591,6 @@ def _count_query_outcomes(query_reports: Sequence[Dict[str, Any]]) -> Dict[str, 
 		"hierarchical_plan_verified": 0,
 		"goal_grounding_failed": 0,
 		GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET: 0,
-		"temporal_compilation_failed": 0,
 		"agentspeak_rendering_failed": 0,
 		"runtime_execution_failed": 0,
 		"plan_verification_failed": 0,
@@ -664,7 +648,6 @@ def _build_domain_summary(
 			GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET,
 			0,
 		),
-		"temporal_compilation_failures": counts.get("temporal_compilation_failed", 0),
 		"agentspeak_rendering_failures": counts.get("agentspeak_rendering_failed", 0),
 		"runtime_execution_failures": counts.get("runtime_execution_failed", 0),
 		"plan_verification_failures": counts.get("plan_verification_failed", 0),
@@ -701,7 +684,6 @@ def _build_domain_summary(
 				"ltlf_operator_counts": dict(
 					((report.get("failure_signature") or {}).get("ltlf_operator_counts") or {}),
 				),
-				"mona_failure_signature": (report.get("failure_signature") or {}).get("mona_failure_signature"),
 				"jason_failure_class": (report.get("failure_signature") or {}).get("jason_failure_class"),
 				"failed_goals": list(((report.get("failure_signature") or {}).get("failed_goals") or [])),
 				"verifier_missing_goal_facts": list(

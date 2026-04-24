@@ -1,5 +1,5 @@
 """
-Evaluation orchestrator for temporal grounding, Jason execution, and verification evidence.
+Evaluation orchestrator for task grounding, Jason execution, and verification evidence.
 """
 
 from __future__ import annotations
@@ -10,13 +10,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from method_library.synthesis.naming import sanitize_identifier
 from method_library.synthesis.schema import HTNMethodLibrary
-from evaluation.agentspeak import (
-	AgentSpeakRenderer,
-	build_agentspeak_transition_specs,
-)
+from evaluation.agentspeak import AgentSpeakRenderer
 from evaluation.failure_signature import (
 	build_failure_signature,
-	extract_mona_failure_signature,
 	infer_missing_goal_facts,
 )
 from evaluation.domain_selection import (
@@ -32,23 +28,19 @@ from evaluation.jason_runtime.runner import JasonValidationError
 from evaluation.runtime_context import (
 	action_type_map_for_domain,
 	build_type_parent_map_for_domain,
-	method_library_source_task_name_map,
 	planner_action_schemas_for_domain,
 	predicate_type_map_for_domain,
 	render_problem_fact,
 	resolve_evaluation_domain_context,
-	task_event_grounding_map,
 	task_type_map_for_domain,
 	typed_object_entries,
 	validate_problem_domain_compatibility,
 )
-from evaluation.temporal_compilation import build_dfa_from_ltlf
 from evaluation.official_verification import (
 	render_supported_hierarchical_plan,
 	verify_jason_hierarchical_plan,
 )
 from evaluation.artifacts import (
-	DFACompilationResult,
 	JasonExecutionResult,
 	TemporalGroundingResult,
 )
@@ -253,16 +245,6 @@ class PlanLibraryEvaluationOrchestrator:
 				evaluation_domain=evaluation_domain,
 			)
 
-		dfa_result = self._compile_temporal_goal(grounding_result)
-		if dfa_result is None:
-			return {
-				"success": False,
-				"step": "temporal_compilation",
-				"error": "LTLf to DFA compilation failed",
-				"method_library": domain_library.to_dict(),
-				"goal_grounding": grounding_result.to_dict(),
-			}
-
 		verification_problem_file, verification_mode = self._determine_verification_problem()
 		if verification_problem_file is None:
 			return {
@@ -271,12 +253,10 @@ class PlanLibraryEvaluationOrchestrator:
 				"error": "Could not determine a verification problem file",
 				"method_library": domain_library.to_dict(),
 				"goal_grounding": grounding_result.to_dict(),
-				"temporal_compilation": dfa_result.to_dict(),
 			}
 
 		agentspeak_render = self._render_agentspeak_program(
 			grounding_result=grounding_result,
-			dfa_result=dfa_result,
 			method_library=domain_library,
 			plan_library=plan_library,
 			evaluation_domain=evaluation_domain,
@@ -288,12 +268,10 @@ class PlanLibraryEvaluationOrchestrator:
 				"error": "AgentSpeak rendering failed",
 				"method_library": domain_library.to_dict(),
 				"goal_grounding": grounding_result.to_dict(),
-				"temporal_compilation": dfa_result.to_dict(),
 			}
 
 		jason_result = self._execute_query_with_jason(
 			grounding_result=grounding_result,
-			dfa_result=dfa_result,
 			method_library=domain_library,
 			plan_library=plan_library,
 			agentspeak_code=agentspeak_render["agentspeak_code"],
@@ -309,12 +287,10 @@ class PlanLibraryEvaluationOrchestrator:
 				"error": "Jason runtime execution failed",
 				"method_library": domain_library.to_dict(),
 				"goal_grounding": grounding_result.to_dict(),
-				"temporal_compilation": dfa_result.to_dict(),
 			}
 
 		plan_solve_data = self._build_plan_solve_data(
 			grounding_result=grounding_result,
-			dfa_result=dfa_result,
 			jason_result=jason_result,
 			evaluation_domain=evaluation_domain,
 			verification_mode=verification_mode,
@@ -332,7 +308,6 @@ class PlanLibraryEvaluationOrchestrator:
 				"error": "Official IPC verification failed",
 				"method_library": domain_library.to_dict(),
 				"goal_grounding": grounding_result.to_dict(),
-				"temporal_compilation": dfa_result.to_dict(),
 				"plan_solve": plan_solve_data,
 			}
 
@@ -340,7 +315,6 @@ class PlanLibraryEvaluationOrchestrator:
 			"success": True,
 			"method_library": domain_library.to_dict(),
 			"goal_grounding": grounding_result.to_dict(),
-			"temporal_compilation": dfa_result.to_dict(),
 			"plan_solve": plan_solve_data,
 			"plan_verification": plan_verification_data,
 			"llm_prompt": grounding_prompt,
@@ -487,84 +461,10 @@ class PlanLibraryEvaluationOrchestrator:
 			print(f"✗ Goal grounding failed: {exc}")
 			return None, None, None
 
-	def _compile_temporal_goal(
-		self,
-		grounding_result: TemporalGroundingResult,
-	) -> Optional[DFACompilationResult]:
-		print("\n[TEMPORAL COMPILATION]")
-		print("-" * 80)
-		stage_start = time.perf_counter()
-
-		try:
-			output_dir = self._require_output_dir()
-			dfa_payload = build_dfa_from_ltlf(grounding_result)
-			dfa_dot = str(dfa_payload.get("dfa_dot") or "")
-			dfa_dot_path = output_dir / "query_dfa.dot"
-			dfa_dot_path.write_text(dfa_dot)
-			grounding_map = task_event_grounding_map(grounding_result)
-			transition_specs = build_agentspeak_transition_specs(
-				dfa_result=dfa_payload,
-				grounding_map=grounding_map,
-				ordered_query_sequence=False,
-			)
-			result = DFACompilationResult(
-				query_text=grounding_result.query_text,
-				ltlf_formula=grounding_result.ltlf_formula,
-				alphabet=tuple(
-					str(item).strip()
-					for item in (dfa_payload.get("alphabet") or ())
-					if str(item).strip()
-				),
-				transition_specs=tuple(dict(spec) for spec in transition_specs),
-				dfa_dot=dfa_dot,
-				construction=str(dfa_payload.get("construction") or "generic_ltlf2dfa"),
-				num_states=int(dfa_payload.get("num_states") or 0) or None,
-				num_transitions=int(dfa_payload.get("num_transitions") or 0) or None,
-				ordered_subgoal_sequence=False,
-				subgoals=tuple(grounding_result.subgoals),
-				timing_profile=dict(dfa_payload.get("timing_profile") or {}),
-			)
-			self.logger.log_temporal_compilation(
-				{
-					**result.to_dict(),
-					"dfa_dot_path": str(dfa_dot_path),
-				},
-				"Success",
-				metadata={
-					"num_states": result.num_states,
-					"num_transitions": result.num_transitions,
-					"task_event_count": len(grounding_result.subgoals),
-				},
-			)
-			self._record_failure_signature(ltlf_formula=grounding_result.ltlf_formula)
-			self._record_step_timing(
-				"temporal_compilation",
-				stage_start,
-				breakdown=self._timing_breakdown_without_total(result.timing_profile),
-				metadata={
-					"num_states": result.num_states,
-					"num_transitions": result.num_transitions,
-					"task_event_count": len(grounding_result.subgoals),
-				},
-			)
-			print(f"✓ DFA states: {result.num_states or 0}")
-			print(f"  Task-event alphabet size: {len(result.alphabet)}")
-			return result
-		except Exception as exc:
-			self.logger.log_temporal_compilation(None, "Failed", error=str(exc))
-			self._record_failure_signature(
-				ltlf_formula=grounding_result.ltlf_formula,
-				mona_failure_signature=extract_mona_failure_signature(str(exc)),
-			)
-			self._record_step_timing("temporal_compilation", stage_start)
-			print(f"✗ Temporal compilation failed: {exc}")
-			return None
-
 	def _render_agentspeak_program(
 		self,
 		*,
 		grounding_result: TemporalGroundingResult,
-		dfa_result: DFACompilationResult,
 		method_library: HTNMethodLibrary,
 		plan_library: PlanLibrary,
 		evaluation_domain: EvaluationDomainContext,
@@ -593,29 +493,24 @@ class PlanLibraryEvaluationOrchestrator:
 				plan_library=plan_library,
 				plan_records=(),
 				typed_objects=typed_objects,
-				ordered_query_sequence=False,
-				prompt_analysis=None,
-				transition_specs=dfa_result.transition_specs,
 				subgoals=[subgoal.to_dict() for subgoal in grounding_result.subgoals],
-				subgoal_task_name_map=method_library_source_task_name_map(method_library),
 			)
 			asl_path = output_dir / "query_runtime.asl"
 			asl_path.write_text(agentspeak_code)
 			artifacts = {
 				"asl_file": str(asl_path),
-				"ordered_subgoal_sequence": dfa_result.ordered_subgoal_sequence,
-				"transition_spec_count": len(dfa_result.transition_specs),
+				"task_event_count": len(grounding_result.subgoals),
 			}
 			self.logger.log_agentspeak_rendering(
 				artifacts,
 				"Success",
-				metadata={"transition_spec_count": len(dfa_result.transition_specs)},
+				metadata={"task_event_count": len(grounding_result.subgoals)},
 			)
 			self._record_step_timing(
 				"agentspeak_rendering",
 				stage_start,
 				metadata={
-					"transition_spec_count": len(dfa_result.transition_specs),
+					"task_event_count": len(grounding_result.subgoals),
 					"evaluation_domain_source": evaluation_domain.source,
 				},
 			)
@@ -634,7 +529,6 @@ class PlanLibraryEvaluationOrchestrator:
 		self,
 		*,
 		grounding_result: TemporalGroundingResult,
-		dfa_result: DFACompilationResult,
 		method_library: HTNMethodLibrary,
 		plan_library: PlanLibrary,
 		agentspeak_code: str,
@@ -660,11 +554,6 @@ class PlanLibraryEvaluationOrchestrator:
 				if self.problem is not None
 				else ()
 			)
-			target_facts = (
-				tuple(render_problem_fact(fact) for fact in (self.problem.goal_facts or ()))
-				if self.problem is not None
-				else ()
-			)
 			runtime_objects = tuple(
 				str(object_name).strip()
 				for object_name in (
@@ -683,7 +572,7 @@ class PlanLibraryEvaluationOrchestrator:
 				runtime_objects=runtime_objects,
 				object_types=dict(grounding_result.typed_objects),
 				type_parent_map=dict(evaluation_domain.type_parent_map),
-				target_facts=target_facts,
+				query_goals=tuple(subgoal.to_dict() for subgoal in grounding_result.subgoals),
 				domain_name=evaluation_domain.domain.name,
 				problem_file=str(Path(verification_problem_file).resolve()),
 				output_dir=output_dir,
@@ -882,7 +771,6 @@ class PlanLibraryEvaluationOrchestrator:
 		self,
 		*,
 		grounding_result: TemporalGroundingResult,
-		dfa_result: DFACompilationResult,
 		jason_result: JasonExecutionResult,
 		evaluation_domain: EvaluationDomainContext,
 		verification_mode: str,
@@ -908,7 +796,13 @@ class PlanLibraryEvaluationOrchestrator:
 				"evaluation_domain_file": evaluation_domain.domain_file,
 				"ltlf_formula": grounding_result.ltlf_formula,
 				"subgoals": [subgoal.to_dict() for subgoal in grounding_result.subgoals],
-				"ordered_subgoal_sequence": dfa_result.ordered_subgoal_sequence,
+				"execution_goal_sequence": [
+					{
+						"task_name": subgoal.task_name,
+						"args": list(subgoal.args),
+					}
+					for subgoal in grounding_result.subgoals
+				],
 				"action_path": list(jason_result.action_path),
 				"method_trace": list(jason_result.method_trace),
 				"hierarchical_plan_text": jason_result.hierarchical_plan_text,
@@ -927,7 +821,6 @@ class PlanLibraryEvaluationOrchestrator:
 		self,
 		*,
 		ltlf_formula: str | None = None,
-		mona_failure_signature: str | None = None,
 		jason_failure_class: str | None = None,
 		failed_goals: Tuple[str, ...] | list[str] = (),
 		verifier_missing_goal_facts: Tuple[str, ...] | list[str] = (),
@@ -935,7 +828,6 @@ class PlanLibraryEvaluationOrchestrator:
 		self.logger.record_failure_signature(
 			build_failure_signature(
 				ltlf_formula=ltlf_formula,
-				mona_failure_signature=mona_failure_signature,
 				jason_failure_class=jason_failure_class,
 				failed_goals=tuple(failed_goals),
 				verifier_missing_goal_facts=tuple(verifier_missing_goal_facts),

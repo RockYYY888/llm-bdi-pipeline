@@ -10,7 +10,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def test_mainline_source_tree_omits_legacy_stage_keys() -> None:
 	patterns = [
 		"stage1_interpretation",
-		"stage2_dfa_generation",
 		"stage4_panda_planning",
 		"stage5_agentspeak_rendering",
 		"stage6_jason_validation",
@@ -48,7 +47,6 @@ def test_repository_tree_omits_retired_runtime_paths() -> None:
 		PROJECT_ROOT / "src" / "ltl_bdi_pipeline.py",
 		PROJECT_ROOT / "src" / "pipeline_artifacts.py",
 		PROJECT_ROOT / "src" / "stage1_interpretation",
-		PROJECT_ROOT / "src" / "stage2_dfa_generation",
 		PROJECT_ROOT / "src" / "stage3_method_synthesis",
 		PROJECT_ROOT / "src" / "stage4_panda_planning",
 		PROJECT_ROOT / "src" / "stage5_agentspeak_rendering",
@@ -60,10 +58,8 @@ def test_repository_tree_omits_retired_runtime_paths() -> None:
 		PROJECT_ROOT / "src" / "utils" / "ipc_plan_verifier.py",
 		PROJECT_ROOT / "src" / "utils" / "pipeline_logger.py",
 		PROJECT_ROOT / "src" / "utils" / "benchmark_query_manifest.py",
-		PROJECT_ROOT / "src" / "utils" / "setup_mona_path.py",
 		PROJECT_ROOT / "src" / "pipeline" / "domain_complete_pipeline.py",
 		PROJECT_ROOT / "tests" / "stage1_interpretation",
-		PROJECT_ROOT / "tests" / "stage2_dfa_generation",
 		PROJECT_ROOT / "tests" / "stage3_method_synthesis",
 		PROJECT_ROOT / "tests" / "stage4_panda_planning",
 		PROJECT_ROOT / "tests" / "stage5_agentspeak_rendering",

@@ -192,10 +192,6 @@ def _aggregate_domain_summaries(
 			int(summary.get("goal_grounding_provider_failures", 0))
 			for summary in domain_summaries.values()
 		),
-		"temporal_compilation_failures": sum(
-			int(summary.get("temporal_compilation_failures", 0))
-			for summary in domain_summaries.values()
-		),
 		"agentspeak_rendering_failures": sum(
 			int(summary.get("agentspeak_rendering_failures", 0))
 			for summary in domain_summaries.values()
@@ -232,7 +228,6 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 		f"verified_successes: {summary['verified_successes']}",
 		f"goal_grounding_failures: {summary['goal_grounding_failures']}",
 		f"goal_grounding_provider_failures: {summary.get('goal_grounding_provider_failures', 0)}",
-		f"temporal_compilation_failures: {summary['temporal_compilation_failures']}",
 		f"agentspeak_rendering_failures: {summary['agentspeak_rendering_failures']}",
 		f"runtime_execution_failures: {summary['runtime_execution_failures']}",
 		f"plan_verification_failures: {summary['plan_verification_failures']}",

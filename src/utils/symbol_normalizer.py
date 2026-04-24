@@ -1,7 +1,7 @@
 """
 Symbol Normalizer Module
 
-Handles normalization of symbols for LTLf formulas to ensure compatibility with ltlf2dfa.
+Handles normalization of symbols for LTLf formulas and task-event identifiers.
 This module centralizes all symbol transformation logic including special character handling.
 
 Key transformations:
@@ -10,9 +10,9 @@ Key transformations:
 3. Reverse transformations for human-readable output
 
 Design rationale:
-- ltlf2dfa has strict requirements for propositional symbols
+- LTLf atom extraction and JSON records need stable task-event identifiers
 - Hyphens in object names (e.g., "block-1", "rover-a") can cause parsing errors
-- We normalize during LTLf→DFA conversion and denormalize for output
+- We normalize while parsing LTLf records and denormalize for readable output
 """
 
 import re
@@ -26,7 +26,7 @@ class SymbolNormalizer:
     Handles:
     - Hyphen replacement/restoration (- ↔ hh)
     - Predicate to propositional symbol conversion
-    - Special character escaping for ltlf2dfa compatibility
+    - Special character escaping for parser-compatible task-event identifiers
     """
 
     # Constants for hyphen encoding

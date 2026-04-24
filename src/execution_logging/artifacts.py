@@ -92,73 +92,6 @@ class TemporalGroundingResult:
 
 
 @dataclass(frozen=True)
-class DFACompilationResult:
-	"""Compiled deterministic automaton and renderer-facing transition data."""
-
-	query_text: str
-	ltlf_formula: str
-	alphabet: Tuple[str, ...]
-	transition_specs: Tuple[Dict[str, Any], ...]
-	dfa_dot: Optional[str] = None
-	construction: Optional[str] = None
-	num_states: Optional[int] = None
-	num_transitions: Optional[int] = None
-	ordered_subgoal_sequence: bool = True
-	subgoals: Tuple[GroundedSubgoal, ...] = ()
-	timing_profile: Dict[str, Any] = field(default_factory=dict)
-	diagnostics: Tuple[str, ...] = ()
-
-	def to_dict(self) -> Dict[str, Any]:
-		return {
-			"query_text": self.query_text,
-			"ltlf_formula": self.ltlf_formula,
-			"alphabet": list(self.alphabet),
-			"transition_specs": [dict(spec) for spec in self.transition_specs],
-			"dfa_dot": self.dfa_dot,
-			"construction": self.construction,
-			"num_states": self.num_states,
-			"num_transitions": self.num_transitions,
-			"ordered_subgoal_sequence": self.ordered_subgoal_sequence,
-			"subgoals": [subgoal.to_dict() for subgoal in self.subgoals],
-			"timing_profile": dict(self.timing_profile),
-			"diagnostics": list(self.diagnostics),
-		}
-
-	@classmethod
-	def from_dict(cls, payload: Dict[str, Any]) -> "DFACompilationResult":
-		return cls(
-			query_text=str(payload.get("query_text") or ""),
-			ltlf_formula=str(payload.get("ltlf_formula") or ""),
-			alphabet=tuple(
-				str(item).strip()
-				for item in (payload.get("alphabet") or ())
-				if str(item).strip()
-			),
-			transition_specs=tuple(
-				dict(spec)
-				for spec in (payload.get("transition_specs") or ())
-				if isinstance(spec, dict)
-			),
-			dfa_dot=payload.get("dfa_dot"),
-			construction=payload.get("construction"),
-			num_states=payload.get("num_states"),
-			num_transitions=payload.get("num_transitions"),
-			ordered_subgoal_sequence=bool(payload.get("ordered_subgoal_sequence", True)),
-			subgoals=tuple(
-				GroundedSubgoal.from_dict(item)
-				for item in (payload.get("subgoals") or ())
-				if isinstance(item, dict)
-			),
-			timing_profile=dict(payload.get("timing_profile") or {}),
-			diagnostics=tuple(
-				str(message).strip()
-				for message in (payload.get("diagnostics") or ())
-				if str(message).strip()
-			),
-		)
-
-
-@dataclass(frozen=True)
 class JasonExecutionResult:
 	"""Structured Jason runtime outcome for one evaluation query."""
 
@@ -410,7 +343,6 @@ def load_domain_library_artifact(
 	)
 __all__ = [
 	"DomainLibraryArtifact",
-	"DFACompilationResult",
 	"GroundedSubgoal",
 	"JasonExecutionResult",
 	"TemporalGroundingResult",

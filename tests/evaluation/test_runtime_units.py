@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sys
 import time
 from pathlib import Path
@@ -13,16 +12,11 @@ if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
 from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
-from evaluation.artifacts import DFACompilationResult, GroundedSubgoal, TemporalGroundingResult
-from evaluation.agentspeak import (
-	AgentSpeakRenderer,
-	build_agentspeak_transition_specs,
-)
+from evaluation.artifacts import GroundedSubgoal, TemporalGroundingResult
+from evaluation.agentspeak import AgentSpeakRenderer
 from evaluation.goal_grounding.canonical_ordered_formula import (
 	ANCHORED_NEXT_CHAIN,
 	CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE,
-	apply_task_event_occurrence_suffixes,
-	build_ordered_benchmark_formula,
 	select_canonical_benchmark_ordered_formula_style,
 )
 from evaluation.goal_grounding.grounder import (
@@ -30,13 +24,10 @@ from evaluation.goal_grounding.grounder import (
 	GoalGroundingProviderUnavailable,
 	NLToLTLfGenerator,
 )
-from evaluation.goal_grounding.grounding_map import GroundingMap
 from evaluation.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from evaluation.jason_runtime.runner import JasonRunner, JasonValidationResult
 from evaluation.official_verification import resolve_verification_domain_file
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
-from evaluation.temporal_compilation import dfa_builder
-from evaluation.temporal_compilation import ltlf_to_dfa as ltlf_to_dfa_module
 from plan_library import (
 	AgentSpeakBodyStep,
 	AgentSpeakPlan,
@@ -46,7 +37,6 @@ from plan_library import (
 	PlanLibraryArtifactBundle,
 	TranslationCoverage,
 )
-from utils.benchmark_query_dataset import load_problem_query_cases
 from utils.hddl_parser import HDDLParser
 from verification.official_plan_verifier import IPCPlanVerifier, IPCPrimitivePlanVerificationResult
 from evaluation import official_verification as evaluation_official_verification_module
@@ -751,69 +741,6 @@ def test_goal_grounding_does_not_retry_malformed_text_response() -> None:
 	assert generator.last_generation_metadata["attempt_errors"][0]["retryable"] == "false"
 
 
-def test_dfa_builder_wraps_converter_output(monkeypatch: pytest.MonkeyPatch) -> None:
-	class FakeConverter:
-		def convert(self, formula: str):
-			assert formula == "G(do_put_on(b4, b2))"
-			return (
-				'digraph G { init -> q0; q0 [shape=circle]; q1 [shape=doublecircle]; q0 -> q1 [label="do_put_on_b4_b2"]; }',
-				{
-					"construction": "fake_converter",
-					"num_states": 2,
-					"num_transitions": 1,
-					"alphabet": ["do_put_on_b4_b2"],
-				},
-			)
-
-	monkeypatch.setattr(dfa_builder, "LTLfToDFA", lambda: FakeConverter())
-
-	result = dfa_builder.build_dfa_from_ltlf("G(do_put_on(b4, b2))")
-
-	assert result["construction"] == "fake_converter"
-	assert result["num_states"] == 2
-	assert result["num_transitions"] == 1
-	assert result["alphabet"] == ["do_put_on_b4_b2"]
-	assert "do_put_on_b4_b2" in result["dfa_dot"]
-
-
-def test_dfa_builder_always_uses_ltlf2dfa_for_ordered_sequence(
-	monkeypatch: pytest.MonkeyPatch,
-) -> None:
-	seen_formulas: list[str] = []
-
-	class FakeConverter:
-		def convert(self, formula: str):
-			seen_formulas.append(formula)
-			return (
-				'digraph G { init -> q0; q0 [shape=circle]; q1 [shape=doublecircle]; q0 -> q1 [label="stack_b_a"]; q1 -> q2 [label="stack_c_b"]; }',
-				{
-					"construction": "generic_ltlf2dfa",
-					"num_states": 3,
-					"num_transitions": 2,
-					"alphabet": ["stack_b_a", "stack_c_b"],
-				},
-			)
-
-	monkeypatch.setattr(dfa_builder, "LTLfToDFA", lambda: FakeConverter())
-
-	result = dfa_builder.build_dfa_from_ltlf(
-		"F(stack(b, a) & F(stack(c, b)))",
-	)
-
-	assert seen_formulas == ["F(stack(b, a) & F(stack(c, b)))"]
-	assert result["construction"] == "generic_ltlf2dfa"
-
-
-def _benchmark_ordered_task_atoms(case_id: str) -> tuple[str, ...]:
-	query_cases = load_problem_query_cases(
-		PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems",
-		limit=10**9,
-	)
-	instruction = str(query_cases[case_id]["instruction"])
-	task_calls = tuple(re.findall(r"(do_[a-z_]+\([^)]*\))", instruction))
-	return apply_task_event_occurrence_suffixes(task_calls)
-
-
 def test_canonical_ordered_formula_style_selection_prefers_small_complete_candidate() -> None:
 	chosen_style = select_canonical_benchmark_ordered_formula_style(
 		{
@@ -846,26 +773,6 @@ def test_canonical_ordered_formula_style_selection_prefers_small_complete_candid
 
 	assert CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE == ANCHORED_NEXT_CHAIN
 	assert chosen_style == ANCHORED_NEXT_CHAIN
-
-
-@pytest.mark.parametrize(
-	"case_id",
-	("query_7", "query_8", "query_9", "query_10", "query_11", "query_12", "query_13"),
-)
-def test_canonical_ordered_formula_compiles_current_blocksworld_temporal_failures(
-	case_id: str,
-) -> None:
-	task_atoms = _benchmark_ordered_task_atoms(case_id)
-	formula = build_ordered_benchmark_formula(
-		task_atoms,
-		style=CANONICAL_BENCHMARK_ORDERED_FORMULA_STYLE,
-	)
-
-	result = dfa_builder.build_dfa_from_ltlf(formula)
-
-	assert result["construction"] == "generic_ltlf2dfa"
-	assert int(result["num_states"] or 0) > 0
-	assert int(result["num_transitions"] or 0) > 0
 
 
 def test_jason_runner_rejects_unbound_runtime_variables_in_method_bodies() -> None:
@@ -1059,7 +966,7 @@ def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
 			"\t!get_to(V, MID);",
 			"\t!drive(V, MID, DEST).",
 			"",
-			"/* DFA Transition Wrappers */",
+			"/* Failure Handlers */",
 		],
 	)
 
@@ -1093,7 +1000,7 @@ def test_jason_runner_rewrites_method_primitive_actions_to_wrapper_goals() -> No
 			"\tunstack(X, Y);",
 			"\tput_down(X).",
 			"",
-			"/* DFA Transition Wrappers */",
+			"/* Failure Handlers */",
 		],
 	)
 
@@ -1109,7 +1016,7 @@ def test_jason_runner_rewrites_method_primitive_actions_to_wrapper_goals() -> No
 		type_parent_map={},
 	)
 	method_section = runner_asl.split("/* HTN Method Plans */", maxsplit=1)[1].split(
-		"/* DFA Transition Wrappers */",
+		"/* Failure Handlers */",
 		maxsplit=1,
 	)[0]
 	primitive_section = runner_asl.split("/* Primitive Action Plans */", maxsplit=1)[1].split(
@@ -1136,7 +1043,7 @@ def test_jason_runner_instruments_before_runtime_specialisation() -> None:
 			"+!do_on_table(X) : on(X, Y) <-",
 			"\tunstack(X, Y).",
 			"",
-			"/* DFA Transition Wrappers */",
+			"/* Failure Handlers */",
 		],
 	)
 	plan_library = PlanLibrary(
@@ -1172,60 +1079,6 @@ def test_jason_runner_instruments_before_runtime_specialisation() -> None:
 	assert "+!do_on_table(b1)" in runner_asl
 
 
-def test_jason_runner_adds_goal_fact_delete_guards_from_action_effects() -> None:
-	runner = JasonRunner()
-	agentspeak_code = "\n".join(
-		[
-			"/* Initial Beliefs */",
-			"linked(node_a, node_b).",
-			"",
-			"/* Primitive Action Plans */",
-			"+!disconnect(FROM, TO) : true <-",
-			"\tdisconnect(FROM, TO).",
-			"",
-			"/* HTN Method Plans */",
-			"+!prepare_route(FROM, TO) : linked(FROM, TO) <-",
-			"\tdisconnect(FROM, TO).",
-			"",
-			"/* DFA Transition Wrappers */",
-		],
-	)
-
-	runner_asl = runner._build_runner_asl(
-		agentspeak_code,
-		action_schemas=(
-			{
-				"functor": "disconnect",
-				"source_name": "disconnect",
-				"parameters": ["?from", "?to"],
-				"effects": [
-					{
-						"predicate": "linked",
-						"args": ["?from", "?to"],
-						"is_positive": False,
-					},
-				],
-			},
-		),
-		seed_facts=("(linked node_a node_b)",),
-		runtime_objects=("node_a", "node_b"),
-		object_types={"node_a": "place", "node_b": "place"},
-		type_parent_map={"place": "object", "object": None},
-		target_facts=("(linked node_a node_b)",),
-	)
-
-	method_section = runner_asl.split("/* HTN Method Plans */", maxsplit=1)[1].split(
-		"/* DFA Transition Wrappers */",
-		maxsplit=1,
-	)[0]
-
-	assert "target_fact_linked(node_a, node_b)." in runner_asl
-	assert (
-		"+!prepare_route(FROM, TO) : linked(FROM, TO) & "
-		"not target_fact_linked(FROM, TO) <-"
-	) in method_section
-
-
 def test_jason_runner_instruments_plan_library_variants_with_source_method_name() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(
@@ -1245,7 +1098,7 @@ def test_jason_runner_instruments_plan_library_variants_with_source_method_name(
 			"\tdrop(PKG, LOC);",
 			"\tmove(LOC).",
 			"",
-			"/* DFA Transition Wrappers */",
+			"/* Failure Handlers */",
 		],
 	)
 	plan_library = PlanLibrary(
@@ -1320,7 +1173,7 @@ def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions(
 			"",
 			"/* HTN Method Plans */",
 			"",
-			"/* DFA Transition Wrappers */",
+			"/* Failure Handlers */",
 		],
 	)
 
@@ -1335,30 +1188,7 @@ def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions(
 	)[-1]["is_positive"] is True
 
 
-def test_dfa_builder_always_uses_ltlf2dfa_for_large_ordered_sequence(
-	monkeypatch: pytest.MonkeyPatch,
-) -> None:
-	captured: list[str] = []
-
-	class FakeConverter:
-		def convert(self, formula: str):
-			captured.append(formula)
-			return ("digraph G { init -> q0; }", {"construction": "generic_ltlf2dfa"})
-
-	monkeypatch.setattr(dfa_builder, "LTLfToDFA", lambda: FakeConverter())
-
-	formula = "F(stack(b2, b1))"
-	for index in range(3, 51):
-		formula = f"F(stack(b{index}, b{index - 1}) & {formula})"
-
-	result = dfa_builder.build_dfa_from_ltlf(formula)
-
-	assert len(captured) == 1
-	assert captured[0] == formula
-	assert result["construction"] == "generic_ltlf2dfa"
-
-
-def test_agentspeak_renderer_emits_subgoal_runtime_without_query_step() -> None:
+def test_agentspeak_renderer_emits_plan_library_without_temporal_runtime() -> None:
 	domain = HDDLParser.parse_domain(str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"))
 	renderer = AgentSpeakRenderer()
 	asl = renderer.generate(
@@ -1367,29 +1197,12 @@ def test_agentspeak_renderer_emits_subgoal_runtime_without_query_step() -> None:
 		method_library=_sample_method_library(),
 		plan_records=(),
 		typed_objects=(("a", "block"), ("b", "block")),
-		ordered_query_sequence=False,
-		transition_specs=(
-			{
-				"transition_name": "dfa_t1",
-				"source_state": "q0",
-				"target_state": "q0",
-				"raw_source_state": "q0",
-				"raw_target_state": "q0",
-				"raw_label": "subgoal_1",
-				"guard_context": "true",
-				"subgoal_index": 1,
-				"initial_state": "q0",
-				"accepting_states": ("qf",),
-				"stateless_subgoal": True,
-			},
-		),
 		subgoals=[{"id": "subgoal_1", "task_name": "stack", "args": ["b", "a"]}],
-		subgoal_task_name_map={"stack": "stack"},
 	)
 
 	assert "query_step" not in asl
 	assert "subgoal_cursor(1)." not in asl
-	assert 'dfa_edge_label(dfa_t1, "subgoal_1").' in asl
+	assert "HTN Method Plans" in asl
 
 
 def test_agentspeak_renderer_renders_structured_plan_library_as_method_plans() -> None:
@@ -1402,147 +1215,12 @@ def test_agentspeak_renderer_renders_structured_plan_library_as_method_plans() -
 		plan_library=_sample_plan_library(),
 		plan_records=(),
 		typed_objects=(("a", "block"), ("b", "block")),
-		ordered_query_sequence=False,
-		transition_specs=(),
 		subgoals=(),
-		subgoal_task_name_map={},
 	)
 
 	assert "+!do_put_on(X, Y) : clear(X) & X \\== Y <-" in asl
 	assert "\tpick_up(X);" in asl
 	assert "\t!stack(X, Y)." in asl
-
-
-def test_build_agentspeak_transition_specs_materialises_guard_groups() -> None:
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("task_a", "stack", ["b", "a"])
-	grounding_map.add_atom("task_b", "do_put_on", ["b", "a"])
-
-	specs = build_agentspeak_transition_specs(
-		dfa_result={
-			"guarded_transitions": [
-				{
-					"source_state": "1",
-					"target_state": "2",
-					"guards": ["0X"],
-					"raw_label": "guard_group_9",
-				},
-			],
-			"free_variables": ["task_a", "task_b"],
-			"alphabet": ["task_a", "task_b"],
-			"initial_state": "1",
-			"accepting_states": ["2"],
-		},
-		grounding_map=grounding_map,
-	)
-
-	assert [spec["task_event_symbol"] for spec in specs] == ["task_b", None]
-	assert specs[0]["task_name"] == "do_put_on"
-	assert specs[0]["task_args"] == ["b", "a"]
-	assert specs[1]["is_epsilon_transition"] is True
-	assert all(spec["raw_label"] == "guard_group_9" for spec in specs)
-
-
-def test_build_agentspeak_transition_specs_supports_boolean_raw_labels() -> None:
-	grounding_map = GroundingMap()
-	grounding_map.add_atom("task_a", "stack", ["b", "a"])
-	grounding_map.add_atom("task_b", "do_put_on", ["b", "a"])
-
-	specs = build_agentspeak_transition_specs(
-		dfa_result={
-			"dfa_dot": (
-				"digraph MONA_DFA {\n"
-				" node [shape = doublecircle]; 2;\n"
-				" node [shape = circle]; 1;\n"
-				' init [shape = plaintext, label = ""];\n'
-				" init -> 1;\n"
-				' 1 -> 2 [label="(~task_a & task_b)"];\n'
-				"}"
-			),
-			"alphabet": ["task_a", "task_b"],
-		},
-		grounding_map=grounding_map,
-	)
-
-	assert len(specs) == 1
-	assert specs[0]["task_event_symbol"] == "task_b"
-	assert specs[0]["task_name"] == "do_put_on"
-	assert specs[0]["task_args"] == ["b", "a"]
-
-
-def test_ltlf_to_dfa_invokes_mona_with_session_and_memory_limit(
-	monkeypatch: pytest.MonkeyPatch,
-) -> None:
-	converter = ltlf_to_dfa_module.LTLfToDFA()
-	monkeypatch.setenv("EVALUATION_MONA_MEMORY_LIMIT_MIB", "4321")
-	monkeypatch.setattr(converter, "_render_mona_program", lambda _formula: "ws1s;")
-	monkeypatch.setattr(converter, "_resolve_mona_runtime", lambda: ("mona", {}))
-
-	captured: dict[str, object] = {}
-
-	class FakeProcess:
-		def __init__(self, *args, **kwargs) -> None:
-			captured["args"] = args
-			captured["kwargs"] = kwargs
-			self.pid = 1234
-			self.returncode = 0
-			stdout_handle = kwargs["stdout"]
-			stdout_handle.write("digraph G {}")
-			stdout_handle.flush()
-
-		def communicate(self, timeout=None):
-			captured["timeout"] = timeout
-			return ("", "")
-
-	monkeypatch.setattr(ltlf_to_dfa_module.subprocess, "Popen", FakeProcess)
-
-	result = converter._invoke_mona_directly(object())
-
-	assert result == "digraph G {}"
-	assert captured["timeout"] == converter.MONA_TIMEOUT_SECONDS
-	assert captured["kwargs"]["start_new_session"] is True
-	assert callable(captured["kwargs"]["preexec_fn"])
-
-
-def test_ltlf_to_dfa_kills_mona_process_group_on_timeout(
-	monkeypatch: pytest.MonkeyPatch,
-) -> None:
-	converter = ltlf_to_dfa_module.LTLfToDFA()
-	monkeypatch.setattr(converter, "_render_mona_program", lambda _formula: "ws1s;")
-	monkeypatch.setattr(converter, "_resolve_mona_runtime", lambda: ("mona", {}))
-
-	killed: dict[str, object] = {}
-
-	class FakeProcess:
-		def __init__(self, *args, **kwargs) -> None:
-			self.pid = 4321
-			self.returncode = None
-
-		def communicate(self, timeout=None):
-			raise ltlf_to_dfa_module.subprocess.TimeoutExpired("mona", timeout)
-
-		def poll(self):
-			return None
-
-		def kill(self) -> None:
-			killed["kill_called"] = True
-
-		def wait(self, timeout=None) -> None:
-			killed["wait_timeout"] = timeout
-
-	monkeypatch.setattr(ltlf_to_dfa_module.subprocess, "Popen", FakeProcess)
-	monkeypatch.setattr(
-		ltlf_to_dfa_module.os,
-		"killpg",
-		lambda pid, sig: killed.update({"pid": pid, "signal": sig}),
-	)
-
-	result = converter._invoke_mona_directly(object())
-
-	assert result is False
-	assert killed["pid"] == 4321
-	assert killed["signal"] == ltlf_to_dfa_module.signal.SIGKILL
-
 
 def test_evaluation_orchestrator_prefers_original_problem_for_verification() -> None:
 	goal_free_problem = PROJECT_ROOT / "tests" / "generated" / "goal_free_p01.hddl"
@@ -1727,48 +1405,34 @@ def test_jason_runner_execute_entry_perceives_initial_world() -> None:
 	runtime_program = runner._build_runner_asl(
 		agentspeak_code="""
 /* Initial Beliefs */
-dfa_state(q1).
-accepting_state(q2).
+clear(b1).
 
 /* Primitive Action Plans */
 
 /* HTN Method Plans */
-
-/* DFA Transition Wrappers */
-+!dfa_t1 : dfa_state(q1) <-
-	-dfa_state(q1);
-	+dfa_state(q2).
-
-/* DFA Control Plans */
-+!run_dfa : dfa_state(q2) & accepting_state(q2) <-
++!do_put_on(X, Y) : clear(X) <-
 	true.
-
-+!run_dfa : dfa_state(q1) <-
-	!dfa_t1;
-	!run_dfa.
 """.strip(),
 		method_library=_sample_method_library(),
 		seed_facts=("(clear b1)", "(handempty)"),
 		runtime_objects=("b1",),
 		object_types={"b1": "block"},
 		type_parent_map={"block": "object", "object": None},
+		query_goals=({"task_name": "do_put_on", "args": ["b1", "b2"]},),
 	)
 
 	assert '.print("execute start")' in runtime_program
 	assert ".perceive" in runtime_program
 	assert "clear(b1)." in runtime_program
 	assert runtime_program.index('.print("execute start")') < runtime_program.index(".perceive")
+	assert runtime_program.index(".perceive") < runtime_program.index("!do_put_on(b1, b2)")
 
 
-def test_jason_runner_accepting_state_uses_raw_dfa_execution_entry() -> None:
+def test_jason_runner_execution_entry_runs_query_goals_directly() -> None:
 	runner = JasonRunner()
 	runtime_program = runner._build_runner_asl(
 		agentspeak_code="""
 /* Initial Beliefs */
-dfa_state(q0).
-accepting_state(q0).
-dfa_edge_label(dfa_t1, "subgoal_1").
-dfa_edge_label(dfa_t2, "subgoal_2").
 
 /* Primitive Action Plans */
 
@@ -1778,61 +1442,23 @@ dfa_edge_label(dfa_t2, "subgoal_2").
 
 +!task_b : true <-
 	true.
-
-/* DFA Transition Wrappers */
-+!dfa_t1 : true <-
-	!task_a.
-
-+!dfa_t2 : true <-
-	!task_b.
-
-/* DFA Control Plans */
-+!run_dfa : dfa_state(q0) & accepting_state(q0) <-
-	true.
 """.strip(),
 		method_library=_sample_method_library(),
 		seed_facts=(),
 		runtime_objects=(),
 		object_types={},
 		type_parent_map={},
+		query_goals=(
+			{"task_name": "task_a", "args": []},
+			{"task_name": "task_b", "args": []},
+		),
 	)
 
 	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
 
-	assert "?accepting_state(FINAL_STATE)" in runtime_program
-	assert "!run_dfa" in execute_section
-
-
-def test_jason_runner_accepting_state_execution_is_direct() -> None:
-	runner = JasonRunner()
-	runtime_program = runner._build_runner_asl(
-		agentspeak_code="""
-/* Initial Beliefs */
-dfa_state(q0).
-accepting_state(q0).
-
-/* Primitive Action Plans */
-
-/* HTN Method Plans */
-
-/* DFA Transition Wrappers */
-
-/* DFA Control Plans */
-+!run_dfa : true <-
-	true.
-""".strip(),
-		method_library=_sample_method_library(),
-		seed_facts=(),
-		runtime_objects=(),
-		object_types={},
-		type_parent_map={},
-	)
-
-	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
-
-	assert "!run_dfa" in execute_section
+	assert "!task_a;" in execute_section
+	assert "!task_b;" in execute_section
 	assert '.print("execute success")' in execute_section
-	assert execute_section.count("!run_dfa") == 1
 
 
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
@@ -1851,17 +1477,11 @@ def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
 		captured["agentspeak_code"] = agentspeak_code
 		return """
 /* Initial Beliefs */
-dfa_state(q0).
-accepting_state(q0).
 
 /* Primitive Action Plans */
 
 /* HTN Method Plans */
-
-/* DFA Transition Wrappers */
-
-/* DFA Control Plans */
-+!run_dfa : true <-
++!navigate_abs(rover1, waypoint5) : true <-
 	true.
 """.strip()
 
@@ -1896,8 +1516,6 @@ accepting_state(q0).
 	runner.validate(
 		agentspeak_code="""
 /* Initial Beliefs */
-dfa_state(q0).
-accepting_state(q0).
 
 /* Primitive Action Plans */
 
@@ -1908,12 +1526,6 @@ accepting_state(q0).
 
 +!navigate_abs(rover1, waypoint5) : true <-
 	.print("runtime trace method flat ", "m-navigate_abs-3");
-	true.
-
-/* DFA Transition Wrappers */
-
-/* DFA Control Plans */
-+!run_dfa : true <-
 	true.
 """.strip(),
 		method_library=_sample_method_library(),
@@ -1987,17 +1599,11 @@ def test_jason_runner_validate_downgrades_consistency_check_failures_to_diagnost
 	result = runner.validate(
 		agentspeak_code="""
 /* Initial Beliefs */
-dfa_state(q0).
-accepting_state(q0).
 
 /* Primitive Action Plans */
 
 /* HTN Method Plans */
-
-/* DFA Transition Wrappers */
-
-/* DFA Control Plans */
-+!run_dfa : true <-
++!noop : true <-
 	true.
 """.strip(),
 		method_library=_sample_method_library(),
@@ -2465,14 +2071,6 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 		query_object_inventory=(),
 		diagnostics=(),
 	)
-	dfa_result = DFACompilationResult(
-		query_text="stack b on a",
-		ltlf_formula="F(subgoal_1)",
-		alphabet=("subgoal_1",),
-		transition_specs=(),
-		ordered_subgoal_sequence=True,
-		subgoals=(GroundedSubgoal("subgoal_1", "do_put_on", ("b", "a")),),
-	)
 	validation_calls: list[dict[str, object]] = []
 
 	class FakeRunner:
@@ -2513,7 +2111,6 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 
 	result = orchestrator._execute_query_with_jason(
 		grounding_result=grounding_result,
-		dfa_result=dfa_result,
 		method_library=_sample_method_library(),
 		plan_library=_sample_plan_library(),
 		agentspeak_code="!execute.",
@@ -2528,6 +2125,7 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 	assert result is None
 	assert len(validation_calls) == 1
 	assert validation_calls[0]["plan_library"] == _sample_plan_library()
+	assert validation_calls[0]["query_goals"] == (grounding_result.subgoals[0].to_dict(),)
 
 
 def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
@@ -2548,15 +2146,6 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 		query_object_inventory=(),
 		diagnostics=(),
 	)
-	dfa_result = DFACompilationResult(
-		query_text="stack b on a",
-		ltlf_formula="F(subgoal_1)",
-		alphabet=("subgoal_1",),
-		transition_specs=(),
-		ordered_subgoal_sequence=True,
-		subgoals=(GroundedSubgoal("subgoal_1", "do_put_on", ("b", "a")),),
-	)
-
 	class FakeRunner:
 		def validate(self, **_kwargs):
 			return JasonValidationResult(
@@ -2594,7 +2183,6 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 
 	result = orchestrator._execute_query_with_jason(
 		grounding_result=grounding_result,
-		dfa_result=dfa_result,
 		method_library=_sample_method_library(),
 		plan_library=_sample_plan_library(),
 		agentspeak_code="!execute.",

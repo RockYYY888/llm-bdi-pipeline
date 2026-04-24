@@ -37,15 +37,10 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 			"llm_finish_reason": "stop",
 		},
 	)
-	logger.log_temporal_compilation(
-		{"ltlf_formula": "F(subgoal_1)", "transition_specs": [{"transition_name": "dfa_t1"}]},
-		"Success",
-		metadata={"num_states": 2},
-	)
 	logger.log_agentspeak_rendering(
 		{"asl_file": "/tmp/query_runtime.asl"},
 		"Success",
-		metadata={"transition_spec_count": 1},
+		metadata={"task_event_count": 1},
 	)
 	logger.log_runtime_execution(
 		{"action_path": ["pickup(c)", "stack(c, b)"]},
@@ -58,7 +53,6 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 			"ltlf_formula": "F(stack(c, b))",
 			"ltlf_atom_count": 1,
 			"ltlf_operator_counts": {"F": 1},
-			"mona_failure_signature": None,
 			"jason_failure_class": None,
 			"failed_goals": [],
 			"verifier_missing_goal_facts": [],
@@ -77,7 +71,6 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	text_log = (log_dir / "execution.txt").read_text()
 
 	assert "goal_grounding" in execution
-	assert "temporal_compilation" in execution
 	assert "agentspeak_rendering" in execution
 	assert "runtime_execution" in execution
 	assert "plan_solve" in execution
@@ -88,7 +81,6 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	assert "pending" not in text_log
 	assert "PLAN LIBRARY EVALUATION" in text_log
 	assert "GOAL GROUNDING" in text_log
-	assert "TEMPORAL COMPILATION" in text_log
 	assert "AGENTSPEAK RENDERING" in text_log
 	assert "RUNTIME EXECUTION" in text_log
 	assert "PLAN SOLVE" in text_log

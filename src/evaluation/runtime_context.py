@@ -304,7 +304,7 @@ def typed_object_entries(
 
 
 def task_event_grounding_map(grounding_result: TemporalGroundingResult) -> GroundingMap:
-	"""Build the task-event map consumed by the DFA-to-AgentSpeak renderer."""
+	"""Build a task-event map from a validated LTLf grounding result."""
 
 	grounding_map = GroundingMap()
 	for task_event in grounding_result.subgoals:

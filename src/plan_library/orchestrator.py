@@ -122,7 +122,6 @@ class PlanLibraryGenerationOrchestrator:
 				"query_sequence_count": len(tuple(query_sequence or ())),
 				"temporal_specification_count": len(tuple(temporal_specifications or ())),
 			}
-			self.context._latest_transition_prompt_analysis = {}
 			self.context._record_step_timing(
 				"method_synthesis",
 				stage_start,
@@ -154,8 +153,6 @@ class PlanLibraryGenerationOrchestrator:
 			print(f"  Methods: {summary['methods']}")
 			return method_library, summary
 		except Exception as exc:
-			self.context._latest_transition_specs = ()
-			self.context._latest_transition_prompt_analysis = {}
 			self.context._record_step_timing("method_synthesis", stage_start)
 			error_metadata = dict(getattr(exc, "metadata", {}) or {})
 			self.context.logger.log_method_synthesis(

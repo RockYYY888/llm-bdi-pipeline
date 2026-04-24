@@ -45,20 +45,6 @@ def ltlf_operator_counts(ltlf_formula: str | None) -> Dict[str, int]:
 	}
 
 
-def extract_mona_failure_signature(error_text: str | None) -> Optional[str]:
-	"""Extract a stable MONA-related failure signature from one compiler error string."""
-
-	text = str(error_text or "").strip()
-	if not text:
-		return None
-	code_match = re.search(r"MONA exited with code ([+-]?[0-9]+)", text, re.IGNORECASE)
-	if code_match is not None:
-		return f"mona_exit_code_{code_match.group(1)}"
-	if "MONA" in text.upper():
-		return "mona_failure"
-	return None
-
-
 def infer_missing_goal_facts(
 	*,
 	problem_file: str | Path | None,
@@ -90,7 +76,6 @@ def infer_missing_goal_facts(
 def build_failure_signature(
 	*,
 	ltlf_formula: str | None,
-	mona_failure_signature: str | None = None,
 	jason_failure_class: str | None = None,
 	failed_goals: Sequence[str] | None = None,
 	verifier_missing_goal_facts: Sequence[str] | None = None,
@@ -101,7 +86,6 @@ def build_failure_signature(
 		"ltlf_formula": str(ltlf_formula or "").strip() or None,
 		"ltlf_atom_count": ltlf_atom_count(ltlf_formula),
 		"ltlf_operator_counts": ltlf_operator_counts(ltlf_formula),
-		"mona_failure_signature": _optional_failure_text(mona_failure_signature),
 		"jason_failure_class": _optional_failure_text(jason_failure_class),
 		"failed_goals": [
 			str(goal).strip()

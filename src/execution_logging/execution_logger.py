@@ -14,7 +14,6 @@ from typing import Any, Dict, Optional, Tuple
 
 STEP_TITLES = {
 	"goal_grounding": "GOAL GROUNDING",
-	"temporal_compilation": "TEMPORAL COMPILATION",
 	"method_synthesis": "METHOD SYNTHESIS",
 	"domain_gate": "DOMAIN GATE",
 	"agentspeak_rendering": "AGENTSPEAK RENDERING",
@@ -57,13 +56,11 @@ class ExecutionRecord:
 	ltlf_formula: Optional[str] = None
 	ltlf_atom_count: Optional[int] = None
 	ltlf_operator_counts: Dict[str, Any] = field(default_factory=dict)
-	mona_failure_signature: Optional[str] = None
 	jason_failure_class: Optional[str] = None
 	failed_goals: Tuple[str, ...] = ()
 	verifier_missing_goal_facts: Tuple[str, ...] = ()
 	failure_signature: Optional[Dict[str, Any]] = None
 	goal_grounding: Optional[Dict[str, Any]] = None
-	temporal_compilation: Optional[Dict[str, Any]] = None
 	method_synthesis: Optional[Dict[str, Any]] = None
 	domain_gate: Optional[Dict[str, Any]] = None
 	agentspeak_rendering: Optional[Dict[str, Any]] = None
@@ -152,7 +149,6 @@ class ExecutionLogger:
 		self.current_record.ltlf_operator_counts = dict(
 			normalized_signature.get("ltlf_operator_counts") or {},
 		)
-		self.current_record.mona_failure_signature = normalized_signature.get("mona_failure_signature")
 		self.current_record.jason_failure_class = normalized_signature.get("jason_failure_class")
 		self.current_record.failed_goals = tuple(
 			str(goal).strip()
@@ -217,22 +213,6 @@ class ExecutionLogger:
 				if model or llm_prompt or llm_response
 				else None
 			),
-		)
-
-	def log_temporal_compilation(
-		self,
-		artifacts: Optional[Dict[str, Any]],
-		status: str,
-		*,
-		error: Optional[str] = None,
-		metadata: Optional[Dict[str, Any]] = None,
-	) -> None:
-		self._set_step_payload(
-			"temporal_compilation",
-			status=status.lower(),
-			error=error,
-			artifacts=artifacts,
-			metadata=metadata,
 		)
 
 	def log_method_synthesis(
@@ -483,7 +463,6 @@ class ExecutionLogger:
 			)
 		for step_name in (
 			"goal_grounding",
-			"temporal_compilation",
 			"method_synthesis",
 			"domain_gate",
 			"agentspeak_rendering",

@@ -169,7 +169,7 @@ class JasonRunner:
 		runtime_objects: Sequence[str] = (),
 		object_types: Optional[Dict[str, str]] = None,
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
-		target_facts: Sequence[str] = (),
+		query_goals: Sequence[Any] = (),
 		domain_name: str,
 		problem_file: str | Path | None = None,
 		output_dir: str | Path,
@@ -222,7 +222,7 @@ class JasonRunner:
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
-			target_facts=target_facts,
+			query_goals=query_goals,
 		)
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
@@ -564,7 +564,7 @@ class JasonRunner:
 		runtime_objects: Sequence[str] = (),
 		object_types: Optional[Dict[str, str]] = None,
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
-		target_facts: Sequence[str] = (),
+		query_goals: Sequence[Any] = (),
 	) -> str:
 		runtime_ready_code = self._inject_runtime_object_beliefs(
 			agentspeak_code,
@@ -573,11 +573,7 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 		)
-		target_ready_code = self._inject_target_fact_beliefs(
-			runtime_ready_code,
-			target_facts=target_facts,
-		)
-		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(target_ready_code)
+		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
 		method_goal_ready_code = self._rewrite_method_primitive_actions_to_goals(
 			environment_ready_code,
 			action_schemas=action_schemas,
@@ -593,8 +589,6 @@ class JasonRunner:
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
-			action_schemas=action_schemas,
-			target_facts=target_facts,
 		)
 		lines = [
 			lowered_code.rstrip(),
@@ -612,15 +606,13 @@ class JasonRunner:
 		]
 		lines.extend(
 			self._indent_body(
-				[
-					'.print("execute start")',
-					".perceive",
-					"!run_dfa",
-					"?dfa_state(FINAL_STATE)",
-					"?accepting_state(FINAL_STATE)",
-					'.print("execute success")',
-					".stopMAS",
-				],
+					[
+						'.print("execute start")',
+						".perceive",
+						*self._render_query_goal_calls(query_goals),
+						'.print("execute success")',
+						".stopMAS",
+					],
 			),
 		)
 		lines.append("")
@@ -718,60 +710,27 @@ class JasonRunner:
 		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
 		return f"{prefix}{injected_section}{suffix}"
 
-	def _inject_target_fact_beliefs(
-		self,
-		agentspeak_code: str,
-		*,
-		target_facts: Sequence[str],
-	) -> str:
-		target_lines = self._target_fact_belief_lines(target_facts)
-		if not target_lines:
-			return agentspeak_code
-
-		start_marker = "/* Initial Beliefs */"
-		end_marker = "/* Primitive Action Plans */"
-		start_index = agentspeak_code.find(start_marker)
-		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
-			return agentspeak_code
-
-		prefix = agentspeak_code[:start_index]
-		section = agentspeak_code[start_index:end_index]
-		suffix = agentspeak_code[end_index:]
-		section_lines = section.splitlines()
-		if not section_lines:
-			return agentspeak_code
-
-		header = section_lines[0]
-		body_lines = [line for line in section_lines[1:] if line.strip()]
-		existing = {line.strip() for line in body_lines}
-		inserted = [
-			line
-			for line in target_lines
-			if line not in existing
-		]
-		if not inserted:
-			return agentspeak_code
-		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
-		return f"{prefix}{injected_section}{suffix}"
-
-	def _target_fact_belief_lines(self, target_facts: Sequence[str]) -> Tuple[str, ...]:
-		lines: List[str] = []
-		seen: set[str] = set()
-		for fact in target_facts:
-			parsed = self._parse_runtime_fact_atom(self._hddl_fact_to_atom(fact))
-			if parsed is None:
+	def _render_query_goal_calls(self, query_goals: Sequence[Any]) -> Tuple[str, ...]:
+		goal_calls: List[str] = []
+		for goal in query_goals:
+			if isinstance(goal, dict):
+				task_name = str(goal.get("task_name") or "").strip()
+				args = tuple(
+					str(arg).strip()
+					for arg in (goal.get("args") or ())
+					if str(arg).strip()
+				)
+			else:
+				task_name = str(getattr(goal, "task_name", "") or "").strip()
+				args = tuple(
+					str(arg).strip()
+					for arg in (getattr(goal, "args", ()) or ())
+					if str(arg).strip()
+				)
+			if not task_name:
 				continue
-			predicate, args = parsed
-			if not predicate:
-				continue
-			target_predicate = self._target_fact_predicate(predicate)
-			line = f"{self._call(target_predicate, args)}."
-			if line in seen:
-				continue
-			seen.add(line)
-			lines.append(line)
-		return tuple(lines)
+			goal_calls.append(f"!{self._runtime_call(task_name, args)}")
+		return tuple(goal_calls)
 
 	def _extract_action_path(self, stdout: str) -> List[str]:
 		pattern = re.compile(r"^runtime env action success (.+?)\s*$")
@@ -1261,13 +1220,6 @@ class JasonRunner:
 		action_schemas: Sequence[Dict[str, Any]] = (),
 	) -> List[str]:
 		lines = ["/* Failure Handlers */"]
-		lines.append("-!run_dfa : true <-")
-		lines.extend(
-			self._indent_body(
-				['.print("runtime goal failed ", fail_goal(run_dfa))', ".stopMAS"],
-			),
-		)
-		lines.append("")
 		seen_triggers: set[str] = set()
 		for task_name, parameters in self._failure_handler_signatures(
 			method_library=method_library,
@@ -1441,11 +1393,13 @@ class JasonRunner:
 			return agentspeak_code
 
 		start_marker = "/* HTN Method Plans */"
-		end_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* Failure Handlers */"
 		start_index = agentspeak_code.find(start_marker)
 		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
+		if start_index == -1:
 			return agentspeak_code
+		if end_index == -1 or end_index <= start_index:
+			end_index = len(agentspeak_code)
 
 		prefix = agentspeak_code[:start_index]
 		section = agentspeak_code[start_index:end_index]
@@ -1498,17 +1452,17 @@ class JasonRunner:
 		runtime_objects: Sequence[str],
 		object_types: Dict[str, str],
 		type_parent_map: Dict[str, Optional[str]],
-		action_schemas: Sequence[Dict[str, Any]] = (),
-		target_facts: Sequence[str] = (),
 		max_candidates_per_clause: int = 64,
 		max_total_specialised_chunks: int = 1024,
 	) -> str:
 		start_marker = "/* HTN Method Plans */"
-		end_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* Failure Handlers */"
 		start_index = agentspeak_code.find(start_marker)
 		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
+		if start_index == -1:
 			return agentspeak_code
+		if end_index == -1 or end_index <= start_index:
+			end_index = len(agentspeak_code)
 
 		prefix = agentspeak_code[:start_index]
 		section = agentspeak_code[start_index:end_index]
@@ -1577,14 +1531,6 @@ class JasonRunner:
 			specialised_chunks,
 		)
 		if specialised_chunks != pre_guard_promotion_chunks:
-			changed = True
-		pre_goal_delete_guard_chunks = list(specialised_chunks)
-		specialised_chunks = self._add_goal_fact_delete_guards(
-			specialised_chunks,
-			action_schemas=action_schemas,
-			target_facts=target_facts,
-		)
-		if specialised_chunks != pre_goal_delete_guard_chunks:
 			changed = True
 		pre_ordered_chunks = list(specialised_chunks)
 		specialised_chunks = self._order_runtime_method_plan_chunks(
@@ -1940,112 +1886,6 @@ class JasonRunner:
 			rewritten_chunks.append("\n".join([rewritten_head, *lines[1:]]))
 		return rewritten_chunks
 
-	def _add_goal_fact_delete_guards(
-		self,
-		chunks: Sequence[str],
-		*,
-		action_schemas: Sequence[Dict[str, Any]],
-		target_facts: Sequence[str],
-	) -> List[str]:
-		if not self._target_fact_belief_lines(target_facts):
-			return list(chunks)
-		action_schema_by_functor = self._action_schema_by_functor(action_schemas)
-		if not action_schema_by_functor:
-			return list(chunks)
-
-		rewritten_chunks: List[str] = []
-		for chunk in chunks:
-			lines = chunk.splitlines()
-			if not lines:
-				rewritten_chunks.append(chunk)
-				continue
-			parsed_head = self._parse_asl_method_head(lines[0])
-			if parsed_head is None:
-				rewritten_chunks.append(chunk)
-				continue
-			goal_delete_guards = self._goal_fact_delete_guards_for_body(
-				lines[1:],
-				action_schema_by_functor=action_schema_by_functor,
-			)
-			if not goal_delete_guards:
-				rewritten_chunks.append(chunk)
-				continue
-			rewritten_head = self._append_asl_method_context_parts(lines[0], goal_delete_guards)
-			rewritten_chunks.append("\n".join([rewritten_head, *lines[1:]]))
-		return rewritten_chunks
-
-	def _action_schema_by_functor(
-		self,
-		action_schemas: Sequence[Dict[str, Any]],
-	) -> Dict[str, Dict[str, Any]]:
-		schemas: Dict[str, Dict[str, Any]] = {}
-		for schema in action_schemas:
-			for key in ("functor", "source_name"):
-				name = str(schema.get(key) or "").strip()
-				if not name:
-					continue
-				schemas[self._sanitize_name(name)] = dict(schema)
-		return schemas
-
-	def _goal_fact_delete_guards_for_body(
-		self,
-		body_lines: Sequence[str],
-		*,
-		action_schema_by_functor: Dict[str, Dict[str, Any]],
-	) -> Tuple[str, ...]:
-		guards: List[str] = []
-		seen: set[str] = set()
-		for line in body_lines:
-			goal = self._parse_asl_goal_call(line)
-			if goal is None:
-				continue
-			goal_name, goal_args = goal
-			schema = action_schema_by_functor.get(self._sanitize_name(goal_name))
-			if schema is None:
-				continue
-			bindings = self._action_goal_bindings(
-				parameters=tuple(schema.get("parameters") or ()),
-				goal_args=goal_args,
-			)
-			for effect in schema.get("effects") or ():
-				if bool(effect.get("is_positive", True)):
-					continue
-				predicate = str(effect.get("predicate") or "").strip()
-				if not predicate or predicate == "=":
-					continue
-				effect_args = tuple(
-					self._substitute_runtime_pattern_arg(str(argument), bindings)
-					for argument in tuple(effect.get("args") or ())
-				)
-				target_predicate = self._target_fact_predicate(predicate)
-				guard = f"not {self._call(target_predicate, effect_args)}"
-				if guard in seen:
-					continue
-				seen.add(guard)
-				guards.append(guard)
-		return tuple(guards)
-
-	def _action_goal_bindings(
-		self,
-		*,
-		parameters: Sequence[str],
-		goal_args: Sequence[str],
-	) -> Dict[str, str]:
-		bindings: Dict[str, str] = {}
-		for parameter, value in zip(parameters, goal_args):
-			token = self._canonical_runtime_token(str(parameter))
-			bindings[token] = str(value)
-			if token.startswith("?"):
-				bindings[token[1:]] = str(value)
-		return bindings
-
-	def _substitute_runtime_pattern_arg(self, argument: str, bindings: Dict[str, str]) -> str:
-		token = self._canonical_runtime_token(str(argument))
-		return bindings.get(token) or bindings.get(token.lstrip("?")) or str(argument).strip()
-
-	def _target_fact_predicate(self, predicate: str) -> str:
-		return f"target_fact_{self._sanitize_name(predicate)}"
-
 	@staticmethod
 	def _append_asl_method_context_parts(
 		head_line: str,
@@ -2143,17 +1983,9 @@ class JasonRunner:
 		ordered_chunks: List[str] = []
 		for task_name in group_order:
 			group_items = [parsed_chunks[index] for index in grouped_indexes[task_name]]
-			group_has_goal_delete_guards = any(
-				self._context_has_goal_fact_delete_guard(
-					tuple(item.get("context_parts") or ()),
-				)
-				for item in group_items
-			)
 			for item in group_items:
+				lines = str(item.get("chunk") or "").splitlines()
 				body_lines = list(item.get("body_lines") or ())
-				has_goal_delete_guard = self._context_has_goal_fact_delete_guard(
-					tuple(item.get("context_parts") or ()),
-				)
 				caller_type_constraints: List[Tuple[str, str]] = []
 				caller_inequalities: List[Tuple[str, str]] = []
 				for part in tuple(item.get("context_parts") or ()):
@@ -2231,11 +2063,7 @@ class JasonRunner:
 							if not self._looks_like_asl_variable(arg)
 						)
 				item["sort_key"] = (
-					self._runtime_goal_guard_priority(
-						group_has_goal_delete_guards=group_has_goal_delete_guards,
-						has_goal_delete_guard=has_goal_delete_guard,
-						is_noop=self._chunk_is_noop_method_plan(body_lines),
-					),
+					0 if self._chunk_is_noop_method_plan(body_lines) else 1,
 					0 if variable_safe else 1,
 					action_setup_penalty,
 					0 if not has_self_recursive_goal else 1,
@@ -2256,23 +2084,6 @@ class JasonRunner:
 			ordered_chunks.extend(str(item["chunk"]) for item in group_items)
 
 		return ordered_chunks
-
-	def _runtime_goal_guard_priority(
-		self,
-		*,
-		group_has_goal_delete_guards: bool,
-		has_goal_delete_guard: bool,
-		is_noop: bool,
-	) -> int:
-		if group_has_goal_delete_guards:
-			return 0 if has_goal_delete_guard else 1
-		return 0 if is_noop else 1
-
-	def _context_has_goal_fact_delete_guard(self, context_parts: Sequence[str]) -> bool:
-		return any(
-			str(part).strip().startswith("not target_fact_")
-			for part in context_parts
-		)
 
 	def _runtime_method_action_setup_penalty(
 		self,
@@ -3071,11 +2882,13 @@ class JasonRunner:
 			return agentspeak_code
 
 		start_marker = "/* HTN Method Plans */"
-		end_marker = "/* DFA Transition Wrappers */"
+		end_marker = "/* Failure Handlers */"
 		start_index = agentspeak_code.find(start_marker)
 		end_index = agentspeak_code.find(end_marker)
-		if start_index == -1 or end_index == -1 or end_index <= start_index:
+		if start_index == -1:
 			return agentspeak_code
+		if end_index == -1 or end_index <= start_index:
+			end_index = len(agentspeak_code)
 
 		prefix = agentspeak_code[:start_index]
 		section = agentspeak_code[start_index:end_index]

@@ -1,5 +1,5 @@
 """
-AgentSpeak rendering for the HTN library plus DFA runtime wrapper pipeline.
+AgentSpeak rendering for the generated plan library S.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from utils.hddl_condition_parser import HDDLConditionParser
 
 
 class AgentSpeakRenderer:
-    """Render the HTN method library plus DFA wrappers as AgentSpeak code."""
+    """Render primitive action wrappers and AgentSpeak(L) plan-library entries."""
 
     _VARIABLE_MAP_INFERENCE_STEP_LIMIT = 64
     _VARIABLE_MAP_INFERENCE_CONTEXT_LIMIT = 256
@@ -26,7 +26,6 @@ class AgentSpeakRenderer:
         self._object_type_map: Dict[str, str] = {}
         self._type_parent_map: Dict[str, Optional[str]] = {}
         self._asl_term_cache: Dict[str, str] = {}
-        self._transition_grounded_local_bindings: Dict[str, Dict[str, str]] = {}
 
     def generate(
         self,
@@ -36,11 +35,7 @@ class AgentSpeakRenderer:
         plan_records: Sequence[Dict[str, Any]],
         plan_library: Optional[PlanLibrary] = None,
         typed_objects: Optional[Sequence[Tuple[str, str]]] = None,
-        ordered_query_sequence: bool = True,
-        prompt_analysis: Optional[Dict[str, Any]] = None,
-        transition_specs: Optional[Sequence[Dict[str, Any]]] = None,
         subgoals: Optional[Sequence[Dict[str, Any]]] = None,
-        subgoal_task_name_map: Optional[Dict[str, str]] = None,
     ) -> str:
         self._asl_term_cache = {}
         self._object_symbol_set = {str(obj) for obj in objects}
@@ -49,24 +44,14 @@ class AgentSpeakRenderer:
             for name, type_name in (typed_objects or ())
         }
         self._type_parent_map = self._build_type_parent_map(domain)
-        self._transition_grounded_local_bindings = (
-            self._build_transition_grounded_local_bindings(prompt_analysis)
-        )
-        _ = ordered_query_sequence
-        raw_dfa_mode = transition_specs is not None
-        transition_specs = tuple(transition_specs or ())
         subgoals = tuple(subgoals or ())
-        subgoal_task_name_map = dict(subgoal_task_name_map or {})
+        _ = subgoals
         lines: List[str] = []
         lines.extend(
             self._render_header(
                 domain,
                 objects,
                 plan_records,
-                raw_dfa_mode=raw_dfa_mode,
-                transition_specs=transition_specs,
-                subgoals=subgoals,
-                ordered_query_sequence=ordered_query_sequence,
             ),
         )
         lines.extend(self._render_primitive_wrappers(domain))
@@ -74,25 +59,6 @@ class AgentSpeakRenderer:
             lines.extend(self._render_structured_plan_library(plan_library))
         else:
             lines.extend(self._render_method_plans(domain, method_library, plan_records))
-        if raw_dfa_mode:
-            lines.extend(
-                self._render_raw_dfa_transition_plans(
-                    transition_specs,
-                    subgoals=subgoals,
-                    subgoal_task_name_map=subgoal_task_name_map,
-                ),
-            )
-            lines.extend(
-                self._render_raw_dfa_control_plans(
-                    transition_specs,
-                    subgoals=subgoals,
-                    subgoal_task_name_map=subgoal_task_name_map,
-                    ordered_query_sequence=ordered_query_sequence,
-                ),
-            )
-        else:
-            lines.extend(self._render_transition_plans(plan_records))
-            lines.extend(self._render_control_plans(plan_records))
         return "\n".join(lines).strip() + "\n"
 
     def _render_header(
@@ -100,11 +66,6 @@ class AgentSpeakRenderer:
         domain: Any,
         objects: Sequence[str],
         plan_records: Sequence[Dict[str, Any]],
-        *,
-        raw_dfa_mode: bool = False,
-        transition_specs: Sequence[Dict[str, Any]] = (),
-        subgoals: Sequence[Dict[str, Any]] = (),
-        ordered_query_sequence: bool = True,
     ) -> List[str]:
         lines = [
             "/* Initial Beliefs */",
@@ -118,30 +79,6 @@ class AgentSpeakRenderer:
                 lines.append(
                     f"{self._call('object_type', (obj, self._type_atom(closure_type)))}."
                 )
-
-        dfa_records: Sequence[Dict[str, Any]] = transition_specs if raw_dfa_mode else plan_records
-        if dfa_records:
-            initial_state = dfa_records[0].get("initial_state")
-            if initial_state:
-                lines.append(f"dfa_state({initial_state}).")
-            accepting_states = sorted(
-                {
-                    state
-                    for record in dfa_records
-                    for state in record.get("accepting_states", [])
-                },
-            )
-            for state in accepting_states:
-                lines.append(f"accepting_state({state}).")
-
-        for record in dfa_records:
-            transition_name = str(record.get("transition_name") or "").strip()
-            if not transition_name:
-                continue
-            label = record.get("label") or record.get("raw_label") or ""
-            lines.append(
-                f"dfa_edge_label({transition_name}, \"{label}\")."
-            )
 
         lines.append("")
         return lines
@@ -942,10 +879,6 @@ class AgentSpeakRenderer:
                 ordered_steps,
                 render_spec,
             )
-        variable_map = self._apply_exact_grounded_local_bindings(
-            method,
-            variable_map,
-        )
         expand_render_context = self._should_expand_render_context(
             ordered_steps,
             methods_by_task,
@@ -1150,263 +1083,6 @@ class AgentSpeakRenderer:
         for arg in trigger_args:
             trace_args.extend((self._asl_string("|"), self._asl_term(arg)))
         return f".print({', '.join(trace_args)})"
-
-    def _render_transition_plans(self, plan_records: Sequence[Dict[str, Any]]) -> List[str]:
-        lines = ["/* DFA Transition Wrappers */"]
-
-        for record in plan_records:
-            plan: PANDAPlanResult = record["plan"]
-            source_state = record["source_state"]
-            target_state = record["target_state"]
-            body = [
-                f"-{self._call('dfa_state', (source_state,))}",
-                f"!{self._transition_runtime_call(record, plan)}",
-                f"+{self._call('dfa_state', (target_state,))}",
-            ]
-            lines.append(
-                f"+!{record['transition_name']} : {self._call('dfa_state', (source_state,))} <-"
-            )
-            lines.extend(self._indent_body(body))
-            lines.append("")
-
-        return lines
-
-    def _render_raw_dfa_transition_plans(
-        self,
-        transition_specs: Sequence[Dict[str, Any]],
-        *,
-        subgoals: Sequence[Dict[str, Any]],
-        subgoal_task_name_map: Dict[str, str],
-    ) -> List[str]:
-        del subgoals
-        del subgoal_task_name_map
-        lines = ["/* DFA Transition Wrappers */"]
-
-        for spec in transition_specs:
-            source_state = str(spec.get("source_state") or "").strip()
-            target_state = str(spec.get("target_state") or "").strip()
-            transition_name = str(spec.get("transition_name") or "").strip()
-            if not transition_name or not source_state or not target_state:
-                continue
-            task_name = str(spec.get("task_name") or "").strip()
-            task_args = tuple(
-                str(arg).strip()
-                for arg in (spec.get("task_args") or ())
-                if str(arg).strip()
-            )
-            is_epsilon_transition = bool(spec.get("is_epsilon_transition"))
-            if not task_name and not is_epsilon_transition:
-                continue
-            lines.append(
-                f"+!{transition_name} : {self._call('dfa_state', (source_state,))} <-"
-            )
-            body = []
-            if task_name:
-                body.append(f"!{self._task_call(task_name, task_args)}")
-            body.extend(
-                [
-                    f"-{self._call('dfa_state', (source_state,))}",
-                    f"+{self._call('dfa_state', (target_state,))}",
-                ],
-            )
-            lines.extend(self._indent_body(body))
-            lines.append("")
-
-        return lines
-
-    def _render_control_plans(self, plan_records: Sequence[Dict[str, Any]]) -> List[str]:
-        lines = ["/* DFA Control Plans */"]
-        transitions_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        accepting_states = {
-            state
-            for record in plan_records
-            for state in record.get("accepting_states", [])
-        }
-
-        for record in plan_records:
-            transitions_by_source[record["source_state"]].append(record)
-
-        for state in sorted(accepting_states):
-            lines.append(
-                f"+!run_dfa : {self._call('dfa_state', (state,))} & "
-                f"{self._call('accepting_state', (state,))} <-"
-            )
-            lines.extend(self._indent_body(["true"]))
-            lines.append("")
-
-        transition_distances = self._transition_distances_to_accepting_states(
-            plan_records,
-            accepting_states=accepting_states,
-        )
-        for source_state in sorted(transitions_by_source):
-            if source_state in accepting_states:
-                continue
-            state_records = sorted(
-                transitions_by_source[source_state],
-                key=lambda record: self._transition_priority_key(
-                    record,
-                    transition_distances=transition_distances,
-                ),
-            )
-            for record in state_records:
-                lines.append(
-                    f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
-                )
-                lines.extend(
-                    self._indent_body(
-                        [
-                            f"!{record['transition_name']}",
-                            "!run_dfa",
-                        ],
-                    ),
-                )
-                lines.append("")
-
-        return lines
-
-    def _render_raw_dfa_control_plans(
-        self,
-        transition_specs: Sequence[Dict[str, Any]],
-        *,
-        subgoals: Sequence[Dict[str, Any]],
-        subgoal_task_name_map: Dict[str, str],
-        ordered_query_sequence: bool,
-    ) -> List[str]:
-        del subgoals
-        del subgoal_task_name_map
-        del ordered_query_sequence
-        lines = ["/* DFA Control Plans */"]
-        transitions_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        accepting_states = {
-            str(state).strip()
-            for record in transition_specs
-            for state in record.get("accepting_states", [])
-            if str(state).strip()
-        }
-
-        for record in transition_specs:
-            source_state = str(record.get("source_state") or "").strip()
-            if source_state:
-                transitions_by_source[source_state].append(record)
-
-        for state in sorted(accepting_states):
-            lines.append(
-                f"+!run_dfa : {self._call('dfa_state', (state,))} & "
-                f"{self._call('accepting_state', (state,))} <-"
-            )
-            lines.extend(self._indent_body(["true"]))
-            lines.append("")
-
-        transition_distances = self._transition_distances_to_accepting_states(
-            transition_specs,
-            accepting_states=accepting_states,
-        )
-        for source_state in sorted(transitions_by_source):
-            if source_state in accepting_states:
-                continue
-            state_records = sorted(
-                [
-                    record
-                    for record in transitions_by_source[source_state]
-                    if str(record.get("task_name") or "").strip()
-                    or bool(record.get("is_epsilon_transition"))
-                ],
-                key=lambda record: self._transition_priority_key(
-                    record,
-                    transition_distances=transition_distances,
-                ),
-            )
-            for record in state_records:
-                transition_name = str(record.get("transition_name") or "").strip()
-                if not transition_name:
-                    continue
-                lines.append(
-                    f"+!run_dfa : {self._call('dfa_state', (source_state,))} <-"
-                )
-                lines.extend(
-                    self._indent_body(
-                        [
-                            f"!{transition_name}",
-                            "!run_dfa",
-                        ],
-                    ),
-                )
-                lines.append("")
-
-        return lines
-
-    def _transition_runtime_call(
-        self,
-        record: Dict[str, Any],
-        plan: PANDAPlanResult,
-    ) -> str:
-        transition_name = str(record.get("transition_name") or "").strip()
-        target_literal = record.get("target_literal") or getattr(plan, "target_literal", None)
-        target_args = tuple(
-            str(value).strip()
-            for value in getattr(target_literal, "args", ())
-            if str(value).strip()
-        )
-        if transition_name:
-            if target_args:
-                return self._task_call(transition_name, target_args)
-            if tuple(getattr(plan, "task_args", ()) or ()):
-                return self._task_call(transition_name, tuple(plan.task_args))
-        query_root_task_name = str(record.get("query_root_task_name") or "").strip()
-        query_root_task_args = tuple(
-            str(value).strip()
-            for value in (record.get("query_root_task_args") or ())
-            if str(value).strip()
-        )
-        if transition_name and query_root_task_args:
-            return self._task_call(transition_name, query_root_task_args)
-        if query_root_task_name:
-            return self._task_call(query_root_task_name, query_root_task_args)
-        return self._task_call(plan.task_name, plan.task_args)
-
-    @staticmethod
-    def _transition_distances_to_accepting_states(
-        plan_records: Sequence[Dict[str, Any]],
-        *,
-        accepting_states: set[str],
-    ) -> Dict[str, int]:
-        reverse_graph: Dict[str, List[str]] = defaultdict(list)
-        for item in plan_records:
-            source_state = str(item.get("source_state") or "").strip()
-            target_state = str(item.get("target_state") or "").strip()
-            if not source_state or not target_state:
-                continue
-            reverse_graph[target_state].append(source_state)
-
-        distances: Dict[str, int] = {}
-        frontier: List[str] = sorted(accepting_states)
-        for state in frontier:
-            distances[state] = 0
-        queue: List[str] = list(frontier)
-        cursor = 0
-        while cursor < len(queue):
-            state = queue[cursor]
-            cursor += 1
-            for predecessor in reverse_graph.get(state, ()):
-                if predecessor in distances:
-                    continue
-                distances[predecessor] = distances[state] + 1
-                queue.append(predecessor)
-        return distances
-
-    @staticmethod
-    def _transition_priority_key(
-        record: Dict[str, Any],
-        *,
-        transition_distances: Dict[str, int],
-    ) -> Tuple[float, int, str]:
-        target_state = str(record.get("target_state") or "").strip()
-        transition_name = str(record.get("transition_name") or "").strip()
-        return (
-            float(transition_distances.get(target_state, 10 ** 9)),
-            0 if str(record.get("task_name") or "").strip() else 1,
-            transition_name,
-        )
 
     def _ordered_method_steps(self, method: HTNMethod) -> List[Any]:
         if len(method.subtasks) <= 1 or not method.ordering:
@@ -1732,10 +1408,6 @@ class AgentSpeakRenderer:
             child_ordered_steps,
             child_render_spec,
         )
-        child_variable_map = self._apply_exact_grounded_local_bindings(
-            child_method,
-            child_variable_map,
-        )
         child_literals = self._method_context_literals(
             child_method,
             child_ordered_steps,
@@ -1817,10 +1489,6 @@ class AgentSpeakRenderer:
                                 child_method,
                                 child_ordered_steps,
                                 child_render_spec,
-                            )
-                            child_variable_map = self._apply_exact_grounded_local_bindings(
-                                child_method,
-                                child_variable_map,
                             )
                             child_context_literals = self._method_context_literals(
                                 child_method,
@@ -3487,79 +3155,6 @@ class AgentSpeakRenderer:
                 )()
             )
         return tuple(guards)
-
-    def _build_transition_grounded_local_bindings(
-        self,
-        prompt_analysis: Optional[Dict[str, Any]],
-    ) -> Dict[str, Dict[str, str]]:
-        if not isinstance(prompt_analysis, dict):
-            return {}
-
-        bindings_by_task: Dict[str, Dict[str, str]] = {}
-        for payload in (prompt_analysis.get("transition_tasks") or ()):
-            if not isinstance(payload, dict):
-                continue
-            task_name = str(payload.get("name", "") or "").strip()
-            if not task_name:
-                continue
-            base_parameters = {
-                str(value).strip()
-                for value in (payload.get("parameters") or ())
-                if str(value).strip()
-            }
-            context_parameters = {
-                str(value).strip()
-                for value in (payload.get("context_parameters") or ())
-                if str(value).strip()
-            }
-            if not context_parameters:
-                continue
-            grounded_symbol_map = payload.get("grounded_symbol_map") or {}
-            if not isinstance(grounded_symbol_map, dict):
-                continue
-            task_bindings: Dict[str, str] = {}
-            for grounded_arg, symbol in grounded_symbol_map.items():
-                grounded_value = str(grounded_arg or "").strip()
-                symbol_name = str(symbol or "").strip()
-                if (
-                    not grounded_value
-                    or not symbol_name
-                    or self._is_synthetic_witness_token(grounded_value)
-                    or symbol_name in base_parameters
-                    or symbol_name not in context_parameters
-                ):
-                    continue
-                task_bindings[symbol_name] = grounded_value
-            if task_bindings:
-                bindings_by_task[task_name] = task_bindings
-        return bindings_by_task
-
-    def _apply_exact_grounded_local_bindings(
-        self,
-        method: HTNMethod,
-        variable_map: Dict[str, str],
-    ) -> Dict[str, str]:
-        task_bindings = self._transition_grounded_local_bindings.get(
-            str(getattr(method, "task_name", "") or "").strip(),
-        )
-        if not task_bindings:
-            return variable_map
-
-        local_parameters = {
-            str(parameter).strip()
-            for parameter in (getattr(method, "parameters", ()) or ())
-            if str(parameter).strip()
-        }
-        task_arguments = {
-            str(argument).strip()
-            for argument in (getattr(method, "task_args", ()) or ())
-            if str(argument).strip()
-        }
-        for parameter, grounded_value in task_bindings.items():
-            if parameter not in local_parameters or parameter in task_arguments:
-                continue
-            variable_map[parameter] = grounded_value
-        return variable_map
 
     def _method_type_guard_literals(
         self,
