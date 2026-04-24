@@ -1043,6 +1043,29 @@ def _render_declared_compound_task_blocks(domain: Any) -> str:
 		blocks.append(f"{task_name}({parameter_signature})")
 	return "\n".join(blocks).strip()
 
+
+def _render_structural_contract_block(domain: Any) -> str:
+	required_task_names = [
+		str(getattr(task, "name", "")).strip()
+		for task in getattr(domain, "tasks", [])
+		if str(getattr(task, "name", "")).strip()
+	]
+	return "\n".join(
+		[
+			"method_coverage:",
+			f"- required_method_task_names: {json.dumps(required_task_names)}",
+			"- output compound_tasks must define exactly these task names with their "
+			"declared parameter types.",
+			"- methods.task_name must cover every required name at least once; do not "
+			"drop tasks absent from temporal_specifications.",
+			"ordering_integrity:",
+			"- local_step_ids are the step_id values inside the same method.subtasks array.",
+			"- each ordering edge [before, after] must use two distinct local_step_ids.",
+			"- if a method has fewer than two subtasks, ordering must be [].",
+		]
+	)
+
+
 def build_domain_htn_system_prompt() -> str:
 	"""System prompt for one-shot domain-complete method synthesis."""
 
@@ -1063,9 +1086,12 @@ def build_domain_htn_system_prompt() -> str:
 		"- Actions are operators, not predicates. Contexts, preconditions, effects, and negated literals may use only predicates or equality.\n"
 		"- Variables are typed symbolic parameters. Give each variable one declared type and use fresh variables for distinct typed roles or witness roles.\n"
 		"- Methods are reusable schemas aligned with the temporal specifications, not one grounded plan trace.\n"
+		"- M is domain-complete: output compound tasks must match declared compound "
+		"tasks, and methods must cover every declared compound task.\n"
 		"- Do not copy object constants from temporal specifications into M; task_args and subtask args should be method variables unless a declared schema requires a constant.\n"
-		"- Use explicit step objects and pairwise ordering edges only: [[\"s1\", \"s2\"]].\n"
-		"- If a method has zero or one subtask, ordering must be empty.\n"
+		"- Use explicit step objects and local pairwise ordering edges only: "
+		"[[\"s1\", \"s2\"]]. Every endpoint must be a step_id in the same method.\n"
+		"- If a method has zero or one subtask, ordering must be [].\n"
 		"- Empty subtasks are allowed only for already-satisfied guard methods; constructive methods must contain real subtasks.\n"
 		"- Recursive methods must make progress by changing at least one witness argument or state-support step before recursion.\n"
 		"\n"
@@ -1097,6 +1123,7 @@ def build_domain_htn_user_prompt(
 	method_blueprints = list(prompt_analysis.get("method_blueprints") or ())
 	action_schema_block = _render_domain_action_schema_blocks(domain)
 	declared_task_block = _render_declared_compound_task_blocks(domain)
+	structural_contract_block = _render_structural_contract_block(domain)
 	method_blueprint_block = _render_method_blueprint_blocks(method_blueprints)
 	temporal_specifications = tuple(temporal_specifications or ())
 	domain_summary_block = "\n".join(
@@ -1110,7 +1137,7 @@ def build_domain_htn_user_prompt(
 	)
 	instructions_block = "\n".join(
 		[
-			"1. Define exactly the declared compound tasks and at least one method for each.",
+			"1. Define exactly the declared compound tasks and a domain-complete set of methods.",
 			"2. Use method_blueprints as compact decomposition evidence, not as permission to invent new symbols.",
 			"3. direct_leaf means one primitive achiever; support_then_leaf means support steps before the final primitive; hierarchical_orchestration means compound delegation or task composition.",
 			"4. Primitive action names from primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families may appear only in subtasks with kind=primitive.",
@@ -1119,18 +1146,20 @@ def build_domain_htn_user_prompt(
 			"7. Non-noop methods must contain real subtasks; primitive leaf methods must include the primitive action itself.",
 			"8. Use temporal_specifications as the only task-level supervision while keeping methods reusable and variable-parameterized.",
 			"9. Every method must cite one or more source_instruction_ids from temporal_specifications.",
-			"10. Ordering must use only two-element step-id arrays such as [[\"s1\", \"s2\"]].",
+			"10. Enforce structural_contract exactly; it is part of the output specification.",
 		]
 	)
 	gate_check_block = "\n".join(
 		[
 			"Before emitting JSON, check that:",
 			"- every symbol is declared in domain_summary;",
+			"- methods.task_name covers every required_method_task_names entry;",
 			"- primitive and compound subtasks are not swapped;",
 			"- no method is specialized to concrete temporal-specification objects such as benchmark block names;",
 			"- contexts and step annotations contain predicates/equality only, never action names;",
 			"- each variable has one declared type and compatible arity everywhere;",
-			"- constructive methods have subtasks and every ordering edge references existing step ids; single-step methods have empty ordering.",
+			"- constructive methods have subtasks and every ordering edge references two distinct local step ids.",
+			"- methods with fewer than two subtasks have empty ordering.",
 		]
 	)
 	temporal_specifications_block = "\n".join(
@@ -1155,6 +1184,7 @@ def build_domain_htn_user_prompt(
 			"temporal_specifications",
 			temporal_specifications_block or "none",
 		),
+		_format_tagged_block("structural_contract", structural_contract_block),
 		_format_tagged_block(
 			"method_blueprints",
 			method_blueprint_block,

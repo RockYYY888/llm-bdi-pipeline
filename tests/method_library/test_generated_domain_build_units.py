@@ -116,6 +116,12 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "source_instruction_ids" in user_prompt
 	assert "primitive_action_schemas:" in user_prompt
 	assert "declared_compound_tasks:" in user_prompt
+	assert "<structural_contract>" in user_prompt
+	assert (
+		"required_method_task_names: "
+		f"{json.dumps([task.name for task in masked['masked_domain'].tasks])}"
+		in user_prompt
+	)
 	assert "method_blueprints" in user_prompt
 	assert '"method_family_schemas"' in user_prompt
 	assert '"uncovered_prerequisite_families"' in user_prompt
@@ -126,15 +132,19 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "primitive and compound subtasks are not swapped" in user_prompt
 	assert "Primitive action names from primitive_action_schemas" in user_prompt
 	assert "Actions are operators, not predicates." in system_prompt
+	assert "M is domain-complete" in system_prompt
 	assert "Do not copy object constants from temporal specifications into M" in system_prompt
-	assert "If a method has zero or one subtask, ordering must be empty." in system_prompt
-	assert 'pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
+	assert "If a method has zero or one subtask, ordering must be []." in system_prompt
+	assert 'local pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
 	assert "Non-noop methods must contain real subtasks" in user_prompt
 	assert "primitive leaf methods must include the primitive action itself" in user_prompt
 	assert "Use temporal_specifications as the only task-level supervision" in user_prompt
 	assert "keeping methods reusable and variable-parameterized" in user_prompt
 	assert "from temporal_specifications" in user_prompt
-	assert "single-step methods have empty ordering" in user_prompt
+	assert "do not drop tasks absent from temporal_specifications" in user_prompt
+	assert "methods.task_name covers every required_method_task_names entry" in user_prompt
+	assert "each ordering edge [before, after] must use two distinct local_step_ids" in user_prompt
+	assert "methods with fewer than two subtasks have empty ordering" in user_prompt
 	assert "Before emitting JSON, check that:" in user_prompt
 	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt
 	assert "primitive_actions:" not in user_prompt
