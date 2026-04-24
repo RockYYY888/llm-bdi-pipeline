@@ -591,13 +591,15 @@ class JasonRunner:
 			plan_library=plan_library,
 		)
 		goal_context = self._render_goal_fact_context(goal_facts)
-		repair_enabled = bool(goal_context or query_goals)
+		goal_retry_enabled = bool(goal_context)
+		failure_repair_enabled = goal_retry_enabled and self._failure_repair_enabled()
 		lowered_code = self._ground_local_witness_method_plans(
 			trace_ready_code,
 			seed_facts=seed_facts,
 			runtime_objects=runtime_objects,
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
+			enable_blocked_goal_guards=failure_repair_enabled,
 		)
 		lines = [
 			lowered_code.rstrip(),
@@ -606,7 +608,7 @@ class JasonRunner:
 				method_library,
 				plan_library=plan_library,
 				action_schemas=action_schemas,
-				allow_repair=repair_enabled,
+				allow_repair=failure_repair_enabled,
 			),
 			"",
 			"/* Execution Entry */",
@@ -617,17 +619,18 @@ class JasonRunner:
 		execute_body = self._render_execute_body(
 			query_goals=query_goals,
 			goal_context=goal_context,
-			repair_enabled=repair_enabled,
+			repair_enabled=goal_retry_enabled,
 		)
 		lines.extend(
 			self._indent_body(execute_body),
 		)
 		lines.append("")
-		if repair_enabled:
+		if goal_retry_enabled:
 			lines.extend(
 				self._render_goal_repair_plans(
 					query_goals=query_goals,
 					goal_context=goal_context,
+					track_runtime_failures=failure_repair_enabled,
 				),
 			)
 		lines.append("-!execute : true <-")
@@ -670,6 +673,7 @@ class JasonRunner:
 		*,
 		query_goals: Sequence[Any],
 		goal_context: str,
+		track_runtime_failures: bool = False,
 	) -> List[str]:
 		pass_count = self._goal_repair_pass_count()
 		lines: List[str] = []
@@ -677,6 +681,8 @@ class JasonRunner:
 		for pass_index in range(0, pass_count + 1):
 			success_context = (
 				f"{goal_context} & not runtime_pass_failed"
+				if goal_context and track_runtime_failures
+				else goal_context
 				if goal_context
 				else "not runtime_pass_failed"
 			)
@@ -693,7 +699,7 @@ class JasonRunner:
 			lines.extend(
 				self._indent_body(
 					[
-						"-runtime_pass_failed",
+						*(("-runtime_pass_failed",) if track_runtime_failures else ()),
 						f"!execute_query_pass_{next_pass}",
 						f"!finish_or_retry_{next_pass}",
 					],
@@ -705,13 +711,18 @@ class JasonRunner:
 				self._indent_body(
 					(
 						f'.print("runtime query pass ", {next_pass})',
-						"-runtime_pass_failed",
+						*(("-runtime_pass_failed",) if track_runtime_failures else ()),
 						*(query_goal_calls or ("true",)),
 					),
 				),
 			)
 			lines.append("")
 		return lines
+
+	@staticmethod
+	def _failure_repair_enabled() -> bool:
+		raw_value = os.getenv("JASON_RUNTIME_FAILURE_REPAIR", "").strip().lower()
+		return raw_value in {"1", "true", "yes", "on"}
 
 	def _render_goal_fact_context(self, goal_facts: Sequence[str]) -> str:
 		goal_atoms: List[str] = []
@@ -1588,6 +1599,7 @@ class JasonRunner:
 		runtime_objects: Sequence[str],
 		object_types: Dict[str, str],
 		type_parent_map: Dict[str, Optional[str]],
+		enable_blocked_goal_guards: bool = False,
 		max_candidates_per_clause: int = 64,
 		max_total_specialised_chunks: int = 1024,
 	) -> str:
@@ -1668,12 +1680,13 @@ class JasonRunner:
 		)
 		if specialised_chunks != pre_guard_promotion_chunks:
 			changed = True
-		pre_blocked_guard_chunks = list(specialised_chunks)
-		specialised_chunks = self._promote_body_blocked_goal_guards_to_context(
-			specialised_chunks,
-		)
-		if specialised_chunks != pre_blocked_guard_chunks:
-			changed = True
+		if enable_blocked_goal_guards:
+			pre_blocked_guard_chunks = list(specialised_chunks)
+			specialised_chunks = self._promote_body_blocked_goal_guards_to_context(
+				specialised_chunks,
+			)
+			if specialised_chunks != pre_blocked_guard_chunks:
+				changed = True
 		pre_ordered_chunks = list(specialised_chunks)
 		specialised_chunks = self._order_runtime_method_plan_chunks(
 			specialised_chunks,
@@ -1998,8 +2011,7 @@ class JasonRunner:
 				if len(candidate_chunks) >= max_candidates_per_chunk:
 					break
 			expanded_chunks.extend(candidate_chunks)
-			if not candidate_chunks:
-				expanded_chunks.append(chunk)
+			expanded_chunks.append(chunk)
 		return expanded_chunks
 
 	def _instantiate_noop_prefix_context(

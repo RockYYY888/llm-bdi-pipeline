@@ -911,18 +911,14 @@ def test_jason_runner_lifts_nonrecursive_child_contexts_to_parent_candidates() -
 		"at(R, FROM) & can_traverse(R, FROM, WAYPOINT) <-" in chunk
 		for chunk in expanded_chunks
 	)
-	assert all(
-		chunk
-		!= "\n".join(
-			[
-				"+!get_soil_data(WAYPOINT) : store_of(S, R) & equipped_for_soil_analysis(R) <-",
-				'\t.print("runtime trace method flat ", "m-get_soil_data");',
-				"\t!navigate_abs(R, WAYPOINT);",
-				"\t!sample_soil(R, S, WAYPOINT).",
-			],
-		)
-		for chunk in expanded_chunks
-	)
+	assert "\n".join(
+		[
+			"+!get_soil_data(WAYPOINT) : store_of(S, R) & equipped_for_soil_analysis(R) <-",
+			'\t.print("runtime trace method flat ", "m-get_soil_data");',
+			"\t!navigate_abs(R, WAYPOINT);",
+			"\t!sample_soil(R, S, WAYPOINT).",
+		],
+	) in expanded_chunks
 
 
 def test_jason_runner_binds_parent_variables_from_ground_child_prefix_contexts() -> None:
@@ -1657,15 +1653,19 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
 
 	assert "!finish_or_retry_0;" in execute_section
-	assert "+!finish_or_retry_0 : done(a) & not runtime_pass_failed <-" in runtime_program
+	assert "+!finish_or_retry_0 : done(a) <-" in runtime_program
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
 	assert "+!execute_query_pass_1 : true <-" in runtime_program
 	assert '.print("runtime query pass ", 1)' in runtime_program
 	assert "!task_a." in runtime_program
+	assert "runtime_pass_failed" not in runtime_program
 	assert runner._extract_goal_repair_pass_count("runtime query pass 1\nruntime query pass 3") == 3
 
 
-def test_jason_runner_repair_mode_blocks_failed_child_goal_choices() -> None:
+def test_jason_runner_repair_mode_blocks_failed_child_goal_choices(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setenv("JASON_RUNTIME_FAILURE_REPAIR", "1")
 	runner = JasonRunner()
 	runtime_program = runner._build_runner_asl(
 		agentspeak_code="""
@@ -1700,6 +1700,41 @@ def test_jason_runner_repair_mode_blocks_failed_child_goal_choices() -> None:
 	assert "+blocked_runtime_goal(child, X)" in runtime_program
 	child_failure_handler = runtime_program.split("-!child(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
 	assert ".fail" not in child_failure_handler
+
+
+def test_jason_runner_keeps_native_goal_backtracking_without_goal_context() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!parent(X) : ready(X) <-
+	!child(X).
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(name="parent", parameters=("x",), is_primitive=False),
+				HTNTask(name="child", parameters=("x",), is_primitive=False),
+			],
+			primitive_tasks=[],
+			methods=[],
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "parent", "args": ["a"]},),
+		goal_facts=(),
+	)
+
+	parent_failure_handler = runtime_program.split("-!parent(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+	assert "!finish_or_retry_0" not in runtime_program
+	assert "not blocked_runtime_goal(child, X)" not in runtime_program
+	assert "+runtime_pass_failed" not in parent_failure_handler
+	assert ".fail" in parent_failure_handler
 
 
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
