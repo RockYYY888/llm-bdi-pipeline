@@ -25,6 +25,8 @@ from evaluation.goal_grounding.grounder import (
 )
 from evaluation.jason_runtime import JasonRunner
 from evaluation.jason_runtime.runner import JasonValidationError
+from evaluation.jadex_runtime import JadexBDIRunner
+from evaluation.jadex_runtime.runner import JadexValidationError
 from evaluation.runtime_context import (
 	action_type_map_for_domain,
 	build_type_parent_map_for_domain,
@@ -60,6 +62,7 @@ class PlanLibraryEvaluationOrchestrator:
 		domain_file: str,
 		problem_file: str | None = None,
 		evaluation_domain_source: str | None = None,
+		runtime_backend: str | None = None,
 	) -> None:
 		self.config = get_config()
 		self.project_root = Path(__file__).resolve().parents[2]
@@ -78,6 +81,9 @@ class PlanLibraryEvaluationOrchestrator:
 		self.evaluation_domain_source = normalize_evaluation_domain_source(
 			evaluation_domain_source or self.config.evaluation_domain_source,
 		)
+		self.runtime_backend = str(runtime_backend or "jason").strip().lower()
+		if self.runtime_backend not in {"jason", "jadex"}:
+			raise ValueError(f"Unsupported runtime backend '{self.runtime_backend}'.")
 
 		self.domain = HDDLParser.parse_domain(self.domain_file)
 		self.problem = HDDLParser.parse_problem(self.problem_file) if self.problem_file else None
@@ -270,7 +276,7 @@ class PlanLibraryEvaluationOrchestrator:
 				"goal_grounding": grounding_result.to_dict(),
 			}
 
-		jason_result = self._execute_query_with_jason(
+		runtime_result = self._execute_query_with_runtime_backend(
 			grounding_result=grounding_result,
 			method_library=domain_library,
 			plan_library=plan_library,
@@ -280,18 +286,18 @@ class PlanLibraryEvaluationOrchestrator:
 			verification_mode=verification_mode,
 			evaluation_domain=evaluation_domain,
 		)
-		if jason_result is None:
+		if runtime_result is None:
 			return {
 				"success": False,
 				"step": "runtime_execution",
-				"error": "Jason runtime execution failed",
+				"error": f"{self.runtime_backend} runtime execution failed",
 				"method_library": domain_library.to_dict(),
 				"goal_grounding": grounding_result.to_dict(),
 			}
 
 		plan_solve_data = self._build_plan_solve_data(
 			grounding_result=grounding_result,
-			jason_result=jason_result,
+			jason_result=runtime_result,
 			evaluation_domain=evaluation_domain,
 			verification_mode=verification_mode,
 		)
@@ -525,6 +531,181 @@ class PlanLibraryEvaluationOrchestrator:
 			print(f"✗ AgentSpeak rendering failed: {exc}")
 			return None
 
+	def _execute_query_with_runtime_backend(
+		self,
+		*,
+		grounding_result: TemporalGroundingResult,
+		method_library: HTNMethodLibrary,
+		plan_library: PlanLibrary,
+		agentspeak_code: str,
+		agentspeak_artifacts: Dict[str, Any],
+		verification_problem_file: str | Path,
+		verification_mode: str,
+		evaluation_domain: EvaluationDomainContext,
+	) -> Optional[JasonExecutionResult]:
+		if self.runtime_backend == "jadex":
+			return self._execute_query_with_jadex(
+				grounding_result=grounding_result,
+				method_library=method_library,
+				plan_library=plan_library,
+				agentspeak_artifacts=agentspeak_artifacts,
+				verification_problem_file=verification_problem_file,
+				verification_mode=verification_mode,
+				evaluation_domain=evaluation_domain,
+			)
+		return self._execute_query_with_jason(
+			grounding_result=grounding_result,
+			method_library=method_library,
+			plan_library=plan_library,
+			agentspeak_code=agentspeak_code,
+			agentspeak_artifacts=agentspeak_artifacts,
+			verification_problem_file=verification_problem_file,
+			verification_mode=verification_mode,
+			evaluation_domain=evaluation_domain,
+		)
+
+	def _execute_query_with_jadex(
+		self,
+		*,
+		grounding_result: TemporalGroundingResult,
+		method_library: HTNMethodLibrary,
+		plan_library: PlanLibrary,
+		agentspeak_artifacts: Dict[str, Any],
+		verification_problem_file: str | Path,
+		verification_mode: str,
+		evaluation_domain: EvaluationDomainContext,
+	) -> Optional[JasonExecutionResult]:
+		print("\n[RUNTIME EXECUTION]")
+		print("-" * 80)
+		stage_start = time.perf_counter()
+
+		try:
+			output_dir = self._require_output_dir()
+			runner = JadexBDIRunner(
+				timeout_seconds=self._jason_runtime_timeout_seconds(
+					subgoal_count=len(grounding_result.subgoals),
+				),
+			)
+			action_schemas = planner_action_schemas_for_domain(evaluation_domain.domain)
+			seed_facts = (
+				tuple(render_problem_fact(fact) for fact in (self.problem.init_facts or ()))
+				if self.problem is not None
+				else ()
+			)
+			runtime_objects = tuple(
+				str(object_name).strip()
+				for object_name in (
+					self.problem.objects
+					if self.problem is not None
+					else grounding_result.typed_objects.keys()
+				)
+				if str(object_name).strip()
+			)
+			validation = runner.validate(
+				method_library=method_library,
+				plan_library=plan_library,
+				action_schemas=action_schemas,
+				seed_facts=seed_facts,
+				runtime_objects=runtime_objects,
+				object_types=dict(grounding_result.typed_objects),
+				type_parent_map=dict(evaluation_domain.type_parent_map),
+				query_goals=tuple(subgoal.to_dict() for subgoal in grounding_result.subgoals),
+				output_dir=output_dir,
+			)
+			hierarchical_plan_text = render_supported_hierarchical_plan(
+				action_path=validation.action_path,
+				method_library=method_library,
+				method_trace=validation.method_trace,
+				problem_file=str(Path(verification_problem_file).resolve()),
+				domain_file=evaluation_domain.domain_file,
+			)
+			result = JasonExecutionResult(
+				query_text=grounding_result.query_text,
+				ltlf_formula=grounding_result.ltlf_formula,
+				action_path=tuple(validation.action_path),
+				method_trace=tuple(dict(item) for item in validation.method_trace),
+				hierarchical_plan_text=hierarchical_plan_text,
+				verification_problem_file=str(Path(verification_problem_file).resolve()),
+				verification_mode=verification_mode,
+				failed_goals=tuple(validation.failed_goals),
+				failure_class=validation.failure_class,
+				consistency_checks=dict(validation.consistency_checks),
+				artifacts={
+					**agentspeak_artifacts,
+					**dict(validation.artifacts),
+				},
+				timing_profile=dict(validation.timing_profile),
+				diagnostics=tuple(str(item) for item in validation.failed_goals),
+			)
+			self.logger.log_runtime_execution(
+				result.to_log_dict(),
+				"Success",
+				backend="JadexBDIRetry",
+				metadata={
+					"step_count": len(result.action_path),
+					"method_trace_count": len(result.method_trace),
+					"verification_mode": verification_mode,
+					"evaluation_domain_source": evaluation_domain.source,
+					"runtime_execution_mode": "jadex_runtime",
+				},
+			)
+			self._record_failure_signature(
+				ltlf_formula=grounding_result.ltlf_formula,
+				jason_failure_class=result.failure_class,
+				failed_goals=result.failed_goals,
+			)
+			self._record_step_timing(
+				"runtime_execution",
+				stage_start,
+				breakdown=self._timing_breakdown_without_total(result.timing_profile),
+				metadata={
+					"step_count": len(result.action_path),
+					"method_trace_count": len(result.method_trace),
+					"verification_mode": verification_mode,
+					"evaluation_domain_source": evaluation_domain.source,
+					"runtime_execution_mode": "jadex_runtime",
+				},
+			)
+			print(f"✓ Jadex-style action steps: {len(result.action_path)}")
+			return result
+		except JadexValidationError as exc:
+			validation_metadata = dict(getattr(exc, "metadata", {}) or {})
+			self.logger.log_runtime_execution(
+				validation_metadata or None,
+				"Failed",
+				error=str(exc),
+				backend="JadexBDIRetry",
+				metadata={
+					"verification_mode": verification_mode,
+					"evaluation_domain_source": evaluation_domain.source,
+					"runtime_execution_mode": "jadex_runtime",
+				},
+			)
+			self._record_failure_signature(
+				ltlf_formula=grounding_result.ltlf_formula,
+				jason_failure_class=validation_metadata.get("failure_class"),
+				failed_goals=tuple(validation_metadata.get("failed_goals") or ()),
+			)
+			self._record_step_timing("runtime_execution", stage_start)
+			print(f"✗ Runtime execution failed: {exc}")
+			return None
+		except Exception as exc:
+			self.logger.log_runtime_execution(
+				None,
+				"Failed",
+				error=str(exc),
+				backend="JadexBDIRetry",
+				metadata={
+					"verification_mode": verification_mode,
+					"evaluation_domain_source": evaluation_domain.source,
+					"runtime_execution_mode": "jadex_runtime",
+				},
+			)
+			self._record_failure_signature(ltlf_formula=grounding_result.ltlf_formula)
+			self._record_step_timing("runtime_execution", stage_start)
+			print(f"✗ Runtime execution failed: {exc}")
+			return None
+
 	def _execute_query_with_jason(
 		self,
 		*,
@@ -612,6 +793,7 @@ class PlanLibraryEvaluationOrchestrator:
 				artifacts={
 					**agentspeak_artifacts,
 					**dict(validation.artifacts),
+					"runtime_backend": "jason",
 					"stdout_path": dict(validation.artifacts).get("stdout"),
 					"stderr_path": dict(validation.artifacts).get("stderr"),
 				},
@@ -786,11 +968,21 @@ class PlanLibraryEvaluationOrchestrator:
 		evaluation_domain: EvaluationDomainContext,
 		verification_mode: str,
 	) -> Dict[str, Any]:
+		runtime_backend = str(
+			(jason_result.artifacts or {}).get("runtime_backend")
+			or self.runtime_backend
+			or "jason",
+		).strip()
+		planning_mode = (
+			"jadex_runtime"
+			if runtime_backend == "jadex"
+			else "jason_runtime"
+		)
 		return {
 			"summary": {
-				"backend": "jason",
+				"backend": runtime_backend,
 				"status": "success",
-				"planning_mode": "jason_runtime",
+				"planning_mode": planning_mode,
 				"verification_mode": verification_mode,
 				"evaluation_domain_source": evaluation_domain.source,
 				"evaluation_domain_file": evaluation_domain.domain_file,
@@ -799,9 +991,9 @@ class PlanLibraryEvaluationOrchestrator:
 				"failure_class": jason_result.failure_class,
 			},
 			"artifacts": {
-				"backend": "jason",
+				"backend": runtime_backend,
 				"status": "success",
-				"planning_mode": "jason_runtime",
+				"planning_mode": planning_mode,
 				"verification_mode": verification_mode,
 				"evaluation_domain_source": evaluation_domain.source,
 				"evaluation_domain_file": evaluation_domain.domain_file,
@@ -817,7 +1009,7 @@ class PlanLibraryEvaluationOrchestrator:
 				"action_path": list(jason_result.action_path),
 				"method_trace": list(jason_result.method_trace),
 				"hierarchical_plan_text": jason_result.hierarchical_plan_text,
-				"hierarchical_plan_source": "jason_runtime",
+				"hierarchical_plan_source": planning_mode,
 				"verification_problem_file": jason_result.verification_problem_file,
 				"verification_domain_file": None,
 				"failed_goals": list(jason_result.failed_goals),

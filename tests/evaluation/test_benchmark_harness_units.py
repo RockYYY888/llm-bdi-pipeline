@@ -23,6 +23,7 @@ from tests.support.plan_library_evaluation_support import (
 	run_plan_library_evaluation_benchmark_for_domain,
 )
 import tests.support.plan_library_evaluation_support as benchmark_support
+import tests.run_plan_library_evaluation_benchmark as benchmark_runner
 from tests.run_plan_library_evaluation_benchmark import (
 	DomainRun,
 	_collect_domain_run_result,
@@ -40,6 +41,40 @@ def test_evaluation_benchmark_runtime_defaults_pin_benchmark_domain_source() -> 
 
 	assert env["EVALUATION_DOMAIN_SOURCE"] == BENCHMARK_EVALUATION_DOMAIN_SOURCE
 	assert env["EVALUATION_DOMAIN_SOURCE"] == "benchmark"
+
+
+def test_full_benchmark_domain_launcher_forwards_selected_query_ids(
+	tmp_path: Path,
+	monkeypatch,
+) -> None:
+	captured: dict[str, object] = {}
+
+	class FakeProcess:
+		pid = 12345
+
+		def wait(self) -> int:
+			return 0
+
+	def fake_popen(command, **kwargs):
+		captured["command"] = list(command)
+		captured["kwargs"] = dict(kwargs)
+		return FakeProcess()
+
+	monkeypatch.setattr(benchmark_runner.subprocess, "Popen", fake_popen)
+	monkeypatch.setattr(benchmark_runner, "_RUN_QUERY_IDS", ["query_1"])
+	monkeypatch.setattr(benchmark_runner, "_RUN_FAILED_ONLY_QUERY_IDS", {})
+	monkeypatch.setattr(benchmark_runner, "_RUN_LIBRARY_SOURCE", "official")
+	monkeypatch.setattr(benchmark_runner, "_RUN_RUNTIME_BACKEND", "jadex")
+	monkeypatch.setattr(benchmark_runner, "_RUN_RESUME", False)
+
+	domain_run = benchmark_runner._start_domain_run(tmp_path, "blocksworld", {})
+	domain_run.output_handle.close()
+
+	assert captured["command"].count("--query-id") == 1
+	query_flag_index = captured["command"].index("--query-id")
+	assert captured["command"][query_flag_index + 1] == "query_1"
+	assert "--runtime-backend" in captured["command"]
+	assert captured["command"][captured["command"].index("--runtime-backend") + 1] == "jadex"
 
 
 def test_evaluation_benchmark_execution_source_defaults_to_benchmark_when_metadata_missing() -> None:
@@ -169,6 +204,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 		query_id: str,
 		*,
 		library_source: str,
+		runtime_backend: str = "jason",
 		logs_root: str | Path | None = None,
 	):
 		calls.append((query_id, str(Path(logs_root or "").resolve())))
@@ -177,6 +213,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 			"instruction": str(query_cases[query_id]["instruction"]),
 			"problem_file": str(query_cases[query_id]["problem_file"]),
 			"library_source": library_source,
+			"runtime_backend": runtime_backend,
 			"success": True,
 			"result": {"success": True, "step": ""},
 			"outcome_bucket": "hierarchical_plan_verified",
@@ -215,6 +252,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 				"instruction": "q1 instruction",
 				"problem_file": str(query_cases["q1"]["problem_file"]),
 				"library_source": "benchmark",
+				"runtime_backend": "jason",
 				"success": True,
 				"result": {"success": True, "step": ""},
 				"outcome_bucket": "hierarchical_plan_verified",
@@ -264,6 +302,7 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 		"instruction": "q2 instruction",
 		"problem_file": str(query_cases["q2"]["problem_file"]),
 		"library_source": "benchmark",
+		"runtime_backend": "jason",
 		"success": True,
 		"result": {"success": True, "step": ""},
 		"outcome_bucket": "hierarchical_plan_verified",
@@ -313,6 +352,7 @@ def test_domain_benchmark_supports_single_query_runs(
 		query_id: str,
 		*,
 		library_source: str,
+		runtime_backend: str = "jason",
 		logs_root: str | Path | None = None,
 	):
 		return {
@@ -320,6 +360,7 @@ def test_domain_benchmark_supports_single_query_runs(
 			"instruction": str(query_cases[query_id]["instruction"]),
 			"problem_file": str(query_cases[query_id]["problem_file"]),
 			"library_source": library_source,
+			"runtime_backend": runtime_backend,
 			"success": False,
 			"result": {"success": False, "step": "runtime_execution"},
 			"outcome_bucket": "runtime_execution_failed",
@@ -518,7 +559,14 @@ def test_evaluation_case_uses_stored_temporal_specification(
 	)
 
 	class FakeOrchestrator:
-		def __init__(self, *, domain_file, problem_file, evaluation_domain_source):
+		def __init__(
+			self,
+			*,
+			domain_file,
+			problem_file,
+			evaluation_domain_source,
+			runtime_backend="jason",
+		):
 			self.problem = object()
 			self.task_type_map = {}
 			self.logger = None

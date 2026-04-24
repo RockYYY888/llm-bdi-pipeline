@@ -47,6 +47,7 @@ OFFICIAL_LIBRARY_ARTIFACTS_DIR = PROJECT_ROOT / "tests" / "generated" / "plan_li
 OFFICIAL_LIBRARY_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
+BENCHMARK_EVALUATION_RUNTIME_BACKEND = "jason"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
 OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v10"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
@@ -474,6 +475,7 @@ def run_plan_library_evaluation_case(
 	query_id: str,
 	*,
 	library_source: str = BENCHMARK_EVALUATION_LIBRARY_SOURCE,
+	runtime_backend: str = BENCHMARK_EVALUATION_RUNTIME_BACKEND,
 	logs_root: str | Path | None = None,
 ) -> Dict[str, Any]:
 	apply_evaluation_runtime_defaults()
@@ -509,6 +511,7 @@ def run_plan_library_evaluation_case(
 		domain_file=domain_file,
 		problem_file=str(case["problem_file"]),
 		evaluation_domain_source=BENCHMARK_EVALUATION_DOMAIN_SOURCE,
+		runtime_backend=runtime_backend,
 	)
 	resolved_logs_root = (
 		Path(logs_root).resolve()
@@ -548,6 +551,7 @@ def run_plan_library_evaluation_case(
 		"case": case,
 		"problem_file": str(case["problem_file"]),
 		"library_source": library_source,
+		"runtime_backend": runtime_backend,
 		"success": bool(result.get("success")),
 		"result": result,
 		"outcome_bucket": outcome_bucket,
@@ -621,6 +625,10 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		"query_id": str(report.get("query_id") or ""),
 		"problem_file": problem_file,
 		"library_source": str(report.get("library_source") or ""),
+		"runtime_backend": str(
+			report.get("runtime_backend")
+			or BENCHMARK_EVALUATION_RUNTIME_BACKEND,
+		),
 		"success": bool(report.get("success")),
 		"result": _compact_result_payload(result_payload),
 		"outcome_bucket": str(report.get("outcome_bucket") or "unknown_failure"),
@@ -663,6 +671,7 @@ def _load_query_report_checkpoint(
 	domain_key: str,
 	query_id: str,
 	library_source: str,
+	runtime_backend: str,
 ) -> Optional[Dict[str, Any]]:
 	if not query_result_path.exists():
 		return None
@@ -675,6 +684,8 @@ def _load_query_report_checkpoint(
 	if str(payload.get("query_id") or "") != query_id:
 		return None
 	if str(payload.get("library_source") or "") != library_source:
+		return None
+	if str(payload.get("runtime_backend") or BENCHMARK_EVALUATION_RUNTIME_BACKEND) != runtime_backend:
 		return None
 	if (
 		str(payload.get("evaluation_domain_source") or "").strip().lower()
@@ -711,6 +722,7 @@ def _build_domain_summary(
 	selected_query_ids: Sequence[str],
 	query_reports: Sequence[Dict[str, Any]],
 	library_source: str,
+	runtime_backend: str,
 	library_artifact_ref: str | None,
 	resume: bool,
 	resumed_query_ids: Sequence[str],
@@ -728,6 +740,7 @@ def _build_domain_summary(
 		"domain_key": domain_key,
 		"evaluation_domain_source": BENCHMARK_EVALUATION_DOMAIN_SOURCE,
 		"library_source": library_source,
+		"runtime_backend": runtime_backend,
 		"domain_file": DOMAIN_FILES[domain_key],
 		"library_artifact_root": library_artifact_ref,
 		"output_root": str(Path(output_root).resolve()) if output_root is not None else None,
@@ -795,6 +808,7 @@ def _build_domain_summary(
 				),
 				"evaluation_domain_source": str(report.get("evaluation_domain_source") or ""),
 				"library_source": str(report.get("library_source") or ""),
+				"runtime_backend": str(report.get("runtime_backend") or ""),
 			}
 			for report in query_reports
 		],
@@ -824,11 +838,15 @@ def run_plan_library_evaluation_benchmark_for_domain(
 	*,
 	query_ids: Optional[Sequence[str]] = None,
 	library_source: str = BENCHMARK_EVALUATION_LIBRARY_SOURCE,
+	runtime_backend: str = BENCHMARK_EVALUATION_RUNTIME_BACKEND,
 	output_root: str | Path | None = None,
 	run_id: str | None = None,
 	resume: bool = False,
 ) -> Dict[str, Any]:
 	normalized_library_source = str(library_source or BENCHMARK_EVALUATION_LIBRARY_SOURCE).strip().lower()
+	normalized_runtime_backend = str(runtime_backend or BENCHMARK_EVALUATION_RUNTIME_BACKEND).strip().lower()
+	if normalized_runtime_backend not in {"jason", "jadex"}:
+		raise ValueError(f"Unsupported runtime backend '{runtime_backend}'.")
 	if normalized_library_source == "generated":
 		library_artifact_ref: str | None = str(ensure_generated_library_artifact(domain_key))
 	elif normalized_library_source in {"benchmark", "official"}:
@@ -859,6 +877,7 @@ def run_plan_library_evaluation_benchmark_for_domain(
 				domain_key=domain_key,
 				query_id=query_id,
 				library_source=normalized_library_source,
+				runtime_backend=normalized_runtime_backend,
 			)
 			if cached_report is None:
 				continue
@@ -874,6 +893,7 @@ def run_plan_library_evaluation_benchmark_for_domain(
 					domain_key,
 					query_id,
 					library_source=normalized_library_source,
+					runtime_backend=normalized_runtime_backend,
 					logs_root=domain_output_root / "logs",
 				),
 				"run_id": run_id,
@@ -897,6 +917,7 @@ def run_plan_library_evaluation_benchmark_for_domain(
 			selected_query_ids=selected_query_ids,
 			query_reports=partial_reports,
 			library_source=normalized_library_source,
+			runtime_backend=normalized_runtime_backend,
 			library_artifact_ref=library_artifact_ref,
 			resume=resume,
 			resumed_query_ids=resumed_query_ids,
@@ -921,6 +942,7 @@ def run_plan_library_evaluation_benchmark_for_domain(
 		selected_query_ids=selected_query_ids,
 		query_reports=query_reports,
 		library_source=normalized_library_source,
+		runtime_backend=normalized_runtime_backend,
 		library_artifact_ref=library_artifact_ref,
 		resume=resume,
 		resumed_query_ids=resumed_query_ids,

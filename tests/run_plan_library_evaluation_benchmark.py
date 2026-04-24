@@ -59,7 +59,11 @@ def _start_domain_run(run_dir: Path, domain_key: str, env: Dict[str, str]) -> Do
 		str(run_dir),
 		"--library-source",
 		_RUN_LIBRARY_SOURCE,
+		"--runtime-backend",
+		_RUN_RUNTIME_BACKEND,
 	]
+	for query_id in _RUN_QUERY_IDS:
+		command.extend(["--query-id", str(query_id)])
 	for query_id in _RUN_FAILED_ONLY_QUERY_IDS.get(domain_key, ()):
 		command.extend(["--query-id", str(query_id)])
 	if _RUN_RESUME:
@@ -177,6 +181,7 @@ def _aggregate_domain_summaries(
 		"run_dir": str(run_dir),
 		"evaluation_domain_source": "benchmark",
 		"library_source": _RUN_LIBRARY_SOURCE,
+		"runtime_backend": _RUN_RUNTIME_BACKEND,
 		"total_queries": total_queries,
 		"completed_query_count": completed_query_count,
 		"remaining_query_count": remaining_query_count,
@@ -222,6 +227,7 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 		f"run_dir: {summary['run_dir']}",
 		f"evaluation_domain_source: {summary['evaluation_domain_source']}",
 		f"library_source: {summary['library_source']}",
+		f"runtime_backend: {summary.get('runtime_backend', 'jason')}",
 		f"total_queries: {summary['total_queries']}",
 		f"completed_query_count: {summary.get('completed_query_count', 0)}",
 		f"remaining_query_count: {summary.get('remaining_query_count', 0)}",
@@ -268,6 +274,7 @@ def _compact_summary_for_console(summary: Dict[str, object]) -> Dict[str, object
 				"outcome_bucket": result.get("outcome_bucket"),
 				"step": result.get("step"),
 				"verification_mode": result.get("verification_mode"),
+				"runtime_backend": result.get("runtime_backend"),
 				"execution_path": result.get("execution_path"),
 				"ltlf_atom_count": result.get("ltlf_atom_count"),
 				"jason_failure_class": result.get("jason_failure_class"),
@@ -287,6 +294,7 @@ def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> Non
 		"summary_txt": str(run_dir / "summary.txt"),
 		"evaluation_domain_source": summary.get("evaluation_domain_source"),
 		"library_source": summary.get("library_source"),
+		"runtime_backend": summary.get("runtime_backend"),
 		"total_queries": summary.get("total_queries"),
 		"completed_query_count": summary.get("completed_query_count"),
 		"remaining_query_count": summary.get("remaining_query_count"),
@@ -350,8 +358,13 @@ def _run_single_domain(domain_key: str, run_dir: Path, *, resume: bool = False) 
 
 	summary = run_plan_library_evaluation_benchmark_for_domain(
 		domain_key,
-		query_ids=tuple(_RUN_QUERY_IDS) if _RUN_QUERY_IDS else tuple(_RUN_FAILED_ONLY_QUERY_IDS.get(domain_key, ())) or None,
+		query_ids=(
+			tuple(_RUN_QUERY_IDS)
+			if _RUN_QUERY_IDS
+			else tuple(_RUN_FAILED_ONLY_QUERY_IDS.get(domain_key, ())) or None
+		),
 		library_source=_RUN_LIBRARY_SOURCE,
+		runtime_backend=_RUN_RUNTIME_BACKEND,
 		output_root=run_dir,
 		run_id=run_dir.name,
 		resume=resume,
@@ -426,6 +439,7 @@ def _run_full_benchmark(*, max_concurrent_domains: int = 1, run_id: str | None =
 
 _RUN_QUERY_IDS: List[str] = []
 _RUN_LIBRARY_SOURCE = "benchmark"
+_RUN_RUNTIME_BACKEND = "jason"
 _RUN_RESUME = False
 _RUN_FAILED_ONLY_QUERY_IDS: Dict[str, List[str]] = {}
 
@@ -445,10 +459,16 @@ def main() -> int:
 		choices=("benchmark", "official", "generated"),
 		default="benchmark",
 	)
+	parser.add_argument(
+		"--runtime-backend",
+		choices=("jason", "jadex"),
+		default="jason",
+	)
 	args = parser.parse_args()
-	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE, _RUN_RESUME, _RUN_FAILED_ONLY_QUERY_IDS
+	global _RUN_QUERY_IDS, _RUN_LIBRARY_SOURCE, _RUN_RUNTIME_BACKEND, _RUN_RESUME, _RUN_FAILED_ONLY_QUERY_IDS
 	_RUN_QUERY_IDS = list(args.query_id or [])
 	_RUN_LIBRARY_SOURCE = str(args.library_source)
+	_RUN_RUNTIME_BACKEND = str(args.runtime_backend)
 	_RUN_RESUME = bool(args.resume or args.resume_run_id)
 	_RUN_FAILED_ONLY_QUERY_IDS = (
 		_load_failed_query_ids_for_run(str(args.replay_failed_run_id).strip())

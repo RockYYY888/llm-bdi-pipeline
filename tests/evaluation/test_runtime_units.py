@@ -26,6 +26,7 @@ from evaluation.goal_grounding.grounder import (
 )
 from evaluation.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from evaluation.jason_runtime.runner import JasonRunner, JasonValidationResult
+from evaluation.jadex_runtime.runner import JadexBDIRunner
 from evaluation.failure_signature import infer_missing_goal_facts
 from evaluation.official_verification import resolve_verification_domain_file
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
@@ -2831,3 +2832,205 @@ def test_official_plan_verifier_result_dict_omits_full_process_output() -> None:
 	assert "stdout" not in payload
 	assert payload["stdout_chars"] == 10_000
 	assert "full text in output_file" in str(payload["stdout_preview"])
+
+
+def test_jadex_runtime_propagates_subgoal_variable_aliases(tmp_path: Path) -> None:
+	plan_library = PlanLibrary(
+		domain_name="alias",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m-select",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="select",
+					arguments=("P:package",),
+				),
+				context=("at(P, L)",),
+				body=(
+					AgentSpeakBodyStep(kind="subgoal", symbol="vehicle-at", arguments=("V", "L")),
+					AgentSpeakBodyStep(kind="action", symbol="inspect", arguments=("V",)),
+				),
+			),
+			AgentSpeakPlan(
+				plan_name="m-vehicle-at",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="vehicle-at",
+					arguments=("V:vehicle", "L:location"),
+				),
+				context=("object_type(V, vehicle)", "at(V, L)"),
+				body=(AgentSpeakBodyStep(kind="action", symbol="noop", arguments=("V", "L")),),
+			),
+		),
+	)
+	action_schemas = (
+		{
+			"functor": "noop",
+			"source_name": "noop",
+			"parameters": ["?v", "?l"],
+			"preconditions": [{"predicate": "at", "args": ["?v", "?l"], "is_positive": True}],
+			"precondition_clauses": [[{"predicate": "at", "args": ["?v", "?l"], "is_positive": True}]],
+			"effects": [],
+		},
+		{
+			"functor": "inspect",
+			"source_name": "inspect",
+			"parameters": ["?v"],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		},
+	)
+
+	result = JadexBDIRunner(timeout_seconds=5).validate(
+		action_schemas=action_schemas,
+		plan_library=plan_library,
+		seed_facts=("(at Package0 Loc0)", "(at Truck0 Loc0)"),
+		runtime_objects=("Package0", "Truck0", "Loc0"),
+		object_types={"Package0": "package", "Truck0": "vehicle", "Loc0": "location"},
+		query_goals=({"task_name": "select", "args": ["Package0"]},),
+		output_dir=tmp_path,
+	)
+
+	assert result.status == "success"
+	assert result.action_path == ("noop(Truck0, Loc0)", "inspect(Truck0)")
+	assert result.method_trace == (
+		{"method_name": "m-select", "task_args": ["Package0"]},
+		{"method_name": "m-vehicle-at", "task_args": ["Truck0", "Loc0"]},
+	)
+
+
+def test_jadex_runtime_keeps_action_schema_bindings_local(tmp_path: Path) -> None:
+	plan_library = PlanLibrary(
+		domain_name="route",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m-route-two-hop",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="route",
+					arguments=("V:vehicle", "A:location", "B:location", "C:location"),
+				),
+				context=("object_type(V, vehicle)",),
+				body=(
+					AgentSpeakBodyStep(kind="action", symbol="drive", arguments=("V", "A", "B")),
+					AgentSpeakBodyStep(kind="action", symbol="drive", arguments=("V", "B", "C")),
+				),
+			),
+		),
+	)
+	drive_schema = {
+		"functor": "drive",
+		"source_name": "drive",
+		"parameters": ["?v", "?from", "?to"],
+		"preconditions": [
+			{"predicate": "at", "args": ["?v", "?from"], "is_positive": True},
+			{"predicate": "road", "args": ["?from", "?to"], "is_positive": True},
+		],
+		"precondition_clauses": [
+			[
+				{"predicate": "at", "args": ["?v", "?from"], "is_positive": True},
+				{"predicate": "road", "args": ["?from", "?to"], "is_positive": True},
+			],
+		],
+		"effects": [
+			{"predicate": "at", "args": ["?v", "?from"], "is_positive": False},
+			{"predicate": "at", "args": ["?v", "?to"], "is_positive": True},
+		],
+	}
+
+	result = JadexBDIRunner(timeout_seconds=5).validate(
+		action_schemas=(drive_schema,),
+		plan_library=plan_library,
+		seed_facts=(
+			"(at truck-0 loc-0)",
+			"(road loc-0 loc-1)",
+			"(road loc-1 loc-2)",
+		),
+		runtime_objects=("truck-0", "loc-0", "loc-1", "loc-2"),
+		object_types={
+			"truck-0": "vehicle",
+			"loc-0": "location",
+			"loc-1": "location",
+			"loc-2": "location",
+		},
+		query_goals=({"task_name": "route", "args": ["truck-0", "loc-0", "loc-1", "loc-2"]},),
+		output_dir=tmp_path,
+	)
+
+	assert result.status == "success"
+	assert result.action_path == (
+		"drive(truck-0, loc-0, loc-1)",
+		"drive(truck-0, loc-1, loc-2)",
+	)
+
+
+def test_jadex_runtime_prefers_low_side_effect_retry_candidates(tmp_path: Path) -> None:
+	plan_library = PlanLibrary(
+		domain_name="priority",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m-destructive",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="keep",
+					arguments=("X:block",),
+				),
+				context=("clear(X)", "!ontable(X)"),
+				body=(
+					AgentSpeakBodyStep(kind="action", symbol="unstack", arguments=("X", "Y")),
+					AgentSpeakBodyStep(kind="action", symbol="put-down", arguments=("X",)),
+				),
+			),
+			AgentSpeakPlan(
+				plan_name="m-idempotent",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="keep",
+					arguments=("X:block",),
+				),
+				context=("clear(X)",),
+				body=(AgentSpeakBodyStep(kind="action", symbol="nop", arguments=()),),
+			),
+		),
+	)
+	action_schemas = (
+		{
+			"functor": "nop",
+			"source_name": "nop",
+			"parameters": [],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		},
+		{
+			"functor": "unstack",
+			"source_name": "unstack",
+			"parameters": ["?x", "?y"],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		},
+		{
+			"functor": "put_down",
+			"source_name": "put-down",
+			"parameters": ["?x"],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		},
+	)
+
+	result = JadexBDIRunner(timeout_seconds=5).validate(
+		action_schemas=action_schemas,
+		plan_library=plan_library,
+		seed_facts=("(clear b1)", "(on b1 b2)"),
+		runtime_objects=("b1", "b2"),
+		object_types={"b1": "block", "b2": "block"},
+		query_goals=({"task_name": "keep", "args": ["b1"]},),
+		output_dir=tmp_path,
+	)
+
+	assert result.status == "success"
+	assert result.action_path == ("nop",)
+	assert result.method_trace == ({"method_name": "m-idempotent", "task_args": ["b1"]},)
