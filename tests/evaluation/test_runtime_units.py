@@ -791,9 +791,17 @@ def test_jason_runner_rejects_unbound_runtime_variables_in_method_bodies() -> No
 		"\t!get_to(V, MID);",
 		"\t!drive(V, MID, DEST).",
 	]
+	primitive_wrapper_binding_chunk = [
+		"+!do_observation(DIR, MODE) : on_board(I, SAT) & supports(I, MODE) <-",
+		'\t.print("runtime trace method flat ", "method0");',
+		"\t!activate_instrument(SAT, I);",
+		"\t!turn_to(SAT, DIR, OLD_DIR);",
+		"\t!take_image(SAT, DIR, I, MODE).",
+	]
 
 	assert runner._chunk_runtime_variables_are_safe(unsafe_chunk) is False
 	assert runner._chunk_runtime_variables_are_safe(safe_chunk) is True
+	assert runner._chunk_runtime_variables_are_safe(primitive_wrapper_binding_chunk) is True
 
 
 def test_jason_runner_orders_noop_then_direct_then_via_chunks() -> None:
@@ -870,6 +878,39 @@ def test_jason_runner_keeps_recursive_transport_via_after_current_context_via() 
 	assert len(ordered_chunks) == 2
 	assert "at(V, MID)" in ordered_chunks[0]
 	assert "road(MID, DEST) <-" in ordered_chunks[1]
+
+
+def test_jason_runner_lifts_nonrecursive_child_contexts_to_parent_candidates() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!navigate_abs(R, TO) : at(R, FROM) & can_traverse(R, FROM, TO) <-",
+				'\t.print("runtime trace method flat ", "m-navigate_abs");',
+				"\t!navigate(R, FROM, TO).",
+			],
+		),
+		"\n".join(
+			[
+				"+!get_soil_data(WAYPOINT) : store_of(S, R) & equipped_for_soil_analysis(R) <-",
+				'\t.print("runtime trace method flat ", "m-get_soil_data");',
+				"\t!navigate_abs(R, WAYPOINT);",
+				"\t!sample_soil(R, S, WAYPOINT).",
+			],
+		),
+	]
+
+	expanded_chunks = runner._specialise_chunks_from_noop_prefix_contexts(
+		chunks,
+		max_candidates_per_chunk=8,
+	)
+
+	assert any(
+		"+!get_soil_data(WAYPOINT) : "
+		"store_of(S, R) & equipped_for_soil_analysis(R) & "
+		"at(R, FROM) & can_traverse(R, FROM, WAYPOINT) <-" in chunk
+		for chunk in expanded_chunks
+	)
 
 
 def test_jason_runner_orders_satellite_observation_methods_with_required_turn_before_image() -> None:
@@ -1222,6 +1263,39 @@ def test_agentspeak_renderer_renders_structured_plan_library_as_method_plans() -
 	assert "+!do_put_on(X, Y) : clear(X) & X \\== Y <-" in asl
 	assert "\tpick_up(X);" in asl
 	assert "\t!stack(X, Y)." in asl
+
+
+def test_agentspeak_renderer_normalises_structured_object_type_type_atoms() -> None:
+	domain = HDDLParser.parse_domain(str(PROJECT_ROOT / "src" / "domains" / "transport" / "domain.hddl"))
+	renderer = AgentSpeakRenderer()
+	plan_library = PlanLibrary(
+		domain_name="transport",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="m_load_capacity_guard",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="load",
+					arguments=("V:vehicle", "L:location", "P:package"),
+				),
+				context=("object_type(S, capacity-number)",),
+				body=(),
+			),
+		),
+	)
+
+	asl = renderer.generate(
+		domain=domain,
+		objects=("truck-0", "capacity-0"),
+		method_library=_sample_method_library(),
+		plan_library=plan_library,
+		plan_records=(),
+		typed_objects=(("truck-0", "vehicle"), ("capacity-0", "capacity-number")),
+		subgoals=(),
+	)
+
+	assert "object_type(S, capacity_number)" in asl
+	assert 'object_type(S, "capacity-number")' not in asl
 
 def test_evaluation_orchestrator_prefers_original_problem_for_verification() -> None:
 	goal_free_problem = PROJECT_ROOT / "tests" / "generated" / "goal_free_p01.hddl"

@@ -48,7 +48,7 @@ OFFICIAL_LIBRARY_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
-OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v3"
+OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v5"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
 COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
 EXECUTION_SUMMARY_KEYS = (

@@ -149,6 +149,11 @@ class AgentSpeakRenderer:
             for value in raw_args[:-1].split(",")
             if value.strip()
         ]
+        if self._sanitize_name(functor.strip()) == "object_type" and len(args) == 2:
+            return (
+                f"object_type({self._asl_term(args[0])}, "
+                f"{self._type_atom(args[1])})"
+            )
         return self._call(functor.strip(), tuple(args))
 
     @staticmethod

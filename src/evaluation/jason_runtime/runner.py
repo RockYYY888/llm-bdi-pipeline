@@ -1830,13 +1830,13 @@ class JasonRunner:
 		if not chunks:
 			return []
 
-		noop_contexts_by_task: Dict[str, List[Tuple[Tuple[str, ...], Tuple[str, ...]]]] = {}
+		prefix_contexts_by_task: Dict[str, List[Dict[str, Any]]] = {}
 		for chunk in chunks:
 			lines = chunk.splitlines()
 			if not lines:
 				continue
 			parsed_head = self._parse_asl_method_head(lines[0])
-			if parsed_head is None or not self._chunk_is_noop_method_plan(lines[1:]):
+			if parsed_head is None:
 				continue
 			task_name, head_args, context_parts = parsed_head
 			no_op_context_parts = tuple(
@@ -1846,11 +1846,15 @@ class JasonRunner:
 			)
 			if not no_op_context_parts:
 				continue
-			noop_contexts_by_task.setdefault(task_name, []).append(
-				(head_args, no_op_context_parts),
+			prefix_contexts_by_task.setdefault(task_name, []).append(
+				{
+					"head_args": head_args,
+					"context_parts": no_op_context_parts,
+					"is_noop": self._chunk_is_noop_method_plan(lines[1:]),
+				},
 			)
 
-		if not noop_contexts_by_task:
+		if not prefix_contexts_by_task:
 			return list(chunks)
 
 		expanded_chunks: List[str] = []
@@ -1863,6 +1867,7 @@ class JasonRunner:
 			if parsed_head is None or self._chunk_is_noop_method_plan(lines[1:]):
 				expanded_chunks.append(chunk)
 				continue
+			parent_task_name = str(parsed_head[0])
 
 			chunk_vars = self._extract_asl_variables(chunk)
 			prefix_context_variants: List[Tuple[str, ...]] = [()]
@@ -1873,13 +1878,19 @@ class JasonRunner:
 				if goal is None:
 					continue
 				goal_task_name, goal_args = goal
-				noop_specs = noop_contexts_by_task.get(goal_task_name)
-				if not noop_specs:
+				prefix_specs = [
+					spec
+					for spec in prefix_contexts_by_task.get(goal_task_name, ())
+					if bool(spec.get("is_noop")) or str(goal_task_name) != parent_task_name
+				]
+				if not prefix_specs:
 					break
 
 				next_variants: List[Tuple[str, ...]] = []
 				for prefix_context in prefix_context_variants:
-					for head_args, context_parts in noop_specs:
+					for spec in prefix_specs:
+						head_args = tuple(spec.get("head_args") or ())
+						context_parts = tuple(spec.get("context_parts") or ())
 						instantiated_context = self._instantiate_noop_prefix_context(
 							head_args=head_args,
 							goal_args=goal_args,
@@ -1950,9 +1961,6 @@ class JasonRunner:
 				or substituted.startswith("object_type(")
 			):
 				continue
-			introduced_vars = self._extract_asl_variables(substituted) - set(chunk_vars)
-			if introduced_vars:
-				return ()
 			instantiated_parts.append(substituted)
 		return tuple(dict.fromkeys(instantiated_parts))
 
@@ -2339,7 +2347,7 @@ class JasonRunner:
 		parsed_head = self._parse_asl_method_head(chunk[0])
 		if parsed_head is None:
 			return [original]
-		_, head_args, context_parts = parsed_head
+		task_name, head_args, context_parts = parsed_head
 		chunk_text = "\n".join(chunk)
 		trigger_vars = {
 			term
@@ -2430,7 +2438,7 @@ class JasonRunner:
 		parsed_head = self._parse_asl_method_head(str(chunk[0]))
 		if parsed_head is None:
 			return True
-		_, head_args, context_parts = parsed_head
+		task_name, head_args, context_parts = parsed_head
 		bound_variables = {
 			str(arg)
 			for arg in tuple(head_args or ())
@@ -2456,8 +2464,18 @@ class JasonRunner:
 			if not statement:
 				continue
 			statement_variables = self._extract_asl_variables(statement)
+			if statement.startswith("!"):
+				goal = self._parse_asl_goal_call(statement)
+				if goal is not None:
+					goal_name, _goal_args = goal
+					unbound_variables = statement_variables - bound_variables
+					if str(goal_name).strip() == str(task_name).strip() and unbound_variables:
+						return False
+					bound_variables.update(statement_variables)
+					continue
 			if statement_variables and not statement_variables.issubset(bound_variables):
 				return False
+			bound_variables.update(statement_variables)
 		return True
 
 	def _candidate_bindings_for_local_witnesses(

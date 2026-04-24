@@ -81,6 +81,7 @@ def validate_plan_library_structure(
 		getattr(method_library, "primitive_tasks", ()) or (),
 	)
 	predicate_signatures = _symbol_signature_map(getattr(domain, "predicates", ()) or (), ())
+	predicate_signatures.setdefault("object_type", ("object", "object"))
 	layer_results = dict((method_validation or {}).get("layers") or {})
 
 	plan_names = [

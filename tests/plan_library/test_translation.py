@@ -96,7 +96,11 @@ def test_translation_reports_accepted_and_rejected_methods() -> None:
 	assert plan_library.plans[0].plan_name == "m_deliver_serial"
 	assert plan_library.plans[0].source_instruction_ids == ("query_7",)
 	assert plan_library.plans[0].trigger.arguments == ("PKG:package", "LOC:location")
-	assert plan_library.plans[0].context == ("loaded(PKG)",)
+	assert plan_library.plans[0].context == (
+		"object_type(PKG, package)",
+		"object_type(LOC, location)",
+		"loaded(PKG)",
+	)
 	assert tuple(step.kind for step in plan_library.plans[0].body) == (
 		"action",
 		"action",
@@ -136,7 +140,10 @@ def test_rendering_emits_structured_agentspeak_library() -> None:
 	rendered = render_plan_library_asl(plan_library)
 
 	assert "source_instruction_ids=query_7" in rendered
-	assert "+!deliver(PKG, LOC) : loaded(PKG) <-" in rendered
+	assert (
+		"+!deliver(PKG, LOC) : object_type(PKG, package) & "
+		"object_type(LOC, location) & loaded(PKG) <-"
+	) in rendered
 	assert "plan=m_deliver_branching__variant_1" in rendered
 	assert "plan=m_deliver_branching__variant_2" in rendered
 	assert "\tload(PKG);" in rendered
@@ -189,7 +196,7 @@ def test_rendering_emits_jason_safe_functors_for_hddl_symbols() -> None:
 	rendered = render_plan_library_asl(plan_library)
 
 	assert plan_library.plans[0].trigger.arguments == ("BLOCK:block",)
-	assert "+!do_put_on(BLOCK) : clear_top(BLOCK) <-" in rendered
+	assert "+!do_put_on(BLOCK) : object_type(BLOCK, block) & clear_top(BLOCK) <-" in rendered
 	assert "\tpick_up(BLOCK)." in rendered
 	assert "do-put-on" not in rendered
 	assert "pick-up" not in rendered
@@ -353,6 +360,10 @@ def test_translation_orders_positive_context_literals_before_negation_for_jason_
 	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
 
 	assert plan_library.plans[0].context == (
+		"object_type(ROVER, rover)",
+		"object_type(FROM, waypoint)",
+		"object_type(TO, waypoint)",
+		"object_type(MID, waypoint)",
 		"can_traverse(ROVER, FROM, MID)",
 		"at(ROVER, FROM)",
 		"can_traverse(ROVER, MID, TO)",
@@ -360,3 +371,41 @@ def test_translation_orders_positive_context_literals_before_negation_for_jason_
 		"!can_traverse(ROVER, FROM, TO)",
 		"!visited(MID)",
 	)
+
+
+def test_translation_adds_type_guards_for_local_method_variables() -> None:
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["transport"])
+	method_library = build_official_method_library(DOMAIN_FILES["transport"])
+
+	plan_library, _coverage = build_plan_library(
+		domain=domain,
+		method_library=method_library,
+	)
+
+	plans_by_name = {plan.plan_name: plan for plan in plan_library.plans}
+	assert plans_by_name["m-deliver"].context == (
+		"object_type(P, package)",
+		"object_type(L2, location)",
+	)
+	assert "object_type(V, vehicle)" in plans_by_name["m-drive-to"].context
+	assert "object_type(L1, location)" in plans_by_name["m-drive-to"].context
+
+
+def test_translation_does_not_lift_preconditions_achieved_by_prior_compound_steps() -> None:
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["satellite"])
+	method_library = build_official_method_library(DOMAIN_FILES["satellite"])
+
+	plan_library, _coverage = build_plan_library(
+		domain=domain,
+		method_library=method_library,
+	)
+
+	plans_by_name = {plan.plan_name: plan for plan in plan_library.plans}
+	method0_context = plans_by_name["method0"].context
+	method2_context = plans_by_name["method2"].context
+	assert all(not literal.startswith("calibrated(") for literal in method0_context)
+	assert all(not literal.startswith("power_on(") for literal in method0_context)
+	assert all(not literal.startswith("calibrated(") for literal in method2_context)
+	assert all(not literal.startswith("power_on(") for literal in method2_context)
+	assert "supports(MDOATT_TI_I, MDOATT_TI_M)" in method0_context
+	assert "supports(MDOAT_TI_I, MDOAT_TI_M)" in method2_context

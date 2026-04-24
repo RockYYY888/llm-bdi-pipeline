@@ -28,11 +28,18 @@ def build_plan_library(
 	"""Translate HTN methods into structured AgentSpeak(L) plans."""
 
 	task_type_map = _task_type_map_for_domain(domain)
+	action_type_map = _action_type_map_for_domain(domain)
+	predicate_type_map = _predicate_type_map_for_domain(domain)
+	domain_method_type_map = _domain_method_parameter_type_map(domain)
 	action_semantics_map = _action_semantics_map_for_domain(domain)
 	task_lookup = {
 		task.name: task
 		for task in [*list(method_library.compound_tasks), *list(method_library.primitive_tasks)]
 	}
+	methods_by_task: Dict[str, List[HTNMethod]] = defaultdict(list)
+	for candidate_method in method_library.methods:
+		methods_by_task[str(candidate_method.task_name).strip()].append(candidate_method)
+	mutable_predicates = _mutable_predicates(action_semantics_map)
 	plans: List[AgentSpeakPlan] = []
 	accepted_methods = 0
 	unsupported_buckets: Dict[str, int] = defaultdict(int)
@@ -62,10 +69,22 @@ def build_plan_library(
 			method=method,
 			task_schema=task_schema,
 		)
+		method_variable_types = _method_variable_type_map(
+			method=method,
+			task_schema=task_schema,
+			task_parameter_types=task_parameter_types,
+			domain_method_type_map=domain_method_type_map,
+			task_type_map=task_type_map,
+			action_type_map=action_type_map,
+			predicate_type_map=predicate_type_map,
+		)
 		context_literals = _translated_context_literals(
 			method=method,
 			task_schema=task_schema,
 			variable_map=variable_map,
+			method_variable_types=method_variable_types,
+			methods_by_task=methods_by_task,
+			mutable_predicates=mutable_predicates,
 			action_semantics_map=action_semantics_map,
 		)
 		plan_name = str(method.method_name).strip()
@@ -121,6 +140,51 @@ def _task_type_map_for_domain(domain: Any) -> Dict[str, Tuple[str, ...]]:
 	return mapping
 
 
+def _action_type_map_for_domain(domain: Any) -> Dict[str, Tuple[str, ...]]:
+	mapping: Dict[str, Tuple[str, ...]] = {}
+	for action in getattr(domain, "actions", ()) or ():
+		action_name = str(getattr(action, "name", "") or "").strip()
+		if not action_name:
+			continue
+		action_types = tuple(
+			_parameter_type(parameter)
+			for parameter in (getattr(action, "parameters", ()) or ())
+		)
+		mapping[action_name] = action_types
+		mapping.setdefault(sanitize_identifier(action_name), action_types)
+	return mapping
+
+
+def _predicate_type_map_for_domain(domain: Any) -> Dict[str, Tuple[str, ...]]:
+	mapping: Dict[str, Tuple[str, ...]] = {}
+	for predicate in getattr(domain, "predicates", ()) or ():
+		predicate_name = str(getattr(predicate, "name", "") or "").strip()
+		if not predicate_name:
+			continue
+		predicate_types = tuple(
+			_parameter_type(parameter)
+			for parameter in (getattr(predicate, "parameters", ()) or ())
+		)
+		mapping[predicate_name] = predicate_types
+		mapping.setdefault(sanitize_identifier(predicate_name), predicate_types)
+	return mapping
+
+
+def _domain_method_parameter_type_map(domain: Any) -> Dict[str, Dict[str, str]]:
+	mapping: Dict[str, Dict[str, str]] = {}
+	for method in getattr(domain, "methods", ()) or ():
+		method_name = str(getattr(method, "name", "") or "").strip()
+		if not method_name:
+			continue
+		typed_parameters: Dict[str, str] = {}
+		for parameter in getattr(method, "parameters", ()) or ():
+			for variable_name, type_name in _parameter_name_type_pairs(parameter):
+				typed_parameters[variable_name] = type_name
+		mapping[method_name] = typed_parameters
+		mapping.setdefault(sanitize_identifier(method_name), typed_parameters)
+	return mapping
+
+
 def _action_semantics_map_for_domain(domain: Any) -> Dict[str, Dict[str, Any]]:
 	parser = HDDLConditionParser()
 	mapping: Dict[str, Dict[str, Any]] = {}
@@ -144,6 +208,16 @@ def _action_semantics_map_for_domain(domain: Any) -> Dict[str, Dict[str, Any]]:
 	return mapping
 
 
+def _mutable_predicates(action_semantics_map: Dict[str, Dict[str, Any]]) -> set[str]:
+	predicates: set[str] = set()
+	for action_entry in action_semantics_map.values():
+		for effect in tuple(action_entry.get("effects") or ()):
+			predicate = str(getattr(effect, "predicate", "") or "").strip()
+			if predicate and predicate != "=":
+				predicates.add(predicate)
+	return predicates
+
+
 def _parameter_type(parameter: str) -> str:
 	text = str(parameter or "").strip()
 	if ":" in text:
@@ -151,6 +225,26 @@ def _parameter_type(parameter: str) -> str:
 	if "-" in text:
 		return text.split("-", 1)[1].strip() or "object"
 	return "object"
+
+
+def _parameter_name_type_pairs(parameter: Any) -> Tuple[Tuple[str, str], ...]:
+	text = str(parameter or "").strip()
+	if not text:
+		return ()
+	if " - " in text:
+		raw_names, raw_type = text.split(" - ", 1)
+		type_name = raw_type.strip() or "object"
+		return tuple(
+			(_symbol_token(name), type_name)
+			for name in raw_names.split()
+			if _symbol_token(name)
+		)
+	if ":" in text:
+		raw_name, raw_type = text.split(":", 1)
+		name = _symbol_token(raw_name)
+		return ((name, raw_type.strip() or "object"),) if name else ()
+	name = _symbol_token(text)
+	return ((name, "object"),) if name else ()
 
 
 def _typed_trigger_arguments(
@@ -211,6 +305,90 @@ def _method_variable_map(
 	return mapping
 
 
+def _method_variable_type_map(
+	*,
+	method: HTNMethod,
+	task_schema: Any | None,
+	task_parameter_types: Sequence[str],
+	domain_method_type_map: Dict[str, Dict[str, str]],
+	task_type_map: Dict[str, Tuple[str, ...]],
+	action_type_map: Dict[str, Tuple[str, ...]],
+	predicate_type_map: Dict[str, Tuple[str, ...]],
+) -> Dict[str, str]:
+	variable_types: Dict[str, str] = {}
+
+	def remember(variable: Any, type_name: Any) -> None:
+		token = _symbol_token(variable)
+		if not _looks_like_variable(token):
+			return
+		normalised_type = str(type_name or "").strip() or "object"
+		if not normalised_type or normalised_type == "object":
+			variable_types.setdefault(token, "object")
+			return
+		current_type = variable_types.get(token)
+		if current_type is None or current_type == "object":
+			variable_types[token] = normalised_type
+
+	for raw_parameter in tuple(getattr(method, "parameters", ()) or ()):
+		for variable_name, type_name in _parameter_name_type_pairs(raw_parameter):
+			remember(variable_name, type_name)
+
+	for method_key in (
+		getattr(method, "source_method_name", None),
+		getattr(method, "method_name", None),
+		sanitize_identifier(str(getattr(method, "method_name", "") or "")),
+	):
+		typed_parameters = domain_method_type_map.get(str(method_key or "").strip())
+		if not typed_parameters:
+			continue
+		for variable_name, type_name in typed_parameters.items():
+			remember(variable_name, type_name)
+
+	for argument, type_name in zip(
+		_trigger_argument_tokens(method=method, task_schema=task_schema),
+		task_parameter_types,
+	):
+		remember(argument, type_name)
+
+	for literal in tuple(getattr(method, "context", ()) or ()):
+		predicate_types = predicate_type_map.get(str(getattr(literal, "predicate", "") or ""))
+		if predicate_types is None:
+			continue
+		for argument, type_name in zip(getattr(literal, "args", ()) or (), predicate_types):
+			remember(argument, type_name)
+
+	for step in tuple(getattr(method, "subtasks", ()) or ()):
+		step_kind = str(getattr(step, "kind", "") or "").strip()
+		if step_kind == "primitive":
+			symbol = str(
+				getattr(step, "action_name", None)
+				or getattr(step, "task_name", "")
+				or "",
+			).strip()
+			signature = action_type_map.get(symbol) or action_type_map.get(sanitize_identifier(symbol))
+		else:
+			symbol = str(getattr(step, "task_name", "") or "").strip()
+			signature = task_type_map.get(symbol) or task_type_map.get(sanitize_identifier(symbol))
+		for argument, type_name in zip(getattr(step, "args", ()) or (), signature or ()):
+			remember(argument, type_name)
+		for step_literal in (
+			*(tuple(getattr(step, "preconditions", ()) or ())),
+			*(tuple(getattr(step, "effects", ()) or ())),
+		):
+			predicate_types = predicate_type_map.get(
+				str(getattr(step_literal, "predicate", "") or ""),
+			)
+			if predicate_types is None:
+				continue
+			for argument, type_name in zip(
+				getattr(step_literal, "args", ()) or (),
+				predicate_types,
+			):
+				remember(argument, type_name)
+
+	return variable_types
+
+
 def _translate_step(
 	step: Any,
 	*,
@@ -260,6 +438,9 @@ def _translated_context_literals(
 	method: HTNMethod,
 	task_schema: Any | None,
 	variable_map: Dict[str, str],
+	method_variable_types: Dict[str, str],
+	methods_by_task: Dict[str, List[HTNMethod]],
+	mutable_predicates: set[str],
 	action_semantics_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[str, ...]:
 	trigger_variables = {
@@ -274,20 +455,63 @@ def _translated_context_literals(
 	}
 	context_bound_variables = set(trigger_variables)
 	context_bound_variables.update(_positive_context_variable_tokens(method))
-	context_literals = [
-		_translate_context_literal(literal, variable_map=variable_map)
-		for literal in tuple(getattr(method, "context", ()) or ())
-	]
+	context_guard_variables = set(trigger_variables)
+	context_literals: List[str] = []
+	for literal in tuple(getattr(method, "context", ()) or ()):
+		if _is_positive_predicate_literal(literal):
+			context_guard_variables.update(_literal_variable_tokens(getattr(literal, "args", ()) or ()))
+		context_literals.append(_translate_context_literal(literal, variable_map=variable_map))
 	for literal in _local_witness_binding_literals(
 		method=method,
 		local_variables=local_variables,
 		initial_bound_variables=context_bound_variables,
+		methods_by_task=methods_by_task,
+		mutable_predicates=mutable_predicates,
 		action_semantics_map=action_semantics_map,
 	):
+		if _is_positive_predicate_literal(literal):
+			context_guard_variables.update(_literal_variable_tokens(getattr(literal, "args", ()) or ()))
 		rendered = _translate_context_literal(literal, variable_map=variable_map)
 		if rendered not in context_literals:
 			context_literals.append(rendered)
+	type_guard_literals = _type_guard_context_literals(
+		method_variable_types=method_variable_types,
+		guard_variables=context_guard_variables,
+		variable_map=variable_map,
+	)
+	context_literals = [*type_guard_literals, *context_literals]
 	return tuple(sorted(context_literals, key=_context_literal_order_key))
+
+
+def _is_positive_predicate_literal(literal: Any) -> bool:
+	if not bool(getattr(literal, "is_positive", True)):
+		return False
+	predicate = str(getattr(literal, "predicate", "") or "").strip()
+	return bool(predicate and predicate != "=")
+
+
+def _type_guard_context_literals(
+	*,
+	method_variable_types: Dict[str, str],
+	guard_variables: set[str],
+	variable_map: Dict[str, str],
+) -> List[str]:
+	context_literals: List[str] = []
+	seen: set[Tuple[str, str]] = set()
+	for variable, type_name in method_variable_types.items():
+		if variable not in guard_variables:
+			continue
+		if not _looks_like_variable(variable):
+			continue
+		if not type_name or type_name == "object":
+			continue
+		canonical_variable = _translate_term(variable, variable_map=variable_map)
+		key = (canonical_variable, type_name)
+		if key in seen:
+			continue
+		seen.add(key)
+		context_literals.append(f"object_type({canonical_variable}, {type_name})")
+	return context_literals
 
 
 def _context_literal_order_key(literal: str) -> int:
@@ -308,6 +532,8 @@ def _local_witness_binding_literals(
 	method: HTNMethod,
 	local_variables: set[str],
 	initial_bound_variables: set[str],
+	methods_by_task: Dict[str, List[HTNMethod]],
+	mutable_predicates: set[str],
 	action_semantics_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[Any, ...]:
 	if not local_variables:
@@ -317,11 +543,21 @@ def _local_witness_binding_literals(
 	produced_positive_signatures: set[str] = set()
 	previous_compound_arg_tuples: set[Tuple[str, ...]] = set()
 	bound_variables = set(initial_bound_variables)
+	prior_compound_step_seen = False
 	for step in tuple(getattr(method, "subtasks", ()) or ()):
 		step_kind = str(getattr(step, "kind", "") or "").strip()
 		if step_kind == "compound":
+			prior_compound_step_seen = True
 			previous_compound_arg_tuples.add(
 				tuple(str(argument) for argument in (getattr(step, "args", ()) or ())),
+			)
+			produced_positive_signatures.update(
+				_compound_step_positive_effect_signatures(
+					step=step,
+					methods_by_task=methods_by_task,
+					action_semantics_map=action_semantics_map,
+					stack=(),
+				),
 			)
 			continue
 		if step_kind != "primitive":
@@ -347,6 +583,8 @@ def _local_witness_binding_literals(
 				continue
 			predicate = str(getattr(precondition, "predicate", "") or "").strip()
 			if not predicate or predicate == "=":
+				continue
+			if prior_compound_step_seen and predicate in mutable_predicates:
 				continue
 			bound_args = tuple(
 				bindings.get(str(argument), str(argument))
@@ -390,6 +628,106 @@ def _local_witness_binding_literals(
 			)
 			produced_positive_signatures.add(f"{predicate}({','.join(bound_args)})")
 	return tuple(binding_literals)
+
+
+def _compound_step_positive_effect_signatures(
+	*,
+	step: Any,
+	methods_by_task: Dict[str, List[HTNMethod]],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+	stack: Tuple[str, ...],
+) -> set[str]:
+	task_name = str(getattr(step, "task_name", "") or "").strip()
+	if not task_name:
+		return set()
+	step_args = tuple(str(argument) for argument in (getattr(step, "args", ()) or ()))
+	signatures: set[str] = set()
+	for child_method in tuple(methods_by_task.get(task_name, ()) or ()):
+		method_key = str(getattr(child_method, "method_name", "") or "").strip()
+		if method_key and method_key in stack:
+			continue
+		child_effects = _method_positive_effect_literals(
+			method=child_method,
+			methods_by_task=methods_by_task,
+			action_semantics_map=action_semantics_map,
+			stack=stack + ((method_key or task_name),),
+		)
+		child_task_args = _trigger_argument_tokens(method=child_method, task_schema=None)
+		bindings = {
+			str(parameter): str(argument)
+			for parameter, argument in zip(child_task_args, step_args)
+		}
+		for effect in child_effects:
+			bound_args = tuple(
+				bindings.get(str(argument), str(argument))
+				for argument in (getattr(effect, "args", ()) or ())
+			)
+			signatures.add(f"{effect.predicate}({','.join(bound_args)})")
+	return signatures
+
+
+def _method_positive_effect_literals(
+	*,
+	method: HTNMethod,
+	methods_by_task: Dict[str, List[HTNMethod]],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+	stack: Tuple[str, ...],
+) -> Tuple[Any, ...]:
+	effects: List[Any] = []
+	for step in tuple(getattr(method, "subtasks", ()) or ()):
+		step_kind = str(getattr(step, "kind", "") or "").strip()
+		if step_kind == "primitive":
+			action_name = str(
+				getattr(step, "action_name", None)
+				or getattr(step, "task_name", "")
+				or "",
+			).strip()
+			action_entry = action_semantics_map.get(action_name) or action_semantics_map.get(
+				sanitize_identifier(action_name),
+			)
+			if action_entry is None:
+				continue
+			action_parameters = tuple(action_entry.get("parameters") or ())
+			step_args = tuple(getattr(step, "args", ()) or ())
+			bindings = {
+				str(parameter): str(argument)
+				for parameter, argument in zip(action_parameters, step_args)
+			}
+			for effect in tuple(action_entry.get("effects") or ()):
+				if not bool(getattr(effect, "is_positive", True)):
+					continue
+				predicate = str(getattr(effect, "predicate", "") or "").strip()
+				if not predicate or predicate == "=":
+					continue
+				bound_args = tuple(
+					bindings.get(str(argument), str(argument))
+					for argument in (getattr(effect, "args", ()) or ())
+				)
+				effects.append(
+					HTNLiteral(
+						predicate=predicate,
+						args=bound_args,
+						is_positive=True,
+					),
+				)
+			continue
+		if step_kind == "compound":
+			for signature in _compound_step_positive_effect_signatures(
+				step=step,
+				methods_by_task=methods_by_task,
+				action_semantics_map=action_semantics_map,
+				stack=stack,
+			):
+				predicate, raw_args = signature.split("(", 1)
+				args = tuple(arg for arg in raw_args[:-1].split(",") if arg)
+				effects.append(
+					HTNLiteral(
+						predicate=predicate,
+						args=args,
+						is_positive=True,
+					),
+				)
+	return tuple(effects)
 
 
 def _positive_context_variable_tokens(method: HTNMethod) -> set[str]:
