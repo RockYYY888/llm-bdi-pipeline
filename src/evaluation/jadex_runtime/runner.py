@@ -77,10 +77,10 @@ class JadexBDIRunner:
 
 	backend_name = "JadexBDIRetry"
 	runtime_output_artifact_limit_chars = 500_000
-	max_search_nodes = 2_000_000
+	max_search_nodes = 50_000_000
 	max_goal_depth = 4_000
 	failed_goal_record_limit = 64
-	candidate_retry_limit = 100_000
+	candidate_retry_limit = 1_000_000
 	candidate_rejection_log_limit = 64
 
 	def __init__(self, *, timeout_seconds: int = 1800) -> None:
