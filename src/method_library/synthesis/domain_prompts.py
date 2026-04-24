@@ -1094,6 +1094,7 @@ def build_domain_htn_system_prompt() -> str:
 		"- If a method has zero or one subtask, ordering must be [].\n"
 		"- Empty subtasks are allowed only for already-satisfied guard methods; constructive methods must contain real subtasks.\n"
 		"- Recursive methods must make progress by changing at least one witness argument or state-support step before recursion.\n"
+		"- All JSON scalar values for names, variables, constants, literals, step ids, and instruction ids must be quoted strings.\n"
 		"\n"
 		"OUTPUT:\n"
 		"Return exactly one minified JSON object with top-level keys compound_tasks and methods. "
@@ -1198,6 +1199,7 @@ def build_domain_htn_user_prompt(
 			"methods entries use: method_name, task_name, parameters, task_args, context, subtasks, ordering, source_instruction_ids.\n"
 			"ordering must be an array of two-element step-id arrays such as [[\"s1\", \"s2\"]].\n"
 			"Each subtask entry uses: step_id, task_name, args, kind.\n"
+			"All names, args, context literals, ordering step ids, and source_instruction_ids are strings; never emit bare tokens.\n"
 			"Use empty subtasks plus empty ordering for noop methods.\n"
 			f"schema_hint: {schema_hint}",
 		),

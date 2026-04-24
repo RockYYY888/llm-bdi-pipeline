@@ -136,6 +136,7 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "Do not copy object constants from temporal specifications into M" in system_prompt
 	assert "If a method has zero or one subtask, ordering must be []." in system_prompt
 	assert 'local pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
+	assert "must be quoted strings" in system_prompt
 	assert "Non-noop methods must contain real subtasks" in user_prompt
 	assert "primitive leaf methods must include the primitive action itself" in user_prompt
 	assert "Use temporal_specifications as the only task-level supervision" in user_prompt
@@ -147,6 +148,7 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "methods with fewer than two subtasks have empty ordering" in user_prompt
 	assert "Before emitting JSON, check that:" in user_prompt
 	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt
+	assert "never emit bare tokens" in user_prompt
 	assert "primitive_actions:" not in user_prompt
 	assert "<silent_self_check>" not in user_prompt
 	assert "Emit one JSON object with keys compound_tasks and methods." in user_prompt

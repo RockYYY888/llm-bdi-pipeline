@@ -154,7 +154,12 @@ def test_rendering_emits_jason_safe_functors_for_hddl_symbols() -> None:
 	)
 	method_library = HTNMethodLibrary(
 		compound_tasks=[
-			HTNTask(name="do-put-on", parameters=("?block",), is_primitive=False),
+			HTNTask(
+				name="do_put_on",
+				parameters=("?block",),
+				is_primitive=False,
+				source_name="do-put-on",
+			),
 		],
 		primitive_tasks=[
 			HTNTask(name="pick-up", parameters=("?block",), is_primitive=True),
@@ -162,7 +167,7 @@ def test_rendering_emits_jason_safe_functors_for_hddl_symbols() -> None:
 		methods=[
 			HTNMethod(
 				method_name="m_do_put_on",
-				task_name="do-put-on",
+				task_name="do_put_on",
 				parameters=("?block",),
 				task_args=("?block",),
 				context=(HTNLiteral(predicate="clear-top", args=("?block",)),),
@@ -178,6 +183,7 @@ def test_rendering_emits_jason_safe_functors_for_hddl_symbols() -> None:
 	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
 	rendered = render_plan_library_asl(plan_library)
 
+	assert plan_library.plans[0].trigger.arguments == ("BLOCK:block",)
 	assert "+!do_put_on(BLOCK) : clear_top(BLOCK) <-" in rendered
 	assert "\tpick_up(BLOCK)." in rendered
 	assert "do-put-on" not in rendered

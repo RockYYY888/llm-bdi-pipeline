@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+from method_library.synthesis.naming import sanitize_identifier
 from method_library.synthesis.schema import HTNMethod, HTNMethodLibrary
 
 from .models import (
@@ -106,10 +107,12 @@ def _task_type_map_for_domain(domain: Any) -> Dict[str, Tuple[str, ...]]:
 		task_name = str(getattr(task, "name", "") or "").strip()
 		if not task_name:
 			continue
-		mapping[task_name] = tuple(
+		task_types = tuple(
 			_parameter_type(parameter)
 			for parameter in (getattr(task, "parameters", ()) or ())
 		)
+		mapping[task_name] = task_types
+		mapping.setdefault(sanitize_identifier(task_name), task_types)
 	return mapping
 
 
