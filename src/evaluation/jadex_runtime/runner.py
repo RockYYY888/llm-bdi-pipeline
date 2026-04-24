@@ -568,6 +568,7 @@ class JadexBDIRunner:
 		bindings: Bindings,
 		world: World,
 	) -> Iterator[Bindings]:
+		self._check_deadline()
 		if not literals:
 			yield dict(bindings)
 			return
@@ -581,6 +582,7 @@ class JadexBDIRunner:
 		bindings: Bindings,
 		world: World,
 	) -> Iterator[Bindings]:
+		self._check_deadline()
 		predicate = self._normalise_name(str(literal.get("predicate") or ""))
 		args = tuple(str(arg) for arg in (literal.get("args") or ()))
 		is_positive = bool(literal.get("is_positive", True))
@@ -599,6 +601,7 @@ class JadexBDIRunner:
 					yield dict(bindings)
 			return
 		for fact_predicate, fact_args in world:
+			self._check_deadline()
 			if fact_predicate != predicate or len(fact_args) != len(args):
 				continue
 			next_bindings = dict(bindings)
@@ -619,6 +622,7 @@ class JadexBDIRunner:
 				yield dict(bindings)
 			return
 		for candidate in self._objects_by_type.get(expected_type, ()):
+			self._check_deadline()
 			next_bindings = dict(bindings)
 			if self._unify_term(value_token, candidate, next_bindings):
 				yield next_bindings
@@ -907,13 +911,16 @@ class JadexBDIRunner:
 		self._debug_lines.append(f"runtime goal failed fail_goal({payload})")
 
 	def _check_budget(self) -> None:
-		if time.perf_counter() >= self._deadline:
-			raise TimeoutError("Jadex-style BDI execution timed out.")
+		self._check_deadline()
 		self._nodes_expanded += 1
 		if self._nodes_expanded > self.max_search_nodes:
 			raise TimeoutError(
 				f"Jadex-style BDI execution exceeded node budget {self.max_search_nodes}.",
 			)
+
+	def _check_deadline(self) -> None:
+		if time.perf_counter() >= self._deadline:
+			raise TimeoutError("Jadex-style BDI execution timed out.")
 
 	def _bounded_text(self, text: str) -> Tuple[str, bool]:
 		value = str(text or "")
