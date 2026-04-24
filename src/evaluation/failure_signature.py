@@ -56,9 +56,9 @@ def infer_missing_goal_facts(
 		return ()
 	problem = HDDLParser.parse_problem(str(Path(problem_file).resolve()))
 	world_fact_set = {
-		str(fact).strip()
+		canonical_fact
 		for fact in (world_facts or ())
-		if str(fact).strip()
+		if (canonical_fact := _canonical_positive_fact_atom(str(fact).strip()))
 	}
 	missing_goal_facts = [
 		render_problem_fact(fact)
@@ -68,9 +68,52 @@ def infer_missing_goal_facts(
 		sorted(
 			fact
 			for fact in missing_goal_facts
-			if fact and fact not in world_fact_set
+			if fact and _canonical_positive_fact_atom(fact) not in world_fact_set
 		),
 	)
+
+
+def _canonical_positive_fact_atom(fact: str) -> Optional[str]:
+	text = str(fact or "").strip()
+	if not text:
+		return None
+	if text.startswith("(") and text.endswith(")"):
+		inner = text[1:-1].strip()
+		if not inner or inner.startswith("not "):
+			return None
+		tokens = inner.split()
+		if not tokens:
+			return None
+		return _canonical_fact_parts(tokens[0], tokens[1:])
+	match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_-]*)\((.*)\)", text)
+	if match is not None:
+		args = [
+			_strip_fact_argument_quotes(part.strip())
+			for part in match.group(2).split(",")
+			if part.strip()
+		]
+		return _canonical_fact_parts(match.group(1), args)
+	tokens = text.split()
+	if tokens:
+		return _canonical_fact_parts(tokens[0], tokens[1:])
+	return None
+
+
+def _canonical_fact_parts(predicate: str, args: Sequence[str]) -> Optional[str]:
+	functor = re.sub(r"[^A-Za-z0-9_]+", "_", str(predicate).strip()).strip("_")
+	if not functor or functor == "_":
+		return None
+	if functor == "=":
+		return None
+	canonical_args = tuple(_strip_fact_argument_quotes(arg) for arg in args)
+	return f"{functor}({','.join(canonical_args)})" if canonical_args else functor
+
+
+def _strip_fact_argument_quotes(argument: str) -> str:
+	token = str(argument).strip()
+	if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'}:
+		return token[1:-1]
+	return token
 
 
 def build_failure_signature(

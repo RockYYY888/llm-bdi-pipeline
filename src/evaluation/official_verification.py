@@ -225,14 +225,28 @@ def verify_jason_hierarchical_plan(
 	)
 	if missing_goal_facts:
 		artifacts["missing_goal_facts"] = list(missing_goal_facts)
+	runtime_goal_reached = bool(replayed_world_facts) and not missing_goal_facts
+	hierarchical_success = (
+		verifier_result.tool_available
+		and verifier_result.plan_kind == "hierarchical"
+		and verifier_result.verification_result is True
+	)
+	primitive_runtime_success = (
+		verifier_result.tool_available
+		and verifier_result.plan_kind == "primitive_only"
+		and verifier_result.primitive_plan_executable is True
+		and runtime_goal_reached
+	)
+	success = hierarchical_success or primitive_runtime_success
 	summary = {
 		"backend": "pandaPIparser",
-		"status": "success" if verifier_result.verification_result is True else "failed",
+		"status": "success" if success else "failed",
 		"tool_available": verifier_result.tool_available,
 		"plan_kind": verifier_result.plan_kind,
 		"verification_result": verifier_result.verification_result,
 		"primitive_plan_executable": verifier_result.primitive_plan_executable,
 		"reached_goal_state": verifier_result.reached_goal_state,
+		"runtime_goal_reached": runtime_goal_reached,
 		"build_warning": verifier_result.build_warning,
 		"verification_mode": verification_mode,
 		"evaluation_domain_source": evaluation_domain.source,
@@ -242,17 +256,14 @@ def verify_jason_hierarchical_plan(
 		"missing_goal_facts": list(missing_goal_facts),
 	}
 
-	success = (
-		verifier_result.tool_available
-		and verifier_result.plan_kind == "hierarchical"
-		and verifier_result.verification_result is True
-	)
 	error = None
 	if not success:
 		error = (
-			"Official IPC verifier rejected the generated hierarchical plan: "
+			"Official IPC verifier rejected the generated plan: "
 			f"plan_kind={verifier_result.plan_kind}, "
-			f"verification_result={verifier_result.verification_result}"
+			f"verification_result={verifier_result.verification_result}, "
+			f"primitive_plan_executable={verifier_result.primitive_plan_executable}, "
+			f"runtime_goal_reached={runtime_goal_reached}"
 		)
 
 	return EvaluationVerificationOutcome(

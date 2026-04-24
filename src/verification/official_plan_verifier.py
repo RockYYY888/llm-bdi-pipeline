@@ -582,6 +582,8 @@ class IPCPlanVerifier:
 				f"({trace_index}/{len(trace_entries)} entries)"
 			)
 		self._last_hierarchical_build_warning = "; ".join(warnings) if warnings else None
+		if warnings:
+			return None
 		return self._render_hierarchical_plan(root_nodes)
 
 	@staticmethod

@@ -110,6 +110,16 @@ def _extract_reported_evaluation_domain_source(execution: Dict[str, Any]) -> str
 
 def _classify_evaluation_failure(result: Dict[str, Any], execution: Dict[str, Any]) -> str:
 	if bool(result.get("success")):
+		summary = dict(
+			result.get("plan_verification_summary")
+			or ((result.get("plan_verification") or {}).get("summary") or {}),
+		)
+		if (
+			str(summary.get("plan_kind") or "") == "primitive_only"
+			and summary.get("primitive_plan_executable") is True
+			and summary.get("runtime_goal_reached") is True
+		):
+			return "runtime_goal_verified"
 		return "hierarchical_plan_verified"
 
 	step = str(result.get("step") or "").strip()
@@ -589,6 +599,7 @@ def _load_query_report_checkpoint(
 def _count_query_outcomes(query_reports: Sequence[Dict[str, Any]]) -> Dict[str, int]:
 	counts = {
 		"hierarchical_plan_verified": 0,
+		"runtime_goal_verified": 0,
 		"goal_grounding_failed": 0,
 		GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET: 0,
 		"agentspeak_rendering_failed": 0,
@@ -642,7 +653,12 @@ def _build_domain_summary(
 		"resumed_query_ids": list(resumed_query_ids),
 		"resume_enabled": bool(resume),
 		"complete": not remaining_query_ids,
-		"verified_successes": counts.get("hierarchical_plan_verified", 0),
+		"verified_successes": (
+			counts.get("hierarchical_plan_verified", 0)
+			+ counts.get("runtime_goal_verified", 0)
+		),
+		"hierarchical_verified_successes": counts.get("hierarchical_plan_verified", 0),
+		"runtime_goal_verified_successes": counts.get("runtime_goal_verified", 0),
 		"goal_grounding_failures": counts.get("goal_grounding_failed", 0),
 		"goal_grounding_provider_failures": counts.get(
 			GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET,

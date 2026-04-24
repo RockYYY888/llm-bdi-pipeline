@@ -554,6 +554,11 @@ class PlanLibraryEvaluationOrchestrator:
 				if self.problem is not None
 				else ()
 			)
+			goal_facts = (
+				tuple(render_problem_fact(fact) for fact in (self.problem.goal_facts or ()))
+				if self.problem is not None
+				else ()
+			)
 			runtime_objects = tuple(
 				str(object_name).strip()
 				for object_name in (
@@ -573,6 +578,7 @@ class PlanLibraryEvaluationOrchestrator:
 				object_types=dict(grounding_result.typed_objects),
 				type_parent_map=dict(evaluation_domain.type_parent_map),
 				query_goals=tuple(subgoal.to_dict() for subgoal in grounding_result.subgoals),
+				goal_facts=goal_facts,
 				domain_name=evaluation_domain.domain.name,
 				problem_file=str(Path(verification_problem_file).resolve()),
 				output_dir=output_dir,
@@ -580,13 +586,18 @@ class PlanLibraryEvaluationOrchestrator:
 			if validation.status != "success":
 				raise ValueError(validation.stderr or validation.stdout or "Jason runtime returned failure")
 
-			hierarchical_plan_text = render_supported_hierarchical_plan(
-				action_path=validation.action_path,
-				method_library=method_library,
-				method_trace=validation.method_trace,
-				problem_file=str(Path(verification_problem_file).resolve()),
-				domain_file=evaluation_domain.domain_file,
+			goal_repair_pass_count = int(
+				(dict(validation.artifacts).get("goal_repair_pass_count") or 0),
 			)
+			hierarchical_plan_text = None
+			if goal_repair_pass_count <= 1:
+				hierarchical_plan_text = render_supported_hierarchical_plan(
+					action_path=validation.action_path,
+					method_library=method_library,
+					method_trace=validation.method_trace,
+					problem_file=str(Path(verification_problem_file).resolve()),
+					domain_file=evaluation_domain.domain_file,
+				)
 			result = JasonExecutionResult(
 				query_text=grounding_result.query_text,
 				ltlf_formula=grounding_result.ltlf_formula,

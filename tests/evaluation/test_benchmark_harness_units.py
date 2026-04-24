@@ -80,6 +80,36 @@ def test_goal_grounding_validation_error_remains_grounding_failed() -> None:
 	assert bucket == "goal_grounding_failed"
 
 
+def test_runtime_repair_success_uses_separate_goal_verified_bucket() -> None:
+	bucket = _classify_evaluation_failure(
+		{
+			"success": True,
+			"plan_verification_summary": {
+				"plan_kind": "primitive_only",
+				"primitive_plan_executable": True,
+				"runtime_goal_reached": True,
+			},
+		},
+		{},
+	)
+
+	assert bucket == "runtime_goal_verified"
+
+	assert _classify_evaluation_failure(
+		{
+			"success": True,
+			"plan_verification": {
+				"summary": {
+					"plan_kind": "primitive_only",
+					"primitive_plan_executable": True,
+					"runtime_goal_reached": True,
+				},
+			},
+		},
+		{},
+	) == "runtime_goal_verified"
+
+
 def test_evaluation_benchmark_standard_library_source_is_benchmark() -> None:
 	assert BENCHMARK_EVALUATION_LIBRARY_SOURCE == "benchmark"
 

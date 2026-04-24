@@ -26,6 +26,7 @@ from evaluation.goal_grounding.grounder import (
 )
 from evaluation.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from evaluation.jason_runtime.runner import JasonRunner, JasonValidationResult
+from evaluation.failure_signature import infer_missing_goal_facts
 from evaluation.official_verification import resolve_verification_domain_file
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
 from plan_library import (
@@ -1461,6 +1462,38 @@ def test_jason_runner_execution_entry_runs_query_goals_directly() -> None:
 	assert '.print("execute success")' in execute_section
 
 
+def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!task_a : true <-
+	true.
+""".strip(),
+		method_library=_sample_method_library(),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "task_a", "args": []},),
+		goal_facts=("(done a)",),
+	)
+
+	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
+
+	assert "!finish_or_retry_0;" in execute_section
+	assert "+!finish_or_retry_0 : done(a) <-" in runtime_program
+	assert "+!finish_or_retry_0 : true <-" in runtime_program
+	assert "+!execute_query_pass_1 : true <-" in runtime_program
+	assert '.print("runtime query pass ", 1)' in runtime_program
+	assert "!task_a." in runtime_program
+	assert runner._extract_goal_repair_pass_count("runtime query pass 1\nruntime query pass 3") == 3
+
+
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
@@ -1696,6 +1729,73 @@ def test_method_trace_reconstruction_accepts_hyphenated_runtime_action_names(
 	assert rendered_plan is not None
 	assert "pick-up b4" in rendered_plan
 	assert "stack b4 b2" in rendered_plan
+
+
+def test_hierarchical_plan_exporter_rejects_runtime_repair_suffix(tmp_path: Path) -> None:
+	problem_file = tmp_path / "blocksworld_repeated_runtime_roots.hddl"
+	problem_file.write_text(
+		"""(define (problem BW-repair-root)
+(:domain BLOCKS)
+(:objects b2 b4 - block)
+(:htn :parameters () :ordered-subtasks (and
+(task1 (do_put_on b4 b2))
+))
+(:init
+(handempty)
+(ontable b2)
+(ontable b4)
+(clear b2)
+(clear b4)
+)
+\t(:goal (and
+(on b4 b2)
+\t))
+)
+""",
+		encoding="utf-8",
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="do_put_on", parameters=("?x", "?y"), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="pick_up", parameters=("?x",), is_primitive=True),
+			HTNTask(name="stack", parameters=("?x", "?y"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on_serial",
+				task_name="do_put_on",
+				parameters=("?x", "?y"),
+				task_args=("?x", "?y"),
+				subtasks=(
+					HTNMethodStep("s1", "pick_up", ("?x",), "primitive", action_name="pick_up"),
+					HTNMethodStep("s2", "stack", ("?x", "?y"), "primitive", action_name="stack"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	rendered_plan = IPCPlanVerifier()._render_supported_hierarchical_plan(
+		domain_file=problem_file,
+		problem_file=problem_file,
+		action_path=(
+			"pick-up(b4)",
+			"stack(b4,b2)",
+			"pick-up(b4)",
+			"stack(b4,b2)",
+		),
+		method_library=method_library,
+		method_trace=(
+			{"method_name": "m_do_put_on_serial", "task_args": ("b4", "b2")},
+			{"method_name": "m_do_put_on_serial", "task_args": ("b4", "b2")},
+		),
+	)
+
+	assert rendered_plan is None
 
 
 def test_goal_grounding_raises_immediately_after_invalid_json_without_retry() -> None:
@@ -2053,6 +2153,15 @@ def test_goal_grounding_streaming_ignores_reasoning_payload_without_storing_it()
 	assert "llm_first_content_chunk_seconds" not in transport_metadata
 
 
+def test_missing_goal_inference_normalises_hddl_and_runtime_fact_formats() -> None:
+	missing = infer_missing_goal_facts(
+		problem_file=PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl",
+		world_facts=("on(b1,b4)", "on(b3,b1)"),
+	)
+
+	assert missing == ()
+
+
 def test_execute_query_with_jason_returns_none_when_runtime_fails(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
@@ -2126,6 +2235,7 @@ def test_execute_query_with_jason_returns_none_when_runtime_fails(
 	assert len(validation_calls) == 1
 	assert validation_calls[0]["plan_library"] == _sample_plan_library()
 	assert validation_calls[0]["query_goals"] == (grounding_result.subgoals[0].to_dict(),)
+	assert validation_calls[0]["goal_facts"]
 
 
 def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
@@ -2198,6 +2308,77 @@ def test_execute_query_with_jason_uses_reconstructed_hierarchical_plan_text(
 	assert result.hierarchical_plan_text == "reconstructed plan"
 
 
+def test_execute_query_with_jason_uses_primitive_verification_after_goal_repair(
+	monkeypatch: pytest.MonkeyPatch,
+	tmp_path: Path,
+) -> None:
+	orchestrator = PlanLibraryEvaluationOrchestrator(
+		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
+		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
+	)
+	orchestrator.output_dir = tmp_path
+	evaluation_domain = orchestrator._resolve_evaluation_domain_context()
+	grounding_result = TemporalGroundingResult(
+		query_text="stack b on a",
+		ltlf_formula="F(subgoal_1)",
+		subgoals=(GroundedSubgoal("subgoal_1", "do_put_on", ("b", "a")),),
+		typed_objects={"a": "block", "b": "block"},
+		query_object_inventory=(),
+		diagnostics=(),
+	)
+
+	class FakeRunner:
+		def validate(self, **_kwargs):
+			return JasonValidationResult(
+				status="success",
+				backend="RunLocalMAS",
+				java_path=None,
+				java_version=None,
+				javac_path=None,
+				jason_jar=None,
+				exit_code=0,
+				timed_out=False,
+				stdout="execute success",
+				stderr="",
+				action_path=["turn_to(a,b,c)"],
+				method_trace=[{"method_name": "runtime_method", "task_args": ["a", "b"]}],
+				failed_goals=[],
+				environment_adapter={},
+				failure_class=None,
+				consistency_checks={},
+				artifacts={"goal_repair_pass_count": 2},
+				timing_profile={},
+			)
+
+	monkeypatch.setattr(evaluation_orchestrator_module, "JasonRunner", lambda **_kwargs: FakeRunner())
+	monkeypatch.setattr(
+		evaluation_orchestrator_module,
+		"planner_action_schemas_for_domain",
+		lambda _domain: [{"action_name": "turn_to"}],
+	)
+	monkeypatch.setattr(
+		evaluation_orchestrator_module,
+		"render_supported_hierarchical_plan",
+		lambda **_kwargs: (_ for _ in ()).throw(AssertionError("hierarchical export skipped")),
+	)
+
+	result = orchestrator._execute_query_with_jason(
+		grounding_result=grounding_result,
+		method_library=_sample_method_library(),
+		plan_library=_sample_plan_library(),
+		agentspeak_code="!execute.",
+		agentspeak_artifacts={},
+		verification_problem_file=str(
+			PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"
+		),
+		verification_mode="original_problem",
+		evaluation_domain=evaluation_domain,
+	)
+
+	assert result is not None
+	assert result.hierarchical_plan_text is None
+
+
 def test_verify_plan_officially_restores_terminal_newline_for_hierarchical_plan_text(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,
@@ -2266,3 +2447,73 @@ def test_verify_plan_officially_restores_terminal_newline_for_hierarchical_plan_
 
 	assert plan_verification is not None
 	assert plan_verification["summary"]["status"] == "success"
+
+
+def test_verify_plan_officially_accepts_runtime_repair_primitive_goal_reach(
+	monkeypatch: pytest.MonkeyPatch,
+	tmp_path: Path,
+) -> None:
+	orchestrator = PlanLibraryEvaluationOrchestrator(
+		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
+		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
+		evaluation_domain_source="benchmark",
+	)
+	orchestrator.output_dir = tmp_path
+	evaluation_domain = orchestrator._resolve_evaluation_domain_context(source="benchmark")
+
+	class FakeVerifier:
+		def tool_available(self) -> bool:
+			return True
+
+		def verify_plan(self, **_kwargs):
+			return IPCPrimitivePlanVerificationResult(
+				tool_available=True,
+				command=["fake"],
+				plan_file=str(tmp_path / "plan.txt"),
+				output_file=str(tmp_path / "verifier.txt"),
+				stdout="Primitive plan alone executable: true\nPlan verification result: false",
+				stderr="",
+				primitive_plan_only=True,
+				primitive_plan_executable=True,
+				verification_result=False,
+				reached_goal_state=True,
+				plan_kind="primitive_only",
+				build_warning=None,
+				error="verifier exited with code 1",
+			)
+
+	monkeypatch.setattr(
+		evaluation_official_verification_module,
+		"IPCPlanVerifier",
+		lambda: FakeVerifier(),
+	)
+
+	plan_verification = orchestrator._verify_plan_officially(
+		method_library=_sample_method_library(),
+		plan_solve_data={
+			"summary": {
+				"backend": "jason",
+				"status": "success",
+			},
+			"artifacts": {
+				"planning_mode": "jason_runtime",
+				"verification_problem_file": str(
+					PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"
+				),
+				"verification_mode": "original_problem",
+				"action_path": ["pick-up(b1)", "stack(b1,b4)"],
+				"method_trace": [],
+				"consistency_checks": {
+					"action_path_schema_replay": {
+						"world_facts": ["on(b1,b4)", "on(b3,b1)"],
+					},
+				},
+			},
+		},
+		evaluation_domain=evaluation_domain,
+	)
+
+	assert plan_verification is not None
+	assert plan_verification["summary"]["status"] == "success"
+	assert plan_verification["summary"]["plan_kind"] == "primitive_only"
+	assert plan_verification["summary"]["runtime_goal_reached"] is True

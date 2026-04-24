@@ -170,6 +170,7 @@ class JasonRunner:
 		object_types: Optional[Dict[str, str]] = None,
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
 		query_goals: Sequence[Any] = (),
+		goal_facts: Sequence[str] = (),
 		domain_name: str,
 		problem_file: str | Path | None = None,
 		output_dir: str | Path,
@@ -223,6 +224,7 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 			query_goals=query_goals,
+			goal_facts=goal_facts,
 		)
 		runner_mas2j = self._build_runner_mas2j(domain_name)
 		env_source = self._build_environment_java_source(
@@ -310,6 +312,7 @@ class JasonRunner:
 		method_trace_output = stderr_text if "runtime trace method" in stderr_text else stdout
 		method_trace = self._extract_method_trace(method_trace_output)
 		failed_goals = self._extract_failed_goals(stdout)
+		goal_repair_pass_count = self._extract_goal_repair_pass_count(stdout)
 		timing_profile["output_processing_seconds"] = (
 			time.perf_counter() - output_processing_start
 		)
@@ -331,6 +334,7 @@ class JasonRunner:
 			"action_path": str(action_path_path),
 			"method_trace": str(method_trace_path),
 			"jason_validation": str(validation_json_path),
+			"goal_repair_pass_count": goal_repair_pass_count,
 		}
 		environment_validation_start = time.perf_counter()
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
@@ -346,6 +350,7 @@ class JasonRunner:
 				action_schemas=action_schemas,
 				seed_facts=seed_facts,
 				problem_file=problem_file,
+				skip_method_trace_diagnostics=goal_repair_pass_count > 1,
 			)
 		except Exception as exc:
 			consistency_checks = {
@@ -565,6 +570,7 @@ class JasonRunner:
 		object_types: Optional[Dict[str, str]] = None,
 		type_parent_map: Optional[Dict[str, Optional[str]]] = None,
 		query_goals: Sequence[Any] = (),
+		goal_facts: Sequence[str] = (),
 	) -> str:
 		runtime_ready_code = self._inject_runtime_object_beliefs(
 			agentspeak_code,
@@ -590,6 +596,7 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 		)
+		goal_context = self._render_goal_fact_context(goal_facts)
 		lines = [
 			lowered_code.rstrip(),
 			"",
@@ -604,22 +611,108 @@ class JasonRunner:
 			"",
 			"+!execute : true <-",
 		]
+		execute_body = self._render_execute_body(
+			query_goals=query_goals,
+			goal_context=goal_context,
+		)
 		lines.extend(
-			self._indent_body(
-					[
-						'.print("execute start")',
-						".perceive",
-						*self._render_query_goal_calls(query_goals),
-						'.print("execute success")',
-						".stopMAS",
-					],
-			),
+			self._indent_body(execute_body),
 		)
 		lines.append("")
+		if goal_context:
+			lines.extend(
+				self._render_goal_repair_plans(
+					query_goals=query_goals,
+					goal_context=goal_context,
+				),
+			)
 		lines.append("-!execute : true <-")
 		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return "\n".join(lines)
+
+	def _render_execute_body(
+		self,
+		*,
+		query_goals: Sequence[Any],
+		goal_context: str,
+	) -> Tuple[str, ...]:
+		if goal_context:
+			return (
+				'.print("execute start")',
+				".perceive",
+				"!finish_or_retry_0",
+				".stopMAS",
+			)
+		return (
+			'.print("execute start")',
+			".perceive",
+			*self._render_query_goal_calls(query_goals),
+			'.print("execute success")',
+			".stopMAS",
+		)
+
+	def _render_goal_repair_plans(
+		self,
+		*,
+		query_goals: Sequence[Any],
+		goal_context: str,
+	) -> List[str]:
+		pass_count = self._goal_repair_pass_count()
+		lines: List[str] = []
+		query_goal_calls = self._render_query_goal_calls(query_goals)
+		for pass_index in range(0, pass_count + 1):
+			lines.append(f"+!finish_or_retry_{pass_index} : {goal_context} <-")
+			lines.extend(self._indent_body(['.print("execute success")']))
+			lines.append("")
+			if pass_index >= pass_count:
+				lines.append(f"+!finish_or_retry_{pass_index} : true <-")
+				lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+				lines.append("")
+				continue
+			next_pass = pass_index + 1
+			lines.append(f"+!finish_or_retry_{pass_index} : true <-")
+			lines.extend(
+				self._indent_body(
+					[
+						f"!execute_query_pass_{next_pass}",
+						f"!finish_or_retry_{next_pass}",
+					],
+				),
+			)
+			lines.append("")
+			lines.append(f"+!execute_query_pass_{next_pass} : true <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f'.print("runtime query pass ", {next_pass})',
+						*(query_goal_calls or ("true",)),
+					),
+				),
+			)
+			lines.append("")
+		return lines
+
+	def _render_goal_fact_context(self, goal_facts: Sequence[str]) -> str:
+		goal_atoms: List[str] = []
+		seen: set[str] = set()
+		for fact in goal_facts:
+			atom = self._hddl_fact_to_atom(fact)
+			if not atom or atom in seen:
+				continue
+			seen.add(atom)
+			goal_atoms.append(atom)
+		return " & ".join(goal_atoms)
+
+	@staticmethod
+	def _goal_repair_pass_count() -> int:
+		raw_value = os.getenv("JASON_RUNTIME_GOAL_REPAIR_PASSES", "").strip()
+		if not raw_value:
+			return 3
+		try:
+			return max(1, int(raw_value))
+		except ValueError:
+			return 3
 
 	def _render_chained_goal_plans(
 		self,
@@ -739,6 +832,14 @@ class JasonRunner:
 			for line in stdout.splitlines()
 			if (match := pattern.match(line.strip())) is not None
 		]
+
+	@staticmethod
+	def _extract_goal_repair_pass_count(stdout: str) -> int:
+		passes = [
+			int(match.group(1))
+			for match in re.finditer(r"runtime query pass\s+([0-9]+)", str(stdout or ""))
+		]
+		return max(passes) if passes else 0
 
 	def _extract_method_trace(self, stdout: str) -> List[Dict[str, Any]]:
 		flat_pattern = re.compile(r"runtime trace method flat\s+(.+?)\s*$")
