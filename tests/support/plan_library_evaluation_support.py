@@ -15,14 +15,17 @@ sys.path.insert(0, str(SRC_ROOT))
 
 from execution_logging.execution_logger import ExecutionLogger
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
+from evaluation.pipeline import _temporal_specification_to_grounding_result
 from evaluation.failure_signature import (
 	build_failure_signature,
 	extract_mona_failure_signature,
 )
+from domain_model import load_query_sequence_records
 from plan_library import (
 	PlanLibraryArtifactBundle,
 	build_library_validation_record,
 	build_plan_library,
+	load_plan_library_artifact_bundle,
 	persist_plan_library_artifact_bundle,
 	render_plan_library_asl,
 )
@@ -354,6 +357,22 @@ def load_domain_query_cases(domain_key: str) -> Dict[str, Dict[str, Any]]:
 	)
 
 
+def load_domain_temporal_specifications(
+	domain_key: str,
+	*,
+	query_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+	_, temporal_specifications = load_query_sequence_records(
+		domain_file=DOMAIN_FILES[domain_key],
+		query_domain=domain_key,
+		query_ids=query_ids,
+	)
+	return {
+		record.instruction_id: record
+		for record in temporal_specifications
+	}
+
+
 def run_plan_library_evaluation_case(
 	domain_key: str,
 	query_id: str,
@@ -364,11 +383,31 @@ def run_plan_library_evaluation_case(
 	apply_evaluation_runtime_defaults()
 	query_cases = load_domain_query_cases(domain_key)
 	case = query_cases[query_id]
+	temporal_specifications = load_domain_temporal_specifications(
+		domain_key,
+		query_ids=(query_id,),
+	)
+	temporal_specification = temporal_specifications[query_id]
+	if str(temporal_specification.problem_file or "").strip():
+		expected_problem_name = Path(str(temporal_specification.problem_file)).name
+		actual_problem_name = Path(str(case["problem_file"])).name
+		if expected_problem_name != actual_problem_name:
+			raise AssertionError(
+				"Benchmark query case and stored temporal specification disagree on "
+				f"problem_file for {domain_key}/{query_id}: "
+				f"{actual_problem_name} != {expected_problem_name}",
+			)
+	case = {
+		**case,
+		"instruction": temporal_specification.source_text or case["instruction"],
+		"ltlf_formula": temporal_specification.ltlf_formula,
+	}
 	domain_file = DOMAIN_FILES[domain_key]
 	method_library_input = resolve_plan_library_input(
 		domain_key,
 		library_source=library_source,
 	)
+	library_artifact = load_plan_library_artifact_bundle(method_library_input)
 
 	orchestrator = PlanLibraryEvaluationOrchestrator(
 		domain_file=domain_file,
@@ -381,9 +420,16 @@ def run_plan_library_evaluation_case(
 		else GENERATED_LOGS_DIR
 	)
 	orchestrator.logger = ExecutionLogger(logs_dir=str(resolved_logs_root), run_origin="tests")
-	result = orchestrator.execute_query_with_library(
+	grounding_result = _temporal_specification_to_grounding_result(
+		temporal_specification=temporal_specification,
+		method_library=library_artifact.method_library,
+		problem=orchestrator.problem,
+		task_type_map=orchestrator.task_type_map,
+	)
+	result = orchestrator.execute_grounded_query_with_library(
 		case["instruction"],
-		library_artifact=method_library_input,
+		library_artifact=library_artifact,
+		grounding_result=grounding_result,
 	)
 	log_path = result.get("log_path")
 	log_dir = Path(str(log_path)).resolve().parent if log_path else None

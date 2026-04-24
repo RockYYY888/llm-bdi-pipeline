@@ -17,6 +17,7 @@ from tests.support.plan_library_evaluation_support import (
 	_classify_evaluation_failure,
 	_extract_reported_evaluation_domain_source,
 	apply_evaluation_runtime_defaults,
+	run_plan_library_evaluation_case,
 	run_plan_library_evaluation_benchmark_for_domain,
 )
 import tests.support.plan_library_evaluation_support as benchmark_support
@@ -28,6 +29,8 @@ from tests.run_plan_library_evaluation_benchmark import (
 	_write_latest_run_manifest,
 	_write_run_summary_snapshot,
 )
+from evaluation.artifacts import TemporalGroundingResult
+from temporal_specification import TemporalSpecificationRecord
 
 
 def test_evaluation_benchmark_runtime_defaults_pin_benchmark_domain_source() -> None:
@@ -332,6 +335,136 @@ def test_domain_benchmark_supports_single_query_runs(
 		/ "query_results"
 		/ "q2.json"
 	).exists()
+
+
+def test_evaluation_case_uses_stored_temporal_specification(
+	tmp_path: Path,
+	monkeypatch,
+) -> None:
+	problem_file = tmp_path / "p1.hddl"
+	problem_file.write_text("(define (problem p1))")
+	temporal_specification = TemporalSpecificationRecord(
+		instruction_id="query_1",
+		source_text="stored instruction",
+		ltlf_formula="F(do_move(b1,b2))",
+		referenced_events=(),
+		problem_file="p1.hddl",
+	)
+	captured: dict[str, object] = {}
+
+	monkeypatch.setattr(
+		benchmark_support,
+		"load_domain_query_cases",
+		lambda domain_key: {
+			"query_1": {
+				"instruction": "nl instruction should not be grounded",
+				"problem_file": str(problem_file),
+			},
+		},
+	)
+	monkeypatch.setattr(
+		benchmark_support,
+		"load_domain_temporal_specifications",
+		lambda domain_key, query_ids=None: {"query_1": temporal_specification},
+	)
+	monkeypatch.setattr(
+		benchmark_support,
+		"resolve_plan_library_input",
+		lambda domain_key, *, library_source: "library-root",
+	)
+	monkeypatch.setattr(
+		benchmark_support,
+		"load_plan_library_artifact_bundle",
+		lambda library_input: type("FakeBundle", (), {"method_library": object()})(),
+	)
+
+	def fake_temporal_specification_to_grounding_result(
+		*,
+		temporal_specification,
+		method_library,
+		problem,
+		task_type_map,
+	):
+		captured["temporal_specification"] = temporal_specification
+		return TemporalGroundingResult(
+			query_text=temporal_specification.source_text,
+			ltlf_formula=temporal_specification.ltlf_formula,
+			subgoals=(object(),),
+			typed_objects={},
+			query_object_inventory=(),
+			diagnostics=(),
+		)
+
+	monkeypatch.setattr(
+		benchmark_support,
+		"_temporal_specification_to_grounding_result",
+		fake_temporal_specification_to_grounding_result,
+	)
+
+	class FakeOrchestrator:
+		def __init__(self, *, domain_file, problem_file, evaluation_domain_source):
+			self.problem = object()
+			self.task_type_map = {}
+			self.logger = None
+
+		def execute_query_with_library(self, *args, **kwargs):
+			raise AssertionError("Benchmark evaluation must not call live NL grounding.")
+
+		def execute_grounded_query_with_library(
+			self,
+			nl_query,
+			*,
+			library_artifact,
+			grounding_result,
+		):
+			captured["nl_query"] = nl_query
+			captured["grounding_result"] = grounding_result
+			log_dir = Path(self.logger.logs_dir) / "query_1"
+			log_dir.mkdir(parents=True)
+			(log_dir / "execution.json").write_text(
+				json.dumps(
+					{
+						"goal_grounding": {
+							"metadata": {
+								"evaluation_domain_source": "benchmark",
+								"grounding_mode": "precomputed_temporal_specification",
+							},
+							"artifacts": {
+								"ltlf_formula": grounding_result.ltlf_formula,
+							},
+						},
+						"runtime_execution": {
+							"metadata": {"verification_mode": "original_problem"},
+						},
+						"ltlf_formula": grounding_result.ltlf_formula,
+					},
+				),
+			)
+			return {
+				"success": True,
+				"step": "",
+				"log_path": str(log_dir / "execution.txt"),
+			}
+
+	monkeypatch.setattr(
+		benchmark_support,
+		"PlanLibraryEvaluationOrchestrator",
+		FakeOrchestrator,
+	)
+
+	report = run_plan_library_evaluation_case(
+		"blocksworld",
+		"query_1",
+		library_source="official",
+		logs_root=tmp_path / "logs",
+	)
+
+	assert captured["temporal_specification"] is temporal_specification
+	assert captured["nl_query"] == "stored instruction"
+	assert captured["grounding_result"].ltlf_formula == "F(do_move(b1,b2))"
+	assert report["case"]["ltlf_formula"] == "F(do_move(b1,b2))"
+	assert report["failure_signature"]["ltlf_formula"] == "F(do_move(b1,b2))"
+	assert report["evaluation_domain_source"] == "benchmark"
 
 
 def test_full_sweep_summary_snapshot_writes_incremental_run_state(tmp_path: Path) -> None:
