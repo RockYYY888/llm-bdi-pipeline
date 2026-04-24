@@ -35,18 +35,31 @@ def _require_existing_path(path_text: str | None, *, label: str) -> str:
 	return resolved_path
 
 
-def _require_openai_api_key(*, config, purpose: str) -> None:
-	if config.validate():
+def _has_configured_api_key(api_key: str | None) -> bool:
+	return bool(api_key and api_key.startswith("sk-"))
+
+
+def _require_api_key(
+	*,
+	api_key: str | None,
+	env_var_name: str,
+	config,
+	purpose: str,
+	fallback_env_var_name: str | None = None,
+) -> None:
+	if _has_configured_api_key(api_key):
 		return
 	print("=" * 80)
-	print("ERROR: OpenAI API Key Not Configured")
+	print(f"ERROR: {env_var_name} Not Configured")
 	print("=" * 80)
 	print(f"\n{purpose} requires an OpenAI API key.")
 	print("\nPlease follow these steps:")
 	print("1. Copy .env.example to .env:")
 	print("   cp .env.example .env")
 	print("\n2. Edit .env and add your API key:")
-	print("   OPENAI_API_KEY=sk-proj-your-actual-key-here")
+	print(f"   {env_var_name}=sk-proj-your-actual-key-here")
+	if fallback_env_var_name:
+		print(f"   # fallback: {fallback_env_var_name}=sk-proj-your-actual-key-here")
 	print(
 		f"   GOAL_GROUNDING_MODEL={config.goal_grounding_model}  "
 		"# temporal specification grounding default",
@@ -150,9 +163,12 @@ def main() -> None:
 
 	if args.command == "generate-library":
 		domain_file = _require_existing_path(args.domain_file, label="Domain File")
-		_require_openai_api_key(
+		_require_api_key(
+			api_key=config.method_synthesis_api_key,
+			env_var_name="METHOD_SYNTHESIS_OPENAI_API_KEY",
 			config=config,
 			purpose="Plan-library generation",
+			fallback_env_var_name="OPENAI_API_KEY",
 		)
 		pipeline = PlanLibraryGenerationPipeline(
 			domain_file=domain_file,
@@ -180,7 +196,9 @@ def main() -> None:
 				)
 			problem_file = _require_existing_path(args.problem_file, label="Problem File")
 			if not str(args.ltlf_formula or "").strip():
-				_require_openai_api_key(
+				_require_api_key(
+					api_key=config.openai_api_key,
+					env_var_name="OPENAI_API_KEY",
 					config=config,
 					purpose="Ad hoc evaluation without a precomputed LTLf formula",
 				)

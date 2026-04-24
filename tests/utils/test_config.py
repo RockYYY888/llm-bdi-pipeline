@@ -109,6 +109,16 @@ def test_method_synthesis_model_defaults_to_pinned_kimi_chat(monkeypatch):
     assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
+def test_method_synthesis_api_key_prefers_method_specific_key(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+    monkeypatch.setenv("METHOD_SYNTHESIS_OPENAI_API_KEY", "sk-method")
+
+    config = Config()
+
+    assert config.method_synthesis_api_key == "sk-method"
+
+
 def test_method_synthesis_api_key_falls_back_to_shared_openai_api_key(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")

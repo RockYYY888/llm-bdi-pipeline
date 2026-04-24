@@ -168,8 +168,8 @@ class HTNMethodSynthesizer(
 				metadata,
 				"preflight",
 				(
-					"Method synthesis requires a configured METHOD_SYNTHESIS_OPENAI_API_KEY "
-					"(or OPENAI_API_KEY fallback). "
+					"Method synthesis requires METHOD_SYNTHESIS_OPENAI_API_KEY "
+					"(OPENAI_API_KEY is only a compatibility fallback). "
 					"HTN method synthesis only accepts live LLM output."
 				),
 			)
