@@ -77,10 +77,11 @@ class JadexBDIRunner:
 
 	backend_name = "JadexBDIRetry"
 	runtime_output_artifact_limit_chars = 500_000
-	max_search_nodes = 300_000
+	max_search_nodes = 2_000_000
 	max_goal_depth = 4_000
 	failed_goal_record_limit = 64
-	candidate_retry_limit = 512
+	candidate_retry_limit = 100_000
+	candidate_rejection_log_limit = 64
 
 	def __init__(self, *, timeout_seconds: int = 1800) -> None:
 		self.timeout_seconds = timeout_seconds
@@ -179,9 +180,12 @@ class JadexBDIRunner:
 					result_state = candidate_state
 					break
 				candidates_rejected += 1
-				self._debug_lines.append(
-					f"runtime candidate rejected candidate={candidates_considered}",
-				)
+				if candidates_rejected <= self.candidate_rejection_log_limit:
+					self._debug_lines.append(
+						f"runtime candidate rejected candidate={candidates_considered}",
+					)
+				elif candidates_rejected == self.candidate_rejection_log_limit + 1:
+					self._debug_lines.append("runtime candidate rejection log limit reached")
 				if candidates_considered >= candidate_limit_value:
 					break
 		except TimeoutError as exc:

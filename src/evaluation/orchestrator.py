@@ -695,7 +695,7 @@ class PlanLibraryEvaluationOrchestrator:
 				query_goals=tuple(subgoal.to_dict() for subgoal in grounding_result.subgoals),
 				output_dir=output_dir,
 				accept_candidate=accept_candidate,
-				candidate_limit=2048,
+				candidate_limit=100_000,
 			)
 			hierarchical_plan_text = render_supported_hierarchical_plan(
 				action_path=validation.action_path,
