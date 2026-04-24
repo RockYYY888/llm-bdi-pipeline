@@ -272,6 +272,8 @@ def _translated_context_literals(
 		for token in _method_variable_tokens(method)
 		if token not in trigger_variables
 	}
+	context_bound_variables = set(trigger_variables)
+	context_bound_variables.update(_positive_context_variable_tokens(method))
 	context_literals = [
 		_translate_context_literal(literal, variable_map=variable_map)
 		for literal in tuple(getattr(method, "context", ()) or ())
@@ -279,18 +281,33 @@ def _translated_context_literals(
 	for literal in _local_witness_binding_literals(
 		method=method,
 		local_variables=local_variables,
+		initial_bound_variables=context_bound_variables,
 		action_semantics_map=action_semantics_map,
 	):
 		rendered = _translate_context_literal(literal, variable_map=variable_map)
 		if rendered not in context_literals:
 			context_literals.append(rendered)
-	return tuple(context_literals)
+	return tuple(sorted(context_literals, key=_context_literal_order_key))
+
+
+def _context_literal_order_key(literal: str) -> int:
+	"""Order context literals so Jason binds variables before negation checks."""
+
+	text = str(literal or "").strip()
+	if not text:
+		return 3
+	if text.startswith("!") or text.lower().startswith("not ") or "!=" in text:
+		return 2
+	if "==" in text:
+		return 1
+	return 0
 
 
 def _local_witness_binding_literals(
 	*,
 	method: HTNMethod,
 	local_variables: set[str],
+	initial_bound_variables: set[str],
 	action_semantics_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[Any, ...]:
 	if not local_variables:
@@ -299,6 +316,7 @@ def _local_witness_binding_literals(
 	seen_signatures: set[str] = set()
 	produced_positive_signatures: set[str] = set()
 	previous_compound_arg_tuples: set[Tuple[str, ...]] = set()
+	bound_variables = set(initial_bound_variables)
 	for step in tuple(getattr(method, "subtasks", ()) or ()):
 		step_kind = str(getattr(step, "kind", "") or "").strip()
 		if step_kind == "compound":
@@ -337,13 +355,22 @@ def _local_witness_binding_literals(
 			signature = f"{predicate}({','.join(bound_args)})"
 			if signature in produced_positive_signatures:
 				continue
-			if bound_args in previous_compound_arg_tuples:
+			bound_arg_variables = _literal_variable_tokens(bound_args)
+			if (
+				bound_arg_variables
+				and bound_arg_variables <= bound_variables
+				and _covered_by_previous_compound_subtask(
+					bound_arg_variables,
+					previous_compound_arg_tuples,
+				)
+			):
 				continue
 			if not any(_symbol_token(argument) in local_variables for argument in bound_args):
 				continue
 			if signature in seen_signatures:
 				continue
 			seen_signatures.add(signature)
+			bound_variables.update(bound_arg_variables)
 			binding_literals.append(
 				HTNLiteral(
 					predicate=predicate,
@@ -363,6 +390,38 @@ def _local_witness_binding_literals(
 			)
 			produced_positive_signatures.add(f"{predicate}({','.join(bound_args)})")
 	return tuple(binding_literals)
+
+
+def _positive_context_variable_tokens(method: HTNMethod) -> set[str]:
+	tokens: set[str] = set()
+	for literal in tuple(getattr(method, "context", ()) or ()):
+		if not bool(getattr(literal, "is_positive", True)):
+			continue
+		predicate = str(getattr(literal, "predicate", "") or "").strip()
+		if not predicate or predicate == "=":
+			continue
+		tokens.update(_literal_variable_tokens(getattr(literal, "args", ()) or ()))
+	return tokens
+
+
+def _literal_variable_tokens(values: Iterable[Any]) -> set[str]:
+	return {
+		token
+		for token in (_symbol_token(value) for value in values)
+		if _looks_like_variable(token)
+	}
+
+
+def _covered_by_previous_compound_subtask(
+	variable_tokens: set[str],
+	previous_compound_arg_tuples: set[Tuple[str, ...]],
+) -> bool:
+	if not variable_tokens:
+		return False
+	for args in previous_compound_arg_tuples:
+		if variable_tokens <= _literal_variable_tokens(args):
+			return True
+	return False
 
 
 def _translate_term(

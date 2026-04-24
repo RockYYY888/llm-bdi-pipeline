@@ -259,3 +259,104 @@ def test_translation_lifts_local_witness_action_preconditions_into_context() -> 
 	assert "on(Y, X)" in plans_by_name["m7_do_clear"].context
 	assert "clear(Y)" not in plans_by_name["m7_do_clear"].context
 	assert "holding(Y)" not in plans_by_name["m7_do_clear"].context
+
+
+def test_translation_does_not_lift_preconditions_delegated_to_prior_compound_steps() -> None:
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["marsrover"])
+	method_library = build_official_method_library(DOMAIN_FILES["marsrover"])
+
+	plan_library, _coverage = build_plan_library(
+		domain=domain,
+		method_library=method_library,
+	)
+
+	plans_by_name = {plan.plan_name: plan for plan in plan_library.plans}
+	context = plans_by_name["m-get_rock_data"].context
+	assert "equipped_for_rock_analysis(ROVER)" in context
+	assert "store_of(S, ROVER)" in context
+	assert all(not literal.startswith("empty(") for literal in context)
+	assert all(not literal.startswith("at(") for literal in context)
+
+
+def test_translation_orders_positive_context_literals_before_negation_for_jason_binding() -> None:
+	domain = SimpleNamespace(
+		name="rover",
+		tasks=(
+			SimpleNamespace(
+				name="navigate_abs",
+				parameters=("?rover:rover", "?to:waypoint"),
+			),
+		),
+		predicates=(
+			SimpleNamespace(name="at", parameters=("?rover:rover", "?wp:waypoint")),
+			SimpleNamespace(
+				name="can_traverse",
+				parameters=("?rover:rover", "?from:waypoint", "?to:waypoint"),
+			),
+			SimpleNamespace(name="visited", parameters=("?wp:waypoint",)),
+		),
+		actions=(
+			SimpleNamespace(
+				name="navigate",
+				parameters=("?rover:rover", "?from:waypoint", "?to:waypoint"),
+			),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="navigate_abs", parameters=("?rover", "?to"), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="navigate", parameters=("?rover", "?from", "?to"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_navigate_abs_recursive",
+				task_name="navigate_abs",
+				parameters=("?rover", "?from", "?to", "?mid"),
+				task_args=("?rover", "?to"),
+				context=(
+					HTNLiteral(predicate="at", args=("?rover", "?to"), is_positive=False),
+					HTNLiteral(
+						predicate="can_traverse",
+						args=("?rover", "?from", "?to"),
+						is_positive=False,
+					),
+					HTNLiteral(predicate="can_traverse", args=("?rover", "?from", "?mid")),
+					HTNLiteral(predicate="visited", args=("?mid",), is_positive=False),
+					HTNLiteral(predicate="at", args=("?rover", "?from")),
+					HTNLiteral(predicate="can_traverse", args=("?rover", "?mid", "?to")),
+				),
+				subtasks=(
+					HTNMethodStep(
+						"s1",
+						"navigate",
+						("?rover", "?from", "?mid"),
+						"primitive",
+						action_name="navigate",
+					),
+					HTNMethodStep(
+						"s2",
+						"navigate",
+						("?rover", "?mid", "?to"),
+						"primitive",
+						action_name="navigate",
+					),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
+
+	assert plan_library.plans[0].context == (
+		"can_traverse(ROVER, FROM, MID)",
+		"at(ROVER, FROM)",
+		"can_traverse(ROVER, MID, TO)",
+		"!at(ROVER, TO)",
+		"!can_traverse(ROVER, FROM, TO)",
+		"!visited(MID)",
+	)
