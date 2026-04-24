@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from method_library.synthesis.schema import HTNMethodLibrary
+from utils.config import DEFAULT_METHOD_SYNTHESIS_SESSION_ID
 from .errors import LLMStreamingResponseError
 
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
@@ -22,7 +23,6 @@ KIMI_COMPLETION_MAX_TOKENS = 65_536
 KIMI_REASONING_MAX_TOKENS = 8_192
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 1000.0
-METHOD_LIBRARY_GENERATION_SESSION_ID = "method-library-generation"
 
 
 def _namespace_from_json_like(value: object) -> object:
@@ -500,7 +500,7 @@ class MethodSynthesisLLMTransportMixin:
 				"only": [provider_name],
 				"allow_fallbacks": False,
 			},
-			"session_id": METHOD_LIBRARY_GENERATION_SESSION_ID,
+			"session_id": self._method_synthesis_session_id(),
 		}
 		reasoning_max_tokens = int(
 			(request_profile or {}).get("reasoning_max_tokens") or 0,
@@ -531,7 +531,7 @@ class MethodSynthesisLLMTransportMixin:
 				"prompt_token_estimate": prompt_token_estimate,
 				"completion_max_tokens": KIMI_COMPLETION_MAX_TOKENS,
 				"reasoning_excluded": False,
-				"session_id": METHOD_LIBRARY_GENERATION_SESSION_ID,
+				"session_id": self._method_synthesis_session_id(),
 				"max_tokens_policy": "fixed_65536",
 			}
 		return {
@@ -541,6 +541,11 @@ class MethodSynthesisLLMTransportMixin:
 			"first_chunk_timeout_seconds": 0.0,
 			"response_healing_plugin": False,
 		}
+
+	def _method_synthesis_session_id(self) -> str:
+		return str(
+			getattr(self, "session_id", None) or DEFAULT_METHOD_SYNTHESIS_SESSION_ID,
+		).strip()
 
 	def _method_synthesis_total_context_tokens(self) -> int:
 		base_url = str(self.base_url or "").strip().lower()

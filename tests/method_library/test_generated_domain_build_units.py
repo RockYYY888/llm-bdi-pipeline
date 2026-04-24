@@ -397,7 +397,7 @@ def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> N
 	assert profile["reasoning_max_tokens"] == 8192
 	assert profile["reasoning_excluded"] is False
 	assert profile["first_chunk_timeout_seconds"] == 1000.0
-	assert profile["session_id"] == "method-library-generation"
+	assert profile["session_id"] == "method-synthesis"
 	assert profile["max_tokens_policy"] == "fixed_65536"
 
 
@@ -421,7 +421,7 @@ def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None
 				"only": ["moonshotai"],
 				"allow_fallbacks": False,
 			},
-			"session_id": "method-library-generation",
+			"session_id": "method-synthesis",
 			"reasoning": {"exclude": False, "max_tokens": 8192},
 		}
 
@@ -489,7 +489,7 @@ def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None
 	assert "response_format" not in captured_request["request_kwargs"]
 	assert captured_request["request_kwargs"]["max_tokens"] == 16
 	assert captured_request["request_timeout_seconds"] == 90.0
-	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "method-library-generation"
+	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "method-synthesis"
 	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {
 		"exclude": False,
 		"max_tokens": 8192,
@@ -530,7 +530,7 @@ def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_sup
 		)
 
 	assert "max_tokens" not in captured_request["request_kwargs"]
-	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "method-library-generation"
+	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "method-synthesis"
 
 
 def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
@@ -602,7 +602,7 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 			"llm_prompt_token_estimate": 1,
 			"llm_completion_max_tokens": 65536,
 			"llm_reasoning_excluded": False,
-			"llm_session_id": "method-library-generation",
+			"llm_session_id": "method-synthesis",
 			"llm_max_tokens_policy": "fixed_65536",
 			"llm_request_timeout_seconds": 0.01,
 		}

@@ -46,24 +46,21 @@ def _require_api_key(
 	env_var_name: str,
 	config,
 	purpose: str,
-	fallback_env_var_name: str | None = None,
 ) -> None:
 	if _has_configured_api_key(api_key):
 		return
 	print("=" * 80)
 	print(f"ERROR: {env_var_name} Not Configured")
 	print("=" * 80)
-	print(f"\n{purpose} requires an OpenAI API key.")
+	print(f"\n{purpose} requires a language-model API key.")
 	print("\nPlease follow these steps:")
 	print("1. Copy .env.example to .env:")
 	print("   cp .env.example .env")
 	print("\n2. Edit .env and add your API key:")
 	print(f"   {env_var_name}=sk-proj-your-actual-key-here")
-	if fallback_env_var_name:
-		print(f"   # fallback: {fallback_env_var_name}=sk-proj-your-actual-key-here")
 	print(
-		f"   GOAL_GROUNDING_MODEL={config.goal_grounding_model}  "
-		"# temporal specification grounding default",
+		f"   LTLF_GENERATION_MODEL={config.ltlf_generation_model}  "
+		"# NL-to-LTLf generation default",
 	)
 	print(
 		f"   METHOD_SYNTHESIS_MODEL={config.method_synthesis_model}  "
@@ -204,8 +201,8 @@ def main() -> None:
 			else None
 		)
 		_require_api_key(
-			api_key=config.openai_api_key,
-			env_var_name="OPENAI_API_KEY",
+			api_key=config.ltlf_generation_api_key,
+			env_var_name="LTLF_GENERATION_API_KEY",
 			config=config,
 			purpose="LTLf dataset generation",
 		)
@@ -222,10 +219,9 @@ def main() -> None:
 		domain_file = _require_existing_path(args.domain_file, label="Domain File")
 		_require_api_key(
 			api_key=config.method_synthesis_api_key,
-			env_var_name="METHOD_SYNTHESIS_OPENAI_API_KEY",
+			env_var_name="METHOD_SYNTHESIS_API_KEY",
 			config=config,
 			purpose="Plan-library generation",
-			fallback_env_var_name="OPENAI_API_KEY",
 		)
 		pipeline = PlanLibraryGenerationPipeline(
 			domain_file=domain_file,
@@ -254,8 +250,8 @@ def main() -> None:
 			problem_file = _require_existing_path(args.problem_file, label="Problem File")
 			if not str(args.ltlf_formula or "").strip():
 				_require_api_key(
-					api_key=config.openai_api_key,
-					env_var_name="OPENAI_API_KEY",
+					api_key=config.ltlf_generation_api_key,
+					env_var_name="LTLF_GENERATION_API_KEY",
 					config=config,
 					purpose="Ad hoc evaluation without a precomputed LTLf formula",
 				)

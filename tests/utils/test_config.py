@@ -1,5 +1,5 @@
 """
-Configuration tests for the shared OpenAI settings.
+Configuration tests for stage-specific language-model settings.
 """
 
 import sys
@@ -12,34 +12,38 @@ if _src_dir not in sys.path:
 from utils.config import Config
 
 
-def test_shared_openai_config_reads_expected_fields(monkeypatch):
+def test_stage_specific_generation_config_reads_expected_fields(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
-    monkeypatch.setenv("METHOD_SYNTHESIS_OPENAI_API_KEY", "sk-method")
-    monkeypatch.setenv("OPENAI_MODEL", "deepseek-chat")
-    monkeypatch.setenv("GOAL_GROUNDING_MODEL", "deepseek/deepseek-chat-v3-0324")
-    monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "legacy/provider-model")
-    monkeypatch.setenv("OPENAI_TIMEOUT", "120")
+    monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
+    monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
+    monkeypatch.setenv("LTLF_GENERATION_MODEL", "deepseek/deepseek-chat-v3-0324")
+    monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "moonshotai/kimi-k2.6")
+    monkeypatch.setenv("LTLF_GENERATION_TIMEOUT", "120")
     monkeypatch.setenv("METHOD_SYNTHESIS_TIMEOUT", "240")
+    monkeypatch.setenv("LTLF_GENERATION_MAX_TOKENS", "2048")
     monkeypatch.setenv("METHOD_SYNTHESIS_MAX_TOKENS", "4096")
     monkeypatch.setenv("PLANNING_TIMEOUT", "900")
-    monkeypatch.setenv("GOAL_GROUNDING_MAX_TOKENS", "2048")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("LTLF_GENERATION_BASE_URL", "https://api.ltlf.example/v1")
+    monkeypatch.setenv("METHOD_SYNTHESIS_BASE_URL", "https://api.method.example/v1")
+    monkeypatch.setenv("LTLF_GENERATION_SESSION_ID", "ltlf-session")
+    monkeypatch.setenv("METHOD_SYNTHESIS_SESSION_ID", "method-session")
     monkeypatch.setenv("EVALUATION_DOMAIN_SOURCE", "generated")
 
     config = Config()
 
-    assert config.openai_api_key == "sk-shared"
+    assert config.ltlf_generation_api_key == "sk-ltlf"
     assert config.method_synthesis_api_key == "sk-method"
-    assert config.openai_model == "deepseek-chat"
-    assert config.goal_grounding_model == "deepseek/deepseek-chat-v3-0324"
+    assert config.ltlf_generation_model == "deepseek/deepseek-chat-v3-0324"
     assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
-    assert config.openai_timeout == 120
+    assert config.ltlf_generation_timeout == 120
     assert config.method_synthesis_timeout == 240
+    assert config.ltlf_generation_max_tokens == 2048
     assert config.method_synthesis_max_tokens == 4096
     assert config.planning_timeout == 900
-    assert config.goal_grounding_max_tokens == 2048
-    assert config.openai_base_url == "https://api.deepseek.com"
+    assert config.ltlf_generation_base_url == "https://api.ltlf.example/v1"
+    assert config.method_synthesis_base_url == "https://api.method.example/v1"
+    assert config.ltlf_generation_session_id == "ltlf-session"
+    assert config.method_synthesis_session_id == "method-session"
     assert config.evaluation_domain_source == "generated"
 
 
@@ -52,13 +56,13 @@ def test_method_synthesis_max_tokens_defaults_to_one_shot_library_budget(monkeyp
     assert config.method_synthesis_max_tokens == 48000
 
 
-def test_openai_timeout_defaults_to_kimi_long_reasoning_budget(monkeypatch):
+def test_ltlf_generation_timeout_defaults_to_kimi_long_reasoning_budget(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.delenv("OPENAI_TIMEOUT", raising=False)
+    monkeypatch.delenv("LTLF_GENERATION_TIMEOUT", raising=False)
 
     config = Config()
 
-    assert config.openai_timeout == 1000
+    assert config.ltlf_generation_timeout == 1000
 
 
 def test_method_synthesis_timeout_defaults_to_longer_one_shot_budget(monkeypatch):
@@ -79,29 +83,26 @@ def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
     assert config.planning_timeout == 600
 
 
-def test_goal_grounding_model_inherits_shared_model_when_no_explicit_override(monkeypatch):
+def test_ltlf_generation_model_defaults_to_pinned_kimi_when_no_env_is_set(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_MODEL", "moonshotai/kimi-k2.6")
-    monkeypatch.delenv("GOAL_GROUNDING_MODEL", raising=False)
+    monkeypatch.delenv("LTLF_GENERATION_MODEL", raising=False)
 
     config = Config()
 
-    assert config.goal_grounding_model == "moonshotai/kimi-k2.6"
+    assert config.ltlf_generation_model == "moonshotai/kimi-k2.6"
 
 
-def test_goal_grounding_model_defaults_to_pinned_kimi_when_no_env_is_set(monkeypatch):
+def test_ltlf_generation_model_uses_stage_specific_override(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.delenv("GOAL_GROUNDING_MODEL", raising=False)
+    monkeypatch.setenv("LTLF_GENERATION_MODEL", "provider/ltlf-model")
 
     config = Config()
 
-    assert config.goal_grounding_model == "moonshotai/kimi-k2.6"
+    assert config.ltlf_generation_model == "provider/ltlf-model"
 
 
 def test_method_synthesis_model_defaults_to_pinned_kimi_chat(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_MODEL", "shared-model")
     monkeypatch.delenv("METHOD_SYNTHESIS_MODEL", raising=False)
 
     config = Config()
@@ -109,57 +110,68 @@ def test_method_synthesis_model_defaults_to_pinned_kimi_chat(monkeypatch):
     assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
 
 
-def test_method_synthesis_api_key_prefers_method_specific_key(monkeypatch):
+def test_method_synthesis_api_key_uses_method_specific_key(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
-    monkeypatch.setenv("METHOD_SYNTHESIS_OPENAI_API_KEY", "sk-method")
+    monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
+    monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
 
     config = Config()
 
     assert config.method_synthesis_api_key == "sk-method"
+    assert config.ltlf_generation_api_key == "sk-ltlf"
 
 
-def test_method_synthesis_api_key_falls_back_to_shared_openai_api_key(monkeypatch):
+def test_method_synthesis_api_key_does_not_fall_back_to_ltlf_generation_key(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
-    monkeypatch.delenv("METHOD_SYNTHESIS_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
+    monkeypatch.delenv("METHOD_SYNTHESIS_API_KEY", raising=False)
 
     config = Config()
 
-    assert config.method_synthesis_api_key == "sk-shared"
+    assert config.method_synthesis_api_key is None
 
 
 def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
-    monkeypatch.setenv("OPENAI_MODEL", "shell-model")
-    monkeypatch.setenv("GOAL_GROUNDING_MODEL", "shell-goal-grounding-model")
+    monkeypatch.setenv("LTLF_GENERATION_MODEL", "shell-ltlf-model")
     monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "shell-method-synthesis-model")
 
     config = Config()
     config._merge_env_lines(
         [
-            "OPENAI_MODEL=file-model",
-            "GOAL_GROUNDING_MODEL=file-goal-grounding-model",
+            "LTLF_GENERATION_MODEL=file-ltlf-model",
             "METHOD_SYNTHESIS_MODEL=file-method-synthesis-model",
         ]
     )
 
-    assert config.openai_model == "shell-model"
-    assert config.goal_grounding_model == "shell-goal-grounding-model"
-    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
+    assert config.ltlf_generation_model == "shell-ltlf-model"
+    assert config.method_synthesis_model == "shell-method-synthesis-model"
 
 
-def test_method_synthesis_model_is_pinned_even_when_dotenv_sets_legacy_override(monkeypatch):
+def test_method_synthesis_model_uses_stage_specific_override(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("METHOD_SYNTHESIS_MODEL", raising=False)
 
     config = Config()
     config._merge_env_lines(
         [
-            "METHOD_SYNTHESIS_MODEL=legacy/provider-model",
+            "METHOD_SYNTHESIS_MODEL=provider/method-model",
         ]
     )
 
-    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
+    assert config.method_synthesis_model == "provider/method-model"
+
+
+def test_generation_session_ids_default_to_distinct_values(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("LTLF_GENERATION_SESSION_ID", raising=False)
+    monkeypatch.delenv("METHOD_SYNTHESIS_SESSION_ID", raising=False)
+
+    config = Config()
+
+    assert config.ltlf_generation_session_id == "ltlf-generation"
+    assert config.method_synthesis_session_id == "method-synthesis"
+    assert config.ltlf_generation_session_id != config.method_synthesis_session_id
 
 
 def test_evaluation_domain_source_defaults_to_benchmark(monkeypatch):

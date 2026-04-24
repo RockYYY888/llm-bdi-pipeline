@@ -28,7 +28,7 @@ import tests.support.htn_evaluation_support as generated_support
 
 
 LIVE_GENERATED_SMOKE_ENABLED = bool(os.getenv("RUN_LIVE_GENERATED_BASELINE_SMOKE")) and bool(
-	os.getenv("OPENAI_API_KEY"),
+	os.getenv("METHOD_SYNTHESIS_API_KEY"),
 )
 
 

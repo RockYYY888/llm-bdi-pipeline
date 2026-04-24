@@ -2091,7 +2091,7 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_with_token_caps() ->
 	assert profile["completion_max_tokens"] == 65536
 	assert profile["reasoning_max_tokens"] == 8192
 	assert profile["reasoning_excluded"] is False
-	assert profile["session_id"] == "evaluation-ltlf-generation"
+	assert profile["session_id"] == "ltlf-generation"
 	assert profile["max_tokens_policy"] == "fixed_65536"
 
 
@@ -2133,7 +2133,7 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_token_cap
 	assert "response_format" not in request_kwargs
 	assert request_kwargs["extra_body"] == {
 		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},
-		"session_id": "evaluation-ltlf-generation",
+		"session_id": "ltlf-generation",
 		"reasoning": {"exclude": False, "max_tokens": 8192},
 	}
 

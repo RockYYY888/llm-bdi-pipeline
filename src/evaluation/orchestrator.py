@@ -416,12 +416,13 @@ class PlanLibraryEvaluationOrchestrator:
 
 		try:
 			generator = NLToLTLfGenerator(
-				api_key=self.config.openai_api_key,
-				model=self.config.goal_grounding_model,
-				base_url=self.config.openai_base_url,
+				api_key=self.config.ltlf_generation_api_key,
+				model=self.config.ltlf_generation_model,
+				base_url=self.config.ltlf_generation_base_url,
 				domain_file=evaluation_domain.domain_file,
-				request_timeout=float(self.config.openai_timeout),
-				response_max_tokens=int(self.config.goal_grounding_max_tokens),
+				request_timeout=float(self.config.ltlf_generation_timeout),
+				response_max_tokens=int(self.config.ltlf_generation_max_tokens),
+				session_id=self.config.ltlf_generation_session_id,
 			)
 			typed_objects = (
 				{
@@ -442,7 +443,7 @@ class PlanLibraryEvaluationOrchestrator:
 			self.logger.log_goal_grounding_success(
 				grounding_result.to_dict(),
 				used_llm=True,
-				model=self.config.goal_grounding_model,
+				model=self.config.ltlf_generation_model,
 				llm_prompt=llm_prompt,
 				llm_response=llm_response,
 			)
@@ -470,7 +471,7 @@ class PlanLibraryEvaluationOrchestrator:
 			llm_prompt = generation_metadata.get("last_prompt")
 			self.logger.log_goal_grounding_error(
 				str(exc),
-				model=self.config.goal_grounding_model,
+				model=self.config.ltlf_generation_model,
 				llm_prompt=llm_prompt if isinstance(llm_prompt, dict) else None,
 				llm_response=str(generation_metadata.get("last_response") or "") or None,
 				metadata={

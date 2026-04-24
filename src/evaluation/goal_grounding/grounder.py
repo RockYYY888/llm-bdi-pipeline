@@ -23,8 +23,9 @@ from evaluation.goal_grounding.canonical_ordered_formula import (
 	build_unordered_eventuality_formula,
 	ordered_formula_style_prompt_guidance,
 )
-from utils.config import DEFAULT_GOAL_GROUNDING_MODEL
-from utils.config import DEFAULT_OPENAI_TIMEOUT_SECONDS
+from utils.config import DEFAULT_LTLF_GENERATION_MODEL
+from utils.config import DEFAULT_LTLF_GENERATION_SESSION_ID
+from utils.config import DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS
 from utils.symbol_normalizer import SymbolNormalizer
 
 KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
@@ -33,7 +34,6 @@ KIMI_COMPLETION_MAX_TOKENS = 65_536
 KIMI_REASONING_MAX_TOKENS = 8_192
 KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
 KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 1000.0
-EVALUATION_LTLF_GENERATION_SESSION_ID = "evaluation-ltlf-generation"
 GOAL_GROUNDING_MAX_TRANSPORT_RETRIES = 3
 GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
 	"exceeded the configured wall-clock timeout before a response chunk was created",
@@ -111,13 +111,15 @@ class NLToLTLfGenerator:
 		domain_file: Optional[str] = None,
 		request_timeout: Optional[float] = None,
 		response_max_tokens: Optional[int] = None,
+		session_id: Optional[str] = None,
 	) -> None:
 		self.api_key = api_key
-		self.model = model or DEFAULT_GOAL_GROUNDING_MODEL
+		self.model = model or DEFAULT_LTLF_GENERATION_MODEL
 		self.base_url = base_url
 		self.domain_file = domain_file
-		self.request_timeout = float(request_timeout or DEFAULT_OPENAI_TIMEOUT_SECONDS)
+		self.request_timeout = float(request_timeout or DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS)
 		self.response_max_tokens = int(response_max_tokens or 12000)
+		self.session_id = str(session_id or DEFAULT_LTLF_GENERATION_SESSION_ID).strip()
 		self.client = None
 		self.last_generation_metadata: Dict[str, Any] = {}
 		self.symbol_normalizer = SymbolNormalizer()
@@ -157,7 +159,7 @@ class NLToLTLfGenerator:
 
 		if not self.client:
 			raise RuntimeError(
-				"No API key configured. Please set OPENAI_API_KEY in .env file.",
+				"No API key configured. Please set LTLF_GENERATION_API_KEY in .env file.",
 			)
 
 		prompt_attempts = self._build_prompt_attempts(
@@ -998,7 +1000,7 @@ class NLToLTLfGenerator:
 				"only": [provider_name],
 				"allow_fallbacks": False,
 			},
-			"session_id": EVALUATION_LTLF_GENERATION_SESSION_ID,
+			"session_id": self.session_id,
 		}
 		reasoning_max_tokens = int(
 			(request_profile or {}).get("reasoning_max_tokens") or 0,
@@ -1027,7 +1029,7 @@ class NLToLTLfGenerator:
 				"prompt_token_estimate": prompt_token_estimate,
 				"completion_max_tokens": KIMI_COMPLETION_MAX_TOKENS,
 				"reasoning_excluded": False,
-				"session_id": EVALUATION_LTLF_GENERATION_SESSION_ID,
+				"session_id": self.session_id,
 				"max_tokens_policy": "fixed_65536",
 			}
 		return {

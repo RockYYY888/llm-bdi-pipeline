@@ -81,13 +81,26 @@ Prepare `.env`:
 cp .env.example .env
 ```
 
-Minimum configuration for synthesis or live ad hoc grounding:
+Minimum configuration for optional LTLf generation and method synthesis:
 
 ```bash
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=...
-GOAL_GROUNDING_MODEL=moonshotai/kimi-k2.6
+LTLF_GENERATION_API_KEY=...
+LTLF_GENERATION_BASE_URL=https://openrouter.ai/api/v1
+LTLF_GENERATION_MODEL=moonshotai/kimi-k2.6
+LTLF_GENERATION_SESSION_ID=ltlf-generation
+METHOD_SYNTHESIS_API_KEY=...
+METHOD_SYNTHESIS_BASE_URL=https://openrouter.ai/api/v1
 METHOD_SYNTHESIS_MODEL=moonshotai/kimi-k2.6
+METHOD_SYNTHESIS_SESSION_ID=method-synthesis
+```
+
+Generate or refresh the stored LTLf dataset only when `queries_LTLf.json` is absent or
+needs regeneration:
+
+```bash
+uv run python src/main.py generate-ltlf-dataset \
+  --source-query-dataset ./src/benchmark_data/benchmark_queries.json \
+  --output-dataset ./src/benchmark_data/queries_LTLf.json
 ```
 
 Generate a plan-library bundle:
@@ -123,7 +136,7 @@ The default stored temporal-specification dataset is:
 
 - [`src/benchmark_data/queries_LTLf.json`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/benchmark_data/queries_LTLf.json)
 
-Generation uses this dataset by default, filtered to the selected domain. Stored benchmark evaluation also uses it directly, rather than rerunning live grounding.
+Generation uses this dataset by default, filtered to the selected domain. Stored benchmark evaluation also uses it directly, rather than rerunning live grounding. The `generate-ltlf-dataset` command is an explicit preparation step, not an implicit part of `generate-library`.
 
 ## Toolchains
 

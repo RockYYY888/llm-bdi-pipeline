@@ -50,9 +50,10 @@ class PlanLibraryGenerationOrchestrator:
 			synthesizer = HTNMethodSynthesizer(
 				api_key=self.context.config.method_synthesis_api_key,
 				model=self.context.config.method_synthesis_model,
-				base_url=self.context.config.openai_base_url,
+				base_url=self.context.config.method_synthesis_base_url,
 				timeout=float(self.context.config.method_synthesis_timeout),
 				max_tokens=int(self.context.config.method_synthesis_max_tokens),
+				session_id=self.context.config.method_synthesis_session_id,
 			)
 			synthesis_start = time.perf_counter()
 			method_library, synthesis_meta = synthesizer.synthesize_domain_complete(

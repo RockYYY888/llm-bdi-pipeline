@@ -58,12 +58,14 @@ class HTNMethodSynthesizer(
 		base_url: Optional[str] = None,
 		timeout: float = 60.0,
 		max_tokens: int = 8192,
+		session_id: Optional[str] = None,
 	) -> None:
 		self.api_key = api_key
 		self.model = model or DEFAULT_METHOD_SYNTHESIS_MODEL
 		self.base_url = base_url
 		self.timeout = timeout
 		self.max_tokens = max_tokens
+		self.session_id = session_id
 		self.parser = HDDLConditionParser()
 		self.client = None
 
@@ -168,8 +170,7 @@ class HTNMethodSynthesizer(
 				metadata,
 				"preflight",
 				(
-					"Method synthesis requires METHOD_SYNTHESIS_OPENAI_API_KEY "
-					"(OPENAI_API_KEY is only a compatibility fallback). "
+					"Method synthesis requires METHOD_SYNTHESIS_API_KEY. "
 					"HTN method synthesis only accepts live LLM output."
 				),
 			)

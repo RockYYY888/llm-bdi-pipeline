@@ -72,8 +72,9 @@ def generate_ltlf_dataset(
 		"source_query_dataset": str(source_path),
 		"ltlf_generator": {
 			"implementation": "evaluation.goal_grounding.NLToLTLfGenerator",
-			"model": active_config.goal_grounding_model,
-			"base_url": active_config.openai_base_url,
+			"model": active_config.ltlf_generation_model,
+			"base_url": active_config.ltlf_generation_base_url,
+			"session_id": active_config.ltlf_generation_session_id,
 		},
 		"domains": {},
 	}
@@ -232,12 +233,13 @@ def _generate_domain_cases(
 	domain_type_names = set(type_parent_map.keys())
 	task_type_map = task_type_map_for_domain(domain, domain_type_names)
 	generator = generator_factory(
-		api_key=config.openai_api_key,
-		model=config.goal_grounding_model,
-		base_url=config.openai_base_url,
+		api_key=config.ltlf_generation_api_key,
+		model=config.ltlf_generation_model,
+		base_url=config.ltlf_generation_base_url,
 		domain_file=str(domain_file),
-		request_timeout=float(config.openai_timeout),
-		response_max_tokens=int(config.goal_grounding_max_tokens),
+		request_timeout=float(config.ltlf_generation_timeout),
+		response_max_tokens=int(config.ltlf_generation_max_tokens),
+		session_id=config.ltlf_generation_session_id,
 	)
 	rendered_cases: Dict[str, Dict[str, Any]] = {}
 	case_summaries = []

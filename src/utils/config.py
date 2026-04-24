@@ -9,13 +9,14 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-DEFAULT_GOAL_GROUNDING_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_LTLF_GENERATION_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_METHOD_SYNTHESIS_MODEL = "moonshotai/kimi-k2.6"
-DEFAULT_SHARED_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_EVALUATION_DOMAIN_SOURCE = "benchmark"
-DEFAULT_OPENAI_TIMEOUT_SECONDS = 1000
+DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS = 1000
 DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 1000
 DEFAULT_PLANNING_TIMEOUT_SECONDS = 600
+DEFAULT_LTLF_GENERATION_SESSION_ID = "ltlf-generation"
+DEFAULT_METHOD_SYNTHESIS_SESSION_ID = "method-synthesis"
 
 
 class Config:
@@ -42,32 +43,21 @@ class Config:
 			os.environ.setdefault(key.strip(), value.strip())
 
 	@property
-	def openai_api_key(self) -> Optional[str]:
-		return os.getenv("OPENAI_API_KEY")
+	def ltlf_generation_api_key(self) -> Optional[str]:
+		return os.getenv("LTLF_GENERATION_API_KEY")
 
 	@property
 	def method_synthesis_api_key(self) -> Optional[str]:
-		return os.getenv("METHOD_SYNTHESIS_OPENAI_API_KEY") or self.openai_api_key
+		return os.getenv("METHOD_SYNTHESIS_API_KEY")
 
 	@property
-	def openai_model(self) -> str:
-		return os.getenv("OPENAI_MODEL", DEFAULT_SHARED_MODEL)
-
-	@property
-	def goal_grounding_model(self) -> str:
+	def ltlf_generation_model(self) -> str:
 		"""
-		Get the goal-grounding model identifier.
+		Get the model identifier for natural-language to LTLf generation.
 
-		The query grounding path is benchmark-pinned and should not silently drift
-		between providers.
+		This is a distinct pipeline stage from HTN method synthesis.
 		"""
-		explicit_model = str(os.getenv("GOAL_GROUNDING_MODEL", "")).strip()
-		if explicit_model:
-			return explicit_model
-		shared_model = str(os.getenv("OPENAI_MODEL", "")).strip()
-		if shared_model:
-			return shared_model
-		return DEFAULT_GOAL_GROUNDING_MODEL
+		return os.getenv("LTLF_GENERATION_MODEL", DEFAULT_LTLF_GENERATION_MODEL)
 
 	@property
 	def method_synthesis_model(self) -> str:
@@ -77,11 +67,19 @@ class Config:
 		The domain-complete synthesis path is benchmark-pinned and should remain
 		stable across runs.
 		"""
-		return DEFAULT_METHOD_SYNTHESIS_MODEL
+		return os.getenv("METHOD_SYNTHESIS_MODEL", DEFAULT_METHOD_SYNTHESIS_MODEL)
 
 	@property
-	def openai_timeout(self) -> int:
-		return max(int(os.getenv("OPENAI_TIMEOUT", str(DEFAULT_OPENAI_TIMEOUT_SECONDS))), 1)
+	def ltlf_generation_timeout(self) -> int:
+		return max(
+			int(
+				os.getenv(
+					"LTLF_GENERATION_TIMEOUT",
+					str(DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS),
+				),
+			),
+			1,
+		)
 
 	@property
 	def method_synthesis_timeout(self) -> int:
@@ -112,24 +110,28 @@ class Config:
 		)
 
 	@property
-	def goal_grounding_max_tokens(self) -> int:
-		return max(int(os.getenv("GOAL_GROUNDING_MAX_TOKENS", "12000")), 1)
+	def ltlf_generation_max_tokens(self) -> int:
+		return max(int(os.getenv("LTLF_GENERATION_MAX_TOKENS", "12000")), 1)
 
 	@property
-	def openai_base_url(self) -> Optional[str]:
-		return os.getenv("OPENAI_BASE_URL")
+	def ltlf_generation_base_url(self) -> Optional[str]:
+		return os.getenv("LTLF_GENERATION_BASE_URL")
+
+	@property
+	def method_synthesis_base_url(self) -> Optional[str]:
+		return os.getenv("METHOD_SYNTHESIS_BASE_URL")
+
+	@property
+	def ltlf_generation_session_id(self) -> str:
+		return os.getenv("LTLF_GENERATION_SESSION_ID", DEFAULT_LTLF_GENERATION_SESSION_ID)
+
+	@property
+	def method_synthesis_session_id(self) -> str:
+		return os.getenv("METHOD_SYNTHESIS_SESSION_ID", DEFAULT_METHOD_SYNTHESIS_SESSION_ID)
 
 	@property
 	def evaluation_domain_source(self) -> str:
 		return os.getenv("EVALUATION_DOMAIN_SOURCE", DEFAULT_EVALUATION_DOMAIN_SOURCE)
-
-	def validate(self) -> bool:
-		if not self.openai_api_key:
-			return False
-		if not self.openai_api_key.startswith("sk-"):
-			return False
-		return True
-
 
 config = Config()
 

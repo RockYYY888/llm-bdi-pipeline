@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 from evaluation.artifacts import TemporalGroundingResult
 from evaluation.goal_grounding.grounder import NLToLTLfGenerator
@@ -18,11 +17,12 @@ BLOCKSWORLD_DOMAIN_FILE = PROJECT_ROOT / "src" / "domains" / "blocksworld" / "do
 
 
 class FakeConfig:
-	openai_api_key = "sk-test"
-	goal_grounding_model = "fake/openrouter-model"
-	openai_base_url = "https://openrouter.ai/api/v1"
-	openai_timeout = 10
-	goal_grounding_max_tokens = 256
+	ltlf_generation_api_key = "sk-test"
+	ltlf_generation_model = "fake/openrouter-model"
+	ltlf_generation_base_url = "https://openrouter.ai/api/v1"
+	ltlf_generation_timeout = 10
+	ltlf_generation_max_tokens = 256
+	ltlf_generation_session_id = "ltlf-test-session"
 
 
 class CapturingGenerator:
@@ -111,6 +111,7 @@ def test_generate_ltlf_dataset_from_natural_language_queries(tmp_path: Path) -> 
 	case_payload = payload["domains"]["blocksworld"]["cases"]["query_1"]
 	assert payload["dataset_kind"] == "stored_benchmark_ltlf_queries"
 	assert payload["ltlf_generator"]["base_url"] == "https://openrouter.ai/api/v1"
+	assert payload["ltlf_generator"]["session_id"] == "ltlf-test-session"
 	assert case_payload["ltlf_formula"] == "do_put_on(b4, b2)"
 	assert case_payload["instruction"].startswith("Using blocks")
 
@@ -120,6 +121,7 @@ def test_generate_ltlf_dataset_from_natural_language_queries(tmp_path: Path) -> 
 	assert call["typed_objects"]["b4"] == "block"
 	assert call["task_type_map"]["do_put_on"] == ("block", "block")
 	assert call["type_parent_map"]["block"] == "object"
+	assert call["kwargs"]["session_id"] == "ltlf-test-session"
 
 
 def test_generate_ltlf_dataset_reuses_existing_formula_without_generator(tmp_path: Path) -> None:
