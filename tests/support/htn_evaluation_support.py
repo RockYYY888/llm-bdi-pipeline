@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -80,6 +81,10 @@ def _load_domain_gate_preflight_from_existing_summary(
 	return None
 
 
+def _query_log_timestamp(query_id: str) -> str:
+	return f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{query_id}"
+
+
 def run_domain_problem_root_case(
 	domain_key: str,
 	query_id: str,
@@ -111,6 +116,7 @@ def run_domain_problem_root_case(
 		domain_name=pipeline.domain.name,
 		problem_name=pipeline.problem.name if pipeline.problem else None,
 		output_dir=str(case_logs_dir),
+		timestamp=_query_log_timestamp(query_id),
 	)
 	pipeline.output_dir = pipeline.logger.current_log_dir
 	if pipeline.logger.current_record is not None and pipeline.output_dir is not None:

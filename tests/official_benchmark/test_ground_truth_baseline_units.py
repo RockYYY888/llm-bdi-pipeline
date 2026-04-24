@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from planning.backends import LiftedPandaBackend, PandaDealerBackend
 from planning.official_benchmark import OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
-from planning.panda_portfolio import PANDAPlanningError
+from planning.panda_portfolio import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
 from planning.process_capture import (
 	PROCESS_OUTPUT_PREVIEW_BYTE_LIMIT,
@@ -129,6 +129,37 @@ def test_pandadealer_backend_uses_full_backend_timeout_budget() -> None:
 	assert len(solver_configs) == 1
 	assert "timeout_seconds" not in solver_configs[0]
 	assert kwargs["timeout_seconds"] == 1800.0
+
+
+def test_panda_plan_parser_decodes_linearized_identifier_tokens() -> None:
+	planner = PANDAPlanner()
+	domain = SimpleNamespace(
+		actions=[
+			SimpleNamespace(name="noop"),
+			SimpleNamespace(name="pick-up"),
+			SimpleNamespace(name="drop"),
+		],
+	)
+	plan_text = planner._decode_linearized_plan_tokens(
+		"""
+==>
+0 noop truckMINUS_0 cityMINUS_locMINUS_0
+1 pickMINUS_up truckMINUS_0 cityMINUS_locMINUS_0 packageMINUS_0 capacityMINUS_2 capacityMINUS_3
+2 drop truckMINUS_0 cityMINUS_locMINUS_3 packageMINUS_0 capacityMINUS_2 capacityMINUS_3
+root
+""",
+	)
+
+	steps = planner._parse_plan_steps(plan_text, domain)
+
+	assert [step.action_name for step in steps] == ["noop", "pick-up", "drop"]
+	assert steps[1].args == (
+		"truck-0",
+		"city-loc-0",
+		"package-0",
+		"capacity-2",
+		"capacity-3",
+	)
 
 
 def test_lifted_panda_backend_uses_full_backend_timeout_budget() -> None:
@@ -578,6 +609,15 @@ def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries
 	assert summary["verified_success_count"] == 1
 	problem_rows = json.loads((output_root / "problem_results.json").read_text())
 	assert [row["query_id"] for row in problem_rows] == ["query_01", "query_02"]
+
+
+def test_htn_query_log_timestamp_includes_query_id_to_avoid_collisions() -> None:
+	query_1_timestamp = baseline_support._query_log_timestamp("query_1")
+	query_2_timestamp = baseline_support._query_log_timestamp("query_2")
+
+	assert query_1_timestamp.endswith("_query_1")
+	assert query_2_timestamp.endswith("_query_2")
+	assert query_1_timestamp != query_2_timestamp
 
 
 def test_run_official_problem_root_baseline_for_domain_preserves_unselected_existing_query_rows(
@@ -1608,6 +1648,111 @@ def test_htn_verifier_evidence_is_compacted_without_raw_stdout(
 	written_payload = json.loads((tmp_path / "verification.json").read_text())
 	assert "stdout" not in written_payload
 	assert "stderr" not in written_payload
+
+
+def test_primitive_executable_goal_reached_plan_is_hierarchical_rejection(
+	tmp_path: Path,
+) -> None:
+	domain_file = tmp_path / "domain.hddl"
+	problem_file = tmp_path / "problem.hddl"
+	actual_plan = tmp_path / "actual.plan"
+	output_dir = tmp_path / "out"
+	domain_file.write_text("(domain)")
+	problem_file.write_text("(problem)")
+	actual_plan.write_text("==>\nroot\n")
+	output_dir.mkdir()
+
+	class FakeVerifier:
+		@staticmethod
+		def tool_available() -> bool:
+			return True
+
+		@staticmethod
+		def verify_primitive_plan(**kwargs: object) -> object:
+			output_path = Path(str(kwargs["output_dir"]))
+			plan_file = output_path / str(kwargs["plan_filename"])
+			output_file = output_path / str(kwargs["output_filename"])
+			plan_file.write_text("primitive")
+			output_file.write_text("Primitive plan alone executable: true")
+			return SimpleNamespace(
+				tool_available=True,
+				primitive_plan_executable=True,
+				verification_result=False,
+				reached_goal_state=True,
+				to_dict=lambda: {
+					"tool_available": True,
+					"command": ["pandaPIparser", "-V"],
+					"plan_file": str(plan_file),
+					"output_file": str(output_file),
+					"stdout": "",
+					"stderr": "",
+					"primitive_plan_only": True,
+					"primitive_plan_executable": True,
+					"verification_result": False,
+					"reached_goal_state": True,
+					"plan_kind": "primitive_only",
+					"build_warning": None,
+					"error": "verifier exited with code 1",
+				},
+			)
+
+		@staticmethod
+		def verify_plan_text(**kwargs: object) -> object:
+			output_path = Path(str(kwargs["output_dir"]))
+			plan_file = output_path / str(kwargs["plan_filename"])
+			output_file = output_path / str(kwargs["output_filename"])
+			plan_file.write_text("hierarchical")
+			output_file.write_text("Plan verification result: false")
+			return SimpleNamespace(
+				tool_available=True,
+				plan_kind="hierarchical",
+				verification_result=False,
+				to_dict=lambda: {
+					"tool_available": True,
+					"command": ["pandaPIparser", "-V"],
+					"plan_file": str(plan_file),
+					"output_file": str(output_file),
+					"stdout": "",
+					"stderr": "",
+					"primitive_plan_only": False,
+					"primitive_plan_executable": None,
+					"verification_result": False,
+					"reached_goal_state": None,
+					"plan_kind": "hierarchical",
+					"build_warning": None,
+					"error": "verifier exited with code 1",
+				},
+			)
+
+	fake_context = SimpleNamespace(
+		domain_file=str(domain_file),
+		problem_file=str(problem_file),
+		output_dir=output_dir,
+		logger=problem_root_runtime._NullExecutionLogger(),
+		_record_step_timing=lambda *_args, **_kwargs: None,
+	)
+
+	result = problem_root_runtime.verify_problem_root_solver_race(
+		fake_context,
+		verifier=FakeVerifier(),
+		plan_solve_data={"summary": {"status": "success"}},
+		plan_solve_artifacts={
+			"solver_candidates": [
+				{
+					"solver_id": "pandadealer_agile_lama",
+					"mode": "agile_lama",
+					"status": "success",
+					"action_path": ["drive(truck-0, a, b)"],
+					"actual_plan_path": str(actual_plan),
+				},
+			],
+		},
+		stage_start=0.0,
+	)
+
+	assert result["summary"]["status"] == "failed"
+	assert result["summary"]["failure_bucket"] == "primitive_plan_valid_but_hierarchical_rejected"
+	assert result["artifacts"]["selected_bucket"] == "primitive_plan_valid_but_hierarchical_rejected"
 
 
 def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(

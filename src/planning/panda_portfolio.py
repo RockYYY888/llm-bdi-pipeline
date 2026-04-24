@@ -52,6 +52,15 @@ class PANDAPlanner:
 
 	OFFICIAL_PANDA_PI_SOLVER_IDS: Tuple[str, ...] = OFFICIAL_PANDA_PI_SOLVER_IDS
 	OFFICIAL_DEALER_SOLVER_IDS: Tuple[str, ...] = (OFFICIAL_PANDADEALER_SOLVER_ID,)
+	_LINEARIZED_TOKEN_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
+		("BAR_", "|"),
+		("SEM_", ";"),
+		("COM_", ","),
+		("PLUS_", "+"),
+		("MINUS_", "-"),
+		("EXCLAMATION_", "!"),
+		("US_", "_"),
+	)
 
 	def __init__(
 		self,
@@ -356,9 +365,13 @@ class PANDAPlanner:
 
 			candidate_conversion_seconds = time.perf_counter() - attempt_start
 			conversion_total_seconds += candidate_conversion_seconds
+			candidate_actual_plan_text = self._decode_linearized_plan_tokens(
+				candidate_actual_plan_text or candidate_raw_plan_text,
+			)
+			candidate_actual_plan_path.write_text(candidate_actual_plan_text)
 			parse_plan_start = time.perf_counter()
 			candidate_steps = self._parse_plan_steps(
-				candidate_actual_plan_text or candidate_raw_plan_text,
+				candidate_actual_plan_text,
 				domain,
 			)
 			parse_seconds = time.perf_counter() - parse_plan_start
@@ -1139,6 +1152,14 @@ class PANDAPlanner:
 				break
 
 		return steps
+
+	@classmethod
+	def _decode_linearized_plan_tokens(cls, plan_text: str) -> str:
+		"""Decode PANDA linearizer-safe identifiers before parsing or verifying plans."""
+		decoded = str(plan_text or "")
+		for source, target in cls._LINEARIZED_TOKEN_REPLACEMENTS:
+			decoded = decoded.replace(source, target)
+		return decoded
 
 	def _run_command(
 		self,

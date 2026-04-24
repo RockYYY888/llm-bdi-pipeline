@@ -686,7 +686,6 @@ def verify_problem_root_solver_race(
 		primitive_valid = (
 			primitive_result.tool_available is True
 			and primitive_result.primitive_plan_executable is True
-			and primitive_result.verification_result is True
 			and primitive_result.reached_goal_state is True
 		)
 		hierarchical_valid = (
