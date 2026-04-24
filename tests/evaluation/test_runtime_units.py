@@ -1737,6 +1737,28 @@ def test_jason_runner_keeps_native_goal_backtracking_without_goal_context() -> N
 	assert ".fail" in parent_failure_handler
 
 
+def test_jason_runner_bounds_repetitive_runtime_artifacts() -> None:
+	runner = JasonRunner()
+	runner.runtime_output_artifact_limit_chars = 12
+	runner.method_trace_record_limit = 2
+
+	bounded_output, output_truncated = runner._bounded_runtime_output_artifact("0123456789abcdef")
+	bounded_trace, original_trace_count, trace_truncated = runner._cap_method_trace_records(
+		[
+			{"method_name": "m1", "task_args": []},
+			{"method_name": "m2", "task_args": []},
+			{"method_name": "m3", "task_args": []},
+		],
+	)
+
+	assert output_truncated is True
+	assert "original_chars=16" in bounded_output
+	assert bounded_output.endswith("456789abcdef")
+	assert original_trace_count == 3
+	assert trace_truncated is True
+	assert [item["method_name"] for item in bounded_trace] == ["m1", "m2"]
+
+
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
 	monkeypatch: pytest.MonkeyPatch,
 	tmp_path: Path,

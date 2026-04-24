@@ -9,6 +9,7 @@ runtime metadata for pipeline logging.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -57,7 +58,7 @@ class JasonValidationResult:
 	environment_adapter: Dict[str, Any]
 	failure_class: Optional[str]
 	consistency_checks: Dict[str, Any]
-	artifacts: Dict[str, str]
+	artifacts: Dict[str, Any]
 	timing_profile: Dict[str, Any]
 
 	def to_dict(self) -> Dict[str, Any]:
@@ -131,6 +132,8 @@ class JasonRunner:
 	success_marker = "execute success"
 	failure_marker = "execute failed"
 	failed_goal_record_limit = 64
+	runtime_output_artifact_limit_chars = 500_000
+	method_trace_record_limit = 2_000
 	min_java_major = 17
 	max_java_major = 23
 	environment_class_name = "JasonPipelineEnvironment"
@@ -311,7 +314,10 @@ class JasonRunner:
 		stderr = stderr_text
 		action_path = self._extract_action_path(stdout)
 		method_trace_output = stderr_text if "runtime trace method" in stderr_text else stdout
-		method_trace = self._extract_method_trace(method_trace_output)
+		raw_method_trace = self._extract_method_trace(method_trace_output)
+		method_trace, method_trace_original_count, method_trace_truncated = (
+			self._cap_method_trace_records(raw_method_trace)
+		)
 		failed_goals = self._extract_failed_goals(stdout)
 		goal_repair_pass_count = self._extract_goal_repair_pass_count(stdout)
 		timing_profile["output_processing_seconds"] = (
@@ -319,8 +325,10 @@ class JasonRunner:
 		)
 
 		artifact_write_start = time.perf_counter()
-		stdout_path.write_text(stdout)
-		stderr_path.write_text(stderr)
+		stdout_artifact, stdout_truncated = self._bounded_runtime_output_artifact(stdout)
+		stderr_artifact, stderr_truncated = self._bounded_runtime_output_artifact(stderr)
+		stdout_path.write_text(stdout_artifact)
+		stderr_path.write_text(stderr_artifact)
 		action_path_path.write_text(self._render_action_path(action_path))
 		method_trace_path.write_text(json.dumps(method_trace, indent=2))
 		timing_profile["artifact_write_seconds"] = time.perf_counter() - artifact_write_start
@@ -336,6 +344,14 @@ class JasonRunner:
 			"method_trace": str(method_trace_path),
 			"jason_validation": str(validation_json_path),
 			"goal_repair_pass_count": goal_repair_pass_count,
+			"stdout_artifact_truncated": stdout_truncated,
+			"stderr_artifact_truncated": stderr_truncated,
+			"stdout_chars": len(stdout),
+			"stderr_chars": len(stderr),
+			"stdout_sha256": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+			"stderr_sha256": hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
+			"method_trace_original_count": method_trace_original_count,
+			"method_trace_truncated": method_trace_truncated,
 		}
 		environment_validation_start = time.perf_counter()
 		environment_result = self.environment_adapter.validate(stdout=stdout, stderr=stderr)
@@ -351,7 +367,10 @@ class JasonRunner:
 				action_schemas=action_schemas,
 				seed_facts=seed_facts,
 				problem_file=problem_file,
-				skip_method_trace_diagnostics=goal_repair_pass_count > 1,
+				skip_method_trace_diagnostics=(
+					goal_repair_pass_count > 1
+					or method_trace_truncated
+				),
 			)
 		except Exception as exc:
 			consistency_checks = {
@@ -916,6 +935,29 @@ class JasonRunner:
 				},
 			)
 		return trace
+
+	def _cap_method_trace_records(
+		self,
+		method_trace: Sequence[Dict[str, Any]],
+	) -> Tuple[List[Dict[str, Any]], int, bool]:
+		records = [dict(item) for item in (method_trace or ())]
+		original_count = len(records)
+		limit = max(1, int(self.method_trace_record_limit))
+		if original_count <= limit:
+			return records, original_count, False
+		return records[:limit], original_count, True
+
+	def _bounded_runtime_output_artifact(self, text: str) -> Tuple[str, bool]:
+		value = str(text or "")
+		limit = max(1, int(self.runtime_output_artifact_limit_chars))
+		if len(value) <= limit:
+			return value, False
+		prefix = (
+			f"[truncated runtime output: original_chars={len(value)}, "
+			f"kept_tail_chars={limit}, "
+			f"sha256={hashlib.sha256(value.encode('utf-8')).hexdigest()}]\n"
+		)
+		return f"{prefix}{value[-limit:]}", True
 
 	def _extract_panda_method_trace(self, plan_text: str) -> List[Dict[str, Any]]:
 		lines = [
