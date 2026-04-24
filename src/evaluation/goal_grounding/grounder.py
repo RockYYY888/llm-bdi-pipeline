@@ -433,9 +433,16 @@ class NLToLTLfGenerator:
 		method_library: Optional[HTNMethodLibrary],
 		task_type_map: Dict[str, Tuple[str, ...]],
 	) -> str:
-		if method_library is None:
-			return ""
 		lines = []
+		if method_library is None:
+			for task_name, arg_types in sorted(task_type_map.items()):
+				task_name_text = str(task_name or "").strip()
+				if not task_name_text:
+					continue
+				typed_signature = ", ".join(arg_types) if arg_types else "untyped"
+				lines.append(f"- {task_name_text}({typed_signature})")
+			return "\n".join(dict.fromkeys(lines))
+
 		for task in tuple(method_library.compound_tasks or ()) + tuple(method_library.primitive_tasks or ()):
 			task_name = str(getattr(task, "name", "") or "").strip()
 			if not task_name:

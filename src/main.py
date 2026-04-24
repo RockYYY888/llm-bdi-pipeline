@@ -15,6 +15,7 @@ if _src_dir not in sys.path:
 
 from evaluation import PlanLibraryEvaluationPipeline
 from plan_library import PlanLibraryGenerationPipeline
+from temporal_specification.ltlf_dataset_generation import generate_ltlf_dataset
 from utils.config import get_config
 
 
@@ -82,12 +83,47 @@ def build_argument_parser() -> argparse.ArgumentParser:
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog="""
 Examples:
+  python src/main.py generate-ltlf-dataset --query-domain blocksworld --query-id query_1
   python src/main.py generate-library --domain-file ./src/domains/blocksworld/domain.hddl
   python src/main.py evaluate-library --library-artifact ./artifacts/plan_library/blocksworld --domain-file ./src/domains/blocksworld/domain.hddl --query-id query_1
   python src/main.py evaluate-library --library-artifact ./artifacts/plan_library/blocksworld --domain-file ./src/domains/blocksworld/domain.hddl --problem-file ./src/domains/blocksworld/problems/p01.hddl --instruction "Put block b4 on block b2" --ltlf-formula "do_put_on(b4, b2)"
 		""",
 	)
 	subparsers = parser.add_subparsers(dest="command")
+
+	ltlf_parser = subparsers.add_parser(
+		"generate-ltlf-dataset",
+		help="Generate stored LTLf query specifications from natural-language benchmark queries.",
+	)
+	ltlf_parser.add_argument(
+		"--source-query-dataset",
+		help="Natural-language query dataset. Defaults to benchmark_queries.json.",
+	)
+	ltlf_parser.add_argument(
+		"--output-dataset",
+		help="Output LTLf dataset. Defaults to src/benchmark_data/queries_LTLf.json.",
+	)
+	ltlf_parser.add_argument(
+		"--domain-file",
+		help="Optional HDDL domain file when generating one domain.",
+	)
+	ltlf_parser.add_argument(
+		"--query-domain",
+		help="Optional query domain key. Omit to generate all supported benchmark domains.",
+	)
+	ltlf_parser.add_argument(
+		"--query-id",
+		action="append",
+		help=(
+			"Stored benchmark query identifier to include in LTLf generation. "
+			"Repeat to generate multiple selected queries."
+		),
+	)
+	ltlf_parser.add_argument(
+		"--regenerate-existing",
+		action="store_true",
+		help="Regenerate records that already contain ltlf_formula.",
+	)
 
 	generate_parser = subparsers.add_parser(
 		"generate-library",
@@ -161,7 +197,28 @@ def main() -> None:
 
 	config = get_config()
 
-	if args.command == "generate-library":
+	if args.command == "generate-ltlf-dataset":
+		domain_file = (
+			_require_existing_path(args.domain_file, label="Domain File")
+			if args.domain_file
+			else None
+		)
+		_require_api_key(
+			api_key=config.openai_api_key,
+			env_var_name="OPENAI_API_KEY",
+			config=config,
+			purpose="LTLf dataset generation",
+		)
+		results = generate_ltlf_dataset(
+			source_query_dataset=_absolute_path(args.source_query_dataset),
+			output_dataset=_absolute_path(args.output_dataset),
+			domain_file=domain_file,
+			query_domain=args.query_domain,
+			query_ids=tuple(args.query_id or ()),
+			regenerate_existing=bool(args.regenerate_existing),
+			config=config,
+		)
+	elif args.command == "generate-library":
 		domain_file = _require_existing_path(args.domain_file, label="Domain File")
 		_require_api_key(
 			api_key=config.method_synthesis_api_key,
