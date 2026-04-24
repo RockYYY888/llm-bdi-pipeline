@@ -32,6 +32,49 @@ from .result_tables import (
 
 
 BACKEND_RESULT_MESSAGE = "backend_attempt"
+HTN_ATTEMPT_TEXT_PREVIEW_CHARS = 4096
+
+
+def _attempt_text_preview(value: Any) -> str:
+	text = str(value or "")
+	if len(text) <= HTN_ATTEMPT_TEXT_PREVIEW_CHARS:
+		return text
+	head_limit = HTN_ATTEMPT_TEXT_PREVIEW_CHARS // 2
+	tail_limit = HTN_ATTEMPT_TEXT_PREVIEW_CHARS - head_limit
+	return (
+		text[:head_limit]
+		+ f"\n...[truncated {len(text) - HTN_ATTEMPT_TEXT_PREVIEW_CHARS} chars]...\n"
+		+ text[-tail_limit:]
+	)
+
+
+def _backend_attempt_summary(attempt: Dict[str, Any]) -> Dict[str, Any]:
+	plan_solve_summary = dict((attempt.get("plan_solve_data") or {}).get("summary") or {})
+	plan_verification_summary = dict(
+		(attempt.get("plan_verification_data") or {}).get("summary") or {},
+	)
+	stdout = str(attempt.get("stdout") or "")
+	stderr = str(attempt.get("stderr") or "")
+	return {
+		"backend_name": str(attempt.get("backend_name") or "unknown"),
+		"task_id": str(attempt.get("task_id") or "unknown"),
+		"representation_id": str(attempt.get("representation_id") or "unknown"),
+		"success": bool(attempt.get("success")),
+		"selected_bucket": attempt.get("selected_bucket"),
+		"resource_profile": dict(attempt.get("resource_profile") or {}),
+		"plan_solve_status": plan_solve_summary.get("status"),
+		"plan_verification_status": plan_verification_summary.get("status"),
+		"plan_solve_failure_bucket": plan_solve_summary.get("failure_bucket"),
+		"plan_verification_failure_bucket": plan_verification_summary.get("failure_bucket"),
+		"total_seconds": attempt.get("total_seconds"),
+		"plan_solve_seconds": attempt.get("plan_solve_seconds"),
+		"plan_verification_seconds": attempt.get("plan_verification_seconds"),
+		"output_dir": attempt.get("output_dir"),
+		"stdout_preview": _attempt_text_preview(stdout),
+		"stderr_preview": _attempt_text_preview(stderr),
+		"stdout_chars": len(stdout),
+		"stderr_chars": len(stderr),
+	}
 
 
 class HTNProblemRootEvaluator:
@@ -447,19 +490,7 @@ class HTNProblemRootEvaluator:
 		)
 
 		attempt_summaries = [
-			{
-				"backend_name": str(attempt.get("backend_name") or "unknown"),
-				"task_id": str(attempt.get("task_id") or "unknown"),
-				"representation_id": str(attempt.get("representation_id") or "unknown"),
-				"success": bool(attempt.get("success")),
-				"selected_bucket": attempt.get("selected_bucket"),
-				"resource_profile": dict(attempt.get("resource_profile") or {}),
-				"plan_solve_status": ((attempt.get("plan_solve_data") or {}).get("summary") or {}).get("status"),
-				"plan_verification_status": ((attempt.get("plan_verification_data") or {}).get("summary") or {}).get("status"),
-				"total_seconds": attempt.get("total_seconds"),
-				"stdout": attempt.get("stdout"),
-				"stderr": attempt.get("stderr"),
-			}
+			_backend_attempt_summary(dict(attempt))
 			for attempt in attempts
 		]
 

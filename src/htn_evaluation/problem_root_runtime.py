@@ -113,6 +113,288 @@ def _sanitize_identifier(value: str) -> str:
 	return text.strip("_") or "item"
 
 
+HTN_EVIDENCE_TEXT_PREVIEW_CHARS = 4096
+HTN_HEAVY_ARTIFACT_NAMES = frozenset(
+	{
+		"output.sas",
+		"problem.psas",
+		"problem.psas.grounded",
+	}
+)
+
+
+def _text_preview(value: Any, *, limit: int = HTN_EVIDENCE_TEXT_PREVIEW_CHARS) -> str:
+	text = str(value or "")
+	if len(text) <= limit:
+		return text
+	head_limit = max(limit // 2, 1)
+	tail_limit = max(limit - head_limit, 1)
+	return (
+		text[:head_limit]
+		+ f"\n...[truncated {len(text) - limit} chars]...\n"
+		+ text[-tail_limit:]
+	)
+
+
+def _path_size(path_value: Any) -> Optional[int]:
+	if not path_value:
+		return None
+	try:
+		path = Path(str(path_value))
+		if path.exists():
+			return int(path.stat().st_size)
+	except OSError:
+		return None
+	return None
+
+
+def _rewrite_text_file_as_preview(path_value: Any, text: str) -> Optional[int]:
+	if not path_value:
+		return None
+	path = Path(str(path_value))
+	if not path.exists():
+		return None
+	original_size = int(path.stat().st_size)
+	preview = _text_preview(text)
+	if len(preview.encode("utf-8", errors="replace")) >= original_size:
+		return original_size
+	path.write_text(
+		(
+			f"[HTN evaluation compact evidence]\n"
+			f"original_bytes={original_size}\n\n"
+			f"{preview}"
+		),
+		encoding="utf-8",
+	)
+	return original_size
+
+
+def _compact_verification_result(
+	result: Any,
+	*,
+	json_filename: str,
+) -> Dict[str, Any]:
+	payload = dict(result.to_dict())
+	stdout = str(payload.pop("stdout", "") or "")
+	stderr = str(payload.pop("stderr", "") or "")
+	output_file = payload.get("output_file")
+	if output_file:
+		original_output_bytes = _rewrite_text_file_as_preview(
+			output_file,
+			IPCPlanVerifier._combine_output(stdout, stderr),
+		)
+		if original_output_bytes is not None:
+			payload["output_original_bytes"] = original_output_bytes
+	payload["stdout_preview"] = _text_preview(stdout)
+	payload["stderr_preview"] = _text_preview(stderr)
+	payload["stdout_chars"] = len(stdout)
+	payload["stderr_chars"] = len(stderr)
+	json_path = Path(str(payload.get("output_file") or "")).with_name(json_filename)
+	if json_path.parent.exists():
+		json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+	return payload
+
+
+def _compact_solver_candidate(candidate: Dict[str, Any]) -> Dict[str, Any]:
+	compact: Dict[str, Any] = {}
+	for key in (
+		"solver_id",
+		"mode",
+		"status",
+		"bucket",
+		"reason",
+		"error",
+		"seconds",
+		"step_count",
+		"has_hierarchical_trace",
+		"raw_plan_path",
+		"actual_plan_path",
+		"verification_output_dir",
+		"engine_stdout_path",
+		"engine_stderr_path",
+	):
+		if candidate.get(key) is not None:
+			compact[key] = candidate.get(key)
+	for path_key in (
+		"raw_plan_path",
+		"actual_plan_path",
+		"engine_stdout_path",
+		"engine_stderr_path",
+	):
+		if compact.get(path_key):
+			compact[f"{path_key}_bytes"] = _path_size(compact[path_key])
+	action_path = candidate.get("action_path")
+	if isinstance(action_path, list):
+		compact["action_path_count"] = len(action_path)
+	if candidate.get("command"):
+		compact["command"] = list(candidate.get("command") or ())
+	if candidate.get("stdout_head"):
+		compact["stdout_preview"] = _text_preview(candidate.get("stdout_head"))
+	if candidate.get("stderr_head"):
+		compact["stderr_preview"] = _text_preview(candidate.get("stderr_head"))
+	if isinstance(candidate.get("primitive_verification"), dict):
+		compact["primitive_verification"] = _compact_verification_payload(
+			dict(candidate["primitive_verification"]),
+		)
+	if isinstance(candidate.get("hierarchical_verification"), dict):
+		compact["hierarchical_verification"] = _compact_verification_payload(
+			dict(candidate["hierarchical_verification"]),
+		)
+	return compact
+
+
+def _compact_verification_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+	compact = {
+		key: payload.get(key)
+		for key in (
+			"tool_available",
+			"command",
+			"plan_file",
+			"output_file",
+			"output_original_bytes",
+			"primitive_plan_only",
+			"primitive_plan_executable",
+			"verification_result",
+			"reached_goal_state",
+			"plan_kind",
+			"build_warning",
+			"error",
+			"stdout_chars",
+			"stderr_chars",
+			"stdout_preview",
+			"stderr_preview",
+		)
+		if payload.get(key) is not None
+	}
+	return compact
+
+
+def _compact_plan_solve_data_for_parent(plan_solve_data: Dict[str, Any]) -> Dict[str, Any]:
+	summary = dict(plan_solve_data.get("summary") or {})
+	artifacts = dict(plan_solve_data.get("artifacts") or {})
+	nested_artifacts = dict(artifacts.get("artifacts") or {})
+	compact_artifacts = {
+		key: artifacts.get(key)
+		for key in (
+			"backend",
+			"status",
+			"planning_mode",
+			"engine_mode",
+			"solver_id",
+			"task_network_ordered",
+			"step_count",
+			"guided_hierarchical_plan_source",
+			"failure_bucket",
+		)
+		if artifacts.get(key) is not None
+	}
+	if artifacts.get("planning_representation"):
+		representation = dict(artifacts.get("planning_representation") or {})
+		compact_artifacts["planning_representation"] = {
+			key: representation.get(key)
+			for key in (
+				"representation_id",
+				"representation_source",
+				"ordering_kind",
+				"domain_file",
+				"problem_file",
+				"compilation_profile",
+			)
+			if representation.get(key) is not None
+		}
+	if isinstance(artifacts.get("task_network"), list):
+		compact_artifacts["task_network_count"] = len(artifacts["task_network"])
+	if isinstance(artifacts.get("ordering_edges"), list):
+		compact_artifacts["ordering_edge_count"] = len(artifacts["ordering_edges"])
+	if nested_artifacts:
+		compact_artifacts["artifact_files"] = {
+			key: value
+			for key, value in nested_artifacts.items()
+			if value is not None
+		}
+		compact_artifacts["artifact_file_bytes"] = {
+			key: _path_size(value)
+			for key, value in nested_artifacts.items()
+			if value is not None
+		}
+	if isinstance(artifacts.get("solver_candidates"), list):
+		compact_artifacts["solver_candidates"] = [
+			_compact_solver_candidate(dict(candidate))
+			for candidate in artifacts["solver_candidates"]
+		]
+	if artifacts.get("failure_metadata"):
+		failure_metadata = dict(artifacts.get("failure_metadata") or {})
+		compact_artifacts["failure_metadata"] = {
+			key: value
+			for key, value in failure_metadata.items()
+			if key not in {"domain_hddl", "problem_hddl", "engine_attempts"}
+		}
+		if isinstance(failure_metadata.get("engine_attempts"), list):
+			compact_artifacts["failure_solver_candidates"] = [
+				_compact_solver_candidate(dict(candidate))
+				for candidate in failure_metadata["engine_attempts"]
+			]
+	return {"summary": summary, "artifacts": compact_artifacts}
+
+
+def _compact_plan_verification_data_for_parent(
+	plan_verification_data: Dict[str, Any],
+) -> Dict[str, Any]:
+	summary = dict(plan_verification_data.get("summary") or {})
+	artifacts = dict(plan_verification_data.get("artifacts") or {})
+	compact_artifacts = {
+		key: artifacts.get(key)
+		for key in (
+			"tool_available",
+			"plan_kind",
+			"verification_result",
+			"primitive_plan_executable",
+			"reached_goal_state",
+			"selected_solver_id",
+			"selected_bucket",
+			"selection_rule",
+			"plan_file",
+			"output_file",
+			"json_file",
+			"output_original_bytes",
+			"stdout_chars",
+			"stderr_chars",
+			"stdout_preview",
+			"stderr_preview",
+		)
+		if artifacts.get(key) is not None
+	}
+	if isinstance(artifacts.get("solver_candidates"), list):
+		compact_artifacts["solver_candidates"] = [
+			_compact_solver_candidate(dict(candidate))
+			for candidate in artifacts["solver_candidates"]
+		]
+	return {"summary": summary, "artifacts": compact_artifacts}
+
+
+def _prune_heavy_planner_artifacts(output_dir: str | Path) -> None:
+	if os.environ.get("HTN_EVAL_KEEP_RAW_PLANNER_ARTIFACTS") == "1":
+		return
+	root = Path(output_dir)
+	if not root.exists():
+		return
+	for path in root.rglob("*"):
+		if path.is_file() and path.name in HTN_HEAVY_ARTIFACT_NAMES:
+			try:
+				original_size = int(path.stat().st_size)
+				path.write_text(
+					(
+						"[HTN evaluation compact evidence]\n"
+						f"original_bytes={original_size}\n"
+						"raw planner intermediate omitted; "
+						"problem_results.json and execution.json retain the audit summary.\n"
+					),
+					encoding="utf-8",
+				)
+			except OSError:
+				continue
+
+
 def solve_problem_root_backend_task(
 	context: HTNEvaluationContext,
 	*,
@@ -374,6 +656,10 @@ def verify_problem_root_solver_race(
 			output_filename="primitive_verifier.txt",
 			json_filename="primitive_verification.json",
 		)
+		primitive_payload = _compact_verification_result(
+			primitive_result,
+			json_filename="primitive_verification.json",
+		)
 
 		candidate_actual_plan_text = ""
 		candidate_actual_plan_path = candidate.get("actual_plan_path")
@@ -390,6 +676,10 @@ def verify_problem_root_solver_race(
 			build_warning=None,
 			plan_filename="hierarchical_plan.txt",
 			output_filename="hierarchical_verifier.txt",
+			json_filename="hierarchical_verification.json",
+		)
+		hierarchical_payload = _compact_verification_result(
+			hierarchical_result,
 			json_filename="hierarchical_verification.json",
 		)
 
@@ -422,8 +712,8 @@ def verify_problem_root_solver_race(
 			"raw_plan_path": candidate.get("raw_plan_path"),
 			"actual_plan_path": candidate_actual_plan_path,
 			"verification_output_dir": str(candidate_output_dir),
-			"primitive_verification": primitive_result.to_dict(),
-			"hierarchical_verification": hierarchical_result.to_dict(),
+			"primitive_verification": primitive_payload,
+			"hierarchical_verification": hierarchical_payload,
 		}
 		verified_candidates.append(record)
 		if bucket == "hierarchical_plan_verified" and selected_success is None:
@@ -659,6 +949,11 @@ def official_problem_root_planning_task_worker(
 			plan_verification_data = verify_plan_officially(context, plan_solve_data)
 			plan_verification_seconds = time.perf_counter() - plan_verification_start
 
+		plan_solve_data = _compact_plan_solve_data_for_parent(plan_solve_data)
+		plan_verification_data = _compact_plan_verification_data_for_parent(
+			plan_verification_data,
+		)
+		_prune_heavy_planner_artifacts(output_dir)
 		plan_solve_summary = dict((plan_solve_data or {}).get("summary") or {})
 		plan_verification_summary = dict((plan_verification_data or {}).get("summary") or {})
 		result_queue.put(

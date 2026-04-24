@@ -1571,6 +1571,99 @@ def test_apply_official_resource_profile_records_memory_and_cpu_enforcement() ->
 	assert profile["requested_cpu_count"] == 1
 
 
+def test_htn_verifier_evidence_is_compacted_without_raw_stdout(
+	tmp_path: Path,
+) -> None:
+	output_file = tmp_path / "verifier.txt"
+	output_file.write_text("existing oversized verifier output")
+	result = SimpleNamespace(
+		to_dict=lambda: {
+			"tool_available": True,
+			"command": ["pandaPIparser", "-V"],
+			"plan_file": str(tmp_path / "plan.txt"),
+			"output_file": str(output_file),
+			"stdout": "a" * 20_000,
+			"stderr": "b" * 12_000,
+			"primitive_plan_only": False,
+			"primitive_plan_executable": True,
+			"verification_result": True,
+			"reached_goal_state": True,
+			"plan_kind": "hierarchical",
+			"build_warning": None,
+			"error": None,
+		},
+	)
+
+	payload = problem_root_runtime._compact_verification_result(
+		result,
+		json_filename="verification.json",
+	)
+
+	assert "stdout" not in payload
+	assert "stderr" not in payload
+	assert payload["stdout_chars"] == 20_000
+	assert payload["stderr_chars"] == 12_000
+	assert "truncated" in payload["stdout_preview"]
+	assert output_file.stat().st_size < 10_000
+	written_payload = json.loads((tmp_path / "verification.json").read_text())
+	assert "stdout" not in written_payload
+	assert "stderr" not in written_payload
+
+
+def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(
+	tmp_path: Path,
+) -> None:
+	actual_plan = tmp_path / "plan.actual"
+	actual_plan.write_text("do-a\n")
+	payload = {
+		"summary": {"status": "success", "step_count": 2},
+		"artifacts": {
+			"backend": "panda_pi_portfolio",
+			"status": "success",
+			"planning_mode": "official_problem_root",
+			"engine_mode": "progression",
+			"solver_id": "progression_rc2_add",
+			"planning_representation": {
+				"representation_id": "linearized_total_order",
+				"representation_source": "linearized",
+				"ordering_kind": "total_order",
+				"domain_file": str(tmp_path / "domain.hddl"),
+				"problem_file": str(tmp_path / "problem.hddl"),
+				"metadata": {"large": "x" * 10_000},
+			},
+			"task_network": [{"task_name": "root", "args": []}],
+			"ordering_edges": [{"before": "s1", "after": "s2"}],
+			"action_path": ["a", "b"],
+			"method_trace": [{"method": "m"}],
+			"guided_hierarchical_plan_text": "plan text" * 1000,
+			"solver_candidates": [
+				{
+					"solver_id": "progression_rc2_add",
+					"status": "success",
+					"action_path": ["a", "b"],
+					"actual_plan_path": str(actual_plan),
+					"engine_stdout": "raw stdout" * 1000,
+				},
+			],
+			"artifacts": {
+				"actual_plan": str(actual_plan),
+			},
+		},
+	}
+
+	compacted = problem_root_runtime._compact_plan_solve_data_for_parent(payload)
+	artifacts = compacted["artifacts"]
+
+	assert "action_path" not in artifacts
+	assert "method_trace" not in artifacts
+	assert "guided_hierarchical_plan_text" not in artifacts
+	assert artifacts["task_network_count"] == 1
+	assert artifacts["ordering_edge_count"] == 1
+	assert artifacts["solver_candidates"][0]["action_path_count"] == 2
+	assert "engine_stdout" not in artifacts["solver_candidates"][0]
+	assert artifacts["artifact_files"]["actual_plan"] == str(actual_plan)
+
+
 def test_planning_tasks_can_filter_to_one_requested_planner() -> None:
 	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["transport"],
