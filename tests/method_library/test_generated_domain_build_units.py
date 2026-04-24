@@ -332,17 +332,33 @@ def test_library_postprocess_bound_helpers_are_callable_via_synthesizer_instance
 	assert synthesizer._looks_like_variable("?x")
 
 
-def test_method_synthesis_transport_streams_on_openrouter_base_url() -> None:
+def test_method_synthesis_transport_preserves_configured_output_budget() -> None:
+	synthesizer = HTNMethodSynthesizer(model="deepseek-v4-pro")
+
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) is None
+	assert synthesizer._apply_method_synthesis_provider_token_ceiling(144000) == 144000
+
+
+def test_method_synthesis_deepseek_profile_uses_configured_output_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
+		model="deepseek-v4-pro",
+		base_url="https://api.deepseek.com",
+		max_tokens=144000,
 	)
 
-	assert synthesizer._should_stream_method_synthesis_response()
-	assert synthesizer._method_synthesis_request_plugins(True) is None
+	profile = synthesizer._method_synthesis_request_profile(
+		prompt={"system": "x", "user": "y"},
+	)
+
+	assert profile["name"] == "deepseek_openai_single_pass"
+	assert profile["stream_response"] is False
+	assert profile["completion_max_tokens"] == 144000
+	assert profile["max_tokens_policy"] == "configured_method_synthesis_max_tokens"
+	assert profile["thinking_type"] == "enabled"
+	assert profile["reasoning_effort"] == "max"
 
 
-def test_method_synthesis_transport_omits_response_format_on_openrouter_streaming() -> None:
+def test_method_synthesis_transport_uses_deepseek_openai_json_request() -> None:
 	captured_kwargs = {}
 
 	class FakeCompletions:
@@ -359,178 +375,18 @@ def test_method_synthesis_transport_omits_response_format_on_openrouter_streamin
 			self.chat = FakeChat()
 
 	synthesizer = HTNMethodSynthesizer(
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
+		model="deepseek-v4-pro",
+		base_url="https://api.deepseek.com",
 	)
 	synthesizer.client = FakeClient()
 
-	synthesizer._create_chat_completion({"system": "x", "user": "y"}, max_tokens=128)
-
-	assert captured_kwargs["stream"] is True
-	assert "response_format" not in captured_kwargs
-
-
-def test_method_synthesis_transport_uses_kimi_output_budget() -> None:
-	synthesizer = HTNMethodSynthesizer(model="moonshotai/kimi-k2.6")
-
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(None) == 65536
-	assert synthesizer._apply_method_synthesis_provider_token_ceiling(32768) == 32768
-
-
-def test_method_synthesis_request_profile_uses_single_pass_context_budget() -> None:
-	synthesizer = HTNMethodSynthesizer(
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
-	)
-	prompt = {
-		"system": "abcd",
-		"user": "efgh",
-	}
-
-	profile = synthesizer._method_synthesis_request_profile(prompt=prompt)
-	expected_prompt_tokens = synthesizer._estimate_method_synthesis_prompt_token_budget(prompt)
-
-	assert profile["name"] == "kimi_stream_single_pass"
-	assert profile["context_window_tokens"] == 262144
-	assert profile["prompt_token_estimate"] == expected_prompt_tokens
-	assert profile["completion_max_tokens"] == 65536
-	assert profile["reasoning_max_tokens"] == 8192
-	assert profile["reasoning_excluded"] is False
-	assert profile["first_chunk_timeout_seconds"] == 1000.0
-	assert profile["session_id"] == "method-synthesis"
-	assert profile["max_tokens_policy"] == "fixed_65536"
-
-
-def test_method_synthesis_transport_uses_kimi_openrouter_provider_lock() -> None:
-	synthesizer = HTNMethodSynthesizer(
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
-	)
-
-	extra_body = synthesizer._openrouter_provider_routing_body(
-		request_profile={
-					"name": "kimi_stream_single_pass",
-					"stream_response": True,
-					"reasoning_max_tokens": 8192,
-					"first_chunk_timeout_seconds": 1000.0,
-				},
-			)
-
-	assert extra_body == {
-			"provider": {
-				"only": ["moonshotai"],
-				"allow_fallbacks": False,
-			},
-			"session_id": "method-synthesis",
-			"reasoning": {"exclude": False, "max_tokens": 8192},
-		}
-
-
-def test_method_synthesis_transport_keeps_response_format_off_openrouter_streaming_path() -> None:
-	captured_kwargs = {}
-
-	class FakeCompletions:
-		def create(self, **kwargs):
-			captured_kwargs.update(kwargs)
-			return object()
-
-	class FakeChat:
-		def __init__(self):
-			self.completions = FakeCompletions()
-
-	class FakeClient:
-		def __init__(self):
-			self.chat = FakeChat()
-
-	synthesizer = HTNMethodSynthesizer(model="other/model", base_url="https://api.example.com/v1")
-	synthesizer.client = FakeClient()
-
-	synthesizer._create_chat_completion({"system": "x", "user": "y"}, max_tokens=128)
+	synthesizer._create_chat_completion({"system": "x", "user": "y"}, max_tokens=144000)
 
 	assert captured_kwargs["stream"] is False
 	assert captured_kwargs["response_format"] == {"type": "json_object"}
-
-
-def test_method_synthesis_transport_uses_raw_openrouter_streaming_path() -> None:
-	captured_request = {}
-
-	class FakeSynthesizer(HTNMethodSynthesizer):
-		def _create_raw_openrouter_stream_response(
-			self,
-			request_kwargs,
-			*,
-			request_timeout_seconds=None,
-		):
-			captured_request["request_kwargs"] = dict(request_kwargs)
-			captured_request["request_timeout_seconds"] = request_timeout_seconds
-			return object()
-
-	synthesizer = FakeSynthesizer(
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
-		api_key="sk-test",
-		timeout=60,
-	)
-
-	response = synthesizer._create_chat_completion(
-		{"system": "x", "user": "y"},
-		max_tokens=16,
-		request_profile={
-				"name": "kimi_stream_single_pass",
-				"stream_response": True,
-				"reasoning_max_tokens": 8192,
-				"first_chunk_timeout_seconds": 90.0,
-			},
-			request_timeout_seconds=90.0,
-	)
-
-	assert response is not None
-	assert captured_request["request_kwargs"]["stream"] is True
-	assert "response_format" not in captured_request["request_kwargs"]
-	assert captured_request["request_kwargs"]["max_tokens"] == 16
-	assert captured_request["request_timeout_seconds"] == 90.0
-	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "method-synthesis"
-	assert captured_request["request_kwargs"]["extra_body"]["reasoning"] == {
-		"exclude": False,
-		"max_tokens": 8192,
-	}
-
-
-def test_method_synthesis_transport_can_omit_lower_level_max_tokens_when_not_supplied() -> None:
-	captured_request = {}
-
-	class FakeSynthesizer(HTNMethodSynthesizer):
-		def _create_raw_openrouter_stream_response(
-			self,
-			request_kwargs,
-			*,
-			request_timeout_seconds=None,
-		):
-			captured_request["request_kwargs"] = dict(request_kwargs)
-			captured_request["request_timeout_seconds"] = request_timeout_seconds
-			return object()
-
-	synthesizer = FakeSynthesizer(
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
-		api_key="sk-test",
-		timeout=60,
-	)
-
-	synthesizer._create_chat_completion(
-		{"system": "x", "user": "y"},
-		max_tokens=None,
-		request_profile={
-				"name": "kimi_stream_single_pass",
-				"stream_response": True,
-				"reasoning_max_tokens": 8192,
-				"first_chunk_timeout_seconds": 1000.0,
-			},
-			request_timeout_seconds=1000.0,
-		)
-
-	assert "max_tokens" not in captured_request["request_kwargs"]
-	assert captured_request["request_kwargs"]["extra_body"]["session_id"] == "method-synthesis"
+	assert captured_kwargs["max_tokens"] == 144000
+	assert captured_kwargs["reasoning_effort"] == "max"
+	assert captured_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
 def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
@@ -560,10 +416,11 @@ def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
 			{"system": "x", "user": "y"},
 			max_tokens=16,
 			request_profile={
-				"name": "kimi_stream_single_pass",
-				"stream_response": True,
-				"reasoning_max_tokens": None,
+				"name": "deepseek_openai_single_pass",
+				"stream_response": False,
 				"first_chunk_timeout_seconds": 0.01,
+				"thinking_type": "enabled",
+				"reasoning_effort": "max",
 			},
 			request_timeout_seconds=0.01,
 		)
@@ -582,30 +439,27 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 		):
 			if transport_metadata is not None:
 				transport_metadata["llm_request_id"] = "req_timeout"
-				transport_metadata["llm_response_mode"] = "streaming"
+				transport_metadata["llm_response_mode"] = "non_streaming"
 				transport_metadata["llm_request_profile"] = dict(request_profile or {}).get("name")
 			time.sleep(0.05)
 			return "{}", "stop", dict(transport_metadata or {})
 
-	synthesizer = SlowSynthesizer(timeout=0.01)
+	synthesizer = SlowSynthesizer(model="deepseek-v4-pro", timeout=0.01, max_tokens=144000)
 
-	with pytest.raises(TimeoutError, match="first-chunk deadline|configured timeout") as exc_info:
+	with pytest.raises(TimeoutError, match="configured timeout") as exc_info:
 		synthesizer._call_llm({"system": "x", "user": "y"}, max_tokens=16)
 
 	assert getattr(exc_info.value, "transport_metadata", {}) == {
 		"llm_request_id": "req_timeout",
-		"llm_response_mode": "streaming",
-			"llm_request_profile": "kimi_stream_single_pass",
-			"llm_reasoning_budget": 8192,
-			"llm_first_chunk_timeout_seconds": 1000.0,
-			"llm_context_window_tokens": 204800,
-			"llm_prompt_token_estimate": 1,
-			"llm_completion_max_tokens": 65536,
-			"llm_reasoning_excluded": False,
-			"llm_session_id": "method-synthesis",
-			"llm_max_tokens_policy": "fixed_65536",
-			"llm_request_timeout_seconds": 0.01,
-		}
+		"llm_response_mode": "non_streaming",
+		"llm_request_profile": "deepseek_openai_single_pass",
+		"llm_first_chunk_timeout_seconds": 0.0,
+		"llm_completion_max_tokens": 144000,
+		"llm_max_tokens_policy": "configured_method_synthesis_max_tokens",
+		"llm_thinking_type": "enabled",
+		"llm_reasoning_effort": "max",
+		"llm_request_timeout_seconds": 0.01,
+	}
 
 
 def test_method_synthesis_transport_streaming_captures_request_id_and_timings() -> None:
@@ -833,7 +687,7 @@ def test_method_synthesis_streaming_total_timeout_survives_off_main_thread() -> 
 def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
 	class RetryingSynthesizer(HTNMethodSynthesizer):
 		def __init__(self):
-			super().__init__(model="moonshotai/kimi-k2.6")
+			super().__init__(model="deepseek-v4-pro")
 			self.call_count = 0
 
 		def _call_llm(self, prompt, *, max_tokens=None):
@@ -844,8 +698,8 @@ def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
 			)
 			error.transport_metadata = {
 				"llm_request_id": f"req_retry_{self.call_count}",
-				"llm_response_mode": "streaming",
-				"llm_request_profile": "kimi_stream_single_pass",
+				"llm_response_mode": "non_streaming",
+				"llm_request_profile": "deepseek_openai_single_pass",
 			}
 			raise error
 
@@ -871,7 +725,7 @@ def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
 		"req_retry_6",
 	]
 	assert all(
-		attempt["request_profile"] == "kimi_stream_single_pass"
+		attempt["request_profile"] == "deepseek_openai_single_pass"
 		for attempt in metadata["llm_attempt_trace"]
 	)
 
@@ -879,7 +733,7 @@ def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
 def test_method_synthesis_retries_then_accepts_successful_response() -> None:
 	class EventuallySuccessfulSynthesizer(HTNMethodSynthesizer):
 		def __init__(self):
-			super().__init__(model="moonshotai/kimi-k2.6")
+			super().__init__(model="deepseek-v4-pro")
 			self.call_count = 0
 
 		def _call_llm(self, prompt, *, max_tokens=None):
@@ -888,8 +742,8 @@ def test_method_synthesis_retries_then_accepts_successful_response() -> None:
 				error = TimeoutError("first attempt timed out")
 				error.transport_metadata = {
 					"llm_request_id": f"req_retry_{self.call_count}",
-					"llm_response_mode": "streaming",
-					"llm_request_profile": "kimi_stream_single_pass",
+					"llm_response_mode": "non_streaming",
+					"llm_request_profile": "deepseek_openai_single_pass",
 				}
 				raise error
 			return (
@@ -897,8 +751,8 @@ def test_method_synthesis_retries_then_accepts_successful_response() -> None:
 				"stop",
 				{
 					"llm_request_id": "req_retry_6",
-					"llm_response_mode": "streaming",
-					"llm_request_profile": "kimi_stream_single_pass",
+					"llm_response_mode": "non_streaming",
+					"llm_request_profile": "deepseek_openai_single_pass",
 				},
 			)
 

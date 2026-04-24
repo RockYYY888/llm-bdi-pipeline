@@ -2067,12 +2067,13 @@ def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences(
 	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
 
 
-def test_goal_grounding_kimi_request_profile_uses_streaming_with_token_caps() -> None:
+def test_goal_grounding_deepseek_request_profile_uses_configured_json_budget() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
+		model="deepseek-v4-pro",
+		base_url="https://api.deepseek.com",
+		response_max_tokens=12000,
 	)
 	messages = [
 		{"role": "system", "content": "Return strict minified JSON only."},
@@ -2081,41 +2082,39 @@ def test_goal_grounding_kimi_request_profile_uses_streaming_with_token_caps() ->
 
 	profile = generator._goal_grounding_request_profile(messages=messages)
 
-	expected_prompt_estimate = generator._estimate_goal_grounding_prompt_token_budget(messages)
-
-	assert profile["name"] == "kimi_stream_single_pass"
-	assert profile["stream_response"] is True
-	assert profile["first_chunk_timeout_seconds"] == 1000.0
-	assert profile["context_window_tokens"] == 262_144
-	assert profile["prompt_token_estimate"] == expected_prompt_estimate
-	assert profile["completion_max_tokens"] == 65536
-	assert profile["reasoning_max_tokens"] == 8192
-	assert profile["reasoning_excluded"] is False
-	assert profile["session_id"] == "ltlf-generation"
-	assert profile["max_tokens_policy"] == "fixed_65536"
+	assert profile["name"] == "deepseek_openai_single_pass"
+	assert profile["stream_response"] is False
+	assert profile["first_chunk_timeout_seconds"] == 0.0
+	assert profile["completion_max_tokens"] == 12000
+	assert profile["max_tokens_policy"] == "configured_ltlf_generation_max_tokens"
+	assert profile["thinking_type"] == "enabled"
+	assert profile["reasoning_effort"] == "high"
 
 
-def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_token_caps() -> None:
+def test_goal_grounding_chat_completion_uses_deepseek_json_request() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
-	captured_request: dict[str, object] = {}
+	captured_kwargs: dict[str, object] = {}
 
-	class FakeGenerator(NLToLTLfGenerator):
-		def _create_raw_openrouter_stream_response(
-			self,
-			request_kwargs,
-			*,
-			request_timeout_seconds=None,
-		):
-			captured_request["request_kwargs"] = dict(request_kwargs)
-			captured_request["request_timeout_seconds"] = request_timeout_seconds
+	class FakeCompletions:
+		def create(self, **kwargs):
+			captured_kwargs.update(kwargs)
 			return {"ok": True}
 
-	generator = FakeGenerator(
+	class FakeChat:
+		def __init__(self):
+			self.completions = FakeCompletions()
+
+	class FakeClient:
+		def __init__(self):
+			self.chat = FakeChat()
+
+	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
-		model="moonshotai/kimi-k2.6",
-		base_url="https://openrouter.ai/api/v1",
+		model="deepseek-v4-pro",
+		base_url="https://api.deepseek.com",
 		api_key="sk-test",
 	)
+	generator.client = FakeClient()
 
 	messages = [{"role": "system", "content": "Return JSON."}]
 	response = generator._create_chat_completion(
@@ -2125,25 +2124,20 @@ def test_goal_grounding_chat_completion_uses_openrouter_streaming_with_token_cap
 	)
 
 	assert response == {"ok": True}
-	request_kwargs = captured_request["request_kwargs"]
-	assert captured_request["request_timeout_seconds"] == 123.0
-	assert request_kwargs["timeout"] == 123.0
-	assert request_kwargs["stream"] is True
-	assert request_kwargs["max_tokens"] == 65536
-	assert "response_format" not in request_kwargs
-	assert request_kwargs["extra_body"] == {
-		"provider": {"only": ["moonshotai"], "allow_fallbacks": False},
-		"session_id": "ltlf-generation",
-		"reasoning": {"exclude": False, "max_tokens": 8192},
-	}
+	assert captured_kwargs["timeout"] == 123.0
+	assert captured_kwargs["stream"] is False
+	assert captured_kwargs["max_tokens"] == 321
+	assert captured_kwargs["response_format"] == {"type": "json_object"}
+	assert captured_kwargs["reasoning_effort"] == "high"
+	assert captured_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
-def test_goal_grounding_chat_completion_keeps_json_object_request_off_openrouter_streaming_path() -> None:
+def test_goal_grounding_chat_completion_keeps_json_object_request_on_deepseek_path() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
-		model="other/model",
-		base_url="https://api.example.com/v1",
+		model="deepseek-v4-pro",
+		base_url="https://api.deepseek.com",
 	)
 
 	class FakeCompletions:
@@ -2178,6 +2172,7 @@ def test_goal_grounding_chat_completion_keeps_json_object_request_off_openrouter
 	assert fake_completions.calls[0]["max_tokens"] == 321
 	assert fake_completions.calls[0]["stream"] is False
 	assert fake_completions.calls[0]["response_format"] == {"type": "json_object"}
+	assert fake_completions.calls[0]["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
 def test_goal_grounding_streaming_rejects_length_finish_even_when_json_is_complete() -> None:

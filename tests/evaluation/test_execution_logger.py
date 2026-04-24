@@ -99,6 +99,16 @@ def test_execution_logger_writes_only_active_semantic_steps(tmp_path) -> None:
 	assert '"llm_finish_reason": "stop"' in text_log
 	assert execution["goal_grounding"]["metadata"]["llm_response_mode"] == "streaming"
 	assert execution["goal_grounding"]["metadata"]["llm_finish_reason"] == "stop"
+	assert "prompt" not in execution["goal_grounding"]["llm"]
+	assert "response" not in execution["goal_grounding"]["llm"]
+	assert execution["goal_grounding"]["llm"]["prompt_file"].endswith(
+		"goal_grounding_llm_prompt.json",
+	)
+	assert execution["goal_grounding"]["llm"]["response_file"].endswith(
+		"goal_grounding_llm_response.txt",
+	)
+	assert (log_dir / execution["goal_grounding"]["llm"]["prompt_file"]).exists()
+	assert (log_dir / execution["goal_grounding"]["llm"]["response_file"]).exists()
 	assert execution["ltlf_formula"] == "F(stack(c, b))"
 	assert execution["ltlf_atom_count"] == 1
 	assert execution["ltlf_operator_counts"] == {"F": 1}
@@ -132,3 +142,46 @@ def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:
 
 	assert execution["plan_solve"]["artifacts"]["backend_attempts"][0]["stdout"] == "solver-bytes"
 	assert "OFFICIAL PROBLEM ROOT EXECUTION" in text_log
+
+
+def test_execution_logger_externalizes_method_and_plan_payloads(tmp_path) -> None:
+	logger = ExecutionLogger(logs_dir=str(tmp_path), run_origin="tests")
+	logger.start_pipeline(
+		"generate library",
+		mode="plan_library_generation",
+		domain_file="/tmp/domain.hddl",
+		domain_name="blocksworld",
+	)
+	logger.log_method_synthesis(
+		{
+			"methods": [
+				{"name": "m1", "subtasks": [{"id": "s1", "task_name": "pick-up"}]},
+			],
+		},
+		"Success",
+		model="deepseek-v4-pro",
+		llm_prompt={"system": "system prompt", "user": "user prompt"},
+		llm_response='{"methods":[]}',
+	)
+	logger.log_agentspeak_rendering(
+		{"plan_library": {"plans": [{"trigger": "+!do_put_on"}]}},
+		"Success",
+	)
+	log_path = logger.end_pipeline(success=True)
+	log_dir = log_path.parent
+	execution = json.loads((log_dir / "execution.json").read_text())
+	text_log = log_path.read_text()
+
+	method_artifacts = execution["method_synthesis"]["artifacts"]
+	render_artifacts = execution["agentspeak_rendering"]["artifacts"]
+
+	assert "method_library" not in method_artifacts
+	assert method_artifacts["method_library_file"].endswith(
+		"payloads/method_synthesis_method_library.json",
+	)
+	assert render_artifacts["plan_library_file"].endswith(
+		"payloads/agentspeak_rendering_plan_library.json",
+	)
+	assert '{"methods":[]}' not in text_log
+	assert (log_dir / method_artifacts["method_library_file"]).exists()
+	assert (log_dir / render_artifacts["plan_library_file"]).exists()

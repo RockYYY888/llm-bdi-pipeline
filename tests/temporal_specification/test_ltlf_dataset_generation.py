@@ -18,8 +18,8 @@ BLOCKSWORLD_DOMAIN_FILE = PROJECT_ROOT / "src" / "domains" / "blocksworld" / "do
 
 class FakeConfig:
 	ltlf_generation_api_key = "sk-test"
-	ltlf_generation_model = "fake/openrouter-model"
-	ltlf_generation_base_url = "https://openrouter.ai/api/v1"
+	ltlf_generation_model = "deepseek-v4-pro"
+	ltlf_generation_base_url = "https://api.deepseek.com"
 	ltlf_generation_timeout = 10
 	ltlf_generation_max_tokens = 256
 	ltlf_generation_session_id = "ltlf-test-session"
@@ -110,7 +110,7 @@ def test_generate_ltlf_dataset_from_natural_language_queries(tmp_path: Path) -> 
 	payload = json.loads(output_dataset.read_text(encoding="utf-8"))
 	case_payload = payload["domains"]["blocksworld"]["cases"]["query_1"]
 	assert payload["dataset_kind"] == "stored_benchmark_ltlf_queries"
-	assert payload["ltlf_generator"]["base_url"] == "https://openrouter.ai/api/v1"
+	assert payload["ltlf_generator"]["base_url"] == "https://api.deepseek.com"
 	assert payload["ltlf_generator"]["session_id"] == "ltlf-test-session"
 	assert case_payload["ltlf_formula"] == "do_put_on(b4, b2)"
 	assert case_payload["instruction"].startswith("Using blocks")

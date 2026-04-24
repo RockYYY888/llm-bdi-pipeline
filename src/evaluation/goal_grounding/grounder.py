@@ -5,13 +5,11 @@ LLM-driven temporal goal grounding for the Jason evaluation runtime.
 from __future__ import annotations
 
 import json
-import math
 import re
 import signal
 import threading
 import time
 from collections import defaultdict
-from types import SimpleNamespace
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from method_library.synthesis.schema import HTNMethodLibrary
@@ -28,12 +26,6 @@ from utils.config import DEFAULT_LTLF_GENERATION_SESSION_ID
 from utils.config import DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS
 from utils.symbol_normalizer import SymbolNormalizer
 
-KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
-KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
-KIMI_COMPLETION_MAX_TOKENS = 65_536
-KIMI_REASONING_MAX_TOKENS = 8_192
-KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
-KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 1000.0
 GOAL_GROUNDING_MAX_TRANSPORT_RETRIES = 3
 GOAL_GROUNDING_RETRYABLE_ERROR_FRAGMENTS = (
 	"exceeded the configured wall-clock timeout before a response chunk was created",
@@ -880,13 +872,10 @@ class NLToLTLfGenerator:
 		request_profile: Optional[Dict[str, Any]] = None,
 	):
 		profile = dict(request_profile or self._goal_grounding_request_profile(messages=messages))
-		stream_response = bool(profile.get("stream_response"))
-		if str(self.model or "").strip().lower().startswith("moonshotai/"):
-			capped_response_max_tokens = int(profile["completion_max_tokens"])
-		else:
-			capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
-				response_max_tokens,
-			)
+		stream_response = bool(profile.get("stream_response", False))
+		capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
+			response_max_tokens,
+		)
 		request_kwargs = {
 			"model": self.model,
 			"messages": messages,
@@ -896,16 +885,11 @@ class NLToLTLfGenerator:
 		}
 		if capped_response_max_tokens is not None:
 			request_kwargs["max_tokens"] = int(capped_response_max_tokens)
-		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
-			request_kwargs["response_format"] = {"type": "json_object"}
-		extra_body = self._openrouter_provider_routing_body(request_profile=profile)
-		if extra_body is not None:
-			request_kwargs["extra_body"] = extra_body
-		if self._should_use_raw_openrouter_stream_transport(stream_response=stream_response):
-			return self._create_raw_openrouter_stream_response(
-				request_kwargs,
-				request_timeout_seconds=float(request_timeout or self.request_timeout),
-			)
+		request_kwargs["response_format"] = {"type": "json_object"}
+		request_kwargs["reasoning_effort"] = profile.get("reasoning_effort", "high")
+		request_kwargs["extra_body"] = {
+			"thinking": {"type": profile.get("thinking_type", "enabled")},
+		}
 		return self.client.chat.completions.create(**request_kwargs)
 
 	def _read_response_payload(
@@ -916,12 +900,6 @@ class NLToLTLfGenerator:
 		transport_metadata: Optional[Dict[str, Any]] = None,
 	) -> Tuple[str, str, Dict[str, Any]]:
 		metadata = dict(transport_metadata or {})
-		if isinstance(response, _RawOpenRouterStreamingResponse):
-			return self._consume_streaming_llm_response(
-				response,
-				transport_metadata=metadata,
-				total_timeout_seconds=max(float(request_timeout or 0.0), 0.0),
-			)
 		finish_reason = self._extract_finish_reason(response)
 		response_text = self._extract_response_text(response)
 		metadata["llm_response_mode"] = "non_streaming"
@@ -981,62 +959,20 @@ class NLToLTLfGenerator:
 				pass
 		return repr(response)
 
-	def _openrouter_provider_routing_body(
-		self,
-		*,
-		request_profile: Optional[Dict[str, Any]] = None,
-	) -> Dict[str, Any] | None:
-		base_url = str(self.base_url or "").strip().lower()
-		if "openrouter.ai" not in base_url:
-			return None
-		model_name = str(self.model or "").strip()
-		if "/" not in model_name:
-			return None
-		provider_name = model_name.split("/", 1)[0].strip().lower()
-		if not provider_name:
-			return None
-		extra_body: Dict[str, Any] = {
-			"provider": {
-				"only": [provider_name],
-				"allow_fallbacks": False,
-			},
-			"session_id": self.session_id,
-		}
-		reasoning_max_tokens = int(
-			(request_profile or {}).get("reasoning_max_tokens") or 0,
-		)
-		extra_body["reasoning"] = {"exclude": False}
-		if reasoning_max_tokens > 0:
-			extra_body["reasoning"]["max_tokens"] = reasoning_max_tokens
-		return extra_body
-
 	def _goal_grounding_request_profile(
 		self,
 		*,
 		messages: Optional[list[dict[str, str]]] = None,
 	) -> Dict[str, Any]:
-		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("moonshotai/"):
-			context_window_tokens = self._goal_grounding_total_context_tokens()
-			prompt_token_estimate = self._estimate_goal_grounding_prompt_token_budget(messages)
-			return {
-				"name": "kimi_stream_single_pass",
-				"stream_response": True,
-				# Reasoning chunks are streamed as heartbeat events but not stored locally.
-				"reasoning_max_tokens": KIMI_REASONING_MAX_TOKENS,
-				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
-				"context_window_tokens": context_window_tokens,
-				"prompt_token_estimate": prompt_token_estimate,
-				"completion_max_tokens": KIMI_COMPLETION_MAX_TOKENS,
-				"reasoning_excluded": False,
-				"session_id": self.session_id,
-				"max_tokens_policy": "fixed_65536",
-			}
+		_ = messages
 		return {
-			"name": "default_profile",
-			"stream_response": self._should_stream_goal_grounding_response(),
-			"reasoning_max_tokens": None,
+			"name": "deepseek_openai_single_pass",
+			"stream_response": False,
 			"first_chunk_timeout_seconds": 0.0,
+			"completion_max_tokens": max(int(self.response_max_tokens or 0), 1),
+			"max_tokens_policy": "configured_ltlf_generation_max_tokens",
+			"thinking_type": "enabled",
+			"reasoning_effort": "high",
 		}
 
 	def _goal_grounding_transport_metadata(
@@ -1046,63 +982,24 @@ class NLToLTLfGenerator:
 		profile = dict(request_profile or {})
 		metadata: Dict[str, Any] = {
 			"llm_request_profile": profile.get("name"),
-			"llm_reasoning_budget": profile.get("reasoning_max_tokens"),
 			"llm_first_chunk_timeout_seconds": profile.get("first_chunk_timeout_seconds"),
 		}
 		for metadata_key, profile_key in (
-			("llm_context_window_tokens", "context_window_tokens"),
-			("llm_prompt_token_estimate", "prompt_token_estimate"),
 			("llm_completion_max_tokens", "completion_max_tokens"),
-			("llm_answer_token_reserve", "answer_token_reserve"),
-			("llm_context_margin_tokens", "context_margin_tokens"),
-			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
-			("llm_reasoning_headroom_ratio", "reasoning_headroom_ratio"),
-			("llm_reasoning_excluded", "reasoning_excluded"),
-			("llm_transport_overhead_tokens", "transport_overhead_tokens"),
-			("llm_session_id", "session_id"),
 			("llm_max_tokens_policy", "max_tokens_policy"),
+			("llm_thinking_type", "thinking_type"),
+			("llm_reasoning_effort", "reasoning_effort"),
 		):
 			if profile.get(profile_key) is not None:
 				metadata[metadata_key] = profile.get(profile_key)
 		return metadata
 
-	def _goal_grounding_total_context_tokens(self) -> int:
-		base_url = str(self.base_url or "").strip().lower()
-		if "openrouter.ai" in base_url:
-			return KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS
-		return KIMI_DIRECT_CONTEXT_WINDOW_TOKENS
-
-	@staticmethod
-	def _estimate_goal_grounding_prompt_token_budget(
-		messages: Optional[list[dict[str, str]]],
-	) -> int:
-		if not isinstance(messages, list):
-			return 0
-		total_characters = 0
-		for message in messages:
-			if not isinstance(message, dict):
-				continue
-			total_characters += len(str(message.get("content") or ""))
-		if total_characters <= 0:
-			return 0
-		return max(
-			1,
-			math.ceil(total_characters / KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN),
-		)
-
 	def _apply_goal_grounding_provider_token_ceiling(
 		self,
 		requested_max_tokens: Optional[int],
 	) -> int | None:
-		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("moonshotai/"):
-			return max(int(requested_max_tokens or KIMI_COMPLETION_MAX_TOKENS), 1)
 		requested = max(int(requested_max_tokens or self.response_max_tokens or 0), 1)
 		return requested
-
-	def _should_stream_goal_grounding_response(self) -> bool:
-		base_url = str(self.base_url or "").strip().lower()
-		return "openrouter.ai" in base_url
 
 	@staticmethod
 	def _run_with_wall_clock_timeout(
@@ -1132,61 +1029,6 @@ class NLToLTLfGenerator:
 		finally:
 			signal.setitimer(signal.ITIMER_REAL, 0.0)
 			signal.signal(signal.SIGALRM, previous_handler)
-
-	def _should_use_raw_openrouter_stream_transport(
-		self,
-		*,
-		stream_response: bool,
-	) -> bool:
-		base_url = str(self.base_url or "").strip().lower()
-		return bool(stream_response) and "openrouter.ai" in base_url
-
-	def _create_raw_openrouter_stream_response(
-		self,
-		request_kwargs: Dict[str, Any],
-		*,
-		request_timeout_seconds: Optional[float],
-	):
-		import httpx
-
-		if not self.api_key:
-			raise RuntimeError("OpenRouter streaming transport requires an API key.")
-		base_url = str(self.base_url or "").rstrip("/")
-		url = f"{base_url}/chat/completions"
-		payload = {
-			key: value
-			for key, value in request_kwargs.items()
-			if key not in {"timeout", "response_format", "extra_body"}
-		}
-		extra_body = dict(request_kwargs.get("extra_body") or {})
-		payload.update(extra_body)
-		timeout_value = request_timeout_seconds if request_timeout_seconds is not None else self.request_timeout
-		client = httpx.Client(timeout=httpx.Timeout(timeout_value))
-		try:
-			request = client.build_request(
-				"POST",
-				url,
-				headers={
-					"Authorization": f"Bearer {self.api_key}",
-					"Content-Type": "application/json",
-				},
-				json=payload,
-			)
-			handshake_start = time.monotonic()
-			response = self._run_with_wall_clock_timeout(
-				request_timeout_seconds,
-				lambda: client.send(request, stream=True),
-			)
-			handshake_seconds = round(time.monotonic() - handshake_start, 6)
-			response.raise_for_status()
-		except Exception:
-			client.close()
-			raise
-		return _RawOpenRouterStreamingResponse(
-			client=client,
-			response=response,
-			handshake_seconds=handshake_seconds,
-		)
 
 	def _consume_streaming_llm_response(
 		self,
@@ -1590,62 +1432,3 @@ class NLToLTLfGenerator:
 		if open_parentheses > 0:
 			normalised_chars.extend(")" for _ in range(open_parentheses))
 		return "".join(normalised_chars).strip()
-
-
-def _namespace_from_json_like(value: object) -> object:
-	if isinstance(value, dict):
-		return SimpleNamespace(
-			**{
-				key: _namespace_from_json_like(item)
-				for key, item in value.items()
-			},
-		)
-	if isinstance(value, list):
-		return [_namespace_from_json_like(item) for item in value]
-	return value
-
-
-class _RawOpenRouterStreamingResponse:
-	def __init__(
-		self,
-		*,
-		client: Any,
-		response: Any,
-		handshake_seconds: Optional[float] = None,
-	) -> None:
-		self._client = client
-		self._response = response
-		self.handshake_seconds = handshake_seconds
-		self.id = (
-			response.headers.get("x-request-id")
-			or response.headers.get("request-id")
-			or None
-		)
-
-	def __iter__(self):
-		for raw_line in self._response.iter_lines():
-			if raw_line is None:
-				continue
-			line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
-			text = line.strip()
-			if not text.startswith("data:"):
-				continue
-			payload = text[5:].strip()
-			if not payload:
-				continue
-			if payload == "[DONE]":
-				break
-			try:
-				chunk = json.loads(payload)
-			except json.JSONDecodeError:
-				continue
-			namespace_chunk = _namespace_from_json_like(chunk)
-			if getattr(namespace_chunk, "id", None) is None and self.id:
-				setattr(namespace_chunk, "id", self.id)
-			yield namespace_chunk
-
-	def close(self) -> None:
-		try:
-			self._response.close()
-		finally:
-			self._client.close()

@@ -3,85 +3,16 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import signal
 import sys
 import threading
 import time
-from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from method_library.synthesis.schema import HTNMethodLibrary
-from utils.config import DEFAULT_METHOD_SYNTHESIS_SESSION_ID
 from .errors import LLMStreamingResponseError
-
-KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS = 262_144
-KIMI_DIRECT_CONTEXT_WINDOW_TOKENS = 204_800
-KIMI_COMPLETION_MAX_TOKENS = 65_536
-KIMI_REASONING_MAX_TOKENS = 8_192
-KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN = 2.0
-KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS = 1000.0
-
-
-def _namespace_from_json_like(value: object) -> object:
-	if isinstance(value, dict):
-		return SimpleNamespace(
-			**{
-				key: _namespace_from_json_like(item)
-				for key, item in value.items()
-			},
-		)
-	if isinstance(value, list):
-		return [_namespace_from_json_like(item) for item in value]
-	return value
-
-
-class _RawOpenRouterStreamingResponse:
-	def __init__(
-		self,
-		*,
-		client: Any,
-		response: Any,
-		handshake_seconds: Optional[float] = None,
-	) -> None:
-		self._client = client
-		self._response = response
-		self.handshake_seconds = handshake_seconds
-		self.id = (
-			response.headers.get("x-request-id")
-			or response.headers.get("request-id")
-			or None
-		)
-
-	def __iter__(self):
-		for raw_line in self._response.iter_lines():
-			if raw_line is None:
-				continue
-			line = raw_line.decode("utf-8", errors="replace") if isinstance(raw_line, bytes) else str(raw_line)
-			text = line.strip()
-			if not text.startswith("data:"):
-				continue
-			payload = text[5:].strip()
-			if not payload:
-				continue
-			if payload == "[DONE]":
-				break
-			try:
-				chunk = json.loads(payload)
-			except json.JSONDecodeError:
-				continue
-			namespace_chunk = _namespace_from_json_like(chunk)
-			if getattr(namespace_chunk, "id", None) is None and self.id:
-				setattr(namespace_chunk, "id", self.id)
-			yield namespace_chunk
-
-	def close(self) -> None:
-		try:
-			self._response.close()
-		finally:
-			self._client.close()
 
 
 class MethodSynthesisLLMTransportMixin:
@@ -121,83 +52,13 @@ class MethodSynthesisLLMTransportMixin:
 		sys.stderr.write(f"[METHOD SYNTHESIS PROGRESS] {message}\n")
 		sys.stderr.flush()
 
-	@staticmethod
-	def _estimate_method_synthesis_response_token_budget(
-		*,
-		prompt_analysis: Optional[Dict[str, Any]],
-		ast_compiler_defaults: Optional[Dict[str, Any]],
-		default_max_tokens: int | None = None,
-	) -> int:
-		max_tokens = int(default_max_tokens or 0)
-		if max_tokens <= 0:
-			max_tokens = 8000
-		defaults = dict(ast_compiler_defaults or {})
-		task_count = len(dict(defaults.get("task_defaults") or {}))
-		prompt_payload = dict(prompt_analysis or {})
-		if task_count <= 0:
-			task_count = len(
-				list(prompt_payload.get("domain_task_contracts") or ())
-				or list(prompt_payload.get("declared_compound_tasks") or ())
-				or list(prompt_payload.get("query_task_contracts") or ())
-				or list(prompt_payload.get("support_task_contracts") or ())
-			)
-		contract_payloads = list(prompt_payload.get("domain_task_contracts") or ())
-		if not contract_payloads:
-			contract_payloads = list(prompt_payload.get("query_task_contracts") or ())
-		if not contract_payloads:
-			contract_payloads = list(prompt_payload.get("support_task_contracts") or ())
-		producer_template_count = sum(
-			len(list(payload.get("producer_consumer_templates") or ()))
-			for payload in contract_payloads
-			if isinstance(payload, dict)
-		)
-		support_task_count = sum(
-			len(list(payload.get("composition_support_tasks") or ()))
-			for payload in contract_payloads
-			if isinstance(payload, dict)
-		)
-		shared_prerequisite_count = sum(
-			len(list(payload.get("shared_dynamic_prerequisites") or ()))
-			for payload in contract_payloads
-			if isinstance(payload, dict)
-		)
-		recursive_support_count = sum(
-			len(list(payload.get("recursive_support_predicates") or ()))
-			for payload in contract_payloads
-			if isinstance(payload, dict)
-		)
-		if ast_compiler_defaults:
-			# One-shot domain synthesis only needs enough headroom for the emitted JSON
-			# library plus a very small amount of provider-side hidden reasoning.
-			estimated = (
-				2200
-				+ 300 * task_count
-				+ 80 * producer_template_count
-				+ 40 * support_task_count
-				+ 40 * shared_prerequisite_count
-				+ 60 * recursive_support_count
-			)
-		else:
-			estimated = 2200 + 900 * task_count
-		minimum_budget = 3000
-		return min(max_tokens, max(minimum_budget, estimated))
-
 	def _apply_method_synthesis_provider_token_ceiling(
 		self,
 		requested_max_tokens: int | None,
 	) -> int | None:
-		"""
-		Keep provider-specific handling explicit even when no extra cap is applied.
-
-		For Kimi method synthesis, use an explicit output ceiling and a smaller
-		reasoning ceiling so final JSON has enough budget while reasoning remains
-		stream-visible as heartbeat events.
-		"""
-		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("moonshotai/"):
-			return max(int(requested_max_tokens or KIMI_COMPLETION_MAX_TOKENS), 1)
-		requested = max(int(requested_max_tokens or 0), 1)
-		return requested
+		if requested_max_tokens is None:
+			return None
+		return max(int(requested_max_tokens), 1)
 
 	def _call_llm(
 		self,
@@ -209,21 +70,13 @@ class MethodSynthesisLLMTransportMixin:
 		request_profile = self._method_synthesis_request_profile(prompt=prompt)
 		transport_metadata: Dict[str, Any] = {
 			"llm_request_profile": request_profile["name"],
-			"llm_reasoning_budget": request_profile.get("reasoning_max_tokens"),
 			"llm_first_chunk_timeout_seconds": request_profile.get("first_chunk_timeout_seconds"),
 		}
 		for metadata_key, profile_key in (
-			("llm_context_window_tokens", "context_window_tokens"),
-			("llm_prompt_token_estimate", "prompt_token_estimate"),
 			("llm_completion_max_tokens", "completion_max_tokens"),
-			("llm_answer_token_reserve", "answer_token_reserve"),
-			("llm_context_margin_tokens", "context_margin_tokens"),
-			("llm_reasoning_headroom_tokens", "reasoning_headroom_tokens"),
-			("llm_reasoning_headroom_ratio", "reasoning_headroom_ratio"),
-			("llm_reasoning_excluded", "reasoning_excluded"),
-			("llm_transport_overhead_tokens", "transport_overhead_tokens"),
-			("llm_session_id", "session_id"),
 			("llm_max_tokens_policy", "max_tokens_policy"),
+			("llm_thinking_type", "thinking_type"),
+			("llm_reasoning_effort", "reasoning_effort"),
 		):
 			if request_profile.get(profile_key) is not None:
 				transport_metadata[metadata_key] = request_profile.get(profile_key)
@@ -367,11 +220,7 @@ class MethodSynthesisLLMTransportMixin:
 		request_timeout_seconds: Optional[float] = None,
 	):
 		profile = dict(request_profile or {})
-		stream_response = bool(
-			profile.get("stream_response")
-			if "stream_response" in profile
-			else self._should_stream_method_synthesis_response()
-		)
+		stream_response = bool(profile.get("stream_response", False))
 		request_kwargs: Dict[str, Any] = {
 			"model": self.model,
 			"messages": [
@@ -384,23 +233,11 @@ class MethodSynthesisLLMTransportMixin:
 		}
 		if max_tokens is not None:
 			request_kwargs["max_tokens"] = max_tokens
-		if not stream_response or "openrouter.ai" not in str(self.base_url or "").strip().lower():
-			request_kwargs["response_format"] = {"type": "json_object"}
-		extra_body = self._openrouter_provider_routing_body(request_profile=profile)
-		plugins = self._method_synthesis_request_plugins(
-			stream_response,
-			request_profile=profile,
-		)
-		if plugins is not None:
-			extra_body = dict(extra_body or {})
-			extra_body["plugins"] = plugins
-		if extra_body is not None:
-			request_kwargs["extra_body"] = extra_body
-		if self._should_use_raw_openrouter_stream_transport(profile):
-			return self._create_raw_openrouter_stream_response(
-				request_kwargs,
-				request_timeout_seconds=request_timeout_seconds,
-			)
+		request_kwargs["response_format"] = {"type": "json_object"}
+		request_kwargs["reasoning_effort"] = profile.get("reasoning_effort", "max")
+		request_kwargs["extra_body"] = {
+			"thinking": {"type": profile.get("thinking_type", "enabled")},
+		}
 		return self._run_with_wall_clock_timeout(
 			request_timeout_seconds,
 			lambda: self.client.chat.completions.create(
@@ -408,164 +245,21 @@ class MethodSynthesisLLMTransportMixin:
 			),
 		)
 
-	def _should_use_raw_openrouter_stream_transport(
-		self,
-		request_profile: Dict[str, Any],
-	) -> bool:
-		base_url = str(self.base_url or "").strip().lower()
-		return bool(request_profile.get("stream_response")) and "openrouter.ai" in base_url
-
-	def _create_raw_openrouter_stream_response(
-		self,
-		request_kwargs: Dict[str, Any],
-		*,
-		request_timeout_seconds: Optional[float],
-	):
-		import httpx
-
-		if not self.api_key:
-			raise RuntimeError("OpenRouter streaming transport requires an API key.")
-		base_url = str(self.base_url or "").rstrip("/")
-		url = f"{base_url}/chat/completions"
-		payload = {
-			key: value
-			for key, value in request_kwargs.items()
-			if key not in {"timeout", "response_format", "extra_body"}
-		}
-		extra_body = dict(request_kwargs.get("extra_body") or {})
-		payload.update(extra_body)
-		timeout_value = request_timeout_seconds if request_timeout_seconds is not None else self.timeout
-		client = httpx.Client(
-			timeout=httpx.Timeout(timeout_value),
-		)
-		try:
-			request = client.build_request(
-				"POST",
-				url,
-				headers={
-					"Authorization": f"Bearer {self.api_key}",
-					"Content-Type": "application/json",
-				},
-				json=payload,
-			)
-			handshake_start = time.monotonic()
-			response = self._run_with_wall_clock_timeout(
-				request_timeout_seconds,
-				lambda: client.send(request, stream=True),
-			)
-			handshake_seconds = round(time.monotonic() - handshake_start, 6)
-			response.raise_for_status()
-		except Exception:
-			client.close()
-			raise
-		return _RawOpenRouterStreamingResponse(
-			client=client,
-			response=response,
-			handshake_seconds=handshake_seconds,
-		)
-
-	def _should_stream_method_synthesis_response(self) -> bool:
-		base_url = str(self.base_url or "").strip().lower()
-		return "openrouter.ai" in base_url
-
-	def _method_synthesis_request_plugins(
-		self,
-		stream_response: bool,
-		*,
-		request_profile: Optional[Dict[str, Any]] = None,
-	) -> Optional[List[Dict[str, Any]]]:
-		base_url = str(self.base_url or "").strip().lower()
-		if stream_response or "openrouter.ai" not in base_url:
-			return None
-		if not bool((request_profile or {}).get("response_healing_plugin")):
-			return None
-		return [{"id": "response-healing"}]
-
-	def _openrouter_provider_routing_body(
-		self,
-		*,
-		request_profile: Optional[Dict[str, Any]] = None,
-	) -> Dict[str, Any] | None:
-		base_url = str(self.base_url or "").strip().lower()
-		if "openrouter.ai" not in base_url:
-			return None
-		model_name = str(self.model or "").strip()
-		if "/" not in model_name:
-			return None
-		provider_name = model_name.split("/", 1)[0].strip().lower()
-		if not provider_name:
-			return None
-		extra_body: Dict[str, Any] = {
-			"provider": {
-				"only": [provider_name],
-				"allow_fallbacks": False,
-			},
-			"session_id": self._method_synthesis_session_id(),
-		}
-		reasoning_max_tokens = int(
-			(request_profile or {}).get("reasoning_max_tokens") or 0,
-		)
-		extra_body["reasoning"] = {"exclude": False}
-		if reasoning_max_tokens > 0:
-			extra_body["reasoning"]["max_tokens"] = reasoning_max_tokens
-		return extra_body
-
 	def _method_synthesis_request_profile(
 		self,
 		*,
 		prompt: Optional[Dict[str, str]] = None,
 	) -> Dict[str, Any]:
-		model_name = str(self.model or "").strip().lower()
-		if model_name.startswith("moonshotai/"):
-			context_window_tokens = self._method_synthesis_total_context_tokens()
-			prompt_token_estimate = self._estimate_method_synthesis_prompt_token_budget(prompt)
-			return {
-				"name": "kimi_stream_single_pass",
-				"stream_response": True,
-				# Keep reasoning chunks visible as heartbeat events, but cap requested
-				# reasoning so final JSON has enough output budget.
-				"reasoning_max_tokens": KIMI_REASONING_MAX_TOKENS,
-				"first_chunk_timeout_seconds": KIMI_SINGLE_PASS_FIRST_CHUNK_TIMEOUT_SECONDS,
-				"response_healing_plugin": False,
-				"context_window_tokens": context_window_tokens,
-				"prompt_token_estimate": prompt_token_estimate,
-				"completion_max_tokens": KIMI_COMPLETION_MAX_TOKENS,
-				"reasoning_excluded": False,
-				"session_id": self._method_synthesis_session_id(),
-				"max_tokens_policy": "fixed_65536",
-			}
+		_ = prompt
 		return {
-			"name": "default_profile",
-			"stream_response": self._should_stream_method_synthesis_response(),
-			"reasoning_max_tokens": None,
+			"name": "deepseek_openai_single_pass",
+			"stream_response": False,
 			"first_chunk_timeout_seconds": 0.0,
-			"response_healing_plugin": False,
+			"completion_max_tokens": max(int(getattr(self, "max_tokens", 0) or 0), 1),
+			"max_tokens_policy": "configured_method_synthesis_max_tokens",
+			"thinking_type": "enabled",
+			"reasoning_effort": "max",
 		}
-
-	def _method_synthesis_session_id(self) -> str:
-		return str(
-			getattr(self, "session_id", None) or DEFAULT_METHOD_SYNTHESIS_SESSION_ID,
-		).strip()
-
-	def _method_synthesis_total_context_tokens(self) -> int:
-		base_url = str(self.base_url or "").strip().lower()
-		if "openrouter.ai" in base_url:
-			return KIMI_OPENROUTER_CONTEXT_WINDOW_TOKENS
-		return KIMI_DIRECT_CONTEXT_WINDOW_TOKENS
-
-	@staticmethod
-	def _estimate_method_synthesis_prompt_token_budget(
-		prompt: Optional[Dict[str, str]],
-	) -> int:
-		if not isinstance(prompt, dict):
-			return 0
-		total_characters = sum(len(str(prompt.get(key) or "")) for key in ("system", "user"))
-		if total_characters <= 0:
-			return 0
-		return max(
-			1,
-			math.ceil(total_characters / KIMI_PROMPT_ESTIMATE_CHARS_PER_TOKEN),
-		)
 
 	def _consume_streaming_llm_response(
 		self,

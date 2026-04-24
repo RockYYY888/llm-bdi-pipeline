@@ -85,12 +85,12 @@ Minimum configuration for optional LTLf generation and method synthesis:
 
 ```bash
 LTLF_GENERATION_API_KEY=...
-LTLF_GENERATION_BASE_URL=https://openrouter.ai/api/v1
-LTLF_GENERATION_MODEL=moonshotai/kimi-k2.6
+LTLF_GENERATION_BASE_URL=https://api.deepseek.com
+LTLF_GENERATION_MODEL=deepseek-v4-pro
 LTLF_GENERATION_SESSION_ID=ltlf-generation
 METHOD_SYNTHESIS_API_KEY=...
-METHOD_SYNTHESIS_BASE_URL=https://openrouter.ai/api/v1
-METHOD_SYNTHESIS_MODEL=moonshotai/kimi-k2.6
+METHOD_SYNTHESIS_BASE_URL=https://api.deepseek.com
+METHOD_SYNTHESIS_MODEL=deepseek-v4-pro
 METHOD_SYNTHESIS_SESSION_ID=method-synthesis
 ```
 

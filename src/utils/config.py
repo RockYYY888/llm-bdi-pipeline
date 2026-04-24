@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-DEFAULT_LTLF_GENERATION_MODEL = "moonshotai/kimi-k2.6"
-DEFAULT_METHOD_SYNTHESIS_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_GENERATION_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LTLF_GENERATION_MODEL = "deepseek-v4-pro"
+DEFAULT_METHOD_SYNTHESIS_MODEL = "deepseek-v4-pro"
 DEFAULT_EVALUATION_DOMAIN_SOURCE = "benchmark"
 DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS = 1000
-DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 1000
+DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 2400
 DEFAULT_PLANNING_TIMEOUT_SECONDS = 600
 DEFAULT_LTLF_GENERATION_SESSION_ID = "ltlf-generation"
 DEFAULT_METHOD_SYNTHESIS_SESSION_ID = "method-synthesis"
@@ -95,7 +96,7 @@ class Config:
 
 	@property
 	def method_synthesis_max_tokens(self) -> int:
-		return max(int(os.getenv("METHOD_SYNTHESIS_MAX_TOKENS", "48000")), 1)
+		return max(int(os.getenv("METHOD_SYNTHESIS_MAX_TOKENS", "144000")), 1)
 
 	@property
 	def planning_timeout(self) -> int:
@@ -115,11 +116,11 @@ class Config:
 
 	@property
 	def ltlf_generation_base_url(self) -> Optional[str]:
-		return os.getenv("LTLF_GENERATION_BASE_URL")
+		return os.getenv("LTLF_GENERATION_BASE_URL", DEFAULT_GENERATION_BASE_URL)
 
 	@property
 	def method_synthesis_base_url(self) -> Optional[str]:
-		return os.getenv("METHOD_SYNTHESIS_BASE_URL")
+		return os.getenv("METHOD_SYNTHESIS_BASE_URL", DEFAULT_GENERATION_BASE_URL)
 
 	@property
 	def ltlf_generation_session_id(self) -> str:

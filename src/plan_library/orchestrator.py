@@ -71,6 +71,10 @@ class PlanLibraryGenerationOrchestrator:
 				"llm_finish_reason": synthesis_meta.get("llm_finish_reason"),
 				"llm_request_id": synthesis_meta.get("llm_request_id"),
 				"llm_request_profile": synthesis_meta.get("llm_request_profile"),
+				"llm_request_max_tokens": synthesis_meta.get("llm_request_max_tokens"),
+				"llm_completion_max_tokens": synthesis_meta.get("llm_completion_max_tokens"),
+				"llm_thinking_type": synthesis_meta.get("llm_thinking_type"),
+				"llm_reasoning_effort": synthesis_meta.get("llm_reasoning_effort"),
 				"llm_response_mode": synthesis_meta.get("llm_response_mode"),
 				"llm_stream_handshake_seconds": synthesis_meta.get("llm_stream_handshake_seconds"),
 				"llm_first_stream_chunk_seconds": synthesis_meta.get("llm_first_stream_chunk_seconds"),
@@ -134,7 +138,7 @@ class PlanLibraryGenerationOrchestrator:
 				},
 			)
 			self.context.logger.log_method_synthesis(
-				method_library.to_dict(),
+				None,
 				"Success",
 				model=synthesis_meta["model"] if synthesis_meta["llm_prompt"] is not None else None,
 				llm_prompt=synthesis_meta["llm_prompt"],

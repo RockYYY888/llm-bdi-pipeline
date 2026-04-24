@@ -23,6 +23,17 @@ STEP_TITLES = {
 	"plan_verification": "OFFICIAL VERIFICATION",
 }
 
+INLINE_LOG_SECTION_LIMIT_BYTES = 12_000
+LLM_PAYLOAD_KEYS = frozenset({"prompt", "response"})
+EXTERNAL_ARTIFACT_KEYS = frozenset(
+	{
+		"method_library",
+		"plan_library",
+		"method_synthesis_metadata",
+		"plan_library_asl",
+	},
+)
+
 
 @dataclass
 class ExecutionRecord:
@@ -345,6 +356,30 @@ class ExecutionLogger:
 			metadata=metadata,
 		)
 
+	def update_step_artifacts(self, step_name: str, artifacts: Dict[str, Any]) -> None:
+		"""Merge lightweight artifact references into an existing step payload."""
+		if self.current_record is None:
+			return
+		current_payload = getattr(self.current_record, step_name, None)
+		payload: Dict[str, Any] = (
+			dict(current_payload)
+			if isinstance(current_payload, dict)
+			else {"status": "success"}
+		)
+		current_artifacts = payload.get("artifacts")
+		merged_artifacts = (
+			dict(current_artifacts)
+			if isinstance(current_artifacts, dict)
+			else {}
+		)
+		merged_artifacts.update(artifacts)
+		payload["artifacts"] = self._compact_artifacts_payload(
+			step_name,
+			self._sanitise_paths(merged_artifacts),
+		)
+		setattr(self.current_record, step_name, payload)
+		self._save_current_state()
+
 	def end_pipeline(self, *, success: bool) -> Path:
 		if self.current_record is None or self.current_log_dir is None:
 			raise RuntimeError("No execution is currently active.")
@@ -377,11 +412,18 @@ class ExecutionLogger:
 		if error:
 			payload["error"] = str(error)
 		if metadata:
-			payload["metadata"] = self._sanitise_paths(metadata)
+			payload["metadata"] = self._compact_large_section(
+				step_name,
+				"metadata",
+				self._sanitise_paths(metadata),
+			)
 		if artifacts:
-			payload["artifacts"] = self._sanitise_paths(artifacts)
+			payload["artifacts"] = self._compact_artifacts_payload(
+				step_name,
+				self._sanitise_paths(artifacts),
+			)
 		if llm:
-			payload["llm"] = llm
+			payload["llm"] = self._compact_llm_payload(step_name, llm)
 		if status == "failed":
 			self.current_record.status = "failed"
 			self.current_record.step = step_name
@@ -474,6 +516,86 @@ class ExecutionLogger:
 				lines.append(json.dumps(payload["llm"], indent=2))
 			lines.append("")
 		(self.current_log_dir / "execution.txt").write_text("\n".join(lines).rstrip() + "\n")
+
+	def _compact_llm_payload(self, step_name: str, llm: Dict[str, Any]) -> Dict[str, Any]:
+		compact_payload: Dict[str, Any] = {}
+		for key, value in llm.items():
+			if key in LLM_PAYLOAD_KEYS and value is not None:
+				reference = self._write_payload_file(
+					step_name=step_name,
+					payload_name=f"llm_{key}",
+					value=value,
+				)
+				compact_payload[f"{key}_file"] = reference["file"]
+				compact_payload[f"{key}_bytes"] = reference["bytes"]
+				continue
+			compact_payload[key] = self._json_safe(value)
+		return compact_payload
+
+	def _compact_artifacts_payload(
+		self,
+		step_name: str,
+		artifacts: Dict[str, Any],
+	) -> Dict[str, Any]:
+		compact_payload: Dict[str, Any] = {}
+		for key, value in artifacts.items():
+			if key in EXTERNAL_ARTIFACT_KEYS and value is not None:
+				reference = self._write_payload_file(
+					step_name=step_name,
+					payload_name=str(key),
+					value=value,
+				)
+				compact_payload[f"{key}_file"] = reference["file"]
+				compact_payload[f"{key}_bytes"] = reference["bytes"]
+				continue
+			compact_payload[key] = self._json_safe(value)
+		return self._compact_large_section(step_name, "artifacts", compact_payload)
+
+	def _compact_large_section(
+		self,
+		step_name: str,
+		payload_name: str,
+		value: Any,
+	) -> Any:
+		payload_size = len(
+			json.dumps(self._json_safe(value), default=str).encode("utf-8"),
+		)
+		if payload_size <= INLINE_LOG_SECTION_LIMIT_BYTES:
+			return self._json_safe(value)
+		reference = self._write_payload_file(
+			step_name=step_name,
+			payload_name=payload_name,
+			value=value,
+		)
+		return {
+			"payload_file": reference["file"],
+			"payload_bytes": reference["bytes"],
+		}
+
+	def _write_payload_file(
+		self,
+		*,
+		step_name: str,
+		payload_name: str,
+		value: Any,
+	) -> Dict[str, Any]:
+		if self.current_log_dir is None:
+			return {"file": "", "bytes": 0}
+		payload_dir = self.current_log_dir / "payloads"
+		payload_dir.mkdir(parents=True, exist_ok=True)
+		slug = self._slug_component(f"{step_name}_{payload_name}")
+		is_text_payload = isinstance(value, str)
+		suffix = ".txt" if is_text_payload else ".json"
+		payload_path = payload_dir / f"{slug}{suffix}"
+		if is_text_payload:
+			payload_text = value
+		else:
+			payload_text = json.dumps(self._json_safe(value), indent=2, default=str)
+		payload_path.write_text(payload_text, encoding="utf-8")
+		return {
+			"file": str(payload_path.relative_to(self.current_log_dir)),
+			"bytes": len(payload_text.encode("utf-8")),
+		}
 
 	def _sanitise_paths(self, value: Any) -> Any:
 		if self.current_log_dir is None:

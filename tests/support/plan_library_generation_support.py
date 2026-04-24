@@ -201,6 +201,7 @@ def run_generated_domain_build(domain_key: str) -> Dict[str, Any]:
 	method_synthesis_metadata = dict(
 		((artifact.method_synthesis_metadata if artifact is not None else None) or {}),
 	)
+	artifact_summary = dict(result.get("artifact_summary") or result.get("artifact") or {})
 	return {
 		"success": bool(result.get("success")),
 		"artifact_root": artifact_root,
@@ -208,7 +209,7 @@ def run_generated_domain_build(domain_key: str) -> Dict[str, Any]:
 		"artifact": artifact,
 		"log_dir": log_dir,
 		"execution": execution,
-		"library_validation": dict((result.get("artifact") or {}).get("library_validation") or {}),
+		"library_validation": dict(artifact_summary.get("library_validation") or {}),
 		"method_synthesis_metadata": method_synthesis_metadata,
 		"source_domain_kind": str(method_synthesis_metadata.get("source_domain_kind") or ""),
 		"llm_request_id": str(method_synthesis_metadata.get("llm_request_id") or ""),

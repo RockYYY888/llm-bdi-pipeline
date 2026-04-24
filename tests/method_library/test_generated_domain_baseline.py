@@ -45,7 +45,7 @@ def test_generated_domain_build_smoke(generated_domain_build_report) -> None:
 	domain_key, report = generated_domain_build_report
 	assert report["success"], domain_key
 	assert report["source_domain_kind"] == "masked_official"
-	assert report["method_synthesis_model"] == "moonshotai/kimi-k2.6"
+	assert report["method_synthesis_model"] == "deepseek-v4-pro"
 	assert report["generated_method_count"] > 0
 	execution = report["execution"]
 	assert execution["mode"] == "plan_library_generation"

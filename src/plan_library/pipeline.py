@@ -119,6 +119,14 @@ class PlanLibraryGenerationPipeline:
 				render_start,
 				metadata={"plan_count": len(plan_library.plans)},
 			)
+			self._context.logger.log_agentspeak_rendering(
+				None,
+				"Success",
+				metadata={
+					"plan_count": len(plan_library.plans),
+					"rendered_asl_bytes": len(plan_library_asl.encode("utf-8")),
+				},
+			)
 
 			method_validation = self._orchestrator.validate_method_library(method_library)
 			library_validation = build_library_validation_record(
@@ -156,10 +164,30 @@ class PlanLibraryGenerationPipeline:
 				masked_domain_text=str(masked_domain_inputs["masked_domain_text"]),
 				plan_library_asl_text=plan_library_asl,
 			)
+			self._context.logger.update_step_artifacts(
+				"method_synthesis",
+				{
+					"method_library_file": artifact_paths["method_library"],
+					"method_synthesis_metadata_file": artifact_paths[
+						"method_synthesis_metadata"
+					],
+				},
+			)
+			self._context.logger.update_step_artifacts(
+				"agentspeak_rendering",
+				{
+					"plan_library_file": artifact_paths["plan_library"],
+					"plan_library_asl_file": artifact_paths["plan_library_asl"],
+					"translation_coverage_file": artifact_paths["translation_coverage"],
+					"library_validation_file": artifact_paths["library_validation"],
+				},
+			)
+			artifact_summary = _artifact_summary(bundle, artifact_paths)
 			log_path = self._context.logger.end_pipeline(success=True)
 			return {
 				"success": True,
-				"artifact": bundle.to_dict(),
+				"artifact": artifact_summary,
+				"artifact_summary": artifact_summary,
 				"artifact_paths": artifact_paths,
 				"log_path": str(log_path),
 			}
@@ -200,3 +228,25 @@ def _artifact_slug(value: str) -> str:
 	while "__" in slug:
 		slug = slug.replace("__", "_")
 	return slug or "query"
+
+
+def _artifact_summary(
+	bundle: PlanLibraryArtifactBundle,
+	artifact_paths: Dict[str, str],
+) -> Dict[str, Any]:
+	return {
+		"domain_name": bundle.domain_name,
+		"query_count": len(tuple(bundle.query_sequence or ())),
+		"temporal_specification_count": len(tuple(bundle.temporal_specifications or ())),
+		"compound_task_count": len(tuple(bundle.method_library.compound_tasks or ())),
+		"primitive_task_count": len(tuple(bundle.method_library.primitive_tasks or ())),
+		"method_count": len(tuple(bundle.method_library.methods or ())),
+		"plan_count": len(tuple(bundle.plan_library.plans or ())),
+		"translation_coverage": bundle.translation_coverage.to_dict(),
+		"library_validation": bundle.library_validation.to_dict(),
+		"artifact_root": bundle.artifact_root,
+		"method_library_file": artifact_paths.get("method_library"),
+		"plan_library_file": artifact_paths.get("plan_library"),
+		"plan_library_asl_file": artifact_paths.get("plan_library_asl"),
+		"method_synthesis_metadata_file": artifact_paths.get("method_synthesis_metadata"),
+	}

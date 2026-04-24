@@ -16,8 +16,8 @@ def test_stage_specific_generation_config_reads_expected_fields(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
     monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
-    monkeypatch.setenv("LTLF_GENERATION_MODEL", "deepseek/deepseek-chat-v3-0324")
-    monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "moonshotai/kimi-k2.6")
+    monkeypatch.setenv("LTLF_GENERATION_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("LTLF_GENERATION_TIMEOUT", "120")
     monkeypatch.setenv("METHOD_SYNTHESIS_TIMEOUT", "240")
     monkeypatch.setenv("LTLF_GENERATION_MAX_TOKENS", "2048")
@@ -33,8 +33,8 @@ def test_stage_specific_generation_config_reads_expected_fields(monkeypatch):
 
     assert config.ltlf_generation_api_key == "sk-ltlf"
     assert config.method_synthesis_api_key == "sk-method"
-    assert config.ltlf_generation_model == "deepseek/deepseek-chat-v3-0324"
-    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
+    assert config.ltlf_generation_model == "deepseek-v4-pro"
+    assert config.method_synthesis_model == "deepseek-v4-pro"
     assert config.ltlf_generation_timeout == 120
     assert config.method_synthesis_timeout == 240
     assert config.ltlf_generation_max_tokens == 2048
@@ -53,10 +53,10 @@ def test_method_synthesis_max_tokens_defaults_to_one_shot_library_budget(monkeyp
 
     config = Config()
 
-    assert config.method_synthesis_max_tokens == 48000
+    assert config.method_synthesis_max_tokens == 144000
 
 
-def test_ltlf_generation_timeout_defaults_to_kimi_long_reasoning_budget(monkeypatch):
+def test_ltlf_generation_timeout_defaults_to_long_generation_budget(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("LTLF_GENERATION_TIMEOUT", raising=False)
 
@@ -71,7 +71,7 @@ def test_method_synthesis_timeout_defaults_to_longer_one_shot_budget(monkeypatch
 
     config = Config()
 
-    assert config.method_synthesis_timeout == 1000
+    assert config.method_synthesis_timeout == 2400
 
 
 def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
@@ -83,13 +83,13 @@ def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
     assert config.planning_timeout == 600
 
 
-def test_ltlf_generation_model_defaults_to_pinned_kimi_when_no_env_is_set(monkeypatch):
+def test_ltlf_generation_model_defaults_to_deepseek_v4_pro_when_no_env_is_set(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("LTLF_GENERATION_MODEL", raising=False)
 
     config = Config()
 
-    assert config.ltlf_generation_model == "moonshotai/kimi-k2.6"
+    assert config.ltlf_generation_model == "deepseek-v4-pro"
 
 
 def test_ltlf_generation_model_uses_stage_specific_override(monkeypatch):
@@ -101,13 +101,24 @@ def test_ltlf_generation_model_uses_stage_specific_override(monkeypatch):
     assert config.ltlf_generation_model == "provider/ltlf-model"
 
 
-def test_method_synthesis_model_defaults_to_pinned_kimi_chat(monkeypatch):
+def test_method_synthesis_model_defaults_to_deepseek_v4_pro(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("METHOD_SYNTHESIS_MODEL", raising=False)
 
     config = Config()
 
-    assert config.method_synthesis_model == "moonshotai/kimi-k2.6"
+    assert config.method_synthesis_model == "deepseek-v4-pro"
+
+
+def test_generation_base_urls_default_to_deepseek_openai_endpoint(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("LTLF_GENERATION_BASE_URL", raising=False)
+    monkeypatch.delenv("METHOD_SYNTHESIS_BASE_URL", raising=False)
+
+    config = Config()
+
+    assert config.ltlf_generation_base_url == "https://api.deepseek.com"
+    assert config.method_synthesis_base_url == "https://api.deepseek.com"
 
 
 def test_method_synthesis_api_key_uses_method_specific_key(monkeypatch):
