@@ -96,3 +96,67 @@ def test_plan_library_generation_pipeline_persists_chapter4_artifacts(
 	assert plan_library["plans"][0]["source_instruction_ids"] == ["query_1"]
 	assert translation_coverage["accepted_translation"] == 1
 	assert library_validation["passed"] is True
+
+
+def test_plan_library_generation_pipeline_filters_selected_query_ids(
+	tmp_path: Path,
+) -> None:
+	domain_file = DOMAIN_FILES["blocksworld"]
+	pipeline = PlanLibraryGenerationPipeline(
+		domain_file=domain_file,
+		query_ids=("query_3", "query_1"),
+	)
+	masked_domain_text = Path(domain_file).read_text(encoding="utf-8")
+	masked_domain_file = tmp_path / "masked_domain.hddl"
+	masked_domain_file.write_text(masked_domain_text, encoding="utf-8")
+	captured: dict[str, object] = {}
+
+	pipeline._orchestrator.prepare_masked_domain_build_inputs = lambda: {  # type: ignore[method-assign]
+		"masked_domain": pipeline.context.domain,
+		"masked_domain_file": masked_domain_file,
+		"masked_domain_text": masked_domain_text,
+		"original_method_count": 3,
+	}
+
+	def fake_synthesise_domain_methods(**kwargs):
+		captured["query_sequence"] = kwargs["query_sequence"]
+		captured["temporal_specifications"] = kwargs["temporal_specifications"]
+		return (
+			_sample_blocksworld_method_library(),
+			{"model": "test-model", "llm_attempted": False},
+		)
+
+	pipeline._orchestrator.synthesise_domain_methods = fake_synthesise_domain_methods  # type: ignore[method-assign]
+	pipeline._orchestrator.validate_method_library = lambda _library: {  # type: ignore[method-assign]
+		"layers": {
+			"signature_conformance": {"passed": True, "warnings": []},
+			"typed_structural_soundness": {"passed": True, "warnings": []},
+			"decomposition_admissibility": {"passed": True, "warnings": []},
+			"materialized_parseability": {"passed": True, "warnings": []},
+		},
+	}
+
+	result = pipeline.build_library_bundle(output_root=str(tmp_path / "artifact_bundle"))
+
+	assert result["success"] is True
+	assert [
+		record["instruction_id"]
+		for record in captured["query_sequence"]
+	] == ["query_3", "query_1"]
+	assert [
+		record["instruction_id"]
+		for record in captured["temporal_specifications"]
+	] == ["query_3", "query_1"]
+	query_sequence = json.loads(Path(result["artifact_paths"]["query_sequence"]).read_text())
+	assert [record["instruction_id"] for record in query_sequence] == ["query_3", "query_1"]
+
+
+def test_plan_library_generation_pipeline_scopes_default_artifact_root_by_query_selection() -> None:
+	pipeline = PlanLibraryGenerationPipeline(
+		domain_file=DOMAIN_FILES["blocksworld"],
+		query_ids=("query_1",),
+	)
+
+	assert pipeline._default_artifact_root("blocksworld") == (
+		PROJECT_ROOT / "artifacts" / "plan_library" / "blocksworld" / "query_1"
+	)

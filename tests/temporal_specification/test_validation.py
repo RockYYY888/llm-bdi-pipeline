@@ -36,6 +36,24 @@ def test_query_sequence_loader_filters_domain_cases_in_numeric_order() -> None:
 	assert all(str(record.problem_file).endswith(".hddl") for record in temporal_specifications[:3])
 
 
+def test_query_sequence_loader_filters_explicit_query_ids_in_requested_order() -> None:
+	query_sequence, temporal_specifications = load_query_sequence_records(
+		domain_file=DOMAIN_FILES["blocksworld"],
+		query_ids=("query_3", "query_1", "query_3"),
+	)
+
+	assert [record.instruction_id for record in query_sequence] == ["query_3", "query_1"]
+	assert [record.instruction_id for record in temporal_specifications] == ["query_3", "query_1"]
+
+
+def test_query_sequence_loader_rejects_unknown_explicit_query_ids() -> None:
+	with pytest.raises(ValueError, match='Unknown query ids for domain "blocksworld": query_missing'):
+		load_query_sequence_records(
+			domain_file=DOMAIN_FILES["blocksworld"],
+			query_ids=("query_missing",),
+		)
+
+
 def test_extract_formula_atoms_and_referenced_events_preserve_source_order() -> None:
 	formula = "F(do_put_on(b1,b2)) & X(do_put_on__e2(b3,b1))"
 

@@ -90,6 +90,14 @@ Examples:
 		help="Optional explicit dataset domain key. Otherwise inferred from the domain file.",
 	)
 	generate_parser.add_argument(
+		"--query-id",
+		action="append",
+		help=(
+			"Stored benchmark query identifier to include in generation. "
+			"Repeat to generate from multiple selected queries. Defaults to all domain queries."
+		),
+	)
+	generate_parser.add_argument(
 		"--output-root",
 		help="Optional explicit output root for the persisted plan-library artifact bundle.",
 	)
@@ -150,6 +158,7 @@ def main() -> None:
 			domain_file=domain_file,
 			query_dataset=_absolute_path(args.query_dataset),
 			query_domain=args.query_domain,
+			query_ids=tuple(args.query_id or ()),
 		)
 		results = pipeline.build_library_bundle(output_root=_absolute_path(args.output_root))
 	elif args.command == "evaluate-library":

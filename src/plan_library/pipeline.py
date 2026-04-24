@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from domain_model import infer_query_domain, load_query_sequence_records
 from method_library.context import MethodLibrarySynthesisContext
@@ -31,11 +31,17 @@ class PlanLibraryGenerationPipeline:
 		domain_file: str,
 		query_dataset: str | None = None,
 		query_domain: str | None = None,
+		query_ids: Sequence[str] | None = None,
 	) -> None:
 		self._context = MethodLibrarySynthesisContext(domain_file=domain_file)
 		self._orchestrator = PlanLibraryGenerationOrchestrator(self._context)
 		self._query_dataset = query_dataset
 		self._query_domain = query_domain
+		self._query_ids = tuple(
+			query_id_text
+			for query_id_text in (str(query_id or "").strip() for query_id in (query_ids or ()))
+			if query_id_text
+		)
 
 	@property
 	def context(self) -> MethodLibrarySynthesisContext:
@@ -58,6 +64,7 @@ class PlanLibraryGenerationPipeline:
 			domain_file=self._context.domain_file,
 			dataset_path=self._query_dataset,
 			query_domain=self._query_domain,
+			query_ids=self._query_ids,
 		)
 		query_domain = infer_query_domain(
 			domain_file=self._context.domain_file,
@@ -128,12 +135,7 @@ class PlanLibraryGenerationPipeline:
 			artifact_root = (
 				Path(output_root).expanduser().resolve()
 				if output_root is not None
-				else (
-					self._context.project_root
-					/ "artifacts"
-					/ "plan_library"
-					/ query_domain
-				)
+				else self._default_artifact_root(query_domain)
 			)
 			bundle = PlanLibraryArtifactBundle(
 				domain_name=self._context.domain.name,
@@ -168,3 +170,33 @@ class PlanLibraryGenerationPipeline:
 				"error": str(exc),
 				"log_path": str(log_path),
 			}
+
+	def _default_artifact_root(self, query_domain: str) -> Path:
+		artifact_root = (
+			self._context.project_root
+			/ "artifacts"
+			/ "plan_library"
+			/ query_domain
+		)
+		if self._query_ids:
+			return artifact_root / self._query_selection_artifact_slug()
+		return artifact_root
+
+	def _query_selection_artifact_slug(self) -> str:
+		if not self._query_ids:
+			return ""
+		if len(self._query_ids) == 1:
+			return _artifact_slug(self._query_ids[0])
+		selection_key = "_".join(_artifact_slug(query_id) for query_id in self._query_ids[:5])
+		if len(self._query_ids) > 5:
+			selection_key = f"{selection_key}_plus_{len(self._query_ids) - 5}"
+		return selection_key or "selected_queries"
+
+
+def _artifact_slug(value: str) -> str:
+	text = str(value or "").strip().lower()
+	buffer = [character if character.isalnum() else "_" for character in text]
+	slug = "".join(buffer).strip("_")
+	while "__" in slug:
+		slug = slug.replace("__", "_")
+	return slug or "query"

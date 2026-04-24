@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 from utils.hddl_parser import HDDLParser
 
@@ -84,6 +84,7 @@ def load_query_sequence_records(
 	domain_file: str | Path,
 	dataset_path: str | Path | None = None,
 	query_domain: str | None = None,
+	query_ids: Sequence[str] | None = None,
 ) -> Tuple[Tuple[QueryInstructionRecord, ...], Tuple[TemporalSpecificationRecord, ...]]:
 	"""Load the default query sequence and validated temporal specifications for one domain."""
 
@@ -97,9 +98,24 @@ def load_query_sequence_records(
 	if not domain_cases:
 		raise ValueError(f'No temporal specification cases found for domain "{domain_key}".')
 
+	selected_query_ids = _normalise_selected_query_ids(query_ids)
+	if selected_query_ids:
+		missing_query_ids = [
+			query_id
+			for query_id in selected_query_ids
+			if query_id not in domain_cases
+		]
+		if missing_query_ids:
+			raise ValueError(
+				f'Unknown query ids for domain "{domain_key}": {", ".join(missing_query_ids)}',
+			)
+		case_items = tuple((query_id, domain_cases[query_id]) for query_id in selected_query_ids)
+	else:
+		case_items = tuple(sorted(domain_cases.items(), key=lambda item: _query_id_sort_key(item[0])))
+
 	query_sequence = []
 	temporal_specifications = []
-	for query_id, payload in sorted(domain_cases.items(), key=lambda item: _query_id_sort_key(item[0])):
+	for query_id, payload in case_items:
 		instruction_record = QueryInstructionRecord(
 			instruction_id=str(query_id).strip(),
 			source_text=str(payload.get("instruction") or payload.get("source_text") or "").strip(),
@@ -124,3 +140,17 @@ def load_query_sequence_records(
 			),
 		)
 	return tuple(query_sequence), tuple(temporal_specifications)
+
+
+def _normalise_selected_query_ids(query_ids: Sequence[str] | None) -> Tuple[str, ...]:
+	if not query_ids:
+		return ()
+	seen: set[str] = set()
+	selected_query_ids: list[str] = []
+	for query_id in query_ids:
+		query_id_text = str(query_id or "").strip()
+		if not query_id_text or query_id_text in seen:
+			continue
+		seen.add(query_id_text)
+		selected_query_ids.append(query_id_text)
+	return tuple(selected_query_ids)
