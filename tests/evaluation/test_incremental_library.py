@@ -20,7 +20,7 @@ from evaluation.incremental_library import (
 	merge_method_libraries,
 	parse_method_patch_response,
 )
-from method_library import HTNMethod, HTNMethodLibrary, HTNMethodStep
+from method_library import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep
 from plan_library.models import (
 	AgentSpeakBodyStep,
 	AgentSpeakPlan,
@@ -59,6 +59,52 @@ def test_merge_method_libraries_deduplicates_semantic_methods_and_merges_sources
 		compound_tasks=scaffold.compound_tasks,
 		primitive_tasks=scaffold.primitive_tasks,
 		methods=[_do_move_method("m_do_move_duplicate_name", ("query_2",))],
+	)
+
+	result = merge_method_libraries(existing, patch)
+
+	assert len(result.method_library.methods) == 1
+	assert result.duplicate_methods == 1
+	assert result.method_library.methods[0].source_instruction_ids == ("query_1", "query_2")
+
+
+def test_merge_method_libraries_deduplicates_methods_with_context_literals() -> None:
+	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
+	scaffold = empty_method_library_for_domain(domain)
+	base_method = _do_move_method("m_do_move_a", ("query_1",))
+	contextual_method = HTNMethod(
+		method_name=base_method.method_name,
+		task_name=base_method.task_name,
+		parameters=base_method.parameters,
+		task_args=base_method.task_args,
+		context=(
+			HTNLiteral("handempty"),
+			HTNLiteral("clear", ("?y",)),
+		),
+		subtasks=base_method.subtasks,
+		ordering=base_method.ordering,
+		source_instruction_ids=base_method.source_instruction_ids,
+	)
+	existing = HTNMethodLibrary(
+		compound_tasks=scaffold.compound_tasks,
+		primitive_tasks=scaffold.primitive_tasks,
+		methods=[contextual_method],
+	)
+	patch = HTNMethodLibrary(
+		compound_tasks=scaffold.compound_tasks,
+		primitive_tasks=scaffold.primitive_tasks,
+		methods=[
+			HTNMethod(
+				method_name="renamed_duplicate",
+				task_name=contextual_method.task_name,
+				parameters=contextual_method.parameters,
+				task_args=contextual_method.task_args,
+				context=tuple(reversed(contextual_method.context)),
+				subtasks=contextual_method.subtasks,
+				ordering=contextual_method.ordering,
+				source_instruction_ids=("query_2",),
+			),
+		],
 	)
 
 	result = merge_method_libraries(existing, patch)

@@ -785,7 +785,10 @@ def method_fingerprint(method: HTNMethod) -> str:
 	payload = {
 		"task_name": method.task_name,
 		"task_args": list(method.task_args),
-		"context": sorted(_literal_fingerprint(literal) for literal in method.context),
+		"context": _sorted_json_fingerprints(
+			_literal_fingerprint(literal)
+			for literal in method.context
+		),
 		"subtasks": [
 			_step_fingerprint(step)
 			for step in method.subtasks
@@ -871,6 +874,13 @@ def _literal_fingerprint(literal: HTNLiteral) -> Dict[str, Any]:
 		"args": list(literal.args),
 		"is_positive": literal.is_positive,
 	}
+
+
+def _sorted_json_fingerprints(values: Any) -> list[Dict[str, Any]]:
+	return sorted(
+		list(values),
+		key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+	)
 
 
 def _step_fingerprint(step: HTNMethodStep) -> Dict[str, Any]:
