@@ -139,6 +139,52 @@ def test_rendering_emits_structured_agentspeak_library() -> None:
 	assert "\tdrop(PKG, LOC)." in rendered
 
 
+def test_rendering_emits_jason_safe_functors_for_hddl_symbols() -> None:
+	domain = SimpleNamespace(
+		name="hyphenated",
+		tasks=(
+			SimpleNamespace(name="do-put-on", parameters=("?block:block",)),
+		),
+		predicates=(
+			SimpleNamespace(name="clear-top", parameters=("?block:block",)),
+		),
+		actions=(
+			SimpleNamespace(name="pick-up", parameters=("?block:block",)),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="do-put-on", parameters=("?block",), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="pick-up", parameters=("?block",), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_do_put_on",
+				task_name="do-put-on",
+				parameters=("?block",),
+				task_args=("?block",),
+				context=(HTNLiteral(predicate="clear-top", args=("?block",)),),
+				subtasks=(
+					HTNMethodStep("s1", "pick-up", ("?block",), "primitive"),
+				),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
+	rendered = render_plan_library_asl(plan_library)
+
+	assert "+!do_put_on(BLOCK) : clear_top(BLOCK) <-" in rendered
+	assert "\tpick_up(BLOCK)." in rendered
+	assert "do-put-on" not in rendered
+	assert "pick-up" not in rendered
+	assert "clear-top" not in rendered
+
+
 def test_translation_canonicalises_local_method_variables() -> None:
 	domain = SimpleNamespace(
 		name="courier",

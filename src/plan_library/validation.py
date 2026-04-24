@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Tuple
 
+from method_library.synthesis.naming import sanitize_identifier
 from method_library.synthesis.schema import HTNMethodLibrary
 
 from .models import LibraryValidationRecord, PlanLibrary, TranslationCoverage
@@ -97,17 +98,29 @@ def validate_plan_library_structure(
 		)
 		for plan in tuple(plan_library.plans or ())
 	]
+	jason_functor_collisions = _jason_functor_collisions(plan_library)
+	has_jason_functor_collision = bool(jason_functor_collisions)
+	has_body_functor_collision = any(
+		collision["category"] in {"action", "task"}
+		for collision in jason_functor_collisions
+	)
 
 	signature_conformance = bool(
 		((layer_results.get("signature_conformance") or {}).get("passed", True))
-	) and unique_plan_names and all(check["signature_conformance"] for check in plan_checks)
+	) and unique_plan_names and not has_jason_functor_collision and all(
+		check["signature_conformance"] for check in plan_checks
+	)
 	typed_structure = bool(
 		((layer_results.get("typed_structural_soundness") or {}).get("passed", True))
 	) and all(check["typed_structure"] for check in plan_checks)
 	body_symbol_validity = bool(
 		((layer_results.get("decomposition_admissibility") or {}).get("passed", True))
-	) and all(check["body_symbol_validity"] for check in plan_checks)
-	groundability_precheck = all(check["groundability_precheck"] for check in plan_checks)
+	) and not has_body_functor_collision and all(
+		check["body_symbol_validity"] for check in plan_checks
+	)
+	groundability_precheck = not has_jason_functor_collision and all(
+		check["groundability_precheck"] for check in plan_checks
+	)
 
 	warnings: List[str] = []
 	for layer_name in (
@@ -126,6 +139,12 @@ def validate_plan_library_structure(
 
 	for check in plan_checks:
 		warnings.extend(check["warnings"])
+	for collision in jason_functor_collisions:
+		warnings.append(
+			"Jason functor collision in "
+			f"{collision['category']} symbols after AgentSpeak(L) rendering: "
+			f"{collision['functor']} <- {', '.join(collision['symbols'])}.",
+		)
 
 	if translation_coverage.unsupported_buckets:
 		warnings.append(
@@ -361,19 +380,67 @@ def _symbol_signature_map(
 		name = str(getattr(symbol, "name", "") or "").strip()
 		if not name:
 			continue
-		signatures[name] = tuple(
+		signature = tuple(
 			_parameter_type(parameter)
 			for parameter in (getattr(symbol, "parameters", ()) or ())
 		)
+		signatures[name] = signature
+		signatures.setdefault(sanitize_identifier(name), signature)
 	for symbol in fallback_symbols:
 		name = str(getattr(symbol, "name", "") or "").strip()
-		if not name or name in signatures:
+		if not name:
 			continue
-		signatures[name] = tuple(
+		signature = tuple(
 			_parameter_type(parameter)
 			for parameter in (getattr(symbol, "parameters", ()) or ())
 		)
+		signatures.setdefault(name, signature)
+		signatures.setdefault(sanitize_identifier(name), signature)
 	return signatures
+
+
+def _jason_functor_collisions(plan_library: PlanLibrary) -> Tuple[Dict[str, Any], ...]:
+	seen_by_category: Dict[str, Dict[str, set[str]]] = {
+		"task": {},
+		"action": {},
+		"predicate": {},
+	}
+
+	def remember(category: str, symbol: Any) -> None:
+		text = str(symbol or "").strip()
+		if not text:
+			return
+		functor = sanitize_identifier(text)
+		seen_by_category.setdefault(category, {}).setdefault(functor, set()).add(text)
+
+	for plan in tuple(plan_library.plans or ()):
+		trigger = getattr(plan, "trigger", None)
+		remember("task", getattr(trigger, "symbol", ""))
+		for raw_literal in tuple(getattr(plan, "context", ()) or ()):
+			literal = _parse_plan_context_literal(raw_literal)
+			if literal is None or literal["kind"] == "equality":
+				continue
+			remember("predicate", literal["symbol"])
+		for step in tuple(getattr(plan, "body", ()) or ()):
+			step_kind = str(getattr(step, "kind", "") or "").strip()
+			if step_kind == "action":
+				remember("action", getattr(step, "symbol", ""))
+			elif step_kind == "subgoal":
+				remember("task", getattr(step, "symbol", ""))
+
+	collisions: List[Dict[str, Any]] = []
+	for category, functor_map in seen_by_category.items():
+		for functor, symbols in sorted(functor_map.items()):
+			if len(symbols) <= 1:
+				continue
+			collisions.append(
+				{
+					"category": category,
+					"functor": functor,
+					"symbols": tuple(sorted(symbols)),
+				},
+			)
+	return tuple(collisions)
 
 
 def _split_typed_argument(raw_argument: Any) -> Tuple[str, str | None]:

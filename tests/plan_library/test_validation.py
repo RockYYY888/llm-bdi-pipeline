@@ -147,3 +147,60 @@ def test_library_validation_record_rejects_invalid_plan_library_symbols() -> Non
 	assert record.checked_layers["body_symbol_validity"] is False
 	assert record.checked_layers["groundability_precheck"] is False
 	assert record.failure_reason is not None
+
+
+def test_library_validation_record_rejects_jason_functor_collisions() -> None:
+	domain = SimpleNamespace(
+		name="collision",
+		types=("object", "block"),
+		predicates=(),
+		tasks=(
+			SimpleNamespace(name="move-block", parameters=("?block:block",)),
+		),
+		actions=(
+			SimpleNamespace(name="pick-up", parameters=("?block:block",)),
+			SimpleNamespace(name="pick_up", parameters=("?block:block",)),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="move-block", parameters=("?block",), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="pick-up", parameters=("?block",), is_primitive=True),
+			HTNTask(name="pick_up", parameters=("?block",), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m_move_block",
+				task_name="move-block",
+				parameters=("?block",),
+				task_args=("?block",),
+				subtasks=(
+					HTNMethodStep("s1", "pick-up", ("?block",), "primitive"),
+					HTNMethodStep("s2", "pick_up", ("?block",), "primitive"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+	plan_library, translation_coverage = build_plan_library(
+		domain=domain,
+		method_library=method_library,
+	)
+
+	record = build_library_validation_record(
+		domain_name="collision",
+		domain=domain,
+		method_library=method_library,
+		plan_library=plan_library,
+		translation_coverage=translation_coverage,
+		method_validation=_all_pass_method_validation(),
+	)
+
+	assert record.passed is False
+	assert record.checked_layers["signature_conformance"] is False
+	assert record.checked_layers["body_symbol_validity"] is False
+	assert any("Jason functor collision" in warning for warning in record.warnings)

@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from typing import List
 
+from method_library.synthesis.naming import sanitize_identifier
+
 from .models import AgentSpeakBodyStep, AgentSpeakPlan, PlanLibrary
 
 
@@ -50,8 +52,8 @@ def _render_body_step(step: AgentSpeakBodyStep) -> str:
 
 def _call(symbol: str, arguments) -> str:
 	if not arguments:
-		return str(symbol).strip()
-	return f"{str(symbol).strip()}({', '.join(str(argument).strip() for argument in arguments)})"
+		return _jason_functor(symbol)
+	return f"{_jason_functor(symbol)}({', '.join(_render_term(argument) for argument in arguments)})"
 
 
 def _raw_argument(argument: str) -> str:
@@ -66,8 +68,45 @@ def _render_context_literal(literal: str) -> str:
 	if not text:
 		return "true"
 	if text.startswith("!"):
-		return f"not {text[1:].strip()}"
+		return f"not {_render_atom(text[1:].strip())}"
 	if text.lower().startswith("not "):
+		return f"not {_render_atom(text[4:].strip())}"
+	if "!=" in text:
+		left, right = text.split("!=", 1)
+		return f"{_render_term(left)} \\\\== {_render_term(right)}"
+	if "==" in text:
+		left, right = text.split("==", 1)
+		return f"{_render_term(left)} == {_render_term(right)}"
+	return _render_atom(text)
+
+
+def _render_atom(atom: str) -> str:
+	text = str(atom or "").strip()
+	if not text:
+		return "true"
+	if "(" not in text:
+		return _jason_functor(text)
+	if not text.endswith(")"):
+		return _jason_functor(text)
+	symbol, raw_args = text.split("(", 1)
+	args = tuple(argument.strip() for argument in raw_args[:-1].split(",") if argument.strip())
+	return _call(symbol, args)
+
+
+def _render_term(term: str) -> str:
+	text = str(term or "").strip()
+	if not text:
+		return "item"
+	if _is_agentspeak_variable(text):
 		return text
-	normalised = re.sub(r"\s*!=\s*", " \\\\== ", text)
-	return normalised
+	if re.fullmatch(r"[a-z][A-Za-z0-9_]*", text):
+		return text
+	return sanitize_identifier(text)
+
+
+def _jason_functor(symbol: str) -> str:
+	return sanitize_identifier(str(symbol or "").strip())
+
+
+def _is_agentspeak_variable(token: str) -> bool:
+	return re.fullmatch(r"[A-Z][A-Za-z0-9_]*", str(token or "").strip()) is not None

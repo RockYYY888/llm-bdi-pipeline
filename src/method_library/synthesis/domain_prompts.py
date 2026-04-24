@@ -1048,43 +1048,29 @@ def build_domain_htn_system_prompt() -> str:
 
 	return (
 		"ROLE:\n"
-		"Write a typed symbolic Hierarchical Task Network method library.\n"
-		"Operate as constrained program synthesis over the provided domain signature.\n"
+		"Generate a typed symbolic Hierarchical Task Network method library M for "
+		"Chapter 4 AgentSpeak(L) plan-library construction.\n"
 		"\n"
-		"TARGET:\n"
-		"Return one domain-complete HTN library aligned with HDDL :method structure.\n"
-		"Start emitting JSON immediately.\n"
+		"OBJECTIVE:\n"
+		"Infer reusable domain-level decompositions over the masked HDDL domain D^- "
+		"and the supplied task requirements. M will be structurally checked and then "
+		"translated into AgentSpeak(L) plan library S; generation must not depend on "
+		"benchmark problem state or original HDDL methods.\n"
 		"\n"
-		"CONSTRAINTS:\n"
-		"- Use only declared compound tasks, declared primitive actions, declared predicates, and typed symbolic variables.\n"
-		"- Primitive action names are never compound-task names unless the same name is explicitly listed as a declared compound task.\n"
-		"- Primitive action names are operators, not predicates. Never use an action name as a context literal, precondition literal, effect literal, or negated literal such as `notnoop(...)`.\n"
-		"- Generate reusable domain-level methods, but align them with the provided query sequence and temporal specifications.\n"
-		"- Prefer the smallest method set that still covers the declared tasks.\n"
-		"- Use one method family per real decomposition pattern, not one branch per local prerequisite permutation.\n"
-		"- Prefer declared support tasks over local primitive repair when a declared task already stabilizes the needed literal.\n"
-		"- Keep tasks with the same headline predicate distinct by task name.\n"
-		"- Distinct AUX witness names encode distinct witness roles; never merge two different AUX roles into one symbol.\n"
-		"- MUST give each variable exactly one declared type; use fresh variables for different typed roles.\n"
-			"- Method preconditions are conjunctions only.\n"
-			"- Use equality only as ARG1 == ARG2 or ARG1 != ARG2.\n"
-			"- For negative literals, use exactly `not predicate(ARGS)` with one space after `not`.\n"
-			"- Never fuse negation into predicate names such as `noton(...)` or `notclear(...)`.\n"
-			"- Never use `!predicate(...)` or boolean wrappers such as `predicate(...) == false`.\n"
-			"- Use explicit step objects and explicit pairwise ordering edges.\n"
-			"- The only allowed ordering syntax is an array of two-element step-id arrays such as [[\"s1\", \"s2\"], [\"s2\", \"s3\"]].\n"
-			"- Do not use object-shaped ordering edges such as {\"pre\":\"s1\",\"post\":\"s2\"} or localized key variants.\n"
-		"- Every compound child must be another declared compound task.\n"
-		"- Every constructive method must end at a final achiever child or primitive that establishes the task headline.\n"
-		"- Recursive methods must change at least one witness argument.\n"
+		"CONTRACT:\n"
+		"- Use only supplied compound tasks, primitive actions, predicates, types, and instruction identifiers.\n"
+		"- Preserve the compound/primitive boundary: method.task_name and compound subtasks must be declared compound tasks; primitive subtasks must be declared primitive actions.\n"
+		"- Actions are operators, not predicates. Contexts, preconditions, effects, and negated literals may use only predicates or equality.\n"
+		"- Variables are typed symbolic parameters. Give each variable one declared type and use fresh variables for distinct typed roles or witness roles.\n"
+		"- Methods are reusable schemas aligned with the query sequence and temporal specifications, not one grounded plan trace.\n"
+		"- Use explicit step objects and pairwise ordering edges only: [[\"s1\", \"s2\"]].\n"
+		"- Empty subtasks are allowed only for already-satisfied guard methods; constructive methods must contain real subtasks.\n"
+		"- Recursive methods must make progress by changing at least one witness argument or state-support step before recursion.\n"
 		"\n"
 		"OUTPUT:\n"
-		"- Emit JSON only.\n"
-		"- Emit one object with top-level keys compound_tasks and methods.\n"
-		"- Every generated method must include source_instruction_ids as an array of instruction identifiers such as [\"l_1\", \"l_2\"].\n"
-		"- The final JSON answer must be emitted in visible completion content, not only in hidden reasoning.\n"
-		"- Do not emit primitive_tasks, markdown, commentary, or reasoning text.\n"
-		"- Return minified JSON only.\n"
+		"Return exactly one minified JSON object with top-level keys compound_tasks and methods. "
+		"Every method must include source_instruction_ids. Do not emit primitive_tasks, "
+		"markdown, commentary, or reasoning text.\n"
 	)
 
 def build_domain_htn_user_prompt(
@@ -1123,23 +1109,26 @@ def build_domain_htn_user_prompt(
 	)
 	instructions_block = "\n".join(
 		[
-			"1. Emit a minimal HDDL-aligned method library and define exactly the declared compound tasks listed in domain_summary.",
-			"2. Read method_blueprints as the canonical task-support tree: first choose the decomposition program from family_archetypes, then emit only the smallest method set that realizes it.",
-			"3. Family meanings are fixed: direct_leaf = primitive wrapper; support_then_leaf = prerequisite support then final primitive; recursive_refinement = noop plus witness-changing recursion; hierarchical_orchestration = compound delegation or mission composition.",
-			"4. Treat method_family_schemas as the primary decomposition evidence. Use direct_primitive_achievers and uncovered_prerequisite_families only for primitive support or primitive leaf steps.",
-			"5. Every action named in primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families is primitive-only. Such names may appear only in subtasks with kind=primitive and must never be declared in compound_tasks or used as methods.task_name unless they also appear in declared_compound_tasks.",
-			"6. Preserve witness-role separation exactly. Distinct AUX names denote distinct witness roles; never merge, rename, or co-bind two different AUX roles, and never reuse one symbol across incompatible typed slots.",
-			"7. MUST give each variable exactly one declared type; if two roles require different types, use two variables.",
-			"8. If witness_binding_required=true, bind every auxiliary witness explicitly in method parameters, context, subtasks, and ordering; never place witnesses in task_args.",
-			"9. If headline_support_tasks is non-empty for a supported state-goal task, route at least one method through that declared support task instead of exposing only the terminal primitive.",
-			"10. A non-noop method must contain at least one real subtask. Only noop methods may use empty subtasks and empty ordering.",
-			"11. If a direct_leaf or primitive leaf method is emitted, include the primitive achiever itself as a subtask with kind=primitive; never encode a constructive leaf method as context-only with empty subtasks.",
-			"12. If redundant_if_noop_holds=true, omit that constructive method; if recursive_support_calls are listed, place them before final_step; if cleanup_steps are listed, place them after final_step.",
-			"13. Use explicit step objects with pairwise ordering edges only, and encode ordering only as arrays of two-element step-id arrays like [[\"s1\", \"s2\"]]. Do not use object-shaped ordering edges or localized ordering keys.",
-			"14. Use the query_sequence and temporal_specifications as supervision for what task-level behavior the library must support, but still emit reusable methods rather than one problem-instance trace.",
-			"15. Preserve a clear mapping from generated methods back to the supporting instruction identifiers. Every method must include source_instruction_ids with one or more instruction ids from query_sequence.",
-			"16. Never invent undeclared compound helpers, predicates, schema fields, or instruction identifiers.",
-			"17. Always emit the final JSON library in visible completion content. Never stop in reasoning without returning the JSON answer.",
+			"1. Define exactly the declared compound tasks and at least one method for each.",
+			"2. Use method_blueprints as compact decomposition evidence, not as permission to invent new symbols.",
+			"3. direct_leaf means one primitive achiever; support_then_leaf means support steps before the final primitive; hierarchical_orchestration means compound delegation or task composition.",
+			"4. Primitive action names from primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families may appear only in subtasks with kind=primitive.",
+			"5. Compound task names may appear only as method.task_name or subtasks with kind=compound.",
+			"6. Preserve distinct AUX witness roles; bind required witnesses in parameters, context, subtasks, and ordering, but not in task_args.",
+			"7. Non-noop methods must contain real subtasks; primitive leaf methods must include the primitive action itself.",
+			"8. Use query_sequence and temporal_specifications as task-level supervision while keeping methods reusable.",
+			"9. Every method must cite one or more source_instruction_ids from query_sequence.",
+			"10. Ordering must use only two-element step-id arrays such as [[\"s1\", \"s2\"]].",
+		]
+	)
+	gate_check_block = "\n".join(
+		[
+			"Before emitting JSON, check that:",
+			"- every symbol is declared in domain_summary;",
+			"- primitive and compound subtasks are not swapped;",
+			"- contexts and step annotations contain predicates/equality only, never action names;",
+			"- each variable has one declared type and compatible arity everywhere;",
+			"- constructive methods have subtasks and every ordering edge references existing step ids.",
 		]
 	)
 	query_sequence_block = "\n".join(
@@ -1180,6 +1169,7 @@ def build_domain_htn_user_prompt(
 			method_blueprint_block,
 		),
 		_format_tagged_block("instructions", instructions_block),
+		_format_tagged_block("gate_checklist", gate_check_block),
 		_format_tagged_block(
 			"output_schema",
 			"Emit one JSON object with keys compound_tasks and methods.\n"

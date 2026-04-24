@@ -119,20 +119,16 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert '"method_family_schemas"' in user_prompt
 	assert '"uncovered_prerequisite_families"' in user_prompt
 	assert '"primitive_action"' in user_prompt
-	assert "Distinct AUX names denote distinct witness roles" in user_prompt
-	assert "never reuse one symbol across incompatible typed slots" in user_prompt
-	assert "MUST give each variable exactly one declared type" in system_prompt
-	assert "align them with the provided query sequence and temporal specifications" in system_prompt
-	assert "if two roles require different types, use two variables" in user_prompt
-	assert "Every action named in primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families is primitive-only." in user_prompt
-	assert "Primitive action names are operators, not predicates." in system_prompt
-	assert 'The only allowed ordering syntax is an array of two-element step-id arrays such as [["s1", "s2"], ["s2", "s3"]].' in system_prompt
-	assert 'Do not use object-shaped ordering edges such as {"pre":"s1","post":"s2"} or localized key variants.' in system_prompt
-	assert "The final JSON answer must be emitted in visible completion content" in system_prompt
-	assert "A non-noop method must contain at least one real subtask." in user_prompt
-	assert "never encode a constructive leaf method as context-only with empty subtasks." in user_prompt
-	assert "Always emit the final JSON library in visible completion content." in user_prompt
-	assert 'encode ordering only as arrays of two-element step-id arrays like [["s1", "s2"]].' in user_prompt
+	assert "Preserve distinct AUX witness roles" in user_prompt
+	assert "Give each variable one declared type" in system_prompt
+	assert "aligned with the query sequence and temporal specifications" in system_prompt
+	assert "primitive and compound subtasks are not swapped" in user_prompt
+	assert "Primitive action names from primitive_action_schemas" in user_prompt
+	assert "Actions are operators, not predicates." in system_prompt
+	assert 'pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
+	assert "Non-noop methods must contain real subtasks" in user_prompt
+	assert "primitive leaf methods must include the primitive action itself" in user_prompt
+	assert "Before emitting JSON, check that:" in user_prompt
 	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt
 	assert "primitive_actions:" not in user_prompt
 	assert "<silent_self_check>" not in user_prompt
