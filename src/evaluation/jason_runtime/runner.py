@@ -1870,50 +1870,77 @@ class JasonRunner:
 			parent_task_name = str(parsed_head[0])
 
 			chunk_vars = self._extract_asl_variables(chunk)
-			prefix_context_variants: List[Tuple[str, ...]] = [()]
+			prefix_context_variants: List[Tuple[Tuple[str, ...], Dict[str, str]]] = [((), {})]
 			candidate_chunks: List[str] = []
 			seen_candidates = {chunk}
-			for line in lines[1:]:
-				goal = self._parse_asl_goal_call(line)
-				if goal is None:
+			for raw_line in lines[1:]:
+				if self._parse_asl_goal_call(raw_line) is None:
 					continue
-				goal_task_name, goal_args = goal
-				prefix_specs = [
-					spec
-					for spec in prefix_contexts_by_task.get(goal_task_name, ())
-					if bool(spec.get("is_noop")) or str(goal_task_name) != parent_task_name
-				]
-				if not prefix_specs:
-					break
 
-				next_variants: List[Tuple[str, ...]] = []
-				for prefix_context in prefix_context_variants:
+				next_variants: List[Tuple[Tuple[str, ...], Dict[str, str]]] = []
+				for prefix_context, prefix_binding in prefix_context_variants:
+					line = self._substitute_asl_bindings(raw_line, prefix_binding)
+					goal = self._parse_asl_goal_call(line)
+					if goal is None:
+						continue
+					goal_task_name, goal_args = goal
+					prefix_specs = [
+						spec
+						for spec in prefix_contexts_by_task.get(goal_task_name, ())
+						if bool(spec.get("is_noop")) or str(goal_task_name) != parent_task_name
+					]
+					if not prefix_specs:
+						continue
 					for spec in prefix_specs:
 						head_args = tuple(spec.get("head_args") or ())
 						context_parts = tuple(spec.get("context_parts") or ())
-						instantiated_context = self._instantiate_noop_prefix_context(
+						instantiated_context, instantiated_binding = (
+							self._instantiate_noop_prefix_context(
 							head_args=head_args,
 							goal_args=goal_args,
 							context_parts=context_parts,
 							chunk_vars=chunk_vars,
 						)
+						)
 						if not instantiated_context:
 							continue
-						combined_context = tuple(
-							dict.fromkeys([*prefix_context, *instantiated_context]),
+						merged_binding = self._merge_asl_bindings(
+							prefix_binding,
+							instantiated_binding,
 						)
-						if not combined_context or combined_context in next_variants:
+						if merged_binding is None:
 							continue
-						next_variants.append(combined_context)
+						rewritten_prefix_context = tuple(
+							self._substitute_asl_bindings(part, merged_binding)
+							for part in prefix_context
+						)
+						combined_context = tuple(
+							dict.fromkeys([*rewritten_prefix_context, *instantiated_context]),
+						)
+						variant_signature = (
+							combined_context,
+							tuple(sorted(merged_binding.items())),
+						)
+						if not combined_context or any(
+							variant_signature
+							== (context, tuple(sorted(binding.items())))
+							for context, binding in next_variants
+						):
+							continue
+						next_variants.append((combined_context, merged_binding))
 						if len(combined_context) < 2:
 							continue
+						bound_lines = [
+							self._substitute_asl_bindings(chunk_line, merged_binding)
+							for chunk_line in lines
+						]
 						rewritten_head = self._append_asl_method_context_parts(
-							lines[0],
+							bound_lines[0],
 							combined_context,
 						)
-						if rewritten_head == lines[0]:
+						if rewritten_head == bound_lines[0]:
 							continue
-						specialised_chunk = "\n".join([rewritten_head, *lines[1:]])
+						specialised_chunk = "\n".join([rewritten_head, *bound_lines[1:]])
 						if specialised_chunk in seen_candidates:
 							continue
 						seen_candidates.add(specialised_chunk)
@@ -1937,20 +1964,21 @@ class JasonRunner:
 		goal_args: Sequence[str],
 		context_parts: Sequence[str],
 		chunk_vars: Set[str],
-	) -> Tuple[str, ...]:
+	) -> Tuple[Tuple[str, ...], Dict[str, str]]:
 		if len(head_args) != len(goal_args):
-			return ()
+			return (), {}
 		binding: Dict[str, str] = {}
 		for head_arg, goal_arg in zip(head_args, goal_args):
 			if self._looks_like_asl_variable(str(head_arg)):
 				binding[str(head_arg)] = str(goal_arg)
 				continue
 			if self._looks_like_asl_variable(str(goal_arg)):
+				binding[str(goal_arg)] = str(head_arg)
 				continue
 			if self._canonical_runtime_token(str(head_arg)) != (
 				self._canonical_runtime_token(str(goal_arg))
 			):
-				return ()
+				return (), {}
 
 		instantiated_parts: List[str] = []
 		for part in context_parts:
@@ -1962,7 +1990,7 @@ class JasonRunner:
 			):
 				continue
 			instantiated_parts.append(substituted)
-		return tuple(dict.fromkeys(instantiated_parts))
+		return tuple(dict.fromkeys(instantiated_parts)), binding
 
 	def _promote_body_no_ancestor_guards_to_context(
 		self,

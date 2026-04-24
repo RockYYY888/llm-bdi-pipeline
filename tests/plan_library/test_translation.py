@@ -283,6 +283,10 @@ def test_translation_does_not_lift_preconditions_delegated_to_prior_compound_ste
 	assert "store_of(S, ROVER)" in context
 	assert all(not literal.startswith("empty(") for literal in context)
 	assert all(not literal.startswith("at(") for literal in context)
+	image_context = plans_by_name["m-get_image_data"].context
+	assert "calibration_target(CAMERA, OBJECTIVE)" not in image_context
+	assert all(not literal.startswith("have_image(") for literal in image_context)
+	assert all(not literal.startswith("at(") for literal in image_context)
 
 
 def test_translation_orders_positive_context_literals_before_negation_for_jason_binding() -> None:
@@ -385,8 +389,13 @@ def test_translation_adds_type_guards_for_local_method_variables() -> None:
 	plans_by_name = {plan.plan_name: plan for plan in plan_library.plans}
 	assert plans_by_name["m-deliver"].context == (
 		"object_type(P, package)",
+		"object_type(L1, location)",
 		"object_type(L2, location)",
+		"object_type(V, vehicle)",
+		"at(P, L1)",
 	)
+	assert "at(P, L)" in plans_by_name["m-load"].context
+	assert "at(V, L)" in plans_by_name["m-load"].context
 	assert "object_type(V, vehicle)" in plans_by_name["m-drive-to"].context
 	assert "object_type(L1, location)" in plans_by_name["m-drive-to"].context
 
@@ -407,5 +416,7 @@ def test_translation_does_not_lift_preconditions_achieved_by_prior_compound_step
 	assert all(not literal.startswith("power_on(") for literal in method0_context)
 	assert all(not literal.startswith("calibrated(") for literal in method2_context)
 	assert all(not literal.startswith("power_on(") for literal in method2_context)
+	assert all(not literal.startswith("pointing(") for literal in method0_context)
+	assert all(not literal.startswith("pointing(") for literal in method2_context)
 	assert "supports(MDOATT_TI_I, MDOATT_TI_M)" in method0_context
 	assert "supports(MDOAT_TI_I, MDOAT_TI_M)" in method2_context

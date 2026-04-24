@@ -913,6 +913,39 @@ def test_jason_runner_lifts_nonrecursive_child_contexts_to_parent_candidates() -
 	)
 
 
+def test_jason_runner_binds_parent_variables_from_ground_child_prefix_contexts() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!navigate_abs(rover0, waypoint1) : at(rover0, waypoint0) & can_traverse(rover0, waypoint0, waypoint1) <-",
+				'\t.print("runtime trace method flat ", "m-navigate_abs");',
+				"\t!navigate(rover0, waypoint0, waypoint1).",
+			],
+		),
+		"\n".join(
+			[
+				"+!calibrate_abs(ROVER, CAMERA) : on_board(CAMERA, ROVER) & visible_from(OBJECTIVE, WAYPOINT) <-",
+				'\t.print("runtime trace method flat ", "m-calibrate_abs");',
+				"\t!navigate_abs(ROVER, WAYPOINT);",
+				"\t!calibrate(ROVER, CAMERA, OBJECTIVE, WAYPOINT).",
+			],
+		),
+	]
+
+	expanded_chunks = runner._specialise_chunks_from_noop_prefix_contexts(
+		chunks,
+		max_candidates_per_chunk=8,
+	)
+
+	assert any(
+		"+!calibrate_abs(rover0, CAMERA)" in chunk
+		and "visible_from(OBJECTIVE, waypoint1)" in chunk
+		and "\t!navigate_abs(rover0, waypoint1);" in chunk
+		for chunk in expanded_chunks
+	)
+
+
 def test_jason_runner_orders_satellite_observation_methods_with_required_turn_before_image() -> None:
 	runner = JasonRunner()
 	chunks = [

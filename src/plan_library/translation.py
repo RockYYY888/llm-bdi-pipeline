@@ -455,7 +455,7 @@ def _translated_context_literals(
 	}
 	context_bound_variables = set(trigger_variables)
 	context_bound_variables.update(_positive_context_variable_tokens(method))
-	context_guard_variables = set(trigger_variables)
+	context_guard_variables = set(method_variable_types)
 	context_literals: List[str] = []
 	for literal in tuple(getattr(method, "context", ()) or ()):
 		if _is_positive_predicate_literal(literal):
@@ -536,8 +536,6 @@ def _local_witness_binding_literals(
 	mutable_predicates: set[str],
 	action_semantics_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[Any, ...]:
-	if not local_variables:
-		return ()
 	binding_literals: List[Any] = []
 	seen_signatures: set[str] = set()
 	produced_positive_signatures: set[str] = set()
@@ -547,9 +545,50 @@ def _local_witness_binding_literals(
 	for step in tuple(getattr(method, "subtasks", ()) or ()):
 		step_kind = str(getattr(step, "kind", "") or "").strip()
 		if step_kind == "compound":
+			canonical_step_args = tuple(
+				_lifted_child_argument(argument)
+				for argument in (getattr(step, "args", ()) or ())
+			)
+			current_step_variables = _literal_variable_tokens(canonical_step_args)
+			for precondition in _single_child_method_precondition_literals(
+				step=step,
+				methods_by_task=methods_by_task,
+				action_semantics_map=action_semantics_map,
+			):
+				predicate = str(getattr(precondition, "predicate", "") or "").strip()
+				if not predicate or predicate == "=":
+					continue
+				bound_args = tuple(str(arg) for arg in (getattr(precondition, "args", ()) or ()))
+				signature = _canonical_literal_signature(predicate, bound_args)
+				if signature in produced_positive_signatures:
+					continue
+				bound_arg_variables = _literal_variable_tokens(bound_args)
+				if (
+					prior_compound_step_seen
+					and predicate in mutable_predicates
+					and not bound_arg_variables <= current_step_variables
+				):
+					continue
+				if (
+					bound_arg_variables
+					and bound_arg_variables <= bound_variables
+					and _covered_by_previous_compound_subtask(
+						bound_arg_variables,
+						previous_compound_arg_tuples,
+					)
+				):
+					continue
+				if signature in seen_signatures:
+					continue
+				seen_signatures.add(signature)
+				bound_variables.update(bound_arg_variables)
+				binding_literals.append(precondition)
 			prior_compound_step_seen = True
 			previous_compound_arg_tuples.add(
-				tuple(str(argument) for argument in (getattr(step, "args", ()) or ())),
+				canonical_step_args,
+			)
+			bound_variables.update(
+				_literal_variable_tokens(canonical_step_args),
 			)
 			produced_positive_signatures.update(
 				_compound_step_positive_effect_signatures(
@@ -590,7 +629,7 @@ def _local_witness_binding_literals(
 				bindings.get(str(argument), str(argument))
 				for argument in (getattr(precondition, "args", ()) or ())
 			)
-			signature = f"{predicate}({','.join(bound_args)})"
+			signature = _canonical_literal_signature(predicate, bound_args)
 			if signature in produced_positive_signatures:
 				continue
 			bound_arg_variables = _literal_variable_tokens(bound_args)
@@ -602,8 +641,6 @@ def _local_witness_binding_literals(
 					previous_compound_arg_tuples,
 				)
 			):
-				continue
-			if not any(_symbol_token(argument) in local_variables for argument in bound_args):
 				continue
 			if signature in seen_signatures:
 				continue
@@ -626,8 +663,133 @@ def _local_witness_binding_literals(
 				bindings.get(str(argument), str(argument))
 				for argument in (getattr(effect, "args", ()) or ())
 			)
-			produced_positive_signatures.add(f"{predicate}({','.join(bound_args)})")
+			produced_positive_signatures.add(_canonical_literal_signature(predicate, bound_args))
 	return tuple(binding_literals)
+
+
+def _single_child_method_precondition_literals(
+	*,
+	step: Any,
+	methods_by_task: Dict[str, List[HTNMethod]],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+) -> Tuple[Any, ...]:
+	task_name = str(getattr(step, "task_name", "") or "").strip()
+	child_methods = tuple(methods_by_task.get(task_name, ()) or ())
+	if len(child_methods) != 1:
+		return ()
+	child_method = child_methods[0]
+	child_task_args = _trigger_argument_tokens(method=child_method, task_schema=None)
+	step_args = tuple(str(argument) for argument in (getattr(step, "args", ()) or ()))
+	child_bindings = {
+		str(parameter): str(argument)
+		for parameter, argument in zip(child_task_args, step_args)
+	}
+	literals: List[Any] = []
+	seen_signatures: set[str] = set()
+	produced_positive_signatures: set[str] = set()
+	for literal in tuple(getattr(child_method, "context", ()) or ()):
+		if not _is_positive_predicate_literal(literal):
+			continue
+		bound_args = _parent_bound_child_args(
+			getattr(literal, "args", ()) or (),
+			child_bindings=child_bindings,
+		)
+		if bound_args is None:
+			continue
+		signature = _canonical_literal_signature(str(literal.predicate), bound_args)
+		if signature in seen_signatures:
+			continue
+		seen_signatures.add(signature)
+		literals.append(
+			HTNLiteral(
+				predicate=str(literal.predicate),
+				args=bound_args,
+				is_positive=True,
+			),
+		)
+	for child_step in tuple(getattr(child_method, "subtasks", ()) or ()):
+		if str(getattr(child_step, "kind", "") or "").strip() != "primitive":
+			continue
+		action_name = str(
+			getattr(child_step, "action_name", None)
+			or getattr(child_step, "task_name", "")
+			or "",
+		).strip()
+		action_entry = action_semantics_map.get(action_name) or action_semantics_map.get(
+			sanitize_identifier(action_name),
+		)
+		if action_entry is None:
+			continue
+		action_parameters = tuple(action_entry.get("parameters") or ())
+		step_arguments = tuple(getattr(child_step, "args", ()) or ())
+		action_bindings = {
+			str(parameter): str(argument)
+			for parameter, argument in zip(action_parameters, step_arguments)
+		}
+		for precondition in tuple(action_entry.get("preconditions") or ()):
+			if not _is_positive_predicate_literal(precondition):
+				continue
+			bound_args = _parent_bound_child_args(
+				(
+					action_bindings.get(str(argument), str(argument))
+					for argument in (getattr(precondition, "args", ()) or ())
+				),
+				child_bindings=child_bindings,
+			)
+			if bound_args is None:
+				continue
+			signature = _canonical_literal_signature(str(precondition.predicate), bound_args)
+			if signature in produced_positive_signatures or signature in seen_signatures:
+				continue
+			seen_signatures.add(signature)
+			literals.append(
+				HTNLiteral(
+					predicate=str(precondition.predicate),
+					args=bound_args,
+					is_positive=True,
+				),
+			)
+		for effect in tuple(action_entry.get("effects") or ()):
+			if not _is_positive_predicate_literal(effect):
+				continue
+			bound_args = _parent_bound_child_args(
+				(
+					action_bindings.get(str(argument), str(argument))
+					for argument in (getattr(effect, "args", ()) or ())
+				),
+				child_bindings=child_bindings,
+			)
+			if bound_args is None:
+				continue
+			produced_positive_signatures.add(
+				_canonical_literal_signature(str(effect.predicate), bound_args),
+			)
+	return tuple(literals)
+
+
+def _parent_bound_child_args(
+	raw_args: Iterable[Any],
+	*,
+	child_bindings: Dict[str, str],
+) -> Tuple[str, ...] | None:
+	bound_args: List[str] = []
+	for argument in raw_args:
+		token = _symbol_token(argument)
+		if _looks_like_variable(token) and token not in child_bindings:
+			return None
+		bound_args.append(_lifted_child_argument(child_bindings.get(token, token)))
+	return tuple(bound_args)
+
+
+def _lifted_child_argument(argument: Any) -> str:
+	token = _symbol_token(argument)
+	if token.startswith("?"):
+		return token.lstrip("?").upper()
+	return token
+
+
+def _canonical_literal_signature(predicate: str, args: Iterable[Any]) -> str:
+	return f"{predicate}({','.join(_lifted_child_argument(argument) for argument in args)})"
 
 
 def _compound_step_positive_effect_signatures(
@@ -659,7 +821,7 @@ def _compound_step_positive_effect_signatures(
 		}
 		for effect in child_effects:
 			bound_args = tuple(
-				bindings.get(str(argument), str(argument))
+				_lifted_child_argument(bindings.get(str(argument), str(argument)))
 				for argument in (getattr(effect, "args", ()) or ())
 			)
 			signatures.add(f"{effect.predicate}({','.join(bound_args)})")
@@ -700,7 +862,7 @@ def _method_positive_effect_literals(
 				if not predicate or predicate == "=":
 					continue
 				bound_args = tuple(
-					bindings.get(str(argument), str(argument))
+					_lifted_child_argument(bindings.get(str(argument), str(argument)))
 					for argument in (getattr(effect, "args", ()) or ())
 				)
 				effects.append(
