@@ -15,6 +15,7 @@ from tests.support.plan_library_evaluation_support import (
 	BENCHMARK_EVALUATION_DOMAIN_SOURCE,
 	BENCHMARK_EVALUATION_LIBRARY_SOURCE,
 	_classify_evaluation_failure,
+	_compact_failure_signature,
 	_extract_failure_signature,
 	_extract_reported_evaluation_domain_source,
 	apply_evaluation_runtime_defaults,
@@ -431,6 +432,25 @@ def test_failure_signature_preserves_counts_when_formula_is_truncated() -> None:
 	assert signature["ltlf_formula_truncated"] is True
 	assert signature["ltlf_formula_chars"] == 12000
 	assert signature["ltlf_formula_sha256"] == "a" * 64
+
+
+def test_compact_failure_signature_truncates_failed_goal_lists() -> None:
+	signature = _compact_failure_signature(
+		{
+			"failed_goals": [f"goal_{index}" for index in range(25)],
+			"verifier_missing_goal_facts": [f"fact_{index}" for index in range(22)],
+		},
+	)
+
+	assert signature["failed_goals"] == [f"goal_{index}" for index in range(20)]
+	assert signature["failed_goals_truncated"] is True
+	assert signature["failed_goals_count"] == 25
+	assert signature["verifier_missing_goal_facts"] == [
+		f"fact_{index}"
+		for index in range(20)
+	]
+	assert signature["verifier_missing_goal_facts_truncated"] is True
+	assert signature["verifier_missing_goal_facts_count"] == 22
 
 
 def test_evaluation_case_uses_stored_temporal_specification(

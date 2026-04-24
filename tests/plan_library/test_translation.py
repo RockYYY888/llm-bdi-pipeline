@@ -377,7 +377,7 @@ def test_translation_orders_positive_context_literals_before_negation_for_jason_
 	)
 
 
-def test_translation_adds_type_guards_for_local_method_variables() -> None:
+def test_translation_adds_type_guards_for_context_bound_method_variables() -> None:
 	domain = HDDLParser.parse_domain(DOMAIN_FILES["transport"])
 	method_library = build_official_method_library(DOMAIN_FILES["transport"])
 
@@ -391,7 +391,6 @@ def test_translation_adds_type_guards_for_local_method_variables() -> None:
 		"object_type(P, package)",
 		"object_type(L1, location)",
 		"object_type(L2, location)",
-		"object_type(V, vehicle)",
 		"at(P, L1)",
 	)
 	assert "at(P, L)" in plans_by_name["m-load"].context

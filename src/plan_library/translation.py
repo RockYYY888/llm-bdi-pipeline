@@ -455,7 +455,7 @@ def _translated_context_literals(
 	}
 	context_bound_variables = set(trigger_variables)
 	context_bound_variables.update(_positive_context_variable_tokens(method))
-	context_guard_variables = set(method_variable_types)
+	context_guard_variables = set(trigger_variables)
 	context_literals: List[str] = []
 	for literal in tuple(getattr(method, "context", ()) or ()):
 		if _is_positive_predicate_literal(literal):
@@ -499,13 +499,13 @@ def _type_guard_context_literals(
 	context_literals: List[str] = []
 	seen: set[Tuple[str, str]] = set()
 	for variable, type_name in method_variable_types.items():
-		if variable not in guard_variables:
+		canonical_variable = _translate_term(variable, variable_map=variable_map)
+		if variable not in guard_variables and canonical_variable not in guard_variables:
 			continue
 		if not _looks_like_variable(variable):
 			continue
 		if not type_name or type_name == "object":
 			continue
-		canonical_variable = _translate_term(variable, variable_map=variable_map)
 		key = (canonical_variable, type_name)
 		if key in seen:
 			continue

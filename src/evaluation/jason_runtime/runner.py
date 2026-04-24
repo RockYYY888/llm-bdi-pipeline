@@ -130,6 +130,7 @@ class JasonRunner:
 	backend_name = "RunLocalMAS"
 	success_marker = "execute success"
 	failure_marker = "execute failed"
+	failed_goal_record_limit = 64
 	min_java_major = 17
 	max_java_major = 23
 	environment_class_name = "JasonPipelineEnvironment"
@@ -589,6 +590,8 @@ class JasonRunner:
 			method_library,
 			plan_library=plan_library,
 		)
+		goal_context = self._render_goal_fact_context(goal_facts)
+		repair_enabled = bool(goal_context or query_goals)
 		lowered_code = self._ground_local_witness_method_plans(
 			trace_ready_code,
 			seed_facts=seed_facts,
@@ -596,7 +599,6 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 		)
-		goal_context = self._render_goal_fact_context(goal_facts)
 		lines = [
 			lowered_code.rstrip(),
 			"",
@@ -604,6 +606,7 @@ class JasonRunner:
 				method_library,
 				plan_library=plan_library,
 				action_schemas=action_schemas,
+				allow_repair=repair_enabled,
 			),
 			"",
 			"/* Execution Entry */",
@@ -614,12 +617,13 @@ class JasonRunner:
 		execute_body = self._render_execute_body(
 			query_goals=query_goals,
 			goal_context=goal_context,
+			repair_enabled=repair_enabled,
 		)
 		lines.extend(
 			self._indent_body(execute_body),
 		)
 		lines.append("")
-		if goal_context:
+		if repair_enabled:
 			lines.extend(
 				self._render_goal_repair_plans(
 					query_goals=query_goals,
@@ -636,11 +640,20 @@ class JasonRunner:
 		*,
 		query_goals: Sequence[Any],
 		goal_context: str,
+		repair_enabled: bool = False,
 	) -> Tuple[str, ...]:
 		if goal_context:
 			return (
 				'.print("execute start")',
 				".perceive",
+				"!finish_or_retry_0",
+				".stopMAS",
+			)
+		if repair_enabled:
+			return (
+				'.print("execute start")',
+				".perceive",
+				*self._render_query_goal_calls(query_goals),
 				"!finish_or_retry_0",
 				".stopMAS",
 			)
@@ -662,7 +675,12 @@ class JasonRunner:
 		lines: List[str] = []
 		query_goal_calls = self._render_query_goal_calls(query_goals)
 		for pass_index in range(0, pass_count + 1):
-			lines.append(f"+!finish_or_retry_{pass_index} : {goal_context} <-")
+			success_context = (
+				f"{goal_context} & not runtime_pass_failed"
+				if goal_context
+				else "not runtime_pass_failed"
+			)
+			lines.append(f"+!finish_or_retry_{pass_index} : {success_context} <-")
 			lines.extend(self._indent_body(['.print("execute success")']))
 			lines.append("")
 			if pass_index >= pass_count:
@@ -675,6 +693,7 @@ class JasonRunner:
 			lines.extend(
 				self._indent_body(
 					[
+						"-runtime_pass_failed",
 						f"!execute_query_pass_{next_pass}",
 						f"!finish_or_retry_{next_pass}",
 					],
@@ -686,6 +705,7 @@ class JasonRunner:
 				self._indent_body(
 					(
 						f'.print("runtime query pass ", {next_pass})',
+						"-runtime_pass_failed",
 						*(query_goal_calls or ("true",)),
 					),
 				),
@@ -1139,14 +1159,23 @@ class JasonRunner:
 	def _extract_failed_goals(self, stdout: str) -> List[str]:
 		pattern = re.compile(r"runtime goal failed\s+fail_goal\((.*)\)\s*$")
 		failed: List[str] = []
+		seen: Set[str] = set()
+		truncated_count = 0
 		for raw_line in stdout.splitlines():
 			line = raw_line.strip()
 			match = pattern.search(line)
 			if match is None:
 				continue
 			payload = match.group(1).strip()
-			if payload:
+			if not payload or payload in seen:
+				continue
+			seen.add(payload)
+			if len(failed) < self.failed_goal_record_limit:
 				failed.append(payload)
+			else:
+				truncated_count += 1
+		if truncated_count:
+			failed.append(f"... truncated {truncated_count} additional failed goals")
 		return failed
 
 	def _render_action_path(self, action_path: Sequence[str]) -> str:
@@ -1319,6 +1348,7 @@ class JasonRunner:
 		*,
 		plan_library: PlanLibrary | None = None,
 		action_schemas: Sequence[Dict[str, Any]] = (),
+		allow_repair: bool = False,
 	) -> List[str]:
 		lines = ["/* Failure Handlers */"]
 		seen_triggers: set[str] = set()
@@ -1343,7 +1373,12 @@ class JasonRunner:
 					[
 						f'.print("runtime goal failed ", {fail_term})',
 						f"+{blocked_goal}",
-						".fail",
+						*(
+							("+runtime_pass_failed",)
+							if allow_repair
+							else ()
+						),
+						*(() if allow_repair else (".fail",)),
 					],
 				),
 			)
@@ -1633,6 +1668,12 @@ class JasonRunner:
 		)
 		if specialised_chunks != pre_guard_promotion_chunks:
 			changed = True
+		pre_blocked_guard_chunks = list(specialised_chunks)
+		specialised_chunks = self._promote_body_blocked_goal_guards_to_context(
+			specialised_chunks,
+		)
+		if specialised_chunks != pre_blocked_guard_chunks:
+			changed = True
 		pre_ordered_chunks = list(specialised_chunks)
 		specialised_chunks = self._order_runtime_method_plan_chunks(
 			specialised_chunks,
@@ -1871,8 +1912,6 @@ class JasonRunner:
 
 			chunk_vars = self._extract_asl_variables(chunk)
 			prefix_context_variants: List[Tuple[Tuple[str, ...], Dict[str, str]]] = [((), {})]
-			candidate_chunks: List[str] = []
-			seen_candidates = {chunk}
 			for raw_line in lines[1:]:
 				if self._parse_asl_goal_call(raw_line) is None:
 					continue
@@ -1928,33 +1967,39 @@ class JasonRunner:
 						):
 							continue
 						next_variants.append((combined_context, merged_binding))
-						if len(combined_context) < 2:
-							continue
-						bound_lines = [
-							self._substitute_asl_bindings(chunk_line, merged_binding)
-							for chunk_line in lines
-						]
-						rewritten_head = self._append_asl_method_context_parts(
-							bound_lines[0],
-							combined_context,
-						)
-						if rewritten_head == bound_lines[0]:
-							continue
-						specialised_chunk = "\n".join([rewritten_head, *bound_lines[1:]])
-						if specialised_chunk in seen_candidates:
-							continue
-						seen_candidates.add(specialised_chunk)
-						candidate_chunks.append(specialised_chunk)
-						if len(candidate_chunks) >= max_candidates_per_chunk:
+						if len(next_variants) >= max_candidates_per_chunk:
 							break
-					if len(candidate_chunks) >= max_candidates_per_chunk:
+					if len(next_variants) >= max_candidates_per_chunk:
 						break
-				if not next_variants or len(candidate_chunks) >= max_candidates_per_chunk:
+				if not next_variants:
 					break
 				prefix_context_variants = next_variants
 
+			candidate_chunks: List[str] = []
+			seen_candidates = {chunk}
+			for combined_context, merged_binding in prefix_context_variants:
+				if len(combined_context) < 2:
+					continue
+				bound_lines = [
+					self._substitute_asl_bindings(chunk_line, merged_binding)
+					for chunk_line in lines
+				]
+				rewritten_head = self._append_asl_method_context_parts(
+					bound_lines[0],
+					combined_context,
+				)
+				if rewritten_head == bound_lines[0]:
+					continue
+				specialised_chunk = "\n".join([rewritten_head, *bound_lines[1:]])
+				if specialised_chunk in seen_candidates:
+					continue
+				seen_candidates.add(specialised_chunk)
+				candidate_chunks.append(specialised_chunk)
+				if len(candidate_chunks) >= max_candidates_per_chunk:
+					break
 			expanded_chunks.extend(candidate_chunks)
-			expanded_chunks.append(chunk)
+			if not candidate_chunks:
+				expanded_chunks.append(chunk)
 		return expanded_chunks
 
 	def _instantiate_noop_prefix_context(
@@ -2018,6 +2063,45 @@ class JasonRunner:
 				guard_context_parts,
 			)
 			if rewritten_head == head_line:
+				rewritten_chunks.append(chunk)
+				continue
+			rewritten_chunks.append("\n".join([rewritten_head, *lines[1:]]))
+		return rewritten_chunks
+
+	def _promote_body_blocked_goal_guards_to_context(
+		self,
+		chunks: Sequence[str],
+	) -> List[str]:
+		rewritten_chunks: List[str] = []
+		for chunk in chunks:
+			lines = chunk.splitlines()
+			if not lines:
+				rewritten_chunks.append(chunk)
+				continue
+			if self._parse_asl_method_head(lines[0]) is None:
+				rewritten_chunks.append(chunk)
+				continue
+			blocked_guards: List[str] = []
+			for line in lines[1:]:
+				goal = self._parse_asl_goal_call(line)
+				if goal is None:
+					continue
+				goal_task_name, goal_args = goal
+				blocked_atom = self._call(
+					"blocked_runtime_goal",
+					(self._asl_atom_or_string(goal_task_name), *goal_args),
+				)
+				guard = f"not {blocked_atom}"
+				if guard not in blocked_guards:
+					blocked_guards.append(guard)
+			if not blocked_guards:
+				rewritten_chunks.append(chunk)
+				continue
+			rewritten_head = self._append_asl_method_context_parts(
+				lines[0],
+				blocked_guards,
+			)
+			if rewritten_head == lines[0]:
 				rewritten_chunks.append(chunk)
 				continue
 			rewritten_chunks.append("\n".join([rewritten_head, *lines[1:]]))
@@ -3804,8 +3888,6 @@ public class {self.environment_class_name} extends Environment {{
 		if exit_code is None or exit_code != 0:
 			return False
 		if self.success_marker not in stdout:
-			return False
-		if self.failure_marker in stdout:
 			return False
 		if not environment_result.success:
 			return False

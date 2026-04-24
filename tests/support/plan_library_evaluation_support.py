@@ -48,7 +48,7 @@ OFFICIAL_LIBRARY_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
-OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v9"
+OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v10"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
 COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
 EXECUTION_SUMMARY_KEYS = (
@@ -80,6 +80,7 @@ EXECUTION_STEP_KEYS = (
 	"plan_verification",
 )
 REPORT_TEXT_FIELD_LIMIT_CHARS = 2_000
+REPORT_SEQUENCE_FIELD_LIMIT = 20
 LONG_TEXT_KEYS = frozenset(
 	{
 		"instruction",
@@ -310,6 +311,13 @@ def _compact_failure_signature(signature: Dict[str, Any]) -> Dict[str, Any]:
 	if "ltlf_formula" in compact:
 		value = compact.pop("ltlf_formula")
 		_set_compact_text(compact, "ltlf_formula", value)
+	for key in ("failed_goals", "verifier_missing_goal_facts"):
+		value = compact.get(key)
+		if not isinstance(value, list) or len(value) <= REPORT_SEQUENCE_FIELD_LIMIT:
+			continue
+		compact[key] = value[:REPORT_SEQUENCE_FIELD_LIMIT]
+		compact[f"{key}_truncated"] = True
+		compact[f"{key}_count"] = len(value)
 	return compact
 
 

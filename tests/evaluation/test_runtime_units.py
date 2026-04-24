@@ -911,6 +911,18 @@ def test_jason_runner_lifts_nonrecursive_child_contexts_to_parent_candidates() -
 		"at(R, FROM) & can_traverse(R, FROM, WAYPOINT) <-" in chunk
 		for chunk in expanded_chunks
 	)
+	assert all(
+		chunk
+		!= "\n".join(
+			[
+				"+!get_soil_data(WAYPOINT) : store_of(S, R) & equipped_for_soil_analysis(R) <-",
+				'\t.print("runtime trace method flat ", "m-get_soil_data");',
+				"\t!navigate_abs(R, WAYPOINT);",
+				"\t!sample_soil(R, S, WAYPOINT).",
+			],
+		)
+		for chunk in expanded_chunks
+	)
 
 
 def test_jason_runner_binds_parent_variables_from_ground_child_prefix_contexts() -> None:
@@ -943,6 +955,51 @@ def test_jason_runner_binds_parent_variables_from_ground_child_prefix_contexts()
 		and "visible_from(OBJECTIVE, waypoint1)" in chunk
 		and "\t!navigate_abs(rover0, waypoint1);" in chunk
 		for chunk in expanded_chunks
+	)
+
+
+def test_jason_runner_keeps_deepest_child_prefix_context_candidate() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!reach(R, X) : at(R, F) & road(F, X) <-",
+				'\t.print("runtime trace method flat ", "m-reach");',
+				"\t!move(R, F, X).",
+			],
+		),
+		"\n".join(
+			[
+				"+!send(R, X) : signal(X) <-",
+				'\t.print("runtime trace method flat ", "m-send");',
+				"\t!reach(R, X);",
+				"\t!emit(R, X).",
+			],
+		),
+		"\n".join(
+			[
+				"+!collect(T) : ready(R) <-",
+				'\t.print("runtime trace method flat ", "m-collect");',
+				"\t!reach(R, T);",
+				"\t!send(R, T).",
+			],
+		),
+	]
+
+	expanded_chunks = runner._specialise_chunks_from_noop_prefix_contexts(
+		chunks,
+		max_candidates_per_chunk=8,
+	)
+
+	collect_candidates = [chunk for chunk in expanded_chunks if chunk.startswith("+!collect")]
+	assert any("at(R, F)" in chunk and "signal(T)" in chunk for chunk in collect_candidates)
+	assert all(
+		not (
+			"at(R, F)" in chunk
+			and "signal(T)" not in chunk
+			and chunk.startswith("+!collect")
+		)
+		for chunk in collect_candidates
 	)
 
 
@@ -1521,7 +1578,14 @@ clear(b1).
 +!do_put_on(X, Y) : clear(X) <-
 	true.
 """.strip(),
-		method_library=_sample_method_library(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(name="parent", parameters=("x",), is_primitive=False),
+				HTNTask(name="child", parameters=("x",), is_primitive=False),
+			],
+			primitive_tasks=[],
+			methods=[],
+		),
 		seed_facts=("(clear b1)", "(handempty)"),
 		runtime_objects=("b1",),
 		object_types={"b1": "block"},
@@ -1593,12 +1657,49 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
 
 	assert "!finish_or_retry_0;" in execute_section
-	assert "+!finish_or_retry_0 : done(a) <-" in runtime_program
+	assert "+!finish_or_retry_0 : done(a) & not runtime_pass_failed <-" in runtime_program
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
 	assert "+!execute_query_pass_1 : true <-" in runtime_program
 	assert '.print("runtime query pass ", 1)' in runtime_program
 	assert "!task_a." in runtime_program
 	assert runner._extract_goal_repair_pass_count("runtime query pass 1\nruntime query pass 3") == 3
+
+
+def test_jason_runner_repair_mode_blocks_failed_child_goal_choices() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!parent(X) : ready(X) <-
+	!child(X).
+
++!child(X) : option(X) <-
+	true.
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(name="parent", parameters=("x",), is_primitive=False),
+				HTNTask(name="child", parameters=("x",), is_primitive=False),
+			],
+			primitive_tasks=[],
+			methods=[],
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "parent", "args": ["a"]},),
+		goal_facts=("(done a)",),
+	)
+
+	assert "not blocked_runtime_goal(child, X)" in runtime_program
+	assert "+blocked_runtime_goal(child, X)" in runtime_program
+	child_failure_handler = runtime_program.split("-!child(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+	assert ".fail" not in child_failure_handler
 
 
 def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
