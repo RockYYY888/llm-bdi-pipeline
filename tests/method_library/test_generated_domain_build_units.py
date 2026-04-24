@@ -110,8 +110,9 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "target_literals" not in user_prompt
 	assert "target_task_bindings" not in user_prompt
 	assert "Do not condition the library on any benchmark query." not in user_prompt
-	assert "<query_sequence>" in user_prompt
+	assert "<query_sequence>" not in user_prompt
 	assert "<temporal_specifications>" in user_prompt
+	assert "Put block b4 on block b2" not in user_prompt
 	assert "source_instruction_ids" in user_prompt
 	assert "primitive_action_schemas:" in user_prompt
 	assert "declared_compound_tasks:" in user_prompt
@@ -121,16 +122,18 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert '"primitive_action"' in user_prompt
 	assert "Preserve distinct AUX witness roles" in user_prompt
 	assert "Give each variable one declared type" in system_prompt
-	assert "aligned with the query sequence and temporal specifications" in system_prompt
+	assert "aligned with the temporal specifications" in system_prompt
 	assert "primitive and compound subtasks are not swapped" in user_prompt
 	assert "Primitive action names from primitive_action_schemas" in user_prompt
 	assert "Actions are operators, not predicates." in system_prompt
-	assert "Do not copy problem object constants from query_sequence into M" in system_prompt
+	assert "Do not copy object constants from temporal specifications into M" in system_prompt
 	assert "If a method has zero or one subtask, ordering must be empty." in system_prompt
 	assert 'pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
 	assert "Non-noop methods must contain real subtasks" in user_prompt
 	assert "primitive leaf methods must include the primitive action itself" in user_prompt
+	assert "Use temporal_specifications as the only task-level supervision" in user_prompt
 	assert "keeping methods reusable and variable-parameterized" in user_prompt
+	assert "from temporal_specifications" in user_prompt
 	assert "single-step methods have empty ordering" in user_prompt
 	assert "Before emitting JSON, check that:" in user_prompt
 	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt

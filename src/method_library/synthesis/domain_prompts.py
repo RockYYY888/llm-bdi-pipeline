@@ -1062,8 +1062,8 @@ def build_domain_htn_system_prompt() -> str:
 		"- Preserve the compound/primitive boundary: method.task_name and compound subtasks must be declared compound tasks; primitive subtasks must be declared primitive actions.\n"
 		"- Actions are operators, not predicates. Contexts, preconditions, effects, and negated literals may use only predicates or equality.\n"
 		"- Variables are typed symbolic parameters. Give each variable one declared type and use fresh variables for distinct typed roles or witness roles.\n"
-		"- Methods are reusable schemas aligned with the query sequence and temporal specifications, not one grounded plan trace.\n"
-		"- Do not copy problem object constants from query_sequence into M; task_args and subtask args should be method variables unless a declared schema requires a constant.\n"
+		"- Methods are reusable schemas aligned with the temporal specifications, not one grounded plan trace.\n"
+		"- Do not copy object constants from temporal specifications into M; task_args and subtask args should be method variables unless a declared schema requires a constant.\n"
 		"- Use explicit step objects and pairwise ordering edges only: [[\"s1\", \"s2\"]].\n"
 		"- If a method has zero or one subtask, ordering must be empty.\n"
 		"- Empty subtasks are allowed only for already-satisfied guard methods; constructive methods must contain real subtasks.\n"
@@ -1098,7 +1098,6 @@ def build_domain_htn_user_prompt(
 	action_schema_block = _render_domain_action_schema_blocks(domain)
 	declared_task_block = _render_declared_compound_task_blocks(domain)
 	method_blueprint_block = _render_method_blueprint_blocks(method_blueprints)
-	query_sequence = tuple(query_sequence or ())
 	temporal_specifications = tuple(temporal_specifications or ())
 	domain_summary_block = "\n".join(
 		[
@@ -1118,8 +1117,8 @@ def build_domain_htn_user_prompt(
 			"5. Compound task names may appear only as method.task_name or subtasks with kind=compound.",
 			"6. Preserve distinct AUX witness roles; bind required witnesses in parameters, context, subtasks, and ordering, but not in task_args.",
 			"7. Non-noop methods must contain real subtasks; primitive leaf methods must include the primitive action itself.",
-			"8. Use query_sequence and temporal_specifications as task-level supervision while keeping methods reusable and variable-parameterized.",
-			"9. Every method must cite one or more source_instruction_ids from query_sequence.",
+			"8. Use temporal_specifications as the only task-level supervision while keeping methods reusable and variable-parameterized.",
+			"9. Every method must cite one or more source_instruction_ids from temporal_specifications.",
 			"10. Ordering must use only two-element step-id arrays such as [[\"s1\", \"s2\"]].",
 		]
 	)
@@ -1128,18 +1127,11 @@ def build_domain_htn_user_prompt(
 			"Before emitting JSON, check that:",
 			"- every symbol is declared in domain_summary;",
 			"- primitive and compound subtasks are not swapped;",
-			"- no method is specialized to concrete query objects such as benchmark block names;",
+			"- no method is specialized to concrete temporal-specification objects such as benchmark block names;",
 			"- contexts and step annotations contain predicates/equality only, never action names;",
 			"- each variable has one declared type and compatible arity everywhere;",
 			"- constructive methods have subtasks and every ordering edge references existing step ids; single-step methods have empty ordering.",
 		]
-	)
-	query_sequence_block = "\n".join(
-		f"- {str(item.get('instruction_id') or item.get('id') or '').strip()}: "
-		f"{str(item.get('source_text') or item.get('instruction') or '').strip()}"
-		for item in query_sequence
-		if str(item.get("instruction_id") or item.get("id") or "").strip()
-		and str(item.get("source_text") or item.get("instruction") or "").strip()
 	)
 	temporal_specifications_block = "\n".join(
 		(
@@ -1156,13 +1148,9 @@ def build_domain_htn_user_prompt(
 		_format_tagged_block(
 			"task",
 			"Generate one executable JSON HTN library for the whole domain. "
-			"Use the provided query sequence and temporal specifications as the task-level requirements that the reusable library should support.",
+			"Use only the provided temporal specifications as the task-level requirements that the reusable library should support.",
 		),
 		_format_tagged_block("domain_summary", domain_summary_block),
-		_format_tagged_block(
-			"query_sequence",
-			query_sequence_block or "none",
-		),
 		_format_tagged_block(
 			"temporal_specifications",
 			temporal_specifications_block or "none",
