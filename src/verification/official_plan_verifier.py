@@ -15,6 +15,21 @@ from utils.hddl_parser import HDDLParser
 
 
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+_TEXT_PREVIEW_LIMIT = 2000
+
+
+def _compact_text_preview(text: str) -> str:
+	payload = str(text or "")
+	if len(payload) <= _TEXT_PREVIEW_LIMIT:
+		return payload
+	head_limit = _TEXT_PREVIEW_LIMIT // 2
+	tail_limit = _TEXT_PREVIEW_LIMIT - head_limit
+	omitted = len(payload) - head_limit - tail_limit
+	return (
+		f"{payload[:head_limit]}\n"
+		f"...[truncated {omitted} chars; full text in output_file]...\n"
+		f"{payload[-tail_limit:]}"
+	)
 
 
 @dataclass(frozen=True)
@@ -39,8 +54,10 @@ class IPCPrimitivePlanVerificationResult:
 			"command": list(self.command),
 			"plan_file": self.plan_file,
 			"output_file": self.output_file,
-			"stdout": self.stdout,
-			"stderr": self.stderr,
+			"stdout_preview": _compact_text_preview(self.stdout),
+			"stdout_chars": len(self.stdout or ""),
+			"stderr_preview": _compact_text_preview(self.stderr),
+			"stderr_chars": len(self.stderr or ""),
 			"primitive_plan_only": self.primitive_plan_only,
 			"primitive_plan_executable": self.primitive_plan_executable,
 			"verification_result": self.verification_result,
@@ -149,7 +166,7 @@ class IPCPlanVerifier:
 		resolved_parser = self._resolve_command_head(self.parser_cmd) or self.parser_cmd
 		command = [
 			resolved_parser,
-			"-V",
+			"-v",
 			str(Path(domain_file).resolve()),
 			str(Path(problem_file).resolve()),
 			str(plan_path),
@@ -255,7 +272,7 @@ class IPCPlanVerifier:
 		engine_head = self._resolve_command_head(self.engine_cmd)
 		verify_command = [
 			parser_head or self.parser_cmd,
-			"-V",
+			"-v",
 			str(Path(domain_file).resolve()),
 			str(Path(problem_file).resolve()),
 			str(plan_path),
@@ -434,7 +451,7 @@ class IPCPlanVerifier:
 		resolved_parser = self._resolve_command_head(self.parser_cmd) or self.parser_cmd
 		command = [
 			resolved_parser,
-			"-V",
+			"-v",
 			str(Path(domain_file).resolve()),
 			str(Path(problem_file).resolve()),
 			str(plan_path),

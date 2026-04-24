@@ -2517,3 +2517,27 @@ def test_verify_plan_officially_accepts_runtime_repair_primitive_goal_reach(
 	assert plan_verification["summary"]["status"] == "success"
 	assert plan_verification["summary"]["plan_kind"] == "primitive_only"
 	assert plan_verification["summary"]["runtime_goal_reached"] is True
+
+
+def test_official_plan_verifier_result_dict_omits_full_process_output() -> None:
+	result = IPCPrimitivePlanVerificationResult(
+		tool_available=True,
+		command=["pandaPIparser", "-v"],
+		plan_file="plan.txt",
+		output_file="verifier.txt",
+		stdout="x" * 10_000,
+		stderr="",
+		primitive_plan_only=True,
+		primitive_plan_executable=True,
+		verification_result=False,
+		reached_goal_state=True,
+		plan_kind="primitive_only",
+		build_warning=None,
+		error=None,
+	)
+
+	payload = result.to_dict()
+
+	assert "stdout" not in payload
+	assert payload["stdout_chars"] == 10_000
+	assert "full text in output_file" in str(payload["stdout_preview"])
