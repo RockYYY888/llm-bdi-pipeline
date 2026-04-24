@@ -101,8 +101,8 @@ def build_failure_signature(
 		"ltlf_formula": str(ltlf_formula or "").strip() or None,
 		"ltlf_atom_count": ltlf_atom_count(ltlf_formula),
 		"ltlf_operator_counts": ltlf_operator_counts(ltlf_formula),
-		"mona_failure_signature": str(mona_failure_signature).strip() or None,
-		"jason_failure_class": str(jason_failure_class).strip() or None,
+		"mona_failure_signature": _optional_failure_text(mona_failure_signature),
+		"jason_failure_class": _optional_failure_text(jason_failure_class),
 		"failed_goals": [
 			str(goal).strip()
 			for goal in (failed_goals or ())
@@ -114,3 +114,12 @@ def build_failure_signature(
 			if str(fact).strip()
 		],
 	}
+
+
+def _optional_failure_text(value: Any) -> Optional[str]:
+	if value is None:
+		return None
+	text = str(value).strip()
+	if not text or text.lower() == "none":
+		return None
+	return text

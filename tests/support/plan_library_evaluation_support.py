@@ -19,7 +19,15 @@ from evaluation.failure_signature import (
 	build_failure_signature,
 	extract_mona_failure_signature,
 )
+from plan_library import (
+	PlanLibraryArtifactBundle,
+	build_library_validation_record,
+	build_plan_library,
+	persist_plan_library_artifact_bundle,
+	render_plan_library_asl,
+)
 from utils.benchmark_query_dataset import load_problem_query_cases
+from utils.hddl_parser import HDDLParser
 
 from tests.support.plan_library_generation_support import (
 	DOMAIN_FILES,
@@ -34,9 +42,43 @@ from tests.support.plan_library_generation_support import (
 
 BENCHMARK_EVALUATION_RESULTS_DIR = PROJECT_ROOT / "tests" / "generated" / "plan_library_evaluation"
 BENCHMARK_EVALUATION_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+OFFICIAL_LIBRARY_ARTIFACTS_DIR = PROJECT_ROOT / "tests" / "generated" / "plan_library_evaluation_official_libraries"
+OFFICIAL_LIBRARY_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
+OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
+COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
+EXECUTION_SUMMARY_KEYS = (
+	"timestamp",
+	"success",
+	"status",
+	"step",
+	"mode",
+	"run_origin",
+	"domain_name",
+	"problem_name",
+	"domain_file",
+	"problem_file",
+	"output_dir",
+	"execution_time_seconds",
+	"timings",
+	"ltlf_formula",
+	"ltlf_atom_count",
+	"ltlf_operator_counts",
+	"mona_failure_signature",
+	"jason_failure_class",
+	"failed_goals",
+	"verifier_missing_goal_facts",
+	"failure_signature",
+)
+EXECUTION_STEP_KEYS = (
+	"goal_grounding",
+	"temporal_compilation",
+	"agentspeak_rendering",
+	"runtime_execution",
+	"plan_verification",
+)
 
 
 def apply_evaluation_runtime_defaults(
@@ -157,16 +199,18 @@ def _extract_failure_signature(
 		)
 		if str(goal).strip()
 	)
-	verifier_missing_goal_facts = tuple(
-		str(fact).strip()
-		for fact in (
-			execution.get("verifier_missing_goal_facts")
-			or ((execution.get("plan_verification") or {}).get("metadata") or {}).get("missing_goal_facts")
-			or ((execution.get("plan_verification") or {}).get("artifacts") or {}).get("missing_goal_facts")
-			or ()
+	verifier_missing_goal_facts: tuple[str, ...] = ()
+	if not bool(report_result.get("success")):
+		verifier_missing_goal_facts = tuple(
+			str(fact).strip()
+			for fact in (
+				execution.get("verifier_missing_goal_facts")
+				or ((execution.get("plan_verification") or {}).get("metadata") or {}).get("missing_goal_facts")
+				or ((execution.get("plan_verification") or {}).get("artifacts") or {}).get("missing_goal_facts")
+				or ()
+			)
+			if str(fact).strip()
 		)
-		if str(fact).strip()
-	)
 	return build_failure_signature(
 		ltlf_formula=ltlf_formula,
 		mona_failure_signature=mona_failure_signature,
@@ -174,6 +218,56 @@ def _extract_failure_signature(
 		failed_goals=failed_goals,
 		verifier_missing_goal_facts=verifier_missing_goal_facts,
 	)
+
+
+def _compact_result_payload(result_payload: Dict[str, Any]) -> Dict[str, Any]:
+	compact = {
+		key: result_payload[key]
+		for key in COMPACT_RESULT_KEYS
+		if key in result_payload
+	}
+	plan_verification = result_payload.get("plan_verification")
+	if isinstance(plan_verification, dict):
+		summary = plan_verification.get("summary")
+		if isinstance(summary, dict):
+			compact["plan_verification_summary"] = dict(summary)
+	return compact
+
+
+def _compact_execution_summary(execution: Dict[str, Any]) -> Dict[str, Any]:
+	summary: Dict[str, Any] = {
+		key: execution[key]
+		for key in EXECUTION_SUMMARY_KEYS
+		if key in execution
+	}
+	for step_name in EXECUTION_STEP_KEYS:
+		step_payload = execution.get(step_name)
+		if not isinstance(step_payload, dict):
+			continue
+		step_summary = {
+			key: step_payload[key]
+			for key in ("status", "backend", "error", "metadata", "artifacts", "llm")
+			if key in step_payload
+		}
+		if step_summary:
+			summary[step_name] = step_summary
+	return summary
+
+
+def _execution_path_for_log_dir(log_dir: Any) -> str | None:
+	if not log_dir:
+		return None
+	return str((Path(str(log_dir)).resolve() / "execution.json"))
+
+
+def _verification_mode_from_execution_summary(execution_summary: Dict[str, Any]) -> str:
+	runtime_payload = execution_summary.get("runtime_execution")
+	if not isinstance(runtime_payload, dict):
+		return ""
+	metadata = runtime_payload.get("metadata")
+	if not isinstance(metadata, dict):
+		return ""
+	return str(metadata.get("verification_mode") or "")
 
 
 def ensure_generated_library_artifact(domain_key: str) -> Path:
@@ -187,6 +281,59 @@ def ensure_generated_library_artifact(domain_key: str) -> Path:
 	return Path(build_report["artifact_root"]).resolve()
 
 
+def ensure_official_library_artifact(domain_key: str) -> Path:
+	cached = OFFICIAL_LIBRARY_ARTIFACT_CACHE.get(domain_key)
+	if cached is not None and (cached / "plan_library.json").exists():
+		return cached
+
+	domain_file = DOMAIN_FILES[domain_key]
+	domain = HDDLParser.parse_domain(domain_file)
+	method_library = build_official_method_library(domain_file)
+	plan_library, translation_coverage = build_plan_library(
+		domain=domain,
+		method_library=method_library,
+	)
+	library_validation = build_library_validation_record(
+		domain_name=str(getattr(domain, "name", "") or domain_key),
+		domain=domain,
+		method_library=method_library,
+		plan_library=plan_library,
+		translation_coverage=translation_coverage,
+		method_validation={
+			"layers": {
+				"signature_conformance": {"passed": True, "warnings": []},
+				"typed_structural_soundness": {"passed": True, "warnings": []},
+				"decomposition_admissibility": {"passed": True, "warnings": []},
+				"materialized_parseability": {"passed": True, "warnings": []},
+			},
+		},
+	)
+	artifact_root = OFFICIAL_LIBRARY_ARTIFACTS_DIR / domain_key
+	artifact = PlanLibraryArtifactBundle(
+		domain_name=str(getattr(domain, "name", "") or domain_key),
+		query_sequence=(),
+		temporal_specifications=(),
+		method_library=method_library,
+		plan_library=plan_library,
+		translation_coverage=translation_coverage,
+		library_validation=library_validation,
+		method_synthesis_metadata={
+			"source": "official_unmasked_hddl",
+			"domain_file": domain_file,
+			"domain_key": domain_key,
+		},
+		artifact_root=str(artifact_root),
+		plan_library_asl_file=str(artifact_root / "plan_library.asl"),
+	)
+	persist_plan_library_artifact_bundle(
+		artifact_root=artifact_root,
+		artifact=artifact,
+		plan_library_asl_text=render_plan_library_asl(plan_library),
+	)
+	OFFICIAL_LIBRARY_ARTIFACT_CACHE[domain_key] = artifact_root
+	return artifact_root
+
+
 def resolve_plan_library_input(
 	domain_key: str,
 	*,
@@ -194,7 +341,7 @@ def resolve_plan_library_input(
 ) -> str | Any:
 	source = str(library_source or BENCHMARK_EVALUATION_LIBRARY_SOURCE).strip().lower()
 	if source in {"benchmark", "official"}:
-		return build_official_method_library(DOMAIN_FILES[domain_key])
+		return str(ensure_official_library_artifact(domain_key))
 	if source == "generated":
 		return str(ensure_generated_library_artifact(domain_key))
 	raise ValueError(f"Unsupported evaluation benchmark library source '{library_source}'.")
@@ -314,6 +461,15 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 	).strip()
 	log_dir = report.get("log_dir")
 	result_payload = dict(report.get("result") or {})
+	execution = dict(report.get("execution") or {})
+	execution_summary = (
+		dict(report.get("execution_summary") or {})
+		or _compact_execution_summary(execution)
+	)
+	verification_mode = (
+		str(report.get("verification_mode") or "").strip()
+		or _verification_mode_from_execution_summary(execution_summary)
+	)
 	return {
 		"run_id": report.get("run_id"),
 		"domain_key": str(report.get("domain_key") or ""),
@@ -322,7 +478,7 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 		"problem_file": problem_file,
 		"library_source": str(report.get("library_source") or ""),
 		"success": bool(report.get("success")),
-		"result": result_payload,
+		"result": _compact_result_payload(result_payload),
 		"outcome_bucket": str(report.get("outcome_bucket") or "unknown_failure"),
 		"goal_grounding_failure_class": str(
 			report.get("goal_grounding_failure_class")
@@ -330,7 +486,12 @@ def _serialize_query_report(report: Dict[str, Any]) -> Dict[str, Any]:
 			or "",
 		),
 		"log_dir": str(log_dir) if log_dir else None,
-		"execution": dict(report.get("execution") or {}),
+		"execution_path": (
+			str(report.get("execution_path") or "").strip()
+			or _execution_path_for_log_dir(log_dir)
+		),
+		"execution_summary": execution_summary,
+		"verification_mode": verification_mode,
 		"failure_signature": dict(report.get("failure_signature") or {}),
 		"ltlf_formula": (report.get("failure_signature") or {}).get("ltlf_formula"),
 		"ltlf_atom_count": (report.get("failure_signature") or {}).get("ltlf_atom_count"),
@@ -463,11 +624,12 @@ def _build_domain_summary(
 				),
 				"step": str((report.get("result") or {}).get("step") or ""),
 				"verification_mode": str(
-					(((report.get("execution") or {}).get("runtime_execution") or {}).get("metadata") or {}).get(
-						"verification_mode",
-					)
-					or "",
+					report.get("verification_mode")
+					or _verification_mode_from_execution_summary(
+						dict(report.get("execution_summary") or {}),
+					),
 				),
+				"execution_path": str(report.get("execution_path") or ""),
 				"ltlf_formula": (report.get("failure_signature") or {}).get("ltlf_formula"),
 				"ltlf_atom_count": (report.get("failure_signature") or {}).get("ltlf_atom_count"),
 				"ltlf_operator_counts": dict(
@@ -517,6 +679,8 @@ def run_plan_library_evaluation_benchmark_for_domain(
 	normalized_library_source = str(library_source or BENCHMARK_EVALUATION_LIBRARY_SOURCE).strip().lower()
 	if normalized_library_source == "generated":
 		library_artifact_ref: str | None = str(ensure_generated_library_artifact(domain_key))
+	elif normalized_library_source in {"benchmark", "official"}:
+		library_artifact_ref = str(ensure_official_library_artifact(domain_key))
 	else:
 		library_artifact_ref = None
 	domain_output_root = _domain_output_root(output_root, domain_key)

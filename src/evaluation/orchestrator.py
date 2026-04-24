@@ -847,11 +847,6 @@ class PlanLibraryEvaluationOrchestrator:
 		)
 		self._record_failure_signature(
 			ltlf_formula=ltlf_formula,
-			verifier_missing_goal_facts=tuple(
-				str(fact).strip()
-				for fact in ((outcome.data or {}).get("summary") or {}).get("missing_goal_facts") or ()
-				if str(fact).strip()
-			),
 		)
 		self._record_step_timing(
 			"plan_verification",

@@ -236,11 +236,13 @@ def test_domain_benchmark_resume_reuses_query_checkpoints(
 		"outcome_bucket": "hierarchical_plan_verified",
 		"goal_grounding_failure_class": "",
 		"log_dir": str((domain_root / "logs" / "q2").resolve()),
-		"execution": {
+		"execution_path": str((domain_root / "logs" / "q2" / "execution.json").resolve()),
+		"execution_summary": {
 			"runtime_execution": {
 				"metadata": {"verification_mode": "original_problem"},
 			},
 		},
+		"verification_mode": "original_problem",
 		"failure_signature": {
 			"ltlf_formula": None,
 			"ltlf_atom_count": 0,

@@ -82,6 +82,47 @@ class JasonValidationResult:
 			"timing_profile": dict(self.timing_profile),
 		}
 
+	def to_compact_dict(self) -> Dict[str, Any]:
+		"""Return a bounded validation record for JSON logs.
+
+		The full stdout/stderr/action path/method trace are written as separate
+		artifacts by the runner. Keeping them out of this JSON prevents sweep
+		summaries from duplicating large runtime traces.
+		"""
+
+		artifacts = dict(self.artifacts)
+		return {
+			"status": self.status,
+			"backend": self.backend,
+			"java_path": self.java_path,
+			"java_version": self.java_version,
+			"javac_path": self.javac_path,
+			"jason_jar": self.jason_jar,
+			"exit_code": self.exit_code,
+			"timed_out": self.timed_out,
+			"stdout_path": artifacts.get("jason_stdout"),
+			"stderr_path": artifacts.get("jason_stderr"),
+			"stdout_bytes": len(self.stdout.encode("utf-8")),
+			"stderr_bytes": len(self.stderr.encode("utf-8")),
+			"stdout_tail": _tail_text(self.stdout),
+			"stderr_tail": _tail_text(self.stderr),
+			"action_path_count": len(self.action_path),
+			"method_trace_count": len(self.method_trace),
+			"failed_goals": list(self.failed_goals),
+			"environment_adapter": dict(self.environment_adapter),
+			"failure_class": self.failure_class,
+			"consistency_checks": dict(self.consistency_checks),
+			"artifacts": artifacts,
+			"timing_profile": dict(self.timing_profile),
+		}
+
+
+def _tail_text(text: str, *, limit: int = 4000) -> str:
+	value = str(text or "")
+	if len(value) <= limit:
+		return value
+	return value[-limit:]
+
 
 class JasonRunner:
 	"""Run rendered AgentSpeak code in Jason and validate runtime outcomes."""
@@ -346,7 +387,7 @@ class JasonRunner:
 			artifacts=artifacts,
 			timing_profile=timing_profile,
 		)
-		validation_json_path.write_text(json.dumps(result_payload.to_dict(), indent=2))
+		validation_json_path.write_text(json.dumps(result_payload.to_compact_dict(), indent=2))
 
 		if not is_success:
 			failure_reason = self._failure_reason(
@@ -358,7 +399,7 @@ class JasonRunner:
 			)
 			raise JasonValidationError(
 				f"Jason runtime validation failed: {failure_reason}",
-				metadata=result_payload.to_dict(),
+				metadata=result_payload.to_compact_dict(),
 			)
 
 		return result_payload
