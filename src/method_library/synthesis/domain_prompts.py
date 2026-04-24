@@ -1063,7 +1063,9 @@ def build_domain_htn_system_prompt() -> str:
 		"- Actions are operators, not predicates. Contexts, preconditions, effects, and negated literals may use only predicates or equality.\n"
 		"- Variables are typed symbolic parameters. Give each variable one declared type and use fresh variables for distinct typed roles or witness roles.\n"
 		"- Methods are reusable schemas aligned with the query sequence and temporal specifications, not one grounded plan trace.\n"
+		"- Do not copy problem object constants from query_sequence into M; task_args and subtask args should be method variables unless a declared schema requires a constant.\n"
 		"- Use explicit step objects and pairwise ordering edges only: [[\"s1\", \"s2\"]].\n"
+		"- If a method has zero or one subtask, ordering must be empty.\n"
 		"- Empty subtasks are allowed only for already-satisfied guard methods; constructive methods must contain real subtasks.\n"
 		"- Recursive methods must make progress by changing at least one witness argument or state-support step before recursion.\n"
 		"\n"
@@ -1116,7 +1118,7 @@ def build_domain_htn_user_prompt(
 			"5. Compound task names may appear only as method.task_name or subtasks with kind=compound.",
 			"6. Preserve distinct AUX witness roles; bind required witnesses in parameters, context, subtasks, and ordering, but not in task_args.",
 			"7. Non-noop methods must contain real subtasks; primitive leaf methods must include the primitive action itself.",
-			"8. Use query_sequence and temporal_specifications as task-level supervision while keeping methods reusable.",
+			"8. Use query_sequence and temporal_specifications as task-level supervision while keeping methods reusable and variable-parameterized.",
 			"9. Every method must cite one or more source_instruction_ids from query_sequence.",
 			"10. Ordering must use only two-element step-id arrays such as [[\"s1\", \"s2\"]].",
 		]
@@ -1126,9 +1128,10 @@ def build_domain_htn_user_prompt(
 			"Before emitting JSON, check that:",
 			"- every symbol is declared in domain_summary;",
 			"- primitive and compound subtasks are not swapped;",
+			"- no method is specialized to concrete query objects such as benchmark block names;",
 			"- contexts and step annotations contain predicates/equality only, never action names;",
 			"- each variable has one declared type and compatible arity everywhere;",
-			"- constructive methods have subtasks and every ordering edge references existing step ids.",
+			"- constructive methods have subtasks and every ordering edge references existing step ids; single-step methods have empty ordering.",
 		]
 	)
 	query_sequence_block = "\n".join(

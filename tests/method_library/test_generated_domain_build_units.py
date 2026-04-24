@@ -125,9 +125,13 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "primitive and compound subtasks are not swapped" in user_prompt
 	assert "Primitive action names from primitive_action_schemas" in user_prompt
 	assert "Actions are operators, not predicates." in system_prompt
+	assert "Do not copy problem object constants from query_sequence into M" in system_prompt
+	assert "If a method has zero or one subtask, ordering must be empty." in system_prompt
 	assert 'pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
 	assert "Non-noop methods must contain real subtasks" in user_prompt
 	assert "primitive leaf methods must include the primitive action itself" in user_prompt
+	assert "keeping methods reusable and variable-parameterized" in user_prompt
+	assert "single-step methods have empty ordering" in user_prompt
 	assert "Before emitting JSON, check that:" in user_prompt
 	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt
 	assert "primitive_actions:" not in user_prompt
