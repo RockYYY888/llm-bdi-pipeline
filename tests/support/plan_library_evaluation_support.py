@@ -50,6 +50,7 @@ OFFICIAL_LIBRARY_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
+OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_order_runtime_goal_delete_guard_v1"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
 COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
 EXECUTION_SUMMARY_KEYS = (
@@ -286,8 +287,13 @@ def ensure_generated_library_artifact(domain_key: str) -> Path:
 
 def ensure_official_library_artifact(domain_key: str) -> Path:
 	cached = OFFICIAL_LIBRARY_ARTIFACT_CACHE.get(domain_key)
-	if cached is not None and (cached / "plan_library.json").exists():
+	if cached is not None and _official_library_artifact_is_current(cached):
 		return cached
+
+	artifact_root = OFFICIAL_LIBRARY_ARTIFACTS_DIR / domain_key
+	if _official_library_artifact_is_current(artifact_root):
+		OFFICIAL_LIBRARY_ARTIFACT_CACHE[domain_key] = artifact_root
+		return artifact_root
 
 	domain_file = DOMAIN_FILES[domain_key]
 	domain = HDDLParser.parse_domain(domain_file)
@@ -311,7 +317,6 @@ def ensure_official_library_artifact(domain_key: str) -> Path:
 			},
 		},
 	)
-	artifact_root = OFFICIAL_LIBRARY_ARTIFACTS_DIR / domain_key
 	artifact = PlanLibraryArtifactBundle(
 		domain_name=str(getattr(domain, "name", "") or domain_key),
 		query_sequence=(),
@@ -324,6 +329,7 @@ def ensure_official_library_artifact(domain_key: str) -> Path:
 			"source": "official_unmasked_hddl",
 			"domain_file": domain_file,
 			"domain_key": domain_key,
+			"translation_version": OFFICIAL_LIBRARY_TRANSLATION_VERSION,
 		},
 		artifact_root=str(artifact_root),
 		plan_library_asl_file=str(artifact_root / "plan_library.asl"),
@@ -335,6 +341,20 @@ def ensure_official_library_artifact(domain_key: str) -> Path:
 	)
 	OFFICIAL_LIBRARY_ARTIFACT_CACHE[domain_key] = artifact_root
 	return artifact_root
+
+
+def _official_library_artifact_is_current(artifact_root: Path) -> bool:
+	metadata_path = artifact_root / "method_synthesis_metadata.json"
+	if not (artifact_root / "plan_library.json").exists() or not metadata_path.exists():
+		return False
+	try:
+		metadata = json.loads(metadata_path.read_text())
+	except json.JSONDecodeError:
+		return False
+	return (
+		str(metadata.get("translation_version") or "").strip()
+		== OFFICIAL_LIBRARY_TRANSLATION_VERSION
+	)
 
 
 def resolve_plan_library_input(

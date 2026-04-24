@@ -1172,6 +1172,60 @@ def test_jason_runner_instruments_before_runtime_specialisation() -> None:
 	assert "+!do_on_table(b1)" in runner_asl
 
 
+def test_jason_runner_adds_goal_fact_delete_guards_from_action_effects() -> None:
+	runner = JasonRunner()
+	agentspeak_code = "\n".join(
+		[
+			"/* Initial Beliefs */",
+			"linked(node_a, node_b).",
+			"",
+			"/* Primitive Action Plans */",
+			"+!disconnect(FROM, TO) : true <-",
+			"\tdisconnect(FROM, TO).",
+			"",
+			"/* HTN Method Plans */",
+			"+!prepare_route(FROM, TO) : linked(FROM, TO) <-",
+			"\tdisconnect(FROM, TO).",
+			"",
+			"/* DFA Transition Wrappers */",
+		],
+	)
+
+	runner_asl = runner._build_runner_asl(
+		agentspeak_code,
+		action_schemas=(
+			{
+				"functor": "disconnect",
+				"source_name": "disconnect",
+				"parameters": ["?from", "?to"],
+				"effects": [
+					{
+						"predicate": "linked",
+						"args": ["?from", "?to"],
+						"is_positive": False,
+					},
+				],
+			},
+		),
+		seed_facts=("(linked node_a node_b)",),
+		runtime_objects=("node_a", "node_b"),
+		object_types={"node_a": "place", "node_b": "place"},
+		type_parent_map={"place": "object", "object": None},
+		target_facts=("(linked node_a node_b)",),
+	)
+
+	method_section = runner_asl.split("/* HTN Method Plans */", maxsplit=1)[1].split(
+		"/* DFA Transition Wrappers */",
+		maxsplit=1,
+	)[0]
+
+	assert "target_fact_linked(node_a, node_b)." in runner_asl
+	assert (
+		"+!prepare_route(FROM, TO) : linked(FROM, TO) & "
+		"not target_fact_linked(FROM, TO) <-"
+	) in method_section
+
+
 def test_jason_runner_instruments_plan_library_variants_with_source_method_name() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(

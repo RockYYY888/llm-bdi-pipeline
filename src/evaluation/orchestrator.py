@@ -660,6 +660,11 @@ class PlanLibraryEvaluationOrchestrator:
 				if self.problem is not None
 				else ()
 			)
+			target_facts = (
+				tuple(render_problem_fact(fact) for fact in (self.problem.goal_facts or ()))
+				if self.problem is not None
+				else ()
+			)
 			runtime_objects = tuple(
 				str(object_name).strip()
 				for object_name in (
@@ -678,6 +683,7 @@ class PlanLibraryEvaluationOrchestrator:
 				runtime_objects=runtime_objects,
 				object_types=dict(grounding_result.typed_objects),
 				type_parent_map=dict(evaluation_domain.type_parent_map),
+				target_facts=target_facts,
 				domain_name=evaluation_domain.domain.name,
 				problem_file=str(Path(verification_problem_file).resolve()),
 				output_dir=output_dir,
