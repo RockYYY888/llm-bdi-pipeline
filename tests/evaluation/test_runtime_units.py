@@ -804,6 +804,36 @@ def test_jason_runner_rejects_unbound_runtime_variables_in_method_bodies() -> No
 	assert runner._chunk_runtime_variables_are_safe(primitive_wrapper_binding_chunk) is True
 
 
+def test_jason_runner_defers_runtime_only_type_guards_for_method_local_variables() -> None:
+	runner = JasonRunner()
+	agentspeak_code = """
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!observe(DIR, MODE) : object_type(PREV, direction) & object_type(DIR, image_direction) & object_type(INST, instrument) & object_type(SAT, satellite) & on_board(INST, SAT) <-
+	!turn_to(SAT, DIR, PREV);
+	!capture(SAT, DIR, INST, MODE).
+
++!already_observe(DIR) : object_type(DIR, image_direction) <-
+	true.
+
+/* Failure Handlers */
+""".strip()
+
+	rewritten = runner._defer_type_only_local_context_guards(agentspeak_code)
+	observe_head = rewritten.split("+!observe", maxsplit=1)[1].split("<-", maxsplit=1)[0]
+	already_head = rewritten.split("+!already_observe", maxsplit=1)[1].split("<-", maxsplit=1)[0]
+
+	assert "object_type(PREV, direction)" not in observe_head
+	assert "object_type(DIR, image_direction)" in observe_head
+	assert "object_type(INST, instrument)" in observe_head
+	assert "object_type(SAT, satellite)" in observe_head
+	assert "on_board(INST, SAT)" in observe_head
+	assert "object_type(DIR, image_direction)" in already_head
+
+
 def test_jason_runtime_ordering_contains_no_domain_named_heuristics() -> None:
 	source = (SRC_ROOT / "evaluation" / "jason_runtime" / "runner.py").read_text()
 	for forbidden_token in (
@@ -854,6 +884,37 @@ def test_jason_runner_orders_already_satisfied_then_direct_then_recursive_chunks
 	assert '"m-i-am-there"' in ordered_chunks[0]
 	assert '"m-drive-to"' in ordered_chunks[1]
 	assert '"m-drive-to-via"' in ordered_chunks[2]
+
+
+def test_jason_runner_prefers_full_nonrecursive_decomposition_over_shorter_prefix() -> None:
+	runner = JasonRunner()
+	chunks = [
+		"\n".join(
+			[
+				"+!achieve(TARGET) : ready(RESOURCE) <-",
+				'\t.print("runtime trace method flat ", "short-prefix");',
+				"\t!prepare(RESOURCE);",
+				"\t!finish(TARGET).",
+			],
+		),
+		"\n".join(
+			[
+				"+!achieve(TARGET) : ready(RESOURCE) <-",
+				'\t.print("runtime trace method flat ", "full-decomposition");',
+				"\t!prepare(RESOURCE);",
+				"\t!align(RESOURCE, TARGET);",
+				"\t!finish(TARGET).",
+			],
+		),
+	]
+
+	ordered_chunks = runner._order_runtime_method_plan_chunks(
+		chunks,
+		fact_index={("ready", 1): (("resource_0",),)},
+	)
+
+	assert '"full-decomposition"' in ordered_chunks[0]
+	assert '"short-prefix"' in ordered_chunks[1]
 
 
 def test_jason_runner_keeps_recursive_transport_via_after_current_context_via() -> None:
@@ -950,8 +1011,10 @@ def test_jason_runner_does_not_apply_domain_named_action_setup_ordering() -> Non
 	)
 
 	assert "method_already_pointing" in ordered_chunks[0]
-	assert "method_without_turn" in ordered_chunks[1]
-	assert "method_with_turn" in ordered_chunks[2]
+	assert {ordered_chunks[1], ordered_chunks[2]} == {
+		chunks[0],
+		chunks[1],
+	}
 
 
 def test_jason_runner_ignores_domain_named_fact_indexes_during_chunk_ordering() -> None:
@@ -1616,7 +1679,7 @@ def test_jason_runner_repair_mode_blocks_failed_child_goal_choices(
 	assert ".fail" not in child_failure_handler
 
 
-def test_jason_runner_keeps_native_goal_backtracking_without_goal_context() -> None:
+def test_jason_runner_retries_runtime_failures_without_problem_goal_context() -> None:
 	runner = JasonRunner()
 	runtime_program = runner._build_runner_asl(
 		agentspeak_code="""
@@ -1645,10 +1708,12 @@ def test_jason_runner_keeps_native_goal_backtracking_without_goal_context() -> N
 	)
 
 	parent_failure_handler = runtime_program.split("-!parent(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
-	assert "!finish_or_retry_0" not in runtime_program
-	assert "not blocked_runtime_goal(child, X)" not in runtime_program
-	assert "+runtime_pass_failed" not in parent_failure_handler
-	assert ".fail" in parent_failure_handler
+	child_failure_handler = runtime_program.split("-!child(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+	assert "!finish_or_retry_0" in runtime_program
+	assert "+!finish_or_retry_0 : not runtime_pass_failed <-" in runtime_program
+	assert "not blocked_runtime_goal(child, X)" in runtime_program
+	assert "+runtime_pass_failed" in parent_failure_handler
+	assert ".fail" not in child_failure_handler
 
 
 def test_jason_runner_bounds_repetitive_runtime_artifacts() -> None:

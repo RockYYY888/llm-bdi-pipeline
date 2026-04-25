@@ -629,14 +629,17 @@ class JasonRunner:
 			environment_ready_code,
 			action_schemas=action_schemas,
 		)
-		trace_ready_code = self._instrument_method_plans(
+		deferred_type_ready_code = self._defer_type_only_local_context_guards(
 			method_goal_ready_code,
+		)
+		trace_ready_code = self._instrument_method_plans(
+			deferred_type_ready_code,
 			method_library,
 			plan_library=plan_library,
 		)
 		goal_context = self._render_goal_fact_context(goal_facts)
-		goal_retry_enabled = bool(goal_context)
-		failure_repair_enabled = goal_retry_enabled and self._failure_repair_enabled()
+		failure_repair_enabled = bool(query_goals) and self._failure_repair_enabled()
+		goal_retry_enabled = bool(goal_context) or failure_repair_enabled
 		lowered_code = self._ground_local_witness_method_plans(
 			trace_ready_code,
 			seed_facts=seed_facts,
@@ -1737,6 +1740,107 @@ class JasonRunner:
 		rewritten_section = "\n\n".join([header, *specialised_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{rewritten_section}{suffix}"
 
+	def _defer_type_only_local_context_guards(self, agentspeak_code: str) -> str:
+		"""
+		Remove runtime-only local type guards that would bind variables too early.
+
+		The generated S may retain object_type guards as type metadata. In Jason
+		runtime execution, a method-local variable that appears only in an
+		object_type guard is better left for the downstream subgoal/action context
+		to bind at the point of execution; otherwise a stale type-domain choice can
+		make an otherwise valid primitive action fail.
+		"""
+
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* Failure Handlers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1:
+			return agentspeak_code
+		if end_index == -1 or end_index <= start_index:
+			end_index = len(agentspeak_code)
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		content_lines = section_lines[1:]
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in content_lines:
+			if not line.strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(line)
+		if current:
+			chunks.append(current)
+
+		rewritten_chunks: List[str] = []
+		changed = False
+		for chunk in chunks:
+			if not chunk:
+				continue
+			rewritten_head = self._defer_type_only_local_context_guards_for_head(chunk[0])
+			if rewritten_head != chunk[0]:
+				changed = True
+			rewritten_chunks.append("\n".join([rewritten_head, *chunk[1:]]))
+
+		if not changed:
+			return agentspeak_code
+		rewritten_section = "\n\n".join([header, *rewritten_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _defer_type_only_local_context_guards_for_head(self, head_line: str) -> str:
+		parsed_head = self._parse_asl_method_head(head_line)
+		if parsed_head is None:
+			return head_line
+		_, head_args, context_parts = parsed_head
+		if not context_parts:
+			return head_line
+
+		trigger_variables = {
+			arg
+			for arg in head_args
+			if self._looks_like_asl_variable(str(arg))
+		}
+		non_type_context_variables: Set[str] = set()
+		parsed_parts: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+		for part in context_parts:
+			parsed = self._parse_asl_context_conjunct(str(part))
+			parsed_parts.append((str(part), parsed))
+			if parsed is None:
+				continue
+			if parsed.get("kind") == "atom" and parsed.get("predicate") == "object_type":
+				continue
+			non_type_context_variables.update(self._extract_asl_variables(str(part)))
+
+		rewritten_context_parts: List[str] = []
+		for part, parsed in parsed_parts:
+			if parsed is None:
+				rewritten_context_parts.append(part)
+				continue
+			if parsed.get("kind") != "atom" or parsed.get("predicate") != "object_type":
+				rewritten_context_parts.append(part)
+				continue
+			args = tuple(parsed.get("args") or ())
+			if not args:
+				rewritten_context_parts.append(part)
+				continue
+			variable = str(args[0]).strip()
+			if not self._looks_like_asl_variable(variable):
+				rewritten_context_parts.append(part)
+				continue
+			if variable in trigger_variables or variable in non_type_context_variables:
+				rewritten_context_parts.append(part)
+
+		return self._replace_asl_method_context_parts(head_line, rewritten_context_parts)
+
 	def _strip_seed_fact_beliefs(
 		self,
 		agentspeak_code: str,
@@ -1892,6 +1996,23 @@ class JasonRunner:
 		rewritten_context = " & ".join(context_parts) if context_parts else "true"
 		return f"{prefix}{rewritten_context}{suffix}"
 
+	@staticmethod
+	def _replace_asl_method_context_parts(
+		head_line: str,
+		context_parts: Sequence[str],
+	) -> str:
+		match = re.match(r"^(\s*\+![^\s(:]+(?:\([^)]*\))?\s*:\s*)(.*?)(\s*<-\s*)$", head_line)
+		if match is None:
+			return head_line
+		prefix, _context_text, suffix = match.groups()
+		filtered_context_parts = [
+			str(part).strip()
+			for part in context_parts
+			if str(part).strip() and str(part).strip() != "true"
+		]
+		rewritten_context = " & ".join(filtered_context_parts) if filtered_context_parts else "true"
+		return f"{prefix}{rewritten_context}{suffix}"
+
 	def _order_runtime_method_plan_chunks(
 		self,
 		chunks: Sequence[str],
@@ -1958,11 +2079,19 @@ class JasonRunner:
 					body_goals,
 					current_fact_arg_pairs,
 				)
+				empty_body_rank = 0 if body_goal_count == 0 else 1
+				body_goal_rank = 0 if body_goal_count == 0 else -body_goal_count
 				grounded_head_arg_count = sum(
 					1
 					for arg in tuple(item.get("head_args") or ())
 					if not self._looks_like_asl_variable(str(arg))
 				)
+				head_variable_set = {
+					str(arg)
+					for arg in tuple(item.get("head_args") or ())
+					if self._looks_like_asl_variable(str(arg))
+				}
+				local_context_variables: Set[str] = set()
 				non_type_context_count = sum(
 					1
 					for part in tuple(item.get("context_parts") or ())
@@ -1974,6 +2103,14 @@ class JasonRunner:
 					if parsed is None:
 						continue
 					if parsed.get("kind") == "atom":
+						local_context_variables.update(
+							str(arg)
+							for arg in tuple(parsed.get("args") or ())
+							if (
+								self._looks_like_asl_variable(str(arg))
+								and str(arg) not in head_variable_set
+							)
+						)
 						grounded_context_arg_count += sum(
 							1
 							for arg in tuple(parsed.get("args") or ())
@@ -1987,11 +2124,13 @@ class JasonRunner:
 						)
 				item["sort_key"] = (
 					0 if variable_safe else 1,
+					empty_body_rank,
 					0 if not has_self_recursive_goal else 1,
-					body_goal_count,
+					grounded_context_arg_count,
+					len(local_context_variables),
 					-non_type_context_count,
+					body_goal_rank,
 					-grounded_head_arg_count,
-					-grounded_context_arg_count,
 					-body_current_fact_pair_score,
 					int(item.get("index", 0)),
 				)
