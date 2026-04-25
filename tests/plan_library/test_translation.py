@@ -150,6 +150,80 @@ def test_translation_reports_accepted_and_rejected_methods() -> None:
 	)
 
 
+def test_translation_orders_same_trigger_plans_by_lifted_structure() -> None:
+	domain = SimpleNamespace(
+		name="routing",
+		tasks=(
+			SimpleNamespace(name="travel", parameters=("?vehicle:vehicle", "?to:location")),
+		),
+		predicates=(
+			SimpleNamespace(name="at", parameters=("?vehicle:vehicle", "?location:location")),
+			SimpleNamespace(name="road", parameters=("?from:location", "?to:location")),
+		),
+		actions=(
+			SimpleNamespace(name="drive", parameters=("?vehicle:vehicle", "?from:location", "?to:location")),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="travel", parameters=("?vehicle", "?to"), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="drive", parameters=("?vehicle", "?from", "?to"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m-recursive",
+				task_name="travel",
+				parameters=("?vehicle", "?from", "?mid", "?to"),
+				task_args=("?vehicle", "?to"),
+				context=(
+					HTNLiteral(predicate="at", args=("?vehicle", "?from")),
+					HTNLiteral(predicate="road", args=("?from", "?mid")),
+					HTNLiteral(predicate="road", args=("?mid", "?to")),
+				),
+				subtasks=(
+					HTNMethodStep("s1", "travel", ("?vehicle", "?mid"), "compound"),
+					HTNMethodStep("s2", "drive", ("?vehicle", "?mid", "?to"), "primitive", action_name="drive"),
+				),
+				ordering=(("s1", "s2"),),
+			),
+			HTNMethod(
+				method_name="m-direct",
+				task_name="travel",
+				parameters=("?vehicle", "?from", "?to"),
+				task_args=("?vehicle", "?to"),
+				context=(
+					HTNLiteral(predicate="at", args=("?vehicle", "?from")),
+					HTNLiteral(predicate="road", args=("?from", "?to")),
+				),
+				subtasks=(
+					HTNMethodStep("s1", "drive", ("?vehicle", "?from", "?to"), "primitive", action_name="drive"),
+				),
+			),
+			HTNMethod(
+				method_name="m-already-there",
+				task_name="travel",
+				parameters=("?vehicle", "?to"),
+				task_args=("?vehicle", "?to"),
+				context=(
+					HTNLiteral(predicate="at", args=("?vehicle", "?to")),
+				),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
+
+	assert [plan.plan_name for plan in plan_library.plans] == [
+		"m-already-there",
+		"m-direct",
+		"m-recursive",
+	]
+
+
 def test_rendering_emits_structured_agentspeak_library() -> None:
 	plan_library, _coverage = build_plan_library(
 		domain=_sample_domain(),
@@ -286,6 +360,68 @@ def test_translation_lifts_local_witness_action_preconditions_into_context() -> 
 	assert "on(Y, X)" in plans_by_name["m7_do_clear"].context
 	assert "clear(Y)" not in plans_by_name["m7_do_clear"].context
 	assert "holding(Y)" not in plans_by_name["m7_do_clear"].context
+
+
+def test_translation_lifts_conservative_multi_method_compound_summary() -> None:
+	domain = SimpleNamespace(
+		name="routing",
+		tasks=(
+			SimpleNamespace(name="deliver", parameters=("?pkg:package", "?to:location")),
+			SimpleNamespace(name="move_abs", parameters=("?from:location", "?to:location")),
+		),
+		predicates=(
+			SimpleNamespace(name="road", parameters=("?from:location", "?to:location")),
+			SimpleNamespace(name="fuelled", parameters=("?from:location",)),
+		),
+		actions=(),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="deliver", parameters=("?pkg", "?to"), is_primitive=False),
+			HTNTask(name="move_abs", parameters=("?from", "?to"), is_primitive=False),
+		],
+		primitive_tasks=[],
+		methods=[
+			HTNMethod(
+				method_name="m-deliver",
+				task_name="deliver",
+				parameters=("?pkg", "?from", "?to"),
+				task_args=("?pkg", "?to"),
+				subtasks=(
+					HTNMethodStep("s1", "move_abs", ("?from", "?to"), "compound"),
+				),
+			),
+			HTNMethod(
+				method_name="m-move-direct",
+				task_name="move_abs",
+				parameters=("?from", "?to"),
+				task_args=("?from", "?to"),
+				context=(
+					HTNLiteral(predicate="road", args=("?from", "?to")),
+				),
+			),
+			HTNMethod(
+				method_name="m-move-fuelled",
+				task_name="move_abs",
+				parameters=("?from", "?to"),
+				task_args=("?from", "?to"),
+				context=(
+					HTNLiteral(predicate="road", args=("?from", "?to")),
+					HTNLiteral(predicate="fuelled", args=("?from",)),
+				),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
+
+	plans_by_name = {plan.plan_name: plan for plan in plan_library.plans}
+	parent_context = plans_by_name["m-deliver"].context
+	assert "road(FROM, TO)" in parent_context
+	assert "fuelled(FROM)" not in parent_context
+	assert "object_type(FROM, location)" in parent_context
 
 
 def test_translation_does_not_lift_preconditions_delegated_to_prior_compound_steps() -> None:

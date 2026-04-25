@@ -125,9 +125,10 @@ def build_plan_library(
 		unsupported_buckets=dict(unsupported_buckets),
 		unsupported_methods=tuple(unsupported_methods),
 	)
+	ordered_plans = _order_plans_by_lifted_structure(plans)
 	return PlanLibrary(
 		domain_name=str(getattr(domain, "name", "") or ""),
-		plans=tuple(plans),
+		plans=tuple(ordered_plans),
 	), coverage
 
 
@@ -667,6 +668,86 @@ def _deduplicate_certificate(entries: Sequence[Dict[str, Any]]) -> Tuple[Dict[st
 	return tuple(result)
 
 
+def _order_plans_by_lifted_structure(plans: Sequence[AgentSpeakPlan]) -> Tuple[AgentSpeakPlan, ...]:
+	"""Order alternatives deterministically using only lifted plan structure."""
+
+	grouped_indexes: Dict[Tuple[str, Tuple[str, ...]], List[int]] = defaultdict(list)
+	group_order: List[Tuple[str, Tuple[str, ...]]] = []
+	for index, plan in enumerate(plans):
+		trigger_key = (
+			str(plan.trigger.symbol or "").strip(),
+			tuple(_split_typed_argument(argument)[1] for argument in plan.trigger.arguments),
+		)
+		if trigger_key not in grouped_indexes:
+			group_order.append(trigger_key)
+		grouped_indexes[trigger_key].append(index)
+
+	ordered_plans: List[AgentSpeakPlan] = []
+	for trigger_key in group_order:
+		group_items = [(index, plans[index]) for index in grouped_indexes[trigger_key]]
+		group_items.sort(
+			key=lambda item: _lifted_structural_plan_order_key(
+				item[1],
+				original_index=item[0],
+			),
+		)
+		ordered_plans.extend(plan for _, plan in group_items)
+	return tuple(ordered_plans)
+
+
+def _lifted_structural_plan_order_key(
+	plan: AgentSpeakPlan,
+	*,
+	original_index: int,
+) -> Tuple[int, int, int, int, int, int, int, int]:
+	trigger_variables = {
+		_split_typed_argument(argument)[0]
+		for argument in tuple(plan.trigger.arguments or ())
+		if _split_typed_argument(argument)[0]
+	}
+	context_variables = set()
+	positive_context_count = 0
+	for literal in tuple(plan.context or ()):
+		text = str(literal or "").strip()
+		if not text:
+			continue
+		if text.startswith("!") or text.lower().startswith("not ") or "!=" in text:
+			continue
+		positive_context_count += 1
+		context_variables.update(_literal_variable_tokens(_context_literal_args(text)))
+	local_witness_count = len(context_variables - trigger_variables)
+	body_steps = tuple(plan.body or ())
+	body_subgoal_count = sum(1 for step in body_steps if str(step.kind or "").strip() == "subgoal")
+	self_recursive = any(
+		str(step.kind or "").strip() == "subgoal"
+		and str(step.symbol or "").strip() == str(plan.trigger.symbol or "").strip()
+		for step in body_steps
+	)
+	unbound_at_use_count = sum(
+		1
+		for item in tuple(plan.binding_certificate or ())
+		if str(item.get("binding_status") or "").strip() == "unbound_at_use"
+	)
+	return (
+		0 if unbound_at_use_count == 0 else 1,
+		0 if not body_steps else 1,
+		0 if not self_recursive else 1,
+		local_witness_count,
+		-positive_context_count,
+		body_subgoal_count,
+		len(body_steps),
+		original_index,
+	)
+
+
+def _context_literal_args(literal: str) -> Tuple[str, ...]:
+	text = str(literal or "").strip()
+	if not text or "(" not in text or not text.endswith(")"):
+		return ()
+	_, raw_args = text.split("(", 1)
+	return tuple(argument.strip() for argument in raw_args[:-1].split(",") if argument.strip())
+
+
 def _context_literal_order_key(literal: str) -> int:
 	"""Order context literals so Jason binds variables before negation checks."""
 
@@ -850,11 +931,56 @@ def _single_child_method_precondition_literals(
 ) -> Tuple[Any, ...]:
 	task_name = str(getattr(step, "task_name", "") or "").strip()
 	child_methods = tuple(methods_by_task.get(task_name, ()) or ())
-	if len(child_methods) != 1:
+	if not child_methods:
 		return ()
-	child_method = child_methods[0]
-	child_task_args = _trigger_argument_tokens(method=child_method, task_schema=None)
 	step_args = tuple(str(argument) for argument in (getattr(step, "args", ()) or ()))
+
+	method_literal_sets: List[set[str]] = []
+	ordered_first_literals: List[Any] = []
+	first_literals_by_signature: Dict[str, Any] = {}
+	for child_method in child_methods:
+		child_literals = _child_method_lifted_precondition_literals(
+			child_method=child_method,
+			step_args=step_args,
+			action_semantics_map=action_semantics_map,
+		)
+		signatures: set[str] = set()
+		for literal in child_literals:
+			signature = _canonical_literal_signature(
+				str(getattr(literal, "predicate", "") or ""),
+				getattr(literal, "args", ()) or (),
+			)
+			signatures.add(signature)
+			if not ordered_first_literals:
+				first_literals_by_signature.setdefault(signature, literal)
+		if not ordered_first_literals:
+			ordered_first_literals = list(child_literals)
+		method_literal_sets.append(signatures)
+	if not method_literal_sets:
+		return ()
+	common_signatures = set.intersection(*method_literal_sets)
+	if not common_signatures:
+		return ()
+	return tuple(
+		first_literals_by_signature[signature]
+		for signature in (
+			_canonical_literal_signature(
+				str(getattr(literal, "predicate", "") or ""),
+				getattr(literal, "args", ()) or (),
+			)
+			for literal in ordered_first_literals
+		)
+		if signature in common_signatures and signature in first_literals_by_signature
+	)
+
+
+def _child_method_lifted_precondition_literals(
+	*,
+	child_method: HTNMethod,
+	step_args: Sequence[Any],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+) -> Tuple[Any, ...]:
+	child_task_args = _trigger_argument_tokens(method=child_method, task_schema=None)
 	child_bindings = {
 		str(parameter): str(argument)
 		for parameter, argument in zip(child_task_args, step_args)
