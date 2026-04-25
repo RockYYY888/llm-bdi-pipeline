@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from planning.backends import default_official_backends
+from planning.primary_planner import default_primary_planners
 
 
 SINGLE_PLANNER_MODE = "single_planner"
@@ -26,8 +26,8 @@ HTN_OUTCOME_BUCKETS: Tuple[str, ...] = (
 	"unknown_failure",
 )
 HTN_PLANNER_IDS: Tuple[str, ...] = tuple(
-	backend.backend_name
-	for backend in default_official_backends()
+	planner.planner_id
+	for planner in default_primary_planners()
 )
 if HTN_PLANNER_IDS != (PRIMARY_HTN_PLANNER_ID,):
 	raise RuntimeError(
@@ -147,14 +147,14 @@ def build_problem_result_row(
 		"representation_build_seconds": _coerce_float(
 			plan_solve_timing_metadata.get("representation_build_seconds"),
 		),
-			"planner_wallclock_seconds": _coerce_float(
-				plan_solve_timing_metadata.get("planner_wallclock_seconds")
-				or plan_verification_timing_metadata.get("planner_wallclock_seconds"),
+		"planner_wallclock_seconds": _coerce_float(
+			plan_solve_timing_metadata.get("planner_wallclock_seconds")
+			or plan_verification_timing_metadata.get("planner_wallclock_seconds"),
 		),
 		"plan_solve_status": plan_solve_summary.get("status"),
 		"plan_verification_status": plan_verification_summary.get("status"),
 		"selected_solver_id": plan_verification_artifacts.get("selected_solver_id"),
-		"selected_backend_name": plan_verification_artifacts.get("selected_backend_name"),
+		"selected_planner_id": plan_verification_artifacts.get("selected_planner_id"),
 		"selected_representation_id": plan_verification_artifacts.get(
 			"selected_representation_id",
 		),
@@ -241,15 +241,15 @@ def build_domain_summary(
 				"log_dir": str(row.get("log_dir") or ""),
 				"success": bool(row.get("ipc_verified_success")),
 				"outcome_bucket": str(row.get("outcome_bucket") or "unknown_failure"),
-				"execution_time_seconds": row.get("execution_time_seconds"),
-				"plan_solve_time_seconds": row.get("plan_solve_time_seconds"),
-				"plan_verification_time_seconds": row.get("plan_verification_time_seconds"),
+					"execution_time_seconds": row.get("execution_time_seconds"),
+					"plan_solve_time_seconds": row.get("plan_solve_time_seconds"),
+					"plan_verification_time_seconds": row.get("plan_verification_time_seconds"),
 					"representation_build_seconds": row.get("representation_build_seconds"),
 					"planner_wallclock_seconds": row.get("planner_wallclock_seconds"),
 					"plan_solve_status": row.get("plan_solve_status"),
 					"plan_verification_status": row.get("plan_verification_status"),
 					"selected_solver_id": row.get("selected_solver_id"),
-					"selected_backend_name": row.get("selected_backend_name"),
+					"selected_planner_id": row.get("selected_planner_id"),
 					"selected_representation_id": row.get("selected_representation_id"),
 					"failure_reason": row.get("failure_reason"),
 				}
@@ -276,14 +276,14 @@ def write_domain_results(
 	output_root.mkdir(parents=True, exist_ok=True)
 	problem_results_path = output_root / "problem_results.json"
 	domain_summary_path = output_root / "domain_summary.json"
-	legacy_summary_path = output_root / "summary.json"
+	summary_path = output_root / "summary.json"
 	problem_results_path.write_text(json.dumps(list(problem_rows), indent=2))
 	domain_summary_path.write_text(json.dumps(dict(domain_summary), indent=2))
-	legacy_summary_path.write_text(json.dumps(dict(domain_summary), indent=2))
+	summary_path.write_text(json.dumps(dict(domain_summary), indent=2))
 	return {
 		"problem_results": str(problem_results_path),
 		"domain_summary": str(domain_summary_path),
-		"legacy_summary": str(legacy_summary_path),
+		"summary": str(summary_path),
 	}
 
 
@@ -428,7 +428,7 @@ def build_problem_capability_rows(
 					"plan_solve_status": query_result.get("plan_solve_status"),
 					"plan_verification_status": query_result.get("plan_verification_status"),
 					"selected_solver_id": query_result.get("selected_solver_id"),
-					"selected_backend_name": query_result.get("selected_backend_name"),
+					"selected_planner_id": query_result.get("selected_planner_id"),
 					"selected_representation_id": query_result.get("selected_representation_id"),
 					"failure_reason": str(query_result.get("failure_reason") or ""),
 				}
@@ -497,10 +497,10 @@ def write_problem_capability_matrix(
 		"plan_verification_time_seconds",
 		"representation_build_seconds",
 		"planner_wallclock_seconds",
-		"plan_solve_status",
-		"plan_verification_status",
+			"plan_solve_status",
+			"plan_verification_status",
 			"selected_solver_id",
-			"selected_backend_name",
+			"selected_planner_id",
 			"selected_representation_id",
 			"failure_reason",
 		]

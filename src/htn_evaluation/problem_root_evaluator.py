@@ -18,9 +18,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
 from planning.linearization import LiftedLinearPlanner
 from planning.panda_sat import PANDAPlanningError
+from planning.primary_planner import (
+	PrimaryPlannerTask,
+	default_primary_planners,
+	expand_primary_planner_tasks_for_representations,
+)
 from planning.representations import PlanningRepresentation, RepresentationBuildResult
 from .problem_root_runtime import official_problem_root_planning_task_worker
 from .result_tables import (
@@ -32,7 +36,7 @@ from .result_tables import (
 )
 
 
-BACKEND_RESULT_MESSAGE = "primary_planner_attempt"
+PRIMARY_PLANNER_RESULT_MESSAGE = "primary_planner_attempt"
 HTN_ATTEMPT_TEXT_PREVIEW_CHARS = 4096
 
 
@@ -49,7 +53,7 @@ def _attempt_text_preview(value: Any) -> str:
 	)
 
 
-def _backend_attempt_summary(attempt: Dict[str, Any]) -> Dict[str, Any]:
+def _planner_attempt_summary(attempt: Dict[str, Any]) -> Dict[str, Any]:
 	plan_solve_summary = dict((attempt.get("plan_solve_data") or {}).get("summary") or {})
 	plan_verification_summary = dict(
 		(attempt.get("plan_verification_data") or {}).get("summary") or {},
@@ -57,7 +61,7 @@ def _backend_attempt_summary(attempt: Dict[str, Any]) -> Dict[str, Any]:
 	stdout = str(attempt.get("stdout") or "")
 	stderr = str(attempt.get("stderr") or "")
 	return {
-		"backend_name": str(attempt.get("backend_name") or "unknown"),
+		"planner_id": str(attempt.get("planner_id") or "unknown"),
 		"task_id": str(attempt.get("task_id") or "unknown"),
 		"representation_id": str(attempt.get("representation_id") or "unknown"),
 		"success": bool(attempt.get("success")),
@@ -89,43 +93,43 @@ class HTNProblemRootEvaluator:
 		timeout_seconds: Optional[float] = None,
 		*,
 		planner_id: Optional[str] = None,
-	) -> tuple[PlanningBackendTask, ...]:
+	) -> tuple[PrimaryPlannerTask, ...]:
 		build_result = self.context._build_problem_representations(
 			timeout_seconds=timeout_seconds,
 		)
-		selected_backends = tuple(
-			backend
-			for backend in default_official_backends(workspace=str(self.context.output_dir))
-			if planner_id is None or backend.backend_name == planner_id
+		selected_planners = tuple(
+			planner
+			for planner in default_primary_planners(workspace=str(self.context.output_dir))
+			if planner_id is None or planner.planner_id == planner_id
 		)
-		if planner_id is not None and not selected_backends:
-			raise ValueError(f"Unknown official planning backend '{planner_id}'.")
-		tasks = expand_backend_tasks_for_representations(
+		if planner_id is not None and not selected_planners:
+			raise ValueError(f"Unknown primary HTN planner '{planner_id}'.")
+		tasks = expand_primary_planner_tasks_for_representations(
 			representations=build_result.representations,
-			backends=selected_backends,
+			planners=selected_planners,
 		)
 		if tasks:
 			return tasks
-		if not self._selected_backends_require_linearized_input(selected_backends):
+		if not self._selected_planners_require_linearized_input(selected_planners):
 			return tasks
-		return expand_backend_tasks_for_representations(
+		return expand_primary_planner_tasks_for_representations(
 			representations=(
 				*self._representations_without_duplicate_linearized(build_result),
-				self._build_linearized_representation_for_backend(
+				self._build_linearized_representation_for_primary_planner(
 					build_result=build_result,
 					timeout_seconds=timeout_seconds,
 				),
 			),
-			backends=selected_backends,
+			planners=selected_planners,
 		)
 
 	@staticmethod
-	def _selected_backends_require_linearized_input(
-		selected_backends: Sequence[Any],
+	def _selected_planners_require_linearized_input(
+		selected_planners: Sequence[Any],
 	) -> bool:
 		return any(
-			"linearized" in set(getattr(backend, "supported_sources", frozenset()))
-			for backend in selected_backends
+			"linearized" in set(getattr(planner, "supported_sources", frozenset()))
+			for planner in selected_planners
 		)
 
 	@staticmethod
@@ -138,26 +142,26 @@ class HTNProblemRootEvaluator:
 			if representation.representation_id != "linearized_total_order"
 		)
 
-	def _build_linearized_representation_for_backend(
+	def _build_linearized_representation_for_primary_planner(
 		self,
 		*,
 		build_result: RepresentationBuildResult,
 		timeout_seconds: Optional[float],
 	) -> PlanningRepresentation:
 		if self.context.output_dir is None:
-			raise ValueError("Linearized backend representation requires an output directory.")
+			raise ValueError("Linearized primary-planner representation requires an output directory.")
 		workspace = Path(self.context.output_dir).resolve() / "representations"
 		linearizer = LiftedLinearPlanner(workspace=workspace)
 		artifacts = linearizer.linearize_hddl_files(
 			domain_file=self.context.domain_file,
 			problem_file=self.context.problem_file,
-			transition_name="official_problem_root_backend_linearization",
+			transition_name="official_problem_root_primary_planner_linearization",
 			timeout_seconds=timeout_seconds,
 		)
 		metadata = dict(artifacts)
 		metadata.update(
 			{
-				"forced_for_backend_capability": True,
+				"forced_for_primary_planner_capability": True,
 				"original_requires_linearization": bool(
 					build_result.structure.requires_linearization,
 				),
@@ -173,7 +177,7 @@ class HTNProblemRootEvaluator:
 			metadata=metadata,
 		)
 
-	def run_backend_evaluation(
+	def run_primary_planner_evaluation(
 		self,
 		*,
 		evaluation_mode: str = SINGLE_PLANNER_MODE,
@@ -188,8 +192,8 @@ class HTNProblemRootEvaluator:
 			evaluation_mode=mode,
 		)
 		planning_timeout_seconds = self.context._official_problem_root_planning_timeout_seconds()
-		backend_root = Path(self.context.output_dir) / "primary_planner"
-		backend_root.mkdir(parents=True, exist_ok=True)
+		planner_root = Path(self.context.output_dir) / "primary_planner"
+		planner_root.mkdir(parents=True, exist_ok=True)
 		representation_build_start = time.perf_counter()
 		try:
 			planning_tasks = self.planning_tasks(
@@ -200,7 +204,7 @@ class HTNProblemRootEvaluator:
 			representation_build_seconds = time.perf_counter() - representation_build_start
 			selected_attempt = self.representation_build_failure_attempt(
 				exc,
-				backend_root=backend_root,
+				planner_root=planner_root,
 				planner_id=normalized_planner_id,
 				total_seconds=representation_build_seconds,
 			)
@@ -220,27 +224,27 @@ class HTNProblemRootEvaluator:
 		selected_attempt: Optional[Dict[str, Any]] = None
 
 		def incomplete_attempt(
-			planning_task: PlanningBackendTask,
+			planning_task: PrimaryPlannerTask,
 			*,
 			failure_reason: str,
 			total_seconds: float,
 		) -> Dict[str, Any]:
 			return {
-				"message_type": BACKEND_RESULT_MESSAGE,
-				"backend_name": planning_task.backend_name,
+				"message_type": PRIMARY_PLANNER_RESULT_MESSAGE,
+				"planner_id": planning_task.planner_id,
 				"task_id": planning_task.task_id,
 				"representation_id": planning_task.representation.representation_id,
-				"output_dir": str((backend_root / planning_task.task_id).resolve()),
+				"output_dir": str((planner_root / planning_task.task_id).resolve()),
 				"plan_solve_data": {
 					"summary": {
-						"backend": planning_task.backend_name,
+						"planner_id": planning_task.planner_id,
 						"status": "failed",
 						"planning_mode": "official_problem_root",
 						"failure_bucket": "no_plan_from_solver",
 						"representation_id": planning_task.representation.representation_id,
 					},
 					"artifacts": {
-						"backend": planning_task.backend_name,
+						"planner_id": planning_task.planner_id,
 						"status": "failed",
 						"planning_mode": "official_problem_root",
 						"failure_bucket": "no_plan_from_solver",
@@ -250,13 +254,13 @@ class HTNProblemRootEvaluator:
 				},
 				"plan_verification_data": {
 					"summary": {
-						"backend": "pandaPIparser",
+						"verifier_id": "pandaPIparser",
 						"status": "failed",
 						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "no_plan_from_solver",
 					},
 					"artifacts": {
-						"backend": planning_task.backend_name,
+						"planner_id": planning_task.planner_id,
 						"status": "failed",
 						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "no_plan_from_solver",
@@ -272,16 +276,16 @@ class HTNProblemRootEvaluator:
 				"stderr": "",
 			}
 
-		def run_single_task(planning_task: PlanningBackendTask) -> Dict[str, Any]:
+		def run_single_task(planning_task: PrimaryPlannerTask) -> Dict[str, Any]:
 			raw_remaining_timeout = planning_timeout_seconds - (time.perf_counter() - planner_start)
 			if raw_remaining_timeout <= 0.0:
 				return incomplete_attempt(
 					planning_task,
-					failure_reason="planner_timeout_budget_exhausted_before_backend_launch",
+					failure_reason="planner_timeout_budget_exhausted_before_primary_planner_launch",
 					total_seconds=planning_timeout_seconds,
 				)
 			remaining_timeout = max(raw_remaining_timeout, 1.0)
-			attempt_output_dir = backend_root / planning_task.task_id
+			attempt_output_dir = planner_root / planning_task.task_id
 			attempt_output_dir.mkdir(parents=True, exist_ok=True)
 			result_queue = context.Queue()
 			process = context.Process(
@@ -314,7 +318,7 @@ class HTNProblemRootEvaluator:
 				finally:
 					process.join(timeout=1.0)
 					if process.is_alive():
-						self.terminate_backend_process(process)
+						self.terminate_planner_process(process)
 						process.join(timeout=1.0)
 			finally:
 				self.close_planner_queue(result_queue)
@@ -322,7 +326,7 @@ class HTNProblemRootEvaluator:
 				return attempt
 			return incomplete_attempt(
 				planning_task,
-				failure_reason="backend_attempt_incomplete_before_deadline",
+				failure_reason="planner_attempt_incomplete_before_deadline",
 				total_seconds=planning_timeout_seconds,
 			)
 
@@ -334,7 +338,7 @@ class HTNProblemRootEvaluator:
 				break
 
 		if selected_attempt is None:
-			selected_attempt = self.select_backend_attempt(attempts)
+			selected_attempt = self.select_planner_attempt(attempts)
 
 		return {
 			"evaluation_mode": mode,
@@ -350,22 +354,22 @@ class HTNProblemRootEvaluator:
 		self,
 		exc: Exception,
 		*,
-		backend_root: Path,
+		planner_root: Path,
 		planner_id: Optional[str],
 		total_seconds: float,
 	) -> Dict[str, Any]:
 		"""Convert representation build failures into one checkpointable query result."""
 		failure_metadata = dict(getattr(exc, "metadata", {}) or {})
-		backend_name = str(planner_id or failure_metadata.get("backend") or "unknown")
+		planner_id = str(planner_id or failure_metadata.get("planner_id") or "unknown")
 		representation_id = (
 			"linearized_total_order"
-			if backend_name == "lifted_panda_sat"
+			if planner_id == "lifted_panda_sat"
 			or "linearizer" in failure_metadata
 			or isinstance(exc, PANDAPlanningError)
 			else "representation_build"
 		)
-		task_id = f"{backend_name}@{representation_id}"
-		output_dir = backend_root / "representation_build_failure"
+		task_id = f"{planner_id}@{representation_id}"
+		output_dir = planner_root / "representation_build_failure"
 		output_dir.mkdir(parents=True, exist_ok=True)
 		failure_reason = f"representation_build_failed: {exc}"
 		if failure_metadata:
@@ -373,24 +377,24 @@ class HTNProblemRootEvaluator:
 				self._safe_json_dump(failure_metadata),
 			)
 		return {
-			"message_type": BACKEND_RESULT_MESSAGE,
-			"backend_name": backend_name,
+			"message_type": PRIMARY_PLANNER_RESULT_MESSAGE,
+			"planner_id": planner_id,
 			"task_id": task_id,
 			"representation_id": representation_id,
 			"output_dir": str(output_dir.resolve()),
 			"plan_solve_data": {
 				"summary": {
-					"backend": backend_name,
+					"planner_id": planner_id,
 					"status": "failed",
 					"planning_mode": "official_problem_root",
 					"failure_bucket": "no_plan_from_solver",
 					"failure_stage": "representation_build",
 					"failure_reason": failure_reason,
-					"solver_id": backend_name,
+					"solver_id": planner_id,
 					"representation_id": representation_id,
 				},
 				"artifacts": {
-					"backend": backend_name,
+					"planner_id": planner_id,
 					"status": "failed",
 					"planning_mode": "official_problem_root",
 					"failure_bucket": "no_plan_from_solver",
@@ -399,30 +403,30 @@ class HTNProblemRootEvaluator:
 					"failure_metadata": failure_metadata,
 					"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
 				},
+			},
+			"plan_verification_data": {
+				"summary": {
+					"verifier_id": "pandaPIparser",
+					"status": "failed",
+					"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+					"failure_bucket": "no_plan_from_solver",
+					"failure_stage": "representation_build",
+					"failure_reason": failure_reason,
 				},
-				"plan_verification_data": {
-					"summary": {
-						"backend": "pandaPIparser",
-						"status": "failed",
-						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
-						"failure_bucket": "no_plan_from_solver",
-						"failure_stage": "representation_build",
-						"failure_reason": failure_reason,
-					},
-					"artifacts": {
-						"backend": backend_name,
-						"status": "failed",
-						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
-						"failure_bucket": "no_plan_from_solver",
-						"failure_stage": "representation_build",
-						"failure_reason": failure_reason,
-						"selected_solver_id": backend_name,
-						"selected_backend_name": backend_name,
-						"selected_representation_id": representation_id,
-						"selected_bucket": "no_plan_from_solver",
-						"failure_metadata": failure_metadata,
-						"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
-					},
+				"artifacts": {
+					"planner_id": planner_id,
+					"status": "failed",
+					"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+					"failure_bucket": "no_plan_from_solver",
+					"failure_stage": "representation_build",
+					"failure_reason": failure_reason,
+					"selected_solver_id": planner_id,
+					"selected_planner_id": planner_id,
+					"selected_representation_id": representation_id,
+					"selected_bucket": "no_plan_from_solver",
+					"failure_metadata": failure_metadata,
+					"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
+				},
 			},
 			"plan_solve_seconds": 0.0,
 			"plan_verification_seconds": 0.0,
@@ -439,7 +443,7 @@ class HTNProblemRootEvaluator:
 		return json.dumps(payload, indent=2, default=str)
 
 	def run_primary_planner(self) -> Dict[str, Any]:
-		return self.run_backend_evaluation(
+		return self.run_primary_planner_evaluation(
 			evaluation_mode=SINGLE_PLANNER_MODE,
 			planner_id=PRIMARY_HTN_PLANNER_ID,
 		)
@@ -458,14 +462,14 @@ class HTNProblemRootEvaluator:
 		)
 		print("\n[PLAN SOLVE]")
 		print("-" * 80)
-		planner_result = self.run_backend_evaluation(
+		planner_result = self.run_primary_planner_evaluation(
 			evaluation_mode=mode,
 			planner_id=normalized_planner_id,
 		)
 		planning_tasks = list(planner_result.get("planning_tasks") or ())
 		task_labels = [
 			(
-				f"{task.get('backend_name')}@"
+				f"{task.get('planner_id')}@"
 				f"{((task.get('representation') or {}).get('representation_id') or 'unknown')}"
 			)
 			for task in planning_tasks
@@ -474,7 +478,7 @@ class HTNProblemRootEvaluator:
 		attempts = list(planner_result.get("attempts") or ())
 		selected_attempt = dict(planner_result.get("selected_attempt") or {})
 		selected_output_dir = Path(str(selected_attempt.get("output_dir") or self.context.output_dir)).resolve()
-		self.context._merge_official_backend_output_dir(selected_output_dir)
+		self.context._merge_primary_planner_output_dir(selected_output_dir)
 
 		plan_solve_data = copy.deepcopy(selected_attempt.get("plan_solve_data") or {})
 		plan_verification_data = copy.deepcopy(selected_attempt.get("plan_verification_data") or {})
@@ -490,7 +494,7 @@ class HTNProblemRootEvaluator:
 		)
 
 		attempt_summaries = [
-			_backend_attempt_summary(dict(attempt))
+			_planner_attempt_summary(dict(attempt))
 			for attempt in attempts
 		]
 
@@ -506,10 +510,10 @@ class HTNProblemRootEvaluator:
 				"planner_attempts": attempt_summaries,
 				"selected_solver_id": str(
 					plan_solve_summary.get("solver_id")
-					or selected_attempt.get("backend_name")
+					or selected_attempt.get("planner_id")
 					or "unknown"
 				),
-				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_planner_id": str(selected_attempt.get("planner_id") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"representation_build_seconds": planner_result.get("representation_build_seconds"),
 				"planner_wallclock_seconds": planner_result.get("planner_wallclock_seconds"),
@@ -523,7 +527,7 @@ class HTNProblemRootEvaluator:
 				"requested_planner_id": normalized_planner_id,
 				"planner_attempts": attempt_summaries,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
-				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_planner_id": str(selected_attempt.get("planner_id") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"selected_bucket": selected_attempt.get("selected_bucket"),
 				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
@@ -535,7 +539,7 @@ class HTNProblemRootEvaluator:
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
-				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_planner_id": str(selected_attempt.get("planner_id") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"representation_build_seconds": planner_result.get("representation_build_seconds"),
 				"planner_wallclock_seconds": planner_result.get("planner_wallclock_seconds"),
@@ -548,7 +552,7 @@ class HTNProblemRootEvaluator:
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
-				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
+				"selected_planner_id": str(selected_attempt.get("planner_id") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
 				"planner_attempts": attempt_summaries,
 				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
@@ -563,7 +567,7 @@ class HTNProblemRootEvaluator:
 			"artifacts": plan_verification_artifacts,
 		}
 
-		selected_backend_name = str(selected_attempt.get("backend_name") or "unknown")
+		selected_planner_id = str(selected_attempt.get("planner_id") or "unknown")
 		selected_representation_id = str(selected_attempt.get("representation_id") or "unknown")
 		plan_solve_status_label = (
 			"Success" if plan_solve_summary.get("status") == "success" else "Failed"
@@ -574,37 +578,37 @@ class HTNProblemRootEvaluator:
 			error=(
 				None
 				if plan_solve_status_label == "Success"
-				else "official backend evaluation failed"
+				else "official primary-planner evaluation failed"
 			),
 			metadata=plan_solve_summary,
 		)
 		self.context.logger.record_step_timing(
-				"plan_solve",
-				float(selected_attempt.get("plan_solve_seconds") or 0.0)
-				+ float(planner_result.get("representation_build_seconds") or 0.0),
-				metadata={
-					"selected_backend_name": selected_backend_name,
-					"selected_representation_id": selected_representation_id,
-					"representation_build_seconds": round(
-						float(planner_result.get("representation_build_seconds") or 0.0),
-						6,
-					),
-					"planner_wallclock_seconds": round(
-						float(planner_result.get("planner_wallclock_seconds") or 0.0),
-						6,
-					),
-					"backend_attempt_count": len(attempt_summaries),
-				},
-			)
+			"plan_solve",
+			float(selected_attempt.get("plan_solve_seconds") or 0.0)
+			+ float(planner_result.get("representation_build_seconds") or 0.0),
+			metadata={
+				"selected_planner_id": selected_planner_id,
+				"selected_representation_id": selected_representation_id,
+				"representation_build_seconds": round(
+					float(planner_result.get("representation_build_seconds") or 0.0),
+					6,
+				),
+				"planner_wallclock_seconds": round(
+					float(planner_result.get("planner_wallclock_seconds") or 0.0),
+					6,
+				),
+				"planner_attempt_count": len(attempt_summaries),
+			},
+		)
 		if plan_solve_summary.get("status") == "success":
 			print(
-				f"✓ Planner returned via backend: {selected_backend_name} "
+				f"✓ Planner returned: {selected_planner_id} "
 				f"on {selected_representation_id}"
 			)
 		else:
 			print(
-				"✗ Plan solve failed across all planning tasks "
-				f"(selected failure: {selected_backend_name} on {selected_representation_id})"
+				"✗ Plan solve failed across all primary-planner tasks "
+				f"(selected failure: {selected_planner_id} on {selected_representation_id})"
 			)
 
 		print("\n[OFFICIAL VERIFICATION]")
@@ -623,29 +627,29 @@ class HTNProblemRootEvaluator:
 			metadata=plan_verification_summary,
 		)
 		self.context.logger.record_step_timing(
-				"plan_verification",
-				float(selected_attempt.get("plan_verification_seconds") or 0.0),
-				metadata={
-					"selected_backend_name": selected_backend_name,
-					"selected_representation_id": selected_representation_id,
-					"planner_wallclock_seconds": round(
-						float(planner_result.get("planner_wallclock_seconds") or 0.0),
-						6,
-					),
-					"backend_attempt_count": len(attempt_summaries),
-				},
-			)
+			"plan_verification",
+			float(selected_attempt.get("plan_verification_seconds") or 0.0),
+			metadata={
+				"selected_planner_id": selected_planner_id,
+				"selected_representation_id": selected_representation_id,
+				"planner_wallclock_seconds": round(
+					float(planner_result.get("planner_wallclock_seconds") or 0.0),
+					6,
+				),
+				"planner_attempt_count": len(attempt_summaries),
+			},
+		)
 		if plan_verification_summary.get("status") == "success":
 			print("✓ Official IPC verification complete")
-			print(f"  Selected backend: {selected_backend_name}")
+			print(f"  Selected planner: {selected_planner_id}")
 			print(f"  Selected representation: {selected_representation_id}")
 			print(
 				f"  Verification result: "
 				f"{plan_verification_artifacts.get('verification_result')}"
 			)
 		else:
-			print("✗ Official verification failed: all planning tasks failed")
-			print(f"  Selected failure backend: {selected_backend_name}")
+			print("✗ Official verification failed: all primary-planner tasks failed")
+			print(f"  Selected failure planner: {selected_planner_id}")
 			print(f"  Selected failure representation: {selected_representation_id}")
 		return {
 			"plan_solve": plan_solve_data,
@@ -676,7 +680,7 @@ class HTNProblemRootEvaluator:
 		}.get(bucket, 5)
 		return (priority, float(attempt.get("total_seconds") or 0.0))
 
-	def select_backend_attempt(
+	def select_planner_attempt(
 		self,
 		attempts: Sequence[Dict[str, Any]],
 	) -> Dict[str, Any]:
@@ -691,7 +695,7 @@ class HTNProblemRootEvaluator:
 				key=lambda attempt: float(attempt.get("total_seconds") or 0.0),
 			)
 		if not attempts:
-			raise ValueError("No official problem-root backend attempts were provided.")
+			raise ValueError("No official problem-root primary-planner attempts were provided.")
 		return min(attempts, key=self.official_problem_root_failure_rank)
 
 	@staticmethod
@@ -704,7 +708,7 @@ class HTNProblemRootEvaluator:
 			join_thread_fn()
 
 	@staticmethod
-	def terminate_backend_process(process: multiprocessing.Process) -> None:
+	def terminate_planner_process(process: multiprocessing.Process) -> None:
 		if not process.is_alive():
 			return
 		try:

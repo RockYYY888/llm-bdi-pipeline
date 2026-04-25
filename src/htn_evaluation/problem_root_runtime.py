@@ -3,7 +3,7 @@ Problem-root HTN evaluation runtime helpers.
 
 This module contains the worker-compatible planning and official-verification
 logic for the HTN evaluation track. It depends on planning/ and verification/
-only, not on the legacy compatibility façade.
+only, not on broader pipeline orchestration.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover - not expected on Unix CI, but keep runtime-safe.
 	resource = None  # type: ignore[assignment]
 
-from planning.backends import PlanningBackendTask, backend_by_name
+from planning.primary_planner import PrimaryPlannerTask, primary_planner_by_id
 from planning.panda_sat import PANDAPlanner
 from planning.official_benchmark import (
 	OFFICIAL_BENCHMARK_CPU_COUNT,
@@ -112,7 +112,6 @@ def _sanitize_identifier(value: str) -> str:
 	text = re.sub(r"[^a-z0-9_]+", "_", text)
 	text = re.sub(r"_+", "_", text)
 	return text.strip("_") or "item"
-
 
 HTN_EVIDENCE_TEXT_PREVIEW_CHARS = 4096
 HTN_HEAVY_ARTIFACT_NAMES = frozenset(
@@ -277,7 +276,7 @@ def _compact_plan_solve_data_for_parent(plan_solve_data: Dict[str, Any]) -> Dict
 	compact_artifacts = {
 		key: artifacts.get(key)
 		for key in (
-			"backend",
+			"planner_id",
 			"status",
 			"planning_mode",
 			"engine_mode",
@@ -396,13 +395,13 @@ def _prune_heavy_planner_artifacts(output_dir: str | Path) -> None:
 				continue
 
 
-def solve_problem_root_backend_task(
+def solve_problem_root_primary_planner_task(
 	context: HTNEvaluationContext,
 	*,
-	planning_task: PlanningBackendTask,
+	planning_task: PrimaryPlannerTask,
 	timeout_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
-	"""Solve one compiled official representation with one backend."""
+	"""Solve one compiled official representation with the primary HTN planner."""
 	print("\n[PLAN SOLVE]")
 	print("-" * 80)
 	stage_start = time.perf_counter()
@@ -411,17 +410,17 @@ def solve_problem_root_backend_task(
 	)
 	if context.output_dir is None:
 		raise ValueError("Problem-root planning requires an output directory.")
-	backend = backend_by_name(
-		planning_task.backend_name,
+	planner = primary_planner_by_id(
+		planning_task.planner_id,
 		workspace=str(context.output_dir),
 	)
 
 	try:
 		if not context.problem.htn_tasks:
 			raise ValueError("Problem file contains no root HTN tasks.")
-		if not backend.toolchain_available():
+		if not planner.toolchain_available():
 			raise ValueError(
-				f"Planning backend '{planning_task.backend_name}' is unavailable on PATH.",
+				f"Primary HTN planner '{planning_task.planner_id}' is unavailable on PATH.",
 			)
 
 		task_network = tuple(
@@ -431,7 +430,7 @@ def solve_problem_root_backend_task(
 		ordering_edges = context._problem_root_task_network_ordering_edges()
 		task_network_ordered = context._problem_root_task_network_is_totally_ordered()
 		primary_task_name, primary_task_args = task_network[0]
-		plan = backend.solve(
+		plan = planner.solve(
 			domain=context.domain,
 			task_name=str(primary_task_name),
 			representation=planning_task.representation,
@@ -460,7 +459,7 @@ def solve_problem_root_backend_task(
 		combined_plan_file.write_text(str(plan.actual_plan or ""))
 
 		artifacts = {
-			"backend": planning_task.backend_name,
+			"planner_id": planning_task.planner_id,
 			"status": "success",
 			"planning_mode": "official_problem_root",
 			"engine_mode": plan.engine_mode,
@@ -479,7 +478,7 @@ def solve_problem_root_backend_task(
 			"action_path": action_path,
 			"method_trace": method_trace,
 			"guided_hierarchical_plan_text": plan.actual_plan or "",
-			"guided_hierarchical_plan_source": backend.plan_source_label,
+			"guided_hierarchical_plan_source": planner.plan_source_label,
 			"timing_profile": timing_profile,
 			"solver_candidates": list(plan.solver_candidates or ()),
 			"artifacts": {
@@ -494,7 +493,7 @@ def solve_problem_root_backend_task(
 			},
 		}
 		summary = {
-			"backend": planning_task.backend_name,
+			"planner_id": planning_task.planner_id,
 			"status": "success",
 			"planning_mode": "official_problem_root",
 			"engine_mode": plan.engine_mode,
@@ -521,7 +520,7 @@ def solve_problem_root_backend_task(
 				"step_count": len(action_path),
 				"planning_mode": "official_problem_root",
 				"solver_id": plan.solver_id,
-				"backend": planning_task.backend_name,
+				"planner_id": planning_task.planner_id,
 				"representation_id": planning_task.representation.representation_id,
 			},
 		)
@@ -531,7 +530,7 @@ def solve_problem_root_backend_task(
 	except Exception as exc:
 		failure_metadata = dict(getattr(exc, "metadata", {}) or {})
 		failure_artifacts = {
-			"backend": planning_task.backend_name,
+			"planner_id": planning_task.planner_id,
 			"status": "failed",
 			"planning_mode": "official_problem_root",
 			"planning_representation": planning_task.representation.to_dict(),
@@ -553,7 +552,7 @@ def solve_problem_root_backend_task(
 			"failure_metadata": failure_metadata,
 		}
 		summary = {
-			"backend": planning_task.backend_name,
+			"planner_id": planning_task.planner_id,
 			"status": "failed",
 			"planning_mode": "official_problem_root",
 			"engine_mode": failure_metadata.get("engine_mode"),
@@ -588,7 +587,7 @@ def verify_primary_planner_solution(
 
 	if plan_solve_summary.get("status") != "success" or not solver_candidates:
 		summary = {
-			"backend": "pandaPIparser",
+			"verifier_id": "pandaPIparser",
 			"status": "failed",
 			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 			"failure_bucket": "no_plan_from_solver",
@@ -800,17 +799,17 @@ def verify_primary_planner_solution(
 		shutil.copyfile(Path(str(selected_json_path)), official_json_file)
 		composite_artifacts["json_file"] = str(official_json_file)
 
-		artifacts = {
-			**composite_artifacts,
-			"selected_solver_id": selected_solver_id,
-			"selected_bucket": selected_bucket,
-			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
-			"solver_candidates": verified_candidates,
-		}
-		summary = {
-			"backend": "pandaPIparser",
-			"status": "success" if selected_success is not None else "failed",
-			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+	artifacts = {
+		**composite_artifacts,
+		"selected_solver_id": selected_solver_id,
+		"selected_bucket": selected_bucket,
+		"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+		"solver_candidates": verified_candidates,
+	}
+	summary = {
+		"verifier_id": "pandaPIparser",
+		"status": "success" if selected_success is not None else "failed",
+		"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 		"failure_bucket": None if selected_success is not None else selected_bucket,
 		"selected_solver_id": selected_solver_id,
 		"selected_bucket": selected_bucket,
@@ -880,7 +879,7 @@ def verify_plan_officially(
 			"Failed",
 			error=error,
 			metadata={
-				"backend": "pandaPIparser",
+				"verifier_id": "pandaPIparser",
 				"status": "failed",
 			},
 		)
@@ -888,7 +887,7 @@ def verify_plan_officially(
 		print(f"✗ Official verification failed: {error}")
 		return {
 			"summary": {
-				"backend": "pandaPIparser",
+				"verifier_id": "pandaPIparser",
 				"status": "failed",
 			},
 			"artifacts": {},
@@ -918,13 +917,13 @@ def official_problem_root_planning_task_worker(
 	task_payload: Dict[str, Any],
 	planning_timeout_seconds: float,
 ) -> None:
-	"""Spawn-safe worker for one backend attempt."""
+	"""Spawn-safe worker for one primary planner attempt."""
 	plan_solve_seconds = 0.0
 	plan_verification_seconds = 0.0
 	total_start = time.perf_counter()
 	captured_stdout = io.StringIO()
 	captured_stderr = io.StringIO()
-	planning_task = PlanningBackendTask.from_dict(dict(task_payload))
+	planning_task = PrimaryPlannerTask.from_dict(dict(task_payload))
 	try:
 		if hasattr(os, "setsid"):
 			os.setsid()
@@ -942,7 +941,7 @@ def official_problem_root_planning_task_worker(
 
 		with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
 			plan_solve_start = time.perf_counter()
-			plan_solve_data = solve_problem_root_backend_task(
+			plan_solve_data = solve_problem_root_primary_planner_task(
 				context,
 				planning_task=planning_task,
 				timeout_seconds=planning_timeout_seconds,
@@ -962,8 +961,8 @@ def official_problem_root_planning_task_worker(
 		plan_verification_summary = dict((plan_verification_data or {}).get("summary") or {})
 		result_queue.put(
 			{
-					"message_type": "primary_planner_attempt",
-				"backend_name": planning_task.backend_name,
+				"message_type": "primary_planner_attempt",
+				"planner_id": planning_task.planner_id,
 				"task_id": planning_task.task_id,
 				"representation_id": planning_task.representation.representation_id,
 				"output_dir": str(Path(output_dir).resolve()),
@@ -990,21 +989,21 @@ def official_problem_root_planning_task_worker(
 	except Exception as exc:
 		result_queue.put(
 			{
-					"message_type": "primary_planner_attempt",
-				"backend_name": planning_task.backend_name,
+				"message_type": "primary_planner_attempt",
+				"planner_id": planning_task.planner_id,
 				"task_id": planning_task.task_id,
 				"representation_id": planning_task.representation.representation_id,
 				"output_dir": str(Path(output_dir).resolve()),
 				"plan_solve_data": {
 					"summary": {
-						"backend": planning_task.backend_name,
+						"planner_id": planning_task.planner_id,
 						"status": "failed",
 						"planning_mode": "official_problem_root",
 						"failure_bucket": "worker_exception",
 						"representation_id": planning_task.representation.representation_id,
 					},
 					"artifacts": {
-						"backend": planning_task.backend_name,
+						"planner_id": planning_task.planner_id,
 						"status": "failed",
 						"planning_mode": "official_problem_root",
 						"failure_bucket": "worker_exception",
@@ -1013,15 +1012,15 @@ def official_problem_root_planning_task_worker(
 				},
 				"plan_verification_data": {
 					"summary": {
-						"backend": "pandaPIparser",
+						"verifier_id": "pandaPIparser",
 						"status": "failed",
-							"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "worker_exception",
 					},
 					"artifacts": {
-						"backend": planning_task.backend_name,
+						"planner_id": planning_task.planner_id,
 						"status": "failed",
-							"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "worker_exception",
 						"error": str(exc),
 					},

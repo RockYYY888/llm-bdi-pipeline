@@ -1,5 +1,5 @@
 """
-Backend capability declarations and solver dispatch for HTN evaluation.
+Primary planner capability declaration and dispatch for HTN evaluation.
 
 The dissertation baseline intentionally exposes one primary planner configuration:
 lifted_panda_sat.
@@ -20,10 +20,8 @@ from planning.plan_models import PANDAPlanResult
 from planning.representations import PlanningRepresentation
 
 
-def _solver_config_with_backend_budget(solver_config: Dict[str, Any]) -> Dict[str, Any]:
+def _solver_config_with_planner_budget(solver_config: Dict[str, Any]) -> Dict[str, Any]:
 	"""
-	Standalone backends should inherit the full backend budget.
-
 	The primary lifted_panda_sat baseline should inherit the full benchmark
 	timeout instead of the lower standalone SAT wrapper default.
 	"""
@@ -33,33 +31,33 @@ def _solver_config_with_backend_budget(solver_config: Dict[str, Any]) -> Dict[st
 
 
 @dataclass(frozen=True)
-class PlanningBackendTask:
-	"""One backend invocation over one compiled representation."""
+class PrimaryPlannerTask:
+	"""One primary planner invocation over one compiled representation."""
 
 	task_id: str
-	backend_name: str
+	planner_id: str
 	representation: PlanningRepresentation
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
 			"task_id": self.task_id,
-			"backend_name": self.backend_name,
+			"planner_id": self.planner_id,
 			"representation": self.representation.to_dict(),
 		}
 
 	@classmethod
-	def from_dict(cls, payload: Dict[str, Any]) -> "PlanningBackendTask":
+	def from_dict(cls, payload: Dict[str, Any]) -> "PrimaryPlannerTask":
 		return cls(
 			task_id=str(payload["task_id"]),
-			backend_name=str(payload["backend_name"]),
+			planner_id=str(payload["planner_id"]),
 			representation=PlanningRepresentation.from_dict(dict(payload["representation"])),
 		)
 
 
-class HierarchicalPlanningBackend(ABC):
-	"""Common interface for solver backends."""
+class PrimaryHTNPlanner(ABC):
+	"""Common interface for the supported primary HTN planner."""
 
-	backend_name: str
+	planner_id: str
 	plan_source_label: str
 	supported_sources: frozenset[str]
 	supported_ordering_kinds: frozenset[str]
@@ -72,7 +70,7 @@ class HierarchicalPlanningBackend(ABC):
 
 	@abstractmethod
 	def toolchain_available(self) -> bool:
-		"""Whether the backend can run in the current environment."""
+		"""Whether the planner can run in the current environment."""
 
 	@abstractmethod
 	def solve(
@@ -84,17 +82,17 @@ class HierarchicalPlanningBackend(ABC):
 		task_args: Sequence[str],
 		timeout_seconds: Optional[float],
 	) -> PANDAPlanResult:
-		"""Run the backend on one representation."""
+		"""Run the planner on one representation."""
 
 
-class LiftedPandaBackend(HierarchicalPlanningBackend):
+class LiftedPandaSatPlanner(PrimaryHTNPlanner):
 	"""Lifted PANDA SAT over a linearized total-order representation."""
 
 	def __init__(
 		self,
 		workspace: Optional[str | Path] = None,
 	) -> None:
-		self.backend_name = "lifted_panda_sat"
+		self.planner_id = "lifted_panda_sat"
 		self.plan_source_label = "lifted_panda_plan"
 		self.supported_sources = frozenset({"linearized"})
 		self.supported_ordering_kinds = frozenset({"total_order"})
@@ -112,7 +110,7 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 		task_args: Sequence[str],
 		timeout_seconds: Optional[float],
 	) -> PANDAPlanResult:
-		solver_config = _solver_config_with_backend_budget(
+		solver_config = _solver_config_with_planner_budget(
 			self.planner.panda_planner._solver_config_by_id(
 				OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
 			),
@@ -126,53 +124,53 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 			task_args=tuple(task_args),
 			timeout_seconds=timeout_seconds,
 			solver_configs=(solver_config,),
-			reported_solver_id=self.backend_name,
+			reported_solver_id=self.planner_id,
 			reported_engine_mode=OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
 			linearization_metadata=dict(representation.metadata),
 		)
 
 
-def default_official_backends(
+def default_primary_planners(
 	workspace: Optional[str | Path] = None,
-) -> Tuple[HierarchicalPlanningBackend, ...]:
+) -> Tuple[PrimaryHTNPlanner, ...]:
 	"""Primary HTN planner baseline used by dissertation evaluation."""
 
 	return (
-		LiftedPandaBackend(workspace=workspace),
+		LiftedPandaSatPlanner(workspace=workspace),
 	)
 
 
-def backend_by_name(
-	backend_name: str,
+def primary_planner_by_id(
+	planner_id: str,
 	workspace: Optional[str | Path] = None,
-) -> HierarchicalPlanningBackend:
-	"""Instantiate one backend by its stable identifier."""
+) -> PrimaryHTNPlanner:
+	"""Instantiate the primary planner by its stable identifier."""
 
-	for backend in default_official_backends(workspace=workspace):
-		if backend.backend_name == backend_name:
-			return backend
-	raise ValueError(f"Unknown official planning backend '{backend_name}'")
+	for planner in default_primary_planners(workspace=workspace):
+		if planner.planner_id == planner_id:
+			return planner
+	raise ValueError(f"Unknown primary HTN planner '{planner_id}'")
 
 
-def expand_backend_tasks_for_representations(
+def expand_primary_planner_tasks_for_representations(
 	representations: Iterable[PlanningRepresentation],
-	backends: Iterable[HierarchicalPlanningBackend],
-) -> Tuple[PlanningBackendTask, ...]:
-	"""Cross product between representations and applicable backend capabilities."""
+	planners: Iterable[PrimaryHTNPlanner],
+) -> Tuple[PrimaryPlannerTask, ...]:
+	"""Cross product between representations and applicable primary planner capabilities."""
 
-	tasks: List[PlanningBackendTask] = []
+	tasks: List[PrimaryPlannerTask] = []
 	for representation in representations:
-		for backend in backends:
-			if not backend.supports(representation):
+		for planner in planners:
+			if not planner.supports(representation):
 				continue
 			task_id = _task_identifier(
-				backend_name=backend.backend_name,
+				planner_id=planner.planner_id,
 				representation_id=representation.representation_id,
 			)
 			tasks.append(
-				PlanningBackendTask(
+				PrimaryPlannerTask(
 					task_id=task_id,
-					backend_name=backend.backend_name,
+					planner_id=planner.planner_id,
 					representation=representation,
 				),
 			)
@@ -181,11 +179,11 @@ def expand_backend_tasks_for_representations(
 
 def _task_identifier(
 	*,
-	backend_name: str,
+	planner_id: str,
 	representation_id: str,
 ) -> str:
 	return (
-		f"{backend_name}__{representation_id}"
+		f"{planner_id}__{representation_id}"
 		.replace("/", "_")
 		.replace(" ", "_")
 		.replace(":", "_")

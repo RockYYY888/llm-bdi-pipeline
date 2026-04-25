@@ -14,7 +14,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
-from planning.backends import LiftedPandaBackend
+from planning.primary_planner import LiftedPandaSatPlanner
 from planning.official_benchmark import OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
 from planning.panda_sat import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
@@ -142,9 +142,9 @@ root
 	)
 
 
-def test_lifted_panda_backend_uses_full_backend_timeout_budget() -> None:
-	backend = LiftedPandaBackend()
-	backend.planner.plan_linearized_hddl_files = Mock(  # type: ignore[method-assign]
+def test_lifted_panda_primary_planner_uses_full_planning_timeout_budget() -> None:
+	planner = LiftedPandaSatPlanner()
+	planner.planner.plan_linearized_hddl_files = Mock(  # type: ignore[method-assign]
 		return_value=Mock(spec=PANDAPlanResult),
 	)
 	representation = PlanningRepresentation(
@@ -155,14 +155,14 @@ def test_lifted_panda_backend_uses_full_backend_timeout_budget() -> None:
 		problem_file="/tmp/problem.hddl",
 		compilation_profile="semantics_preserving_linearization",
 	)
-	backend.solve(
+	planner.solve(
 		domain=object(),
 		representation=representation,
 		task_name="deliver",
 		task_args=("package-0", "city-loc-0"),
 		timeout_seconds=1800.0,
 	)
-	kwargs = backend.planner.plan_linearized_hddl_files.call_args.kwargs  # type: ignore[union-attr]
+	kwargs = planner.planner.plan_linearized_hddl_files.call_args.kwargs  # type: ignore[union-attr]
 	solver_configs = kwargs["solver_configs"]
 	assert len(solver_configs) == 1
 	assert "timeout_seconds" not in solver_configs[0]
@@ -241,7 +241,7 @@ def test_run_official_problem_root_baseline_for_domain_filters_query_ids(
 	)
 
 
-def test_merge_official_backend_output_dir_skips_unreadable_backend_root(
+def test_merge_primary_planner_output_dir_skips_unreadable_planner_root(
 	tmp_path: Path,
 ) -> None:
 	pipeline = HTNEvaluationPipeline(
@@ -251,7 +251,7 @@ def test_merge_official_backend_output_dir_skips_unreadable_backend_root(
 		),
 	)
 	pipeline.output_dir = str(tmp_path / "selected-root")
-	unreadable_root = tmp_path / "backend-root"
+	unreadable_root = tmp_path / "planner-root"
 	unreadable_root.mkdir(parents=True, exist_ok=True)
 	original_iterdir = Path.iterdir
 
@@ -261,7 +261,7 @@ def test_merge_official_backend_output_dir_skips_unreadable_backend_root(
 		return original_iterdir(path)
 
 	with patch.object(Path, "iterdir", fake_iterdir):
-		pipeline._merge_official_backend_output_dir(unreadable_root)
+		pipeline._merge_primary_planner_output_dir(unreadable_root)
 
 	assert (tmp_path / "selected-root").exists()
 
@@ -406,7 +406,7 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 					"summary": {"status": "success"},
 					"artifacts": {
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				},
@@ -514,7 +514,7 @@ def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries
 		"plan_solve_status": "success",
 		"plan_verification_status": "success",
 		"selected_solver_id": "sat",
-		"selected_backend_name": "lifted_panda_sat",
+		"selected_planner_id": "lifted_panda_sat",
 		"selected_representation_id": "linearized_total_order",
 	}
 	(output_root / "problem_results.json").write_text(
@@ -627,7 +627,7 @@ def test_run_official_problem_root_baseline_for_domain_preserves_unselected_exis
 					"plan_solve_status": "success",
 					"plan_verification_status": "success",
 					"selected_solver_id": "sat",
-					"selected_backend_name": "lifted_panda_sat",
+					"selected_planner_id": "lifted_panda_sat",
 					"selected_representation_id": "linearized_total_order",
 				},
 			],
@@ -672,7 +672,7 @@ def test_run_official_problem_root_baseline_for_domain_preserves_unselected_exis
 				"summary": {"status": "success"},
 				"artifacts": {
 					"selected_solver_id": "sat",
-					"selected_backend_name": "lifted_panda_sat",
+					"selected_planner_id": "lifted_panda_sat",
 					"selected_representation_id": "linearized_total_order",
 				},
 			},
@@ -737,7 +737,7 @@ def test_run_official_problem_root_baseline_for_domain_persists_partial_query_ch
 					"summary": {"status": "success"},
 					"artifacts": {
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				},
@@ -814,7 +814,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 				"summary": {"status": "success"},
 				"artifacts": {
 					"selected_solver_id": "sat",
-					"selected_backend_name": "lifted_panda_sat",
+					"selected_planner_id": "lifted_panda_sat",
 					"selected_representation_id": "linearized_total_order",
 				},
 			},
@@ -856,7 +856,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				],
@@ -870,7 +870,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	paths = write_planner_capability_matrix(tmp_path, rows=rows)
 	problem_paths = write_problem_capability_matrix(tmp_path, rows=problem_rows)
 
-	assert problem_row["selected_backend_name"] == "lifted_panda_sat"
+	assert problem_row["selected_planner_id"] == "lifted_panda_sat"
 	assert problem_row["execution_time_seconds"] == 17.0
 	assert rows[0]["track_id"] == PRIMARY_HTN_PLANNER_ID
 	assert rows[0]["execution_time_seconds_total"] == 17.0
@@ -938,7 +938,7 @@ def test_sequential_full_baseline_writes_incremental_track_outputs(
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				],
@@ -1013,7 +1013,7 @@ def test_sequential_full_baseline_resumes_from_existing_domain_summaries(
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				],
@@ -1068,7 +1068,7 @@ def test_sequential_full_baseline_resumes_from_existing_domain_summaries(
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				],
@@ -1332,7 +1332,7 @@ def test_sequential_full_baseline_cleans_resources_between_domains(
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
-						"selected_backend_name": "lifted_panda_sat",
+						"selected_planner_id": "lifted_panda_sat",
 						"selected_representation_id": "linearized_total_order",
 					},
 				],
@@ -1553,7 +1553,7 @@ def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(
 	payload = {
 		"summary": {"status": "success", "step_count": 2},
 		"artifacts": {
-			"backend": PRIMARY_HTN_PLANNER_ID,
+			"planner_id": PRIMARY_HTN_PLANNER_ID,
 			"status": "success",
 			"planning_mode": "official_problem_root",
 			"engine_mode": "sat",
@@ -1612,7 +1612,7 @@ def test_planning_tasks_can_filter_to_one_requested_planner() -> None:
 	tasks = evaluator.planning_tasks(planner_id="lifted_panda_sat")
 
 	assert tasks
-	assert all(task.backend_name == "lifted_panda_sat" for task in tasks)
+	assert all(task.planner_id == "lifted_panda_sat" for task in tasks)
 
 
 def test_lifted_planner_forces_linearized_representation_for_total_order_problem(
@@ -1652,12 +1652,12 @@ def test_lifted_planner_forces_linearized_representation_for_total_order_problem
 		)
 
 	assert len(tasks) == 1
-	assert tasks[0].backend_name == "lifted_panda_sat"
+	assert tasks[0].planner_id == "lifted_panda_sat"
 	assert tasks[0].representation.representation_id == "linearized_total_order"
-	assert tasks[0].representation.metadata["forced_for_backend_capability"] is True
+	assert tasks[0].representation.metadata["forced_for_primary_planner_capability"] is True
 
 
-def test_backend_evaluation_records_representation_build_failure_as_query_failure(
+def test_primary_planner_evaluation_records_representation_build_failure_as_query_failure(
 	tmp_path: Path,
 ) -> None:
 	original_representation = PlanningRepresentation(
@@ -1691,7 +1691,7 @@ def test_backend_evaluation_records_representation_build_failure_as_query_failur
 			},
 		)
 
-		result = HTNProblemRootEvaluator(context).run_backend_evaluation(
+		result = HTNProblemRootEvaluator(context).run_primary_planner_evaluation(
 			evaluation_mode=SINGLE_PLANNER_MODE,
 			planner_id="lifted_panda_sat",
 		)
@@ -1699,7 +1699,7 @@ def test_backend_evaluation_records_representation_build_failure_as_query_failur
 	assert result["planning_tasks"] == []
 	assert len(result["attempts"]) == 1
 	selected_attempt = result["selected_attempt"]
-	assert selected_attempt["backend_name"] == "lifted_panda_sat"
+	assert selected_attempt["planner_id"] == "lifted_panda_sat"
 	assert selected_attempt["representation_id"] == "linearized_total_order"
 	assert selected_attempt["selected_bucket"] == "no_plan_from_solver"
 	assert selected_attempt["plan_solve_data"]["summary"]["status"] == "failed"
@@ -1709,7 +1709,7 @@ def test_backend_evaluation_records_representation_build_failure_as_query_failur
 	assert selected_attempt["stderr"] == "linearizer err"
 
 
-def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressure(
+def test_primary_planner_evaluation_runs_tasks_sequentially_to_cap_memory_pressure(
 	tmp_path: Path,
 ) -> None:
 	pipeline = HTNEvaluationPipeline(
@@ -1728,11 +1728,11 @@ def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressu
 		)
 		return SimpleNamespace(
 			task_id=task_id,
-			backend_name="lifted_panda_sat",
+			planner_id="lifted_panda_sat",
 			representation=representation,
 			to_dict=lambda: {
 				"task_id": task_id,
-				"backend_name": "lifted_panda_sat",
+				"planner_id": "lifted_panda_sat",
 				"representation": {"representation_id": representation_id},
 			},
 		)
@@ -1783,8 +1783,8 @@ def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressu
 			output_dir = str(self.kwargs["output_dir"])  # type: ignore[index]
 			self.kwargs["result_queue"].put(  # type: ignore[index]
 				{
-					"message_type": "backend_attempt",
-					"backend_name": task_payload["backend_name"],
+					"message_type": "primary_planner_attempt",
+					"planner_id": task_payload["planner_id"],
 					"task_id": task_payload["task_id"],
 					"representation_id": task_payload["representation"]["representation_id"],
 					"output_dir": output_dir,
@@ -1832,7 +1832,7 @@ def test_backend_evaluation_runs_backend_tasks_sequentially_to_cap_memory_pressu
 		"get_context",
 		return_value=FakeContext(),
 	):
-		result = evaluator.run_backend_evaluation(
+		result = evaluator.run_primary_planner_evaluation(
 			evaluation_mode=SINGLE_PLANNER_MODE,
 			planner_id="lifted_panda_sat",
 		)

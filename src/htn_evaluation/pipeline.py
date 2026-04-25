@@ -82,8 +82,8 @@ class HTNEvaluationPipeline:
 	) -> float:
 		return self._context._official_problem_root_planning_timeout_seconds(timeout_seconds)
 
-	def _merge_official_backend_output_dir(self, source_root: Path) -> None:
-		self._context._merge_official_backend_output_dir(source_root)
+	def _merge_primary_planner_output_dir(self, source_root: Path) -> None:
+		self._context._merge_primary_planner_output_dir(source_root)
 
 	def _execute_primary_htn_planner(
 		self,

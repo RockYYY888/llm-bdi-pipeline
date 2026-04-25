@@ -150,9 +150,9 @@ def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:
 	)
 	logger.log_plan_solve(
 		{
-			"backend_attempts": [
+			"planner_attempts": [
 				{
-					"backend_name": "lifted_panda_sat",
+					"planner_id": "lifted_panda_sat",
 					"stdout": b"solver-bytes",
 					"stderr": b"",
 				},
@@ -164,7 +164,7 @@ def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:
 	execution = json.loads((log_path.parent / "execution.json").read_text())
 	text_log = log_path.read_text()
 
-	assert execution["plan_solve"]["artifacts"]["backend_attempts"][0]["stdout"] == "solver-bytes"
+	assert execution["plan_solve"]["artifacts"]["planner_attempts"][0]["stdout"] == "solver-bytes"
 	assert "OFFICIAL PROBLEM ROOT EXECUTION" in text_log
 
 

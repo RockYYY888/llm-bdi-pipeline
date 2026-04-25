@@ -2,8 +2,8 @@
 Evaluation-only context for planner-based HTN benchmark execution.
 
 This module owns the state and helpers required by the Hierarchical Task
-Network evaluation track. It must not import or instantiate the legacy
-compatibility facade.
+Network evaluation track. It must not import or instantiate broader pipeline
+orchestration.
 """
 
 from __future__ import annotations
@@ -178,7 +178,7 @@ class HTNEvaluationContext:
 			return str(rewritten)
 		return value
 
-	def _merge_official_backend_output_dir(self, source_root: Path) -> None:
+	def _merge_primary_planner_output_dir(self, source_root: Path) -> None:
 		target_root = Path(self.output_dir or "").resolve()
 		target_root.mkdir(parents=True, exist_ok=True)
 		if not source_root.exists():

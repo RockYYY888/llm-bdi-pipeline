@@ -11,13 +11,13 @@ from .representations import (
 	RepresentationBuildResult,
 )
 from .problem_encoding import PANDAProblemBuilder, PANDAProblemBuilderConfig
-from .backends import (
-	HierarchicalPlanningBackend,
-	LiftedPandaBackend,
-	PlanningBackendTask,
-	backend_by_name,
-	default_official_backends,
-	expand_backend_tasks_for_representations,
+from .primary_planner import (
+	PrimaryHTNPlanner,
+	LiftedPandaSatPlanner,
+	PrimaryPlannerTask,
+	primary_planner_by_id,
+	default_primary_planners,
+	expand_primary_planner_tasks_for_representations,
 )
 
 __all__ = [
@@ -32,10 +32,10 @@ __all__ = [
 	"RepresentationBuildResult",
 	"PANDAProblemBuilder",
 	"PANDAProblemBuilderConfig",
-	"HierarchicalPlanningBackend",
-	"LiftedPandaBackend",
-	"PlanningBackendTask",
-	"default_official_backends",
-	"backend_by_name",
-	"expand_backend_tasks_for_representations",
+	"PrimaryHTNPlanner",
+	"LiftedPandaSatPlanner",
+	"PrimaryPlannerTask",
+	"default_primary_planners",
+	"primary_planner_by_id",
+	"expand_primary_planner_tasks_for_representations",
 ]
