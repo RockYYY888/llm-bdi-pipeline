@@ -989,7 +989,7 @@ class MethodSynthesisLibraryPostprocessMixin:
 	def _domain_schema_hint() -> str:
 		return (
 			'{"compound_tasks":[{"name":"TASK","parameters":["?x:type"]}],"methods":'
-			'[{"method_name":"m_task_noop","task_name":"TASK","parameters":["?x:type"],'
+			'[{"method_name":"m_task_already_satisfied","task_name":"TASK","parameters":["?x:type"],'
 			'"task_args":["?x"],"context":["goal(?x)"],"subtasks":[],"ordering":[]},'
 			'{"method_name":"m_task_constructive","task_name":"TASK","parameters":["?x:type"],'
 			'"task_args":["?x"],"context":["pre(?x)"],'

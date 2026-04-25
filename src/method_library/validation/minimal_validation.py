@@ -234,17 +234,11 @@ def validate_decomposition_admissibility(
 			raise ValueError(
 				f"Method '{method_name}' has empty subtasks without an already-satisfied guard."
 			)
-		if _method_name_marks_noop(method_name):
-			warnings.append(
-				"Guarded empty method accepted using method-name noop fallback; "
-				f"method='{method_name}'."
-			)
-		else:
 			warnings.append(
 				"Guarded empty method accepted by structural guard-only policy; "
 				f"method='{method_name}'."
 			)
-	return warnings
+		return warnings
 
 
 def _validate_ordering_graph(method: Any) -> None:
@@ -281,20 +275,6 @@ def _validate_ordering_graph(method: Any) -> None:
 
 	for step_id in sorted(step_ids):
 		visit(step_id)
-
-
-def _method_name_marks_noop(method_name: str) -> bool:
-	normalized = sanitize_identifier(method_name).lower()
-	return any(
-		marker in normalized
-		for marker in (
-			"noop",
-			"no_op",
-			"already",
-			"satisfied",
-			"identity",
-		)
-	)
 
 
 def _build_type_parent_map(domain: Any) -> Dict[str, Optional[str]]:

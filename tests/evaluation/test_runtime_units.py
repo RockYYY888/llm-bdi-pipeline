@@ -816,7 +816,7 @@ def test_jason_runtime_ordering_contains_no_domain_named_heuristics() -> None:
 		assert forbidden_token not in source
 
 
-def test_jason_runner_orders_noop_then_direct_then_via_chunks() -> None:
+def test_jason_runner_orders_already_satisfied_then_direct_then_recursive_chunks() -> None:
 	runner = JasonRunner()
 	chunks = [
 		"\n".join(
@@ -849,7 +849,6 @@ def test_jason_runner_orders_noop_then_direct_then_via_chunks() -> None:
 			("at", 2): (("truck_0", "loc_0"),),
 			("road", 2): (("loc_0", "loc_1"), ("loc_1", "loc_2")),
 		},
-		type_domains={},
 	)
 
 	assert '"m-i-am-there"' in ordered_chunks[0]
@@ -884,7 +883,6 @@ def test_jason_runner_keeps_recursive_transport_via_after_current_context_via() 
 			("at", 2): (("truck_0", "loc_0"),),
 			("road", 2): (("loc_0", "loc_1"),),
 		},
-		type_domains={},
 	)
 
 	assert len(ordered_chunks) == 2
@@ -915,125 +913,6 @@ def test_jason_runner_inserts_no_ancestor_guard_for_self_recursive_methods() -> 
 		"pipeline.no_ancestor_goal(get_to, V, MID) <-"
 	) in guarded_chunks[0]
 	assert "\t!get_to(V, MID);" in guarded_chunks[0]
-
-
-def test_jason_runner_lifts_nonrecursive_child_contexts_to_parent_candidates() -> None:
-	runner = JasonRunner()
-	chunks = [
-		"\n".join(
-			[
-				"+!navigate_abs(R, TO) : at(R, FROM) & can_traverse(R, FROM, TO) <-",
-				'\t.print("runtime trace method flat ", "m-navigate_abs");',
-				"\t!navigate(R, FROM, TO).",
-			],
-		),
-		"\n".join(
-			[
-				"+!get_soil_data(WAYPOINT) : store_of(S, R) & equipped_for_soil_analysis(R) <-",
-				'\t.print("runtime trace method flat ", "m-get_soil_data");',
-				"\t!navigate_abs(R, WAYPOINT);",
-				"\t!sample_soil(R, S, WAYPOINT).",
-			],
-		),
-	]
-
-	expanded_chunks = runner._specialise_chunks_from_noop_prefix_contexts(
-		chunks,
-		max_candidates_per_chunk=8,
-	)
-
-	assert any(
-		"+!get_soil_data(WAYPOINT) : "
-		"store_of(S, R) & equipped_for_soil_analysis(R) & "
-		"at(R, FROM) & can_traverse(R, FROM, WAYPOINT) <-" in chunk
-		for chunk in expanded_chunks
-	)
-	assert "\n".join(
-		[
-			"+!get_soil_data(WAYPOINT) : store_of(S, R) & equipped_for_soil_analysis(R) <-",
-			'\t.print("runtime trace method flat ", "m-get_soil_data");',
-			"\t!navigate_abs(R, WAYPOINT);",
-			"\t!sample_soil(R, S, WAYPOINT).",
-		],
-	) in expanded_chunks
-
-
-def test_jason_runner_binds_parent_variables_from_ground_child_prefix_contexts() -> None:
-	runner = JasonRunner()
-	chunks = [
-		"\n".join(
-			[
-				"+!navigate_abs(rover0, waypoint1) : at(rover0, waypoint0) & can_traverse(rover0, waypoint0, waypoint1) <-",
-				'\t.print("runtime trace method flat ", "m-navigate_abs");',
-				"\t!navigate(rover0, waypoint0, waypoint1).",
-			],
-		),
-		"\n".join(
-			[
-				"+!calibrate_abs(ROVER, CAMERA) : on_board(CAMERA, ROVER) & visible_from(OBJECTIVE, WAYPOINT) <-",
-				'\t.print("runtime trace method flat ", "m-calibrate_abs");',
-				"\t!navigate_abs(ROVER, WAYPOINT);",
-				"\t!calibrate(ROVER, CAMERA, OBJECTIVE, WAYPOINT).",
-			],
-		),
-	]
-
-	expanded_chunks = runner._specialise_chunks_from_noop_prefix_contexts(
-		chunks,
-		max_candidates_per_chunk=8,
-	)
-
-	assert any(
-		"+!calibrate_abs(rover0, CAMERA)" in chunk
-		and "visible_from(OBJECTIVE, waypoint1)" in chunk
-		and "\t!navigate_abs(rover0, waypoint1);" in chunk
-		for chunk in expanded_chunks
-	)
-
-
-def test_jason_runner_keeps_deepest_child_prefix_context_candidate() -> None:
-	runner = JasonRunner()
-	chunks = [
-		"\n".join(
-			[
-				"+!reach(R, X) : at(R, F) & road(F, X) <-",
-				'\t.print("runtime trace method flat ", "m-reach");',
-				"\t!move(R, F, X).",
-			],
-		),
-		"\n".join(
-			[
-				"+!send(R, X) : signal(X) <-",
-				'\t.print("runtime trace method flat ", "m-send");',
-				"\t!reach(R, X);",
-				"\t!emit(R, X).",
-			],
-		),
-		"\n".join(
-			[
-				"+!collect(T) : ready(R) <-",
-				'\t.print("runtime trace method flat ", "m-collect");',
-				"\t!reach(R, T);",
-				"\t!send(R, T).",
-			],
-		),
-	]
-
-	expanded_chunks = runner._specialise_chunks_from_noop_prefix_contexts(
-		chunks,
-		max_candidates_per_chunk=8,
-	)
-
-	collect_candidates = [chunk for chunk in expanded_chunks if chunk.startswith("+!collect")]
-	assert any("at(R, F)" in chunk and "signal(T)" in chunk for chunk in collect_candidates)
-	assert all(
-		not (
-			"at(R, F)" in chunk
-			and "signal(T)" not in chunk
-			and chunk.startswith("+!collect")
-		)
-		for chunk in collect_candidates
-	)
 
 
 def test_jason_runner_does_not_apply_domain_named_action_setup_ordering() -> None:
@@ -1068,7 +947,6 @@ def test_jason_runner_does_not_apply_domain_named_action_setup_ordering() -> Non
 	ordered_chunks = runner._order_runtime_method_plan_chunks(
 		chunks,
 		fact_index={},
-		type_domains={},
 	)
 
 	assert "method_already_pointing" in ordered_chunks[0]
@@ -1104,7 +982,6 @@ def test_jason_runner_ignores_domain_named_fact_indexes_during_chunk_ordering() 
 		fact_index={
 			("calibration_target", 2): (("instrument0", "calib_direction0"),),
 		},
-		type_domains={},
 	)
 
 	assert "method_bad_source" in ordered_chunks[0]
@@ -1864,7 +1741,7 @@ def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
 	true.
 """.strip(),
 		method_library=_sample_method_library(),
-		action_schemas=[{"name": "noop"}],
+			action_schemas=[{"name": "idle_action"}],
 		seed_facts=(),
 		runtime_objects=(),
 		object_types={},
@@ -1938,11 +1815,11 @@ def test_jason_runner_validate_downgrades_consistency_check_failures_to_diagnost
 /* Primitive Action Plans */
 
 /* HTN Method Plans */
-+!noop : true <-
-	true.
+	+!idle_goal : true <-
+		true.
 """.strip(),
-		method_library=_sample_method_library(),
-		action_schemas=[{"name": "noop"}],
+			method_library=_sample_method_library(),
+			action_schemas=[{"name": "idle_action"}],
 		seed_facts=(),
 		runtime_objects=(),
 		object_types={},

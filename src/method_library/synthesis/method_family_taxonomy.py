@@ -12,7 +12,7 @@ import re
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 
-NOOP_GUARD = "noop_guard"
+ALREADY_SATISFIED_GUARD = "already_satisfied_guard"
 DIRECT_LEAF = "direct_leaf"
 SUPPORT_THEN_LEAF = "support_then_leaf"
 RECURSIVE_REFINEMENT = "recursive_refinement"
@@ -106,15 +106,10 @@ def classify_method_family(
 		for step in support_subtasks
 	]
 	support_profile = _support_profile(support_kinds)
-	is_noop_primitive = (
-		subtask_count == 1
-		and final_step_kind == "primitive"
-		and str(final_step_name or "").replace("-", "_").lower() in {"nop", "noop"}
-	)
-	is_already_satisfied_branch = subtask_count == 0 or is_noop_primitive
+	is_already_satisfied_branch = subtask_count == 0
 
 	if is_already_satisfied_branch:
-		archetype = NOOP_GUARD
+		archetype = ALREADY_SATISFIED_GUARD
 	elif uses_self_recursion:
 		archetype = RECURSIVE_REFINEMENT
 	elif final_step_kind == "primitive" and not support_subtasks:
@@ -124,7 +119,7 @@ def classify_method_family(
 	else:
 		archetype = HIERARCHICAL_ORCHESTRATION
 
-	if archetype == NOOP_GUARD:
+	if archetype == ALREADY_SATISFIED_GUARD:
 		coordination_pattern = "already_satisfied"
 	elif archetype == RECURSIVE_REFINEMENT:
 		coordination_pattern = "recursive_via_witness"
@@ -190,7 +185,7 @@ def infer_blueprint_family_archetypes(blueprint: Mapping[str, Any]) -> tuple[str
 
 	archetypes: list[str] = []
 	if not helper_only:
-		archetypes.append(NOOP_GUARD)
+		archetypes.append(ALREADY_SATISFIED_GUARD)
 	if recursive_families:
 		archetypes.append(RECURSIVE_REFINEMENT)
 	if headline_support_tasks and not helper_only:

@@ -290,7 +290,6 @@ class AgentSpeakRenderer:
                     method=method,
                     method_node=node,
                     actual_plan_nodes=self._parse_actual_plan_nodes(actual_plan_text),
-                    method_lookup=method_lookup,
                     methods_by_task=methods_by_task,
                     task_lookup=task_lookup,
                     render_specs=render_specs,
@@ -307,7 +306,6 @@ class AgentSpeakRenderer:
         method: HTNMethod,
         method_node: Dict[str, Any],
         actual_plan_nodes: Dict[int, Dict[str, Any]],
-        method_lookup: Dict[str, HTNMethod],
         methods_by_task: Dict[str, List[HTNMethod]],
         task_lookup: Dict[str, Any],
         render_specs: Dict[str, Dict[str, Any]],
@@ -328,16 +326,9 @@ class AgentSpeakRenderer:
 
         trigger = self._task_call(task_name, task_args)
         render_spec = render_specs.get(method.task_name, {})
-        grounded_context_literals = self._merge_context_literals(
-            self._ground_method_context_literals(
-                method,
-                binding,
-            ),
-            self._ground_exact_prefix_noop_child_context_literals(
-                ordered_children,
-                actual_plan_nodes=actual_plan_nodes,
-                method_lookup=method_lookup,
-            ),
+        grounded_context_literals = self._ground_method_context_literals(
+            method,
+            binding,
         )
         grounded_context_literals = self._merge_context_literals(
             grounded_context_literals,
@@ -647,40 +638,6 @@ class AgentSpeakRenderer:
             },
         )()
 
-    def _ground_exact_prefix_noop_child_context_literals(
-        self,
-        ordered_children: Sequence[Dict[str, Any]],
-        *,
-        actual_plan_nodes: Dict[int, Dict[str, Any]],
-        method_lookup: Dict[str, HTNMethod],
-    ) -> Tuple[Any, ...]:
-        grounded_literals: List[Any] = []
-        seen_signatures: set[Tuple[str, bool, Tuple[str, ...]]] = set()
-        for child_node in ordered_children:
-            if str(child_node.get("kind") or "") != "compound":
-                break
-            child_method_name = str(child_node.get("method_name") or "").strip()
-            child_method = method_lookup.get(child_method_name)
-            if child_method is None or not self._method_is_pure_noop(child_method):
-                break
-            child_binding = self._exact_method_binding(
-                method=child_method,
-                task_args=tuple(child_node.get("task_args") or ()),
-                ordered_children=self._ordered_actual_plan_child_nodes(
-                    child_node,
-                    actual_plan_nodes,
-                ),
-            )
-            if child_binding is None or self._binding_has_synthetic_witness_tokens(child_binding):
-                break
-            for literal in self._ground_method_context_literals(child_method, child_binding):
-                signature = self._literal_structural_key(literal)
-                if signature in seen_signatures:
-                    continue
-                seen_signatures.add(signature)
-                grounded_literals.append(literal)
-        return tuple(grounded_literals)
-
     @staticmethod
     def _binding_has_synthetic_witness_tokens(binding: Dict[str, str]) -> bool:
         return any(
@@ -735,12 +692,6 @@ class AgentSpeakRenderer:
             )
 
         return tuple(ordered)
-
-    @staticmethod
-    def _method_is_pure_noop(method: HTNMethod) -> bool:
-        """Return True when a method has no subtasks and performs no decomposition."""
-
-        return not tuple(getattr(method, "subtasks", ()) or ())
 
     def _ordered_task_methods_for_rendering(
         self,
@@ -813,17 +764,12 @@ class AgentSpeakRenderer:
         task_effect_signatures: set[str],
     ) -> Tuple[int, int, int, int]:
         ordered_steps = self._ordered_method_steps(method)
-        is_noop_like = self._method_is_pure_noop(method) or self._method_is_single_noop_primitive(
-            method,
-            ordered_steps,
-        )
         directly_supports_effect = self._context_literals_support_task_effect(
             method,
             tuple(getattr(method, "context", ()) or ()),
             task_lookup,
             task_effect_signatures,
         )
-        noop_rank = 0 if is_noop_like else 1
         has_compound_subtasks = any(
             getattr(step, "kind", None) == "compound"
             for step in ordered_steps
@@ -834,30 +780,11 @@ class AgentSpeakRenderer:
             for step in ordered_steps
         )
         return (
-            noop_rank,
             0 if directly_supports_effect else 1,
             0 if not has_compound_subtasks else 1,
             0 if not is_recursive else 1,
             original_index,
         )
-
-    @staticmethod
-    def _method_is_single_noop_primitive(
-        method: HTNMethod,
-        ordered_steps: Sequence[Any],
-    ) -> bool:
-        _ = method
-        if len(ordered_steps) != 1:
-            return False
-        step = ordered_steps[0]
-        if getattr(step, "kind", None) != "primitive":
-            return False
-        action_name = str(
-            getattr(step, "action_name", None)
-            or getattr(step, "task_name", "")
-            or ""
-        ).strip()
-        return action_name in {"nop", "noop"}
 
     def _render_method_plan(
         self,
@@ -1471,10 +1398,6 @@ class AgentSpeakRenderer:
         for step_index, step in enumerate(ordered_steps):
             if step_index == first_compound_index and getattr(step, "kind", None) == "compound":
                 child_methods = tuple(methods_by_task.get(step.task_name, ()))
-                child_has_non_noop_method = any(
-                    not self._method_is_pure_noop(child_method)
-                    for child_method in child_methods
-                )
                 has_recursive_child_method = any(
                     self._method_is_recursive(child_method)
                     for child_method in child_methods
@@ -1532,23 +1455,6 @@ class AgentSpeakRenderer:
                                     child_context_literals,
                                     child_extra_literals,
                                 )
-                                child_task_effect_signatures = (
-                                    self._task_render_priority_effect_signatures(
-                                        child_method.task_name,
-                                        task_lookup,
-                                    )
-                                )
-                                if not child_has_non_noop_method:
-                                    child_variant_literals = tuple(
-                                        literal
-                                        for literal in child_variant_literals
-                                        if not self._literal_supports_task_effect(
-                                            literal,
-                                            child_method,
-                                            task_lookup,
-                                            child_task_effect_signatures,
-                                        )
-                                    )
                                 translated = self._translate_child_context_literals(
                                     child_method,
                                     step,

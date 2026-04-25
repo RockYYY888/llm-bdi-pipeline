@@ -70,7 +70,7 @@ def _compound_task(name: str = "deliver", parameters=("?p:package",)) -> HTNTask
 
 def _method(
 	*,
-	method_name: str = "m_deliver_noop",
+	method_name: str = "m_deliver_already_satisfied",
 	task_name: str = "deliver",
 	parameters=("?p:package",),
 	task_args=("?p",),
@@ -341,10 +341,10 @@ def test_decomposition_admissibility_rejects_unguarded_empty_method() -> None:
 		validate_decomposition_admissibility(_domain(), library)
 
 
-def test_decomposition_admissibility_accepts_guarded_noop_with_fallback_warning() -> None:
+def test_decomposition_admissibility_accepts_guarded_empty_method_structurally() -> None:
 	warnings = validate_decomposition_admissibility(_domain(), _library())
 
-	assert any("method-name noop fallback" in warning for warning in warnings)
+	assert warnings == []
 
 
 def test_domain_quality_gate_rejects_unreparseable_materialized_domain_file(tmp_path: Path) -> None:

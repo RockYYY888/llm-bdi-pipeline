@@ -743,14 +743,13 @@ class HTNMethodLibrary:
                 {
                     "parameter_score": task_parameter_score,
                     "task_parameters": list(raw_task_parameters),
-                    "grounded_args": list(task_entry.get("grounded_args") or []),
-                    "source_predicates": [],
-                    "headline": task_entry.get("headline"),
-                    "source_name": task_entry.get("source_name"),
-                    "noop": None,
-                    "constructive": [],
-                },
-            )
+	                    "grounded_args": list(task_entry.get("grounded_args") or []),
+	                    "source_predicates": [],
+	                    "headline": task_entry.get("headline"),
+	                    "source_name": task_entry.get("source_name"),
+	                    "constructive": [],
+	                },
+	            )
             if task_parameter_score < grouped_entry["parameter_score"]:
                 grouped_entry["parameter_score"] = task_parameter_score
                 grouped_entry["task_parameters"] = list(raw_task_parameters)
@@ -769,17 +768,6 @@ class HTNMethodLibrary:
                 elif existing_headline != task_headline:
                     raise ValueError(
                         f"method synthesis task '{task_name}' contains conflicting headline literals "
-                        "across duplicate task entries."
-                    )
-
-            noop_branch = task_entry.get("noop")
-            if noop_branch is not None:
-                existing_noop = grouped_entry.get("noop")
-                if existing_noop is None:
-                    grouped_entry["noop"] = noop_branch
-                elif existing_noop != noop_branch:
-                    raise ValueError(
-                        f"method synthesis task '{task_name}' contains conflicting noop branches "
                         "across duplicate task entries."
                     )
 
@@ -849,20 +837,6 @@ class HTNMethodLibrary:
             if task_level_constructive is not None:
                 grouped_entry["constructive"].append(task_level_constructive)
 
-            normalised_constructive: List[Dict[str, Any]] = []
-            for branch_payload in grouped_entry.get("constructive", []):
-                if HTNMethodLibrary._is_ast_constructive_noop_branch(branch_payload):
-                    noop_payload = (
-                        branch_payload.get("precondition")
-                        if branch_payload.get("precondition") is not None
-                        else branch_payload.get("context")
-                    )
-                    if grouped_entry.get("noop") is None:
-                        grouped_entry["noop"] = noop_payload
-                    continue
-                normalised_constructive.append(branch_payload)
-            grouped_entry["constructive"] = normalised_constructive
-
         for task_name, grouped_entry in grouped_task_entries.items():
             task_parameters = [
                 _canonical_parameter_symbol(value)
@@ -903,21 +877,6 @@ class HTNMethodLibrary:
                 compiled_task["source_predicates"] = [
                     str(compiled_task["headline"]["predicate"]).strip()
                 ]
-
-            noop_branch = grouped_entry.get("noop")
-            if noop_branch is not None:
-                methods.append(
-                    HTNMethodLibrary._compile_ast_branch(
-                        task_name=task_name,
-                        task_parameters=task_parameters,
-                        base_symbol_aliases=task_symbol_aliases,
-                        primitive_aliases=primitive_aliases,
-                        call_arities=call_arities,
-                        branch_key="noop",
-                        branch_payload=noop_branch,
-                        branch_index=1,
-                    ),
-                )
 
             for branch_index, branch_payload in enumerate(
                 grouped_entry.get("constructive", []),
@@ -1014,16 +973,7 @@ class HTNMethodLibrary:
         branch_index: int,
     ) -> Dict[str, Any]:
         if not isinstance(branch_payload, dict):
-            if branch_key == "noop":
-                if isinstance(branch_payload, (str, dict)):
-                    branch_payload = {"precondition": [branch_payload]}
-                elif isinstance(branch_payload, (list, tuple)):
-                    branch_payload = {"precondition": list(branch_payload)}
-                else:
-                    raise ValueError(
-                        f"method synthesis noop branch for task '{task_name}' must be an object, string, or list."
-                    )
-            elif isinstance(branch_payload, str):
+            if isinstance(branch_payload, str):
                 branch_payload = {"ordered_subtasks": [branch_payload]}
             elif isinstance(branch_payload, (list, tuple)):
                 branch_payload = {"ordered_subtasks": list(branch_payload)}
@@ -1058,9 +1008,7 @@ class HTNMethodLibrary:
         ]
 
         label = str(branch_payload.get("label", "")).strip()
-        if branch_key == "noop":
-            method_suffix = "noop"
-        elif label:
+        if label:
             method_suffix = label
         elif branch_index == 1:
             method_suffix = "constructive"
@@ -1432,40 +1380,3 @@ class HTNMethodLibrary:
         if literal_payload in (None, []):
             return []
         return [literal_payload]
-
-    @staticmethod
-    def _is_ast_constructive_noop_branch(branch_payload: Any) -> bool:
-        if not isinstance(branch_payload, dict):
-            return False
-        producer = branch_payload.get("producer")
-        if producer in (None, ""):
-            producer = branch_payload.get("produce")
-        noop_marker = "noop" in branch_payload
-        parsed_producer = (
-            _parse_invocation_signature(producer)
-            if isinstance(producer, str)
-            else None
-        )
-        producer_name = (
-            parsed_producer["call"]
-            if parsed_producer is not None
-            else str(producer).strip()
-        )
-        if producer_name not in {"nop", "noop"} and not (
-            noop_marker and producer in (None, "")
-        ):
-            return False
-        for key in (
-            "support_before",
-            "followup",
-            "followups",
-            "ordered_subtasks",
-            "ordering",
-            "orderings",
-            "ordering_edges",
-            "subtasks",
-            "steps",
-        ):
-            if branch_payload.get(key) not in (None, [], {}):
-                return False
-        return True

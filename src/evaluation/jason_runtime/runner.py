@@ -1675,22 +1675,6 @@ class JasonRunner:
 				changed = True
 			specialised_chunks.extend(specialised)
 
-		pre_noop_specialisation_chunks = list(specialised_chunks)
-		specialised_chunks = self._specialise_chunks_from_noop_body_support(
-			specialised_chunks,
-			fact_index=fact_index,
-			type_domains=type_domains,
-			max_candidates_per_chunk=max_candidates_per_clause,
-		)
-		if specialised_chunks != pre_noop_specialisation_chunks:
-			changed = True
-		pre_noop_prefix_context_chunks = list(specialised_chunks)
-		specialised_chunks = self._specialise_chunks_from_noop_prefix_contexts(
-			specialised_chunks,
-			max_candidates_per_chunk=max_candidates_per_clause,
-		)
-		if specialised_chunks != pre_noop_prefix_context_chunks:
-			changed = True
 		pre_recursive_guard_chunks = list(specialised_chunks)
 		specialised_chunks = self._insert_self_recursive_no_ancestor_guards(
 			specialised_chunks,
@@ -1714,7 +1698,6 @@ class JasonRunner:
 		specialised_chunks = self._order_runtime_method_plan_chunks(
 			specialised_chunks,
 			fact_index=fact_index,
-			type_domains=type_domains,
 		)
 		if specialised_chunks != pre_ordered_chunks:
 			changed = True
@@ -1750,327 +1733,6 @@ class JasonRunner:
 			if normalise_belief_line(line) not in seed_belief_lines
 		]
 		return "\n".join(lines).rstrip() + "\n"
-
-	def _specialise_chunks_from_noop_body_support(
-		self,
-		chunks: Sequence[str],
-		*,
-		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
-		type_domains: Dict[str, Tuple[str, ...]],
-		max_candidates_per_chunk: int,
-	) -> List[str]:
-		if not chunks:
-			return []
-
-		noop_specs_by_task: Dict[str, List[Dict[str, Any]]] = {}
-		for chunk in chunks:
-			lines = chunk.splitlines()
-			if not lines:
-				continue
-			parsed_head = self._parse_asl_method_head(lines[0])
-			if parsed_head is None or not self._chunk_is_noop_method_plan(lines[1:]):
-				continue
-			task_name, head_args, context_parts = parsed_head
-			context_atoms: List[Dict[str, Any]] = []
-			inequalities: List[Tuple[str, str]] = []
-			for part in context_parts:
-				parsed = self._parse_asl_context_conjunct(part)
-				if parsed is None:
-					continue
-				if parsed.get("kind") == "atom":
-					context_atoms.append(parsed)
-				elif parsed.get("kind") == "inequality":
-					inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
-			noop_specs_by_task.setdefault(task_name, []).append(
-				{
-					"head_args": head_args,
-					"context_atoms": tuple(context_atoms),
-					"inequalities": tuple(inequalities),
-				},
-			)
-
-		expanded_chunks: List[str] = []
-		for chunk in chunks:
-			lines = chunk.splitlines()
-			if not lines:
-				expanded_chunks.append(chunk)
-				continue
-			parsed_head = self._parse_asl_method_head(lines[0])
-			if parsed_head is None:
-				expanded_chunks.append(chunk)
-				continue
-			_, head_args, context_parts = parsed_head
-			trigger_vars = {
-				arg
-				for arg in head_args
-				if self._looks_like_asl_variable(arg)
-			}
-			caller_type_constraints: List[Tuple[str, str]] = []
-			caller_inequalities: List[Tuple[str, str]] = []
-			for part in context_parts:
-				parsed = self._parse_asl_context_conjunct(part)
-				if parsed is None:
-					continue
-				if parsed.get("kind") == "atom" and str(parsed.get("predicate")) == "object_type":
-					args = tuple(parsed.get("args") or ())
-					if len(args) == 2:
-						caller_type_constraints.append((str(args[0]), str(args[1])))
-				elif parsed.get("kind") == "inequality":
-					caller_inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
-
-			candidate_chunks = [chunk]
-			seen_chunks = {chunk}
-			chunk_vars = self._extract_asl_variables(chunk)
-			combined_bindings: List[Dict[str, str]] = [{}]
-			seen_combined_bindings: set[Tuple[Tuple[str, str], ...]] = {()}
-			for line in lines[1:]:
-				goal = self._parse_asl_goal_call(line)
-				if goal is None:
-					continue
-				goal_support_bindings: List[Dict[str, str]] = []
-				for spec in noop_specs_by_task.get(str(goal[0]), ()):
-					for binding in self._noop_support_bindings(
-						head_args=tuple(spec.get("head_args") or ()),
-						goal_args=tuple(goal[1]),
-						context_atoms=tuple(spec.get("context_atoms") or ()),
-						inequalities=tuple(spec.get("inequalities") or ()),
-						fact_index=fact_index,
-						type_domains=type_domains,
-						caller_type_constraints=tuple(caller_type_constraints),
-						caller_inequalities=tuple(caller_inequalities),
-					):
-						goal_support_bindings.append(binding)
-						head_binding = {
-							variable: value
-							for variable, value in binding.items()
-							if variable in trigger_vars
-						}
-						if not head_binding:
-							continue
-						specialised_chunk = "\n".join(
-							self._substitute_asl_bindings(chunk_line, head_binding)
-							for chunk_line in lines
-						)
-						if specialised_chunk in seen_chunks:
-							continue
-						if len(candidate_chunks) >= max_candidates_per_chunk:
-							continue
-						seen_chunks.add(specialised_chunk)
-						candidate_chunks.append(specialised_chunk)
-				if not goal_support_bindings:
-					continue
-				next_combined_bindings = list(combined_bindings)
-				for existing_binding in combined_bindings:
-					for support_binding in goal_support_bindings:
-						merged_binding = self._merge_asl_bindings(
-							existing_binding,
-							support_binding,
-						)
-						if merged_binding is None:
-							continue
-						signature = tuple(sorted(merged_binding.items()))
-						if signature in seen_combined_bindings:
-							continue
-						if len(next_combined_bindings) >= max_candidates_per_chunk:
-							continue
-						seen_combined_bindings.add(signature)
-						next_combined_bindings.append(merged_binding)
-				combined_bindings = next_combined_bindings
-			for binding in combined_bindings:
-				chunk_binding = {
-					variable: value
-					for variable, value in binding.items()
-					if variable in chunk_vars
-				}
-				if not chunk_binding:
-					continue
-				specialised_chunk = "\n".join(
-					self._substitute_asl_bindings(chunk_line, chunk_binding)
-					for chunk_line in lines
-				)
-				if specialised_chunk in seen_chunks:
-					continue
-				if len(candidate_chunks) >= max_candidates_per_chunk:
-					continue
-				seen_chunks.add(specialised_chunk)
-				candidate_chunks.append(specialised_chunk)
-			expanded_chunks.extend(candidate_chunks)
-
-		return expanded_chunks
-
-	def _specialise_chunks_from_noop_prefix_contexts(
-		self,
-		chunks: Sequence[str],
-		*,
-		max_candidates_per_chunk: int,
-	) -> List[str]:
-		if not chunks:
-			return []
-
-		prefix_contexts_by_task: Dict[str, List[Dict[str, Any]]] = {}
-		for chunk in chunks:
-			lines = chunk.splitlines()
-			if not lines:
-				continue
-			parsed_head = self._parse_asl_method_head(lines[0])
-			if parsed_head is None:
-				continue
-			task_name, head_args, context_parts = parsed_head
-			no_op_context_parts = tuple(
-				part
-				for part in context_parts
-				if not str(part).strip().startswith("object_type(")
-			)
-			if not no_op_context_parts:
-				continue
-			prefix_contexts_by_task.setdefault(task_name, []).append(
-				{
-					"head_args": head_args,
-					"context_parts": no_op_context_parts,
-					"is_noop": self._chunk_is_noop_method_plan(lines[1:]),
-				},
-			)
-
-		if not prefix_contexts_by_task:
-			return list(chunks)
-
-		expanded_chunks: List[str] = []
-		for chunk in chunks:
-			lines = chunk.splitlines()
-			if not lines:
-				expanded_chunks.append(chunk)
-				continue
-			parsed_head = self._parse_asl_method_head(lines[0])
-			if parsed_head is None or self._chunk_is_noop_method_plan(lines[1:]):
-				expanded_chunks.append(chunk)
-				continue
-			parent_task_name = str(parsed_head[0])
-
-			chunk_vars = self._extract_asl_variables(chunk)
-			prefix_context_variants: List[Tuple[Tuple[str, ...], Dict[str, str]]] = [((), {})]
-			for raw_line in lines[1:]:
-				if self._parse_asl_goal_call(raw_line) is None:
-					continue
-
-				next_variants: List[Tuple[Tuple[str, ...], Dict[str, str]]] = []
-				for prefix_context, prefix_binding in prefix_context_variants:
-					line = self._substitute_asl_bindings(raw_line, prefix_binding)
-					goal = self._parse_asl_goal_call(line)
-					if goal is None:
-						continue
-					goal_task_name, goal_args = goal
-					prefix_specs = [
-						spec
-						for spec in prefix_contexts_by_task.get(goal_task_name, ())
-						if bool(spec.get("is_noop")) or str(goal_task_name) != parent_task_name
-					]
-					if not prefix_specs:
-						continue
-					for spec in prefix_specs:
-						head_args = tuple(spec.get("head_args") or ())
-						context_parts = tuple(spec.get("context_parts") or ())
-						instantiated_context, instantiated_binding = (
-							self._instantiate_noop_prefix_context(
-							head_args=head_args,
-							goal_args=goal_args,
-							context_parts=context_parts,
-							chunk_vars=chunk_vars,
-						)
-						)
-						if not instantiated_context:
-							continue
-						merged_binding = self._merge_asl_bindings(
-							prefix_binding,
-							instantiated_binding,
-						)
-						if merged_binding is None:
-							continue
-						rewritten_prefix_context = tuple(
-							self._substitute_asl_bindings(part, merged_binding)
-							for part in prefix_context
-						)
-						combined_context = tuple(
-							dict.fromkeys([*rewritten_prefix_context, *instantiated_context]),
-						)
-						variant_signature = (
-							combined_context,
-							tuple(sorted(merged_binding.items())),
-						)
-						if not combined_context or any(
-							variant_signature
-							== (context, tuple(sorted(binding.items())))
-							for context, binding in next_variants
-						):
-							continue
-						next_variants.append((combined_context, merged_binding))
-						if len(next_variants) >= max_candidates_per_chunk:
-							break
-					if len(next_variants) >= max_candidates_per_chunk:
-						break
-				if not next_variants:
-					break
-				prefix_context_variants = next_variants
-
-			candidate_chunks: List[str] = []
-			seen_candidates = {chunk}
-			for combined_context, merged_binding in prefix_context_variants:
-				if len(combined_context) < 2:
-					continue
-				bound_lines = [
-					self._substitute_asl_bindings(chunk_line, merged_binding)
-					for chunk_line in lines
-				]
-				rewritten_head = self._append_asl_method_context_parts(
-					bound_lines[0],
-					combined_context,
-				)
-				if rewritten_head == bound_lines[0]:
-					continue
-				specialised_chunk = "\n".join([rewritten_head, *bound_lines[1:]])
-				if specialised_chunk in seen_candidates:
-					continue
-				seen_candidates.add(specialised_chunk)
-				candidate_chunks.append(specialised_chunk)
-				if len(candidate_chunks) >= max_candidates_per_chunk:
-					break
-			expanded_chunks.extend(candidate_chunks)
-			expanded_chunks.append(chunk)
-		return expanded_chunks
-
-	def _instantiate_noop_prefix_context(
-		self,
-		*,
-		head_args: Sequence[str],
-		goal_args: Sequence[str],
-		context_parts: Sequence[str],
-		chunk_vars: Set[str],
-	) -> Tuple[Tuple[str, ...], Dict[str, str]]:
-		if len(head_args) != len(goal_args):
-			return (), {}
-		binding: Dict[str, str] = {}
-		for head_arg, goal_arg in zip(head_args, goal_args):
-			if self._looks_like_asl_variable(str(head_arg)):
-				binding[str(head_arg)] = str(goal_arg)
-				continue
-			if self._looks_like_asl_variable(str(goal_arg)):
-				binding[str(goal_arg)] = str(head_arg)
-				continue
-			if self._canonical_runtime_token(str(head_arg)) != (
-				self._canonical_runtime_token(str(goal_arg))
-			):
-				return (), {}
-
-		instantiated_parts: List[str] = []
-		for part in context_parts:
-			substituted = self._substitute_asl_bindings(str(part), binding).strip()
-			if (
-				not substituted
-				or substituted == "true"
-				or substituted.startswith("object_type(")
-			):
-				continue
-			instantiated_parts.append(substituted)
-		return tuple(dict.fromkeys(instantiated_parts)), binding
 
 	def _promote_body_no_ancestor_guards_to_context(
 		self,
@@ -2206,7 +1868,6 @@ class JasonRunner:
 		chunks: Sequence[str],
 		*,
 		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
-		type_domains: Dict[str, Tuple[str, ...]],
 	) -> List[str]:
 		if not chunks:
 			return []
@@ -2235,31 +1896,6 @@ class JasonRunner:
 				},
 			)
 
-		noop_specs_by_task: Dict[str, List[Dict[str, Any]]] = {}
-		for item in parsed_chunks:
-			if not self._chunk_is_noop_method_plan(item.get("body_lines") or ()):
-				continue
-			task_name = str(item.get("task_name") or "")
-			if not task_name:
-				continue
-			context_atoms: List[Dict[str, Any]] = []
-			inequalities: List[Tuple[str, str]] = []
-			for part in item.get("context_parts") or ():
-				parsed = self._parse_asl_context_conjunct(str(part))
-				if parsed is None:
-					continue
-				if parsed.get("kind") == "atom":
-					context_atoms.append(parsed)
-				elif parsed.get("kind") == "inequality":
-					inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
-			noop_specs_by_task.setdefault(task_name, []).append(
-				{
-					"head_args": tuple(item.get("head_args") or ()),
-					"context_atoms": tuple(context_atoms),
-					"inequalities": tuple(inequalities),
-				},
-			)
-
 		grouped_indexes: Dict[str, List[int]] = {}
 		group_order: List[str] = []
 		for index, item in enumerate(parsed_chunks):
@@ -2275,18 +1911,6 @@ class JasonRunner:
 			for item in group_items:
 				lines = str(item.get("chunk") or "").splitlines()
 				body_lines = list(item.get("body_lines") or ())
-				caller_type_constraints: List[Tuple[str, str]] = []
-				caller_inequalities: List[Tuple[str, str]] = []
-				for part in tuple(item.get("context_parts") or ()):
-					parsed = self._parse_asl_context_conjunct(str(part))
-					if parsed is None:
-						continue
-					if parsed.get("kind") == "atom" and str(parsed.get("predicate")) == "object_type":
-						args = tuple(parsed.get("args") or ())
-						if len(args) == 2:
-							caller_type_constraints.append((str(args[0]), str(args[1])))
-					elif parsed.get("kind") == "inequality":
-						caller_inequalities.append((str(parsed["lhs"]), str(parsed["rhs"])))
 				body_goals = [
 					goal
 					for goal in (
@@ -2301,18 +1925,6 @@ class JasonRunner:
 					for goal in body_goals
 				)
 				variable_safe = self._chunk_runtime_variables_are_safe(lines)
-				weighted_noop_support = 0
-				for goal_index, goal in enumerate(body_goals, start=1):
-					if self._goal_has_noop_runtime_support(
-						goal_task_name=str(goal[0]),
-						goal_args=tuple(goal[1]),
-						noop_specs_by_task=noop_specs_by_task,
-						fact_index=fact_index,
-						type_domains=type_domains,
-						caller_type_constraints=tuple(caller_type_constraints),
-						caller_inequalities=tuple(caller_inequalities),
-					):
-						weighted_noop_support += goal_index
 				body_current_fact_pair_score = self._body_current_fact_pair_score(
 					body_goals,
 					current_fact_arg_pairs,
@@ -2345,7 +1957,6 @@ class JasonRunner:
 							if not self._looks_like_asl_variable(arg)
 						)
 				item["sort_key"] = (
-					0 if self._chunk_is_noop_method_plan(body_lines) else 1,
 					0 if variable_safe else 1,
 					0 if not has_self_recursive_goal else 1,
 					body_goal_count,
@@ -2353,7 +1964,6 @@ class JasonRunner:
 					-grounded_head_arg_count,
 					-grounded_context_arg_count,
 					-body_current_fact_pair_score,
-					-weighted_noop_support,
 					int(item.get("index", 0)),
 				)
 				item["variable_safe"] = variable_safe
@@ -2839,19 +2449,6 @@ class JasonRunner:
 		return {"kind": "atom", "predicate": predicate, "args": args}
 
 	@staticmethod
-	def _chunk_is_noop_method_plan(body_lines: Sequence[str]) -> bool:
-		statements = [
-			line.strip().rstrip(";.")
-			for line in body_lines
-			if line.strip()
-		]
-		if not statements:
-			return False
-		if statements[0].startswith('.print("runtime trace method flat "'):
-			statements = statements[1:]
-		return statements == ["true"]
-
-	@staticmethod
 	def _parse_asl_goal_call(line: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
 		text = str(line or "").strip().rstrip(";.")
 		if not text.startswith("!"):
@@ -2863,131 +2460,6 @@ class JasonRunner:
 		args_text = (match.group(2) or "").strip()
 		args = JasonRunner._split_asl_arguments(args_text) if args_text else ()
 		return task_name, args
-
-	def _goal_has_noop_runtime_support(
-		self,
-		*,
-		goal_task_name: str,
-		goal_args: Sequence[str],
-		noop_specs_by_task: Dict[str, List[Dict[str, Any]]],
-		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
-		type_domains: Dict[str, Tuple[str, ...]],
-		caller_type_constraints: Sequence[Tuple[str, str]] = (),
-		caller_inequalities: Sequence[Tuple[str, str]] = (),
-	) -> bool:
-		for spec in noop_specs_by_task.get(str(goal_task_name), ()):
-			if self._noop_support_bindings(
-				head_args=tuple(spec.get("head_args") or ()),
-				goal_args=tuple(goal_args),
-				context_atoms=tuple(spec.get("context_atoms") or ()),
-				inequalities=tuple(spec.get("inequalities") or ()),
-				fact_index=fact_index,
-				type_domains=type_domains,
-				caller_type_constraints=caller_type_constraints,
-				caller_inequalities=caller_inequalities,
-			):
-				return True
-		return False
-
-	def _noop_support_bindings(
-		self,
-		*,
-		head_args: Sequence[str],
-		goal_args: Sequence[str],
-		context_atoms: Sequence[Dict[str, Any]],
-		inequalities: Sequence[Tuple[str, str]],
-		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
-		type_domains: Dict[str, Tuple[str, ...]],
-		caller_type_constraints: Sequence[Tuple[str, str]],
-		caller_inequalities: Sequence[Tuple[str, str]],
-	) -> List[Dict[str, str]]:
-		if len(head_args) != len(goal_args):
-			return []
-
-		head_binding = {
-			str(pattern): str(actual)
-			for pattern, actual in zip(head_args, goal_args)
-			if self._looks_like_asl_variable(str(pattern))
-		}
-		instantiated_atoms: List[Dict[str, Any]] = []
-		for atom in context_atoms:
-			instantiated_atoms.append(
-				{
-					"predicate": str(atom.get("predicate") or ""),
-					"args": tuple(
-						head_binding.get(str(arg), str(arg))
-						for arg in tuple(atom.get("args") or ())
-					),
-				},
-			)
-		instantiated_inequalities = [
-			(
-				head_binding.get(str(lhs), str(lhs)),
-				head_binding.get(str(rhs), str(rhs)),
-			)
-			for lhs, rhs in inequalities
-		]
-		bindings: List[Dict[str, str]] = [{}]
-		instantiated_atoms.sort(
-			key=lambda atom: len(
-				fact_index.get((str(atom["predicate"]), len(tuple(atom["args"]))), ()),
-			),
-		)
-		for atom in instantiated_atoms:
-			facts = fact_index.get((str(atom["predicate"]), len(tuple(atom["args"]))), ())
-			if not facts:
-				return []
-			next_bindings: List[Dict[str, str]] = []
-			for binding in bindings:
-				for fact_args in facts:
-					matched = self._match_grounding_atom(
-						tuple(atom["args"]),
-						fact_args,
-						binding,
-					)
-					if matched is None:
-						continue
-					if not self._binding_satisfies_local_witness_filters(
-						matched,
-						type_constraints=caller_type_constraints,
-						type_domains=type_domains,
-						inequalities=tuple(instantiated_inequalities) + tuple(caller_inequalities),
-						local_vars=(),
-						require_all_local_bindings=False,
-					):
-						continue
-					next_bindings.append(matched)
-			if not next_bindings:
-				return []
-			bindings = next_bindings
-		return [
-			dict(binding)
-			for binding in bindings
-			if self._binding_satisfies_local_witness_filters(
-				binding,
-				type_constraints=caller_type_constraints,
-				type_domains=type_domains,
-				inequalities=tuple(instantiated_inequalities) + tuple(caller_inequalities),
-				local_vars=(),
-				require_all_local_bindings=False,
-			)
-		]
-
-	@staticmethod
-	def _merge_asl_bindings(
-		first: Dict[str, str],
-		second: Dict[str, str],
-	) -> Optional[Dict[str, str]]:
-		merged = dict(first)
-		for variable, value in second.items():
-			existing = merged.get(variable)
-			if existing is not None and (
-				JasonRunner._canonical_runtime_token(existing)
-				!= JasonRunner._canonical_runtime_token(value)
-			):
-				return None
-			merged[variable] = value
-		return merged
 
 	@staticmethod
 	def _extract_asl_variables(text: str) -> Set[str]:

@@ -137,7 +137,7 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "If a method has zero or one subtask, ordering must be []." in system_prompt
 	assert 'local pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
 	assert "must be quoted strings" in system_prompt
-	assert "Non-noop methods must contain real subtasks" in user_prompt
+	assert "Methods that are not already satisfied must contain real subtasks" in user_prompt
 	assert "primitive leaf methods must include the primitive action itself" in user_prompt
 	assert "Use temporal_specifications as the only task-level supervision" in user_prompt
 	assert "keeping methods reusable and variable-parameterized" in user_prompt
@@ -816,7 +816,7 @@ def test_method_synthesis_transport_does_not_store_reasoning_when_no_json_arrive
 			)
 			yield FakeChunk(
 				"req_reasoning_only",
-				reasoning="Now for all noop methods, parameters are the task signature parameters.",
+				reasoning="Now for all empty methods, parameters are the task signature parameters.",
 				finish_reason="length",
 			)
 
@@ -875,10 +875,10 @@ def test_library_postprocess_normalises_typed_method_parameter_surfaces() -> Non
 	synthesizer = HTNMethodSynthesizer()
 	domain = HDDLParser.parse_domain(DOMAIN_FILES["blocksworld"])
 	library = synthesizer._parse_llm_library(
-		'{"compound_tasks":[{"name":"do_put_on","parameters":["?x:block","?y:block"]}],'
-		'"methods":[{"method_name":"m_do_put_on_noop","task_name":"do_put_on",'
-		'"parameters":["?x:block","?y:block"],"task_args":["?x","?y"],'
-		'"context":["on(?x, ?y)"],"subtasks":[],"ordering":[]}]}'
+			'{"compound_tasks":[{"name":"do_put_on","parameters":["?x:block","?y:block"]}],'
+			'"methods":[{"method_name":"m_do_put_on_already_satisfied","task_name":"do_put_on",'
+			'"parameters":["?x:block","?y:block"],"task_args":["?x","?y"],'
+			'"context":["on(?x, ?y)"],"subtasks":[],"ordering":[]}]}'
 	)
 
 	normalised = synthesizer._normalise_llm_library(library, domain)
@@ -1080,9 +1080,9 @@ def test_parse_llm_library_salvages_domain_task_payload_with_extra_closers() -> 
 	response_text = (
 		'{"tasks":['
 		'{"name":"calibrate_abs","parameters":["R","C"],'
-		'"noop":{"precondition":["calibrated(C)"]}}]},'
+		'"constructive":[{"precondition":["calibrated(C)"],"ordered_subtasks":[]}]}}]},'
 		'{"name":"empty_store","parameters":["S","R"],'
-		'"noop":{"precondition":["empty(S)"]}}]}'
+		'"constructive":[{"precondition":["empty(S)"],"ordered_subtasks":[]}]}}]}'
 	)
 
 	library = synthesizer._parse_llm_library(response_text)
@@ -1093,7 +1093,7 @@ def test_parse_llm_library_salvages_domain_task_payload_with_extra_closers() -> 
 def test_parse_llm_library_repairs_common_stray_quote_before_field_separator() -> None:
 	response_text = (
 		'{"tasks":[{"name":"do_clear","parameters":["ARG1"],'
-		'"constructive":[{"producer":"unstack(ARG2, ARG1)"}]","noop":{"precondition":["clear(ARG1)"]}}]}'
+		'"constructive":[{"producer":"unstack(ARG2, ARG1)"}]","context":["clear(ARG1)"]}]}'
 	)
 
 	library = HTNMethodSynthesizer()._parse_llm_library(response_text)
@@ -1120,7 +1120,7 @@ def test_parse_llm_library_unwraps_single_list_wrapped_tasks_payload() -> None:
 	response_text = (
 		'[{"tasks":['
 		'{"name":"auto_calibrate","parameters":["?s","?i"],'
-		'"noop":{"precondition":["calibrated(?i)"]},'
+		'"context":["calibrated(?i)"],'
 		'"constructive":[{"producer":"calibrate(?s, ?i, ?d)"}]}'
 		']}]'
 	)

@@ -687,14 +687,6 @@ class IPCPlanVerifier:
 					task_args=task_args,
 				):
 					break
-				if self._can_skip_noop_trace_artifact(
-					method=method,
-					actions=actions,
-					action_index=next_action_index,
-				):
-					next_action_index += 1
-					next_trace_index += 1
-					continue
 				if method.task_name != task_name:
 					raise ValueError(
 						f"expected method for task '{task_name}' but trace selected '{method.task_name}'",
@@ -1001,30 +993,6 @@ class IPCPlanVerifier:
 		except ValueError:
 			return False
 		return True
-
-	def _can_skip_noop_trace_artifact(
-		self,
-		*,
-		method: HTNMethod,
-		actions: Sequence[_ActionStep],
-		action_index: int,
-	) -> bool:
-		if not self._method_is_pure_noop(method):
-			return False
-		if action_index >= len(actions):
-			return False
-		action_name, action_args = actions[action_index]
-		return action_name == "nop" and not action_args
-
-	@staticmethod
-	def _method_is_pure_noop(method: HTNMethod) -> bool:
-		if len(method.subtasks) != 1:
-			return False
-		step = method.subtasks[0]
-		if step.kind != "primitive":
-			return False
-		action_name = (step.action_name or step.task_name or "").strip()
-		return action_name == "nop"
 
 	@staticmethod
 	def _normalise_method_trace(

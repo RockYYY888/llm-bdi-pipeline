@@ -6,12 +6,12 @@ if _src_dir not in sys.path:
 	sys.path.insert(0, _src_dir)
 
 from utils.hddl_parser import HDDLParser
-from method_library.synthesis.domain_materialization import write_masked_domain_file
+from domain_model.materialization import write_masked_domain_file
 from method_library.synthesis.domain_prompts import build_domain_prompt_analysis_payload
 from method_library.synthesis.method_family_taxonomy import (
 	DIRECT_LEAF,
 	HIERARCHICAL_ORCHESTRATION,
-	NOOP_GUARD,
+	ALREADY_SATISFIED_GUARD,
 	RECURSIVE_REFINEMENT,
 	SUPPORT_THEN_LEAF,
 	classify_domain_methods,
@@ -38,7 +38,7 @@ def test_official_transport_methods_match_structural_taxonomy() -> None:
 	assert classifications["m-load"].archetype == DIRECT_LEAF
 	assert classifications["m-unload"].archetype == DIRECT_LEAF
 	assert classifications["m-drive-to-via"].archetype == RECURSIVE_REFINEMENT
-	assert classifications["m-i-am-there"].archetype == NOOP_GUARD
+	assert classifications["m-i-am-there"].archetype == DIRECT_LEAF
 	assert classifications["m-deliver"].archetype == HIERARCHICAL_ORCHESTRATION
 
 
@@ -49,7 +49,7 @@ def test_official_blocksworld_methods_match_structural_taxonomy() -> None:
 		for classification in classify_domain_methods(domain)
 	}
 
-	assert classifications["m0_do_put_on"].archetype == NOOP_GUARD
+	assert classifications["m0_do_put_on"].archetype == DIRECT_LEAF
 	assert classifications["m4_do_move"].archetype == SUPPORT_THEN_LEAF
 	assert classifications["m7_do_clear"].archetype == RECURSIVE_REFINEMENT
 
@@ -68,7 +68,7 @@ def test_official_satellite_and_marsrover_methods_match_structural_taxonomy() ->
 
 	assert satellite_classifications["method3"].archetype == DIRECT_LEAF
 	assert satellite_classifications["method4"].archetype == HIERARCHICAL_ORCHESTRATION
-	assert marsrover_classifications["m-empty-store-1"].archetype == NOOP_GUARD
+	assert marsrover_classifications["m-empty-store-1"].archetype == ALREADY_SATISFIED_GUARD
 	assert marsrover_classifications["m-get_soil_data"].archetype == HIERARCHICAL_ORCHESTRATION
 	assert marsrover_classifications["m-navigate_abs-4"].archetype == SUPPORT_THEN_LEAF
 
@@ -104,7 +104,7 @@ def test_blocksworld_masked_blueprints_expose_method_family_archetypes(tmp_path:
 		for blueprint in payload["method_blueprints"]
 	}
 
-	assert NOOP_GUARD in tuple(blueprints["do_put_on"]["family_archetypes"])
+	assert ALREADY_SATISFIED_GUARD in tuple(blueprints["do_put_on"]["family_archetypes"])
 	assert HIERARCHICAL_ORCHESTRATION in tuple(blueprints["do_put_on"]["family_archetypes"])
 	assert SUPPORT_THEN_LEAF not in tuple(blueprints["do_put_on"]["family_archetypes"])
 	assert SUPPORT_THEN_LEAF in tuple(blueprints["do_move"]["family_archetypes"])
@@ -124,7 +124,7 @@ def test_marsrover_masked_blueprints_separate_supported_leaf_from_mission_tasks(
 	}
 
 	assert tuple(blueprints["send_soil_data"]["family_archetypes"]) == (
-		NOOP_GUARD,
+			ALREADY_SATISFIED_GUARD,
 		SUPPORT_THEN_LEAF,
 	)
 	assert HIERARCHICAL_ORCHESTRATION in tuple(blueprints["get_soil_data"]["family_archetypes"])
@@ -158,4 +158,4 @@ def test_blueprint_archetype_inference_handles_helper_leaf_and_recursive_cases()
 			"witness_binding_required": True,
 			"typed_task_signature": "get-to(?v:vehicle, ?l:location)",
 		}
-	) == (NOOP_GUARD, RECURSIVE_REFINEMENT)
+	) == (ALREADY_SATISFIED_GUARD, RECURSIVE_REFINEMENT)

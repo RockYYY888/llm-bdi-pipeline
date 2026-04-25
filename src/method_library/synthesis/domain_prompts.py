@@ -764,8 +764,8 @@ def _compact_method_family_schema(family: Dict[str, Any]) -> Dict[str, Any]:
 	serializable = dict(family)
 	if str(serializable.get("family_role") or "").strip() == "direct_achiever":
 		serializable.pop("family_role", None)
-	if serializable.get("redundant_if_noop_holds") is False:
-		serializable.pop("redundant_if_noop_holds", None)
+	if serializable.get("redundant_if_already_satisfied") is False:
+		serializable.pop("redundant_if_already_satisfied", None)
 	return serializable
 
 
@@ -916,7 +916,7 @@ def _render_method_family_schemas(
 				),
 				"final_step": final_step,
 				"context": context,
-				"redundant_if_noop_holds": headline_signature in context,
+					"redundant_if_already_satisfied": headline_signature in context,
 			}
 			if recursive_support_calls:
 				family_payload["recursive_support_calls"] = _limited_unique(
@@ -1144,7 +1144,7 @@ def build_domain_htn_user_prompt(
 			"4. Primitive action names from primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families may appear only in subtasks with kind=primitive.",
 			"5. Compound task names may appear only as method.task_name or subtasks with kind=compound.",
 			"6. Preserve distinct AUX witness roles; bind required witnesses in parameters, context, subtasks, and ordering, but not in task_args.",
-			"7. Non-noop methods must contain real subtasks; primitive leaf methods must include the primitive action itself.",
+				"7. Methods that are not already satisfied must contain real subtasks; primitive leaf methods must include the primitive action itself.",
 			"8. Use temporal_specifications as the only task-level supervision while keeping methods reusable and variable-parameterized.",
 			"9. Every method must cite one or more source_instruction_ids from temporal_specifications.",
 			"10. Enforce structural_contract exactly; it is part of the output specification.",
@@ -1200,7 +1200,7 @@ def build_domain_htn_user_prompt(
 			"ordering must be an array of two-element step-id arrays such as [[\"s1\", \"s2\"]].\n"
 			"Each subtask entry uses: step_id, task_name, args, kind.\n"
 			"All names, args, context literals, ordering step ids, and source_instruction_ids are strings; never emit bare tokens.\n"
-			"Use empty subtasks plus empty ordering for noop methods.\n"
+				"Use empty subtasks plus empty ordering only for already-satisfied guarded methods.\n"
 			f"schema_hint: {schema_hint}",
 		),
 	]

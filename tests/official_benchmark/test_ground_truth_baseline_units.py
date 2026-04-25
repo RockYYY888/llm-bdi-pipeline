@@ -115,7 +115,7 @@ def test_panda_plan_parser_decodes_linearized_identifier_tokens() -> None:
 	planner = PANDAPlanner()
 	domain = SimpleNamespace(
 		actions=[
-			SimpleNamespace(name="noop"),
+			SimpleNamespace(name="wait"),
 			SimpleNamespace(name="pick-up"),
 			SimpleNamespace(name="drop"),
 		],
@@ -123,7 +123,7 @@ def test_panda_plan_parser_decodes_linearized_identifier_tokens() -> None:
 	plan_text = planner._decode_linearized_plan_tokens(
 		"""
 ==>
-0 noop truckMINUS_0 cityMINUS_locMINUS_0
+0 wait truckMINUS_0 cityMINUS_locMINUS_0
 1 pickMINUS_up truckMINUS_0 cityMINUS_locMINUS_0 packageMINUS_0 capacityMINUS_2 capacityMINUS_3
 2 drop truckMINUS_0 cityMINUS_locMINUS_3 packageMINUS_0 capacityMINUS_2 capacityMINUS_3
 root
@@ -132,7 +132,7 @@ root
 
 	steps = planner._parse_plan_steps(plan_text, domain)
 
-	assert [step.action_name for step in steps] == ["noop", "pick-up", "drop"]
+	assert [step.action_name for step in steps] == ["wait", "pick-up", "drop"]
 	assert steps[1].args == (
 		"truck-0",
 		"city-loc-0",

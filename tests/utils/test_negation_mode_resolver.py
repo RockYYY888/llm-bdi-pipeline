@@ -33,7 +33,7 @@ def _action(name: str, preconditions: str, effects: str):
 def test_policy_forces_all_negative_literals_to_naf_even_with_query_hints():
 	domain = SimpleNamespace(
 		predicates=[_predicate("on", 2)],
-		actions=[_action("noop", "(and)", "(and)")],
+		actions=[_action("wait", "(and)", "(and)")],
 	)
 	resolution = resolve_negation_modes(
 		domain,
