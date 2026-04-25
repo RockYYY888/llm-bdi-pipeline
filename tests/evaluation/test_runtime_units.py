@@ -1239,8 +1239,15 @@ def test_jason_runner_instruments_plan_library_variants_with_source_method_name(
 	)
 
 	assert '"m_deliver_branching"' in instrumented
-	assert "__variant_1" not in instrumented
-	assert "__variant_2" not in instrumented
+	assert '.print("runtime trace method flat ", "m_deliver_branching"' in instrumented
+	assert (
+		'blocked_runtime_method("m_deliver_branching__variant_1", deliver, PKG, LOC, '
+		"runtime_binding)"
+	) in instrumented
+	assert (
+		'blocked_runtime_method("m_deliver_branching__variant_2", deliver, PKG, LOC, '
+		"runtime_binding)"
+	) in instrumented
 
 
 def test_jason_runner_renders_failure_handlers_from_plan_library_and_action_schemas() -> None:
@@ -1264,7 +1271,7 @@ def test_jason_runner_renders_failure_handlers_from_plan_library_and_action_sche
 	assert "-!pick_up(X) : true <-" in rendered
 
 
-def test_jason_runner_orders_delete_effects_before_add_effects() -> None:
+def test_jason_runner_delegates_dynamic_effects_to_environment() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(
 		[
@@ -1284,7 +1291,10 @@ def test_jason_runner_orders_delete_effects_before_add_effects() -> None:
 
 	rewritten = runner._rewrite_primitive_wrappers_for_environment(agentspeak_code)
 
-	assert rewritten.index("-at(OBJ, FROM)") < rewritten.index("+at(OBJ, TO)")
+	assert "+at(OBJ, TO)" not in rewritten
+	assert "-at(OBJ, FROM)" not in rewritten
+	assert "update_position(OBJ, TO, FROM);" in rewritten
+	assert ".perceive." in rewritten
 	assert runner._ordered_runtime_effects(
 		(
 			{"predicate": "at", "args": ("obj0", "loc0"), "is_positive": True},
@@ -1634,7 +1644,14 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
 	assert "+!execute_query_pass_1 : true <-" in runtime_program
 	assert '.print("runtime query pass ", 1)' in runtime_program
-	assert "!task_a." in runtime_program
+	assert "!runtime_query_goal_1." in runtime_program
+	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
+	assert "+!runtime_mark_query_goal_1 : not runtime_pass_failed <-" in runtime_program
+	assert "runtime_snapshot(1);" in runtime_program
+	assert "runtime_commit(1);" in runtime_program
+	assert "runtime_restore(1);" in runtime_program
+	assert ".perceive." in runtime_program
+	assert "!task_a;" in runtime_program
 	assert "runtime_pass_failed" in runtime_program
 	assert runner._extract_goal_repair_pass_count("runtime query pass 1\nruntime query pass 3") == 3
 
@@ -1673,8 +1690,8 @@ def test_jason_runner_repair_mode_blocks_failed_child_goal_choices(
 		goal_facts=("(done a)",),
 	)
 
-	assert "not blocked_runtime_goal(child, X)" in runtime_program
-	assert "+blocked_runtime_goal(child, X)" in runtime_program
+	assert "blocked_runtime_goal" not in runtime_program
+	assert "+blocked_runtime_method(METHOD, child, X, BINDING)" in runtime_program
 	child_failure_handler = runtime_program.split("-!child(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
 	assert ".fail" not in child_failure_handler
 
@@ -1711,9 +1728,33 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	child_failure_handler = runtime_program.split("-!child(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
 	assert "!finish_or_retry_0" in runtime_program
 	assert "+!finish_or_retry_0 : not runtime_pass_failed <-" in runtime_program
-	assert "not blocked_runtime_goal(child, X)" in runtime_program
+	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
+	assert "blocked_runtime_goal" not in runtime_program
+	assert "+blocked_runtime_method(METHOD, child, X, BINDING)" in runtime_program
 	assert "+runtime_pass_failed" in parent_failure_handler
 	assert ".fail" not in child_failure_handler
+
+
+def test_jason_runner_extracts_only_committed_snapshot_actions() -> None:
+	runner = JasonRunner()
+	stdout = "\n".join(
+		[
+			"runtime env action success move(a,b)",
+			"runtime env snapshot 1",
+			"runtime env action success move(b,c)",
+			"runtime env restore 1",
+			"runtime env snapshot 1",
+			"runtime env action success move(b,d)",
+			"runtime env commit 1",
+			"runtime env action success move(d,e)",
+		],
+	)
+
+	assert runner._extract_action_path(stdout) == [
+		"move(a,b)",
+		"move(b,d)",
+		"move(d,e)",
+	]
 
 
 def test_jason_runner_bounds_repetitive_runtime_artifacts() -> None:

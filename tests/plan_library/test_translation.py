@@ -673,3 +673,21 @@ def test_translation_does_not_lift_preconditions_achieved_by_prior_compound_step
 	assert all(not literal.startswith("pointing(") for literal in method2_context)
 	assert "supports(MDOATT_TI_I, MDOATT_TI_M)" in method0_context
 	assert "supports(MDOAT_TI_I, MDOAT_TI_M)" in method2_context
+	assert {
+		"variable": "MDOATT_T_D_PREV",
+		"source": "action-bound",
+		"role": "output_variable_from_action_precondition",
+		"step_index": 1,
+		"argument_index": 2,
+		"step_kind": "action",
+		"step_symbol": "turn_to",
+		"binding_status": "action_precondition_bound",
+		"binding_source": "positive_action_precondition",
+		"binding_literals": ("pointing(MDOATT_T_S,MDOATT_T_D_PREV)",),
+	} in plans_by_name["method0"].binding_certificate
+	assert not any(
+		entry.get("variable") == "MDOATT_T_D_PREV"
+		and entry.get("step_symbol") == "turn_to"
+		and entry.get("binding_status") == "unbound_at_use"
+		for entry in plans_by_name["method0"].binding_certificate
+	)

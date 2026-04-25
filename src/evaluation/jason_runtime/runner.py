@@ -673,6 +673,8 @@ class JasonRunner:
 		)
 		lines.append("")
 		if goal_retry_enabled:
+			if query_goals:
+				lines.extend(self._render_retry_query_goal_plans(query_goals))
 			lines.extend(
 				self._render_goal_repair_plans(
 					query_goals=query_goals,
@@ -703,7 +705,7 @@ class JasonRunner:
 			return (
 				'.print("execute start")',
 				".perceive",
-				*self._render_query_goal_calls(query_goals),
+				*self._render_retry_query_goal_calls(query_goals),
 				"!finish_or_retry_0",
 				".stopMAS",
 			)
@@ -724,7 +726,7 @@ class JasonRunner:
 	) -> List[str]:
 		pass_count = self._goal_repair_pass_count()
 		lines: List[str] = []
-		query_goal_calls = self._render_query_goal_calls(query_goals)
+		query_goal_calls = self._render_retry_query_goal_calls(query_goals)
 		for pass_index in range(0, pass_count + 1):
 			success_context = (
 				f"{goal_context} & not runtime_pass_failed"
@@ -765,6 +767,54 @@ class JasonRunner:
 			)
 			lines.append("")
 		return lines
+
+	def _render_retry_query_goal_plans(self, query_goals: Sequence[Any]) -> List[str]:
+		lines: List[str] = ["/* Runtime Query Goal Wrappers */"]
+		for index, goal_call in enumerate(self._render_query_goal_calls(query_goals), start=1):
+			goal_name = f"runtime_query_goal_{index}"
+			marker = f"runtime_query_goal_completed({index})"
+			mark_goal = f"runtime_mark_query_goal_{index}"
+			lines.append(f"+!{goal_name} : {marker} <-")
+			lines.extend(self._indent_body(("true",)))
+			lines.append("")
+			lines.append(f"+!{goal_name} : true <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f"runtime_snapshot({index})",
+						goal_call,
+						f"!{mark_goal}",
+					),
+				),
+			)
+			lines.append("")
+			lines.append(f"+!{mark_goal} : not runtime_pass_failed <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f"runtime_commit({index})",
+						f"+{marker}",
+					),
+				),
+			)
+			lines.append("")
+			lines.append(f"+!{mark_goal} : true <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f"runtime_restore({index})",
+						".perceive",
+					),
+				),
+			)
+			lines.append("")
+		return lines
+
+	def _render_retry_query_goal_calls(self, query_goals: Sequence[Any]) -> Tuple[str, ...]:
+		return tuple(
+			f"!runtime_query_goal_{index}"
+			for index, _goal in enumerate(self._render_query_goal_calls(query_goals), start=1)
+		)
 
 	@staticmethod
 	def _failure_repair_enabled() -> bool:
@@ -834,7 +884,8 @@ class JasonRunner:
 		object_types: Dict[str, str],
 		type_parent_map: Dict[str, Optional[str]],
 	) -> str:
-		if not runtime_objects and not seed_facts:
+		_ = seed_facts
+		if not runtime_objects:
 			return agentspeak_code
 
 		start_marker = "/* Initial Beliefs */"
@@ -855,15 +906,6 @@ class JasonRunner:
 		body_lines = [line for line in section_lines[1:] if line.strip()]
 		existing = {line.strip() for line in body_lines}
 		inserted: List[str] = []
-
-		for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts):
-			if not atom:
-				continue
-			belief_line = f"{atom}."
-			if belief_line in existing:
-				continue
-			existing.add(belief_line)
-			inserted.append(belief_line)
 
 		for obj in runtime_objects:
 			object_line = f"{self._call('object', (self._runtime_atom_term(obj),))}."
@@ -908,12 +950,37 @@ class JasonRunner:
 		return tuple(goal_calls)
 
 	def _extract_action_path(self, stdout: str) -> List[str]:
-		pattern = re.compile(r"^runtime env action success (.+?)\s*$")
-		return [
-			match.group(1).strip()
-			for line in stdout.splitlines()
-			if (match := pattern.match(line.strip())) is not None
-		]
+		action_pattern = re.compile(r"^runtime env action success (.+?)\s*$")
+		snapshot_pattern = re.compile(r"^runtime env snapshot (.+?)\s*$")
+		restore_pattern = re.compile(r"^runtime env restore (.+?)\s*$")
+		commit_pattern = re.compile(r"^runtime env commit (.+?)\s*$")
+		actions: List[str] = []
+		snapshots: List[Tuple[str, int]] = []
+		for raw_line in stdout.splitlines():
+			line = raw_line.strip()
+			if match := snapshot_pattern.match(line):
+				snapshots.append((match.group(1).strip(), len(actions)))
+				continue
+			if match := restore_pattern.match(line):
+				key = match.group(1).strip()
+				for index in range(len(snapshots) - 1, -1, -1):
+					snapshot_key, action_count = snapshots[index]
+					if snapshot_key != key:
+						continue
+					del actions[action_count:]
+					del snapshots[index:]
+					break
+				continue
+			if match := commit_pattern.match(line):
+				key = match.group(1).strip()
+				for index in range(len(snapshots) - 1, -1, -1):
+					if snapshots[index][0] == key:
+						del snapshots[index]
+						break
+				continue
+			if match := action_pattern.match(line):
+				actions.append(match.group(1).strip())
+		return actions
 
 	@staticmethod
 	def _extract_goal_repair_pass_count(stdout: str) -> int:
@@ -1423,16 +1490,51 @@ class JasonRunner:
 				continue
 			seen_triggers.add(trigger)
 			fail_term = self._call("fail_goal", (self._asl_atom_or_string(task_name), *handler_args))
-			blocked_goal = self._call(
-				"blocked_runtime_goal",
-				(self._asl_atom_or_string(self._sanitize_name(task_name)), *handler_args),
+			active_method = self._call(
+				"active_runtime_method",
+				(
+					"METHOD",
+					self._asl_atom_or_string(self._sanitize_name(task_name)),
+					*handler_args,
+					"BINDING",
+				),
 			)
+			blocked_method = self._call(
+				"blocked_runtime_method",
+				(
+					"METHOD",
+					self._asl_atom_or_string(self._sanitize_name(task_name)),
+					*handler_args,
+					"BINDING",
+				),
+			)
+			active_handler_context = (
+				f"{active_method} & not runtime_pass_failed"
+				if allow_repair
+				else active_method
+			)
+			lines.append(f"-!{trigger} : {active_handler_context} <-")
+			lines.extend(
+				self._indent_body(
+					[
+						f'.print("runtime goal failed ", {fail_term})',
+						f"+{blocked_method}",
+						f"-{active_method}",
+						*(
+							("+runtime_pass_failed",)
+							if allow_repair
+							else ()
+						),
+						*(() if allow_repair else (".fail",)),
+					],
+				),
+			)
+			lines.append("")
 			lines.append(f"-!{trigger} : true <-")
 			lines.extend(
 				self._indent_body(
 					[
 						f'.print("runtime goal failed ", {fail_term})',
-						f"+{blocked_goal}",
 						*(
 							("+runtime_pass_failed",)
 							if allow_repair
@@ -1547,18 +1649,7 @@ class JasonRunner:
 				rewritten_chunks.append("\n".join(chunk))
 				continue
 			action_statement = statements[0]
-			effect_statements = statements[1:]
-			ordered_effect_statements = [
-				statement
-				for statement in effect_statements
-				if statement.startswith("-")
-			]
-			ordered_effect_statements.extend(
-				statement
-				for statement in effect_statements
-				if not statement.startswith("-")
-			)
-			statements = [action_statement, *ordered_effect_statements, ".perceive"]
+			statements = [action_statement, ".perceive"]
 			rewritten_body = [
 				f"\t{statement}{'.' if index == len(statements) - 1 else ';'}"
 				for index, statement in enumerate(statements)
@@ -1719,13 +1810,7 @@ class JasonRunner:
 		)
 		if specialised_chunks != pre_guard_promotion_chunks:
 			changed = True
-		if enable_blocked_goal_guards:
-			pre_blocked_guard_chunks = list(specialised_chunks)
-			specialised_chunks = self._promote_body_blocked_goal_guards_to_context(
-				specialised_chunks,
-			)
-			if specialised_chunks != pre_blocked_guard_chunks:
-				changed = True
+		_ = enable_blocked_goal_guards
 		pre_ordered_chunks = list(specialised_chunks)
 		specialised_chunks = self._order_runtime_method_plan_chunks(
 			specialised_chunks,
@@ -2759,11 +2844,119 @@ class JasonRunner:
 		for method_like, chunk in zip(trace_sources, chunks):
 			head_line = chunk[0]
 			body_lines = chunk[1:]
+			parsed_head = self._parse_asl_method_head(head_line)
+			active_line = ""
+			cleanup_statement = ""
+			if parsed_head is not None:
+				task_name, trigger_args, _context_parts = parsed_head
+				method_identity = self._runtime_method_identity(method_like)
+				binding_term = self._runtime_method_binding_term(
+					trigger_args=trigger_args,
+					context_parts=_context_parts,
+				)
+				active_method = self._runtime_method_state_atom(
+					"active_runtime_method",
+					method_identity=method_identity,
+					task_name=task_name,
+					args=trigger_args,
+					binding_term=binding_term,
+				)
+				blocked_method = self._runtime_method_state_atom(
+					"blocked_runtime_method",
+					method_identity=method_identity,
+					task_name=task_name,
+					args=trigger_args,
+					binding_term=binding_term,
+				)
+				head_line = self._append_asl_method_context_parts(
+					head_line,
+					(f"not {blocked_method}",),
+				)
+				active_line = f"\t+{active_method};"
+				cleanup_statement = f"-{active_method}"
+				body_lines = self._append_success_cleanup_statement(
+					body_lines,
+					cleanup_statement,
+				)
 			trace_line = self._render_method_trace_statement(method_like, head_line)
-			instrumented_chunks.append("\n".join([head_line, trace_line, *body_lines]))
+			prefix_lines = [head_line, trace_line]
+			if active_line:
+				prefix_lines.append(active_line)
+			instrumented_chunks.append("\n".join([*prefix_lines, *body_lines]))
 
 		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{instrumented_section}{suffix}"
+
+	def _runtime_method_identity(self, method: Any) -> str:
+		method_name = str(
+			getattr(method, "plan_name", None)
+			or getattr(method, "method_name", None)
+			or "",
+		).strip()
+		return method_name or "anonymous_method"
+
+	def _runtime_method_state_atom(
+		self,
+		predicate_name: str,
+		*,
+		method_identity: str,
+		task_name: str,
+		args: Sequence[str],
+		binding_term: str,
+	) -> str:
+		return self._call(
+			predicate_name,
+			(
+				self._asl_string(method_identity),
+				self._asl_atom_or_string(self._sanitize_name(task_name)),
+				*args,
+				binding_term,
+			),
+		)
+
+	def _runtime_method_binding_term(
+		self,
+		*,
+		trigger_args: Sequence[str],
+		context_parts: Sequence[str],
+	) -> str:
+		trigger_variables = {
+			token
+			for argument in trigger_args
+			for token in self._extract_asl_variables(argument)
+		}
+		local_variables: List[str] = []
+		seen: set[str] = set()
+		for part in context_parts:
+			for variable in self._extract_asl_variables(part):
+				if variable in trigger_variables or variable in seen:
+					continue
+				seen.add(variable)
+				local_variables.append(variable)
+		if not local_variables:
+			return "runtime_binding"
+		return f"runtime_binding({', '.join(local_variables)})"
+
+	@staticmethod
+	def _append_success_cleanup_statement(
+		body_lines: Sequence[str],
+		cleanup_statement: str,
+	) -> List[str]:
+		cleanup = str(cleanup_statement or "").strip()
+		if not cleanup:
+			return list(body_lines)
+		if not body_lines:
+			return [f"\t{cleanup}."]
+		rewritten_lines = list(body_lines)
+		last_line = rewritten_lines[-1]
+		match = re.match(r"^(\s*)(.*?)([;.])\s*$", last_line)
+		if match is None:
+			rewritten_lines.append(f"\t{cleanup}.")
+			return rewritten_lines
+		indent, statement, _suffix = match.groups()
+		rewritten_lines[-1] = f"{indent}{statement};"
+		rewritten_lines.append(f"{indent}{cleanup}.")
+		return rewritten_lines
 
 	@classmethod
 	def _context_atom(
@@ -3021,6 +3214,7 @@ public class {self.environment_class_name} extends Environment {{
 
 	private final Set<String> world = new LinkedHashSet<>();
 	private final Map<String, ActionSchema> actions = new HashMap<>();
+	private final Map<String, Set<String>> snapshots = new HashMap<>();
 
 	@Override
 	public synchronized void init(String[] args) {{
@@ -3034,6 +3228,9 @@ public class {self.environment_class_name} extends Environment {{
 	@Override
 	public synchronized boolean executeAction(String agName, Structure action) {{
 		if ("true".equals(action.getFunctor()) && action.getArity() == 0) {{
+			return true;
+		}}
+		if (handleRuntimeControlAction(action)) {{
 			return true;
 		}}
 		ActionSchema schema = actions.get(action.getFunctor());
@@ -3068,8 +3265,51 @@ public class {self.environment_class_name} extends Environment {{
 		return true;
 	}}
 
+	private boolean handleRuntimeControlAction(Structure action) {{
+		String functor = action.getFunctor();
+		if (
+			!"runtime_snapshot".equals(functor)
+			&& !"runtime_restore".equals(functor)
+			&& !"runtime_commit".equals(functor)
+		) {{
+			return false;
+		}}
+		String key = snapshotKey(action);
+		if ("runtime_snapshot".equals(functor)) {{
+			snapshots.put(key, new LinkedHashSet<>(world));
+			System.out.println("runtime env snapshot " + key);
+			return true;
+		}}
+		if ("runtime_restore".equals(functor)) {{
+			Set<String> snapshot = snapshots.get(key);
+			if (snapshot == null) {{
+				return false;
+			}}
+			world.clear();
+			world.addAll(snapshot);
+			syncPercepts();
+			System.out.println("runtime env restore " + key);
+			return true;
+		}}
+		snapshots.remove(key);
+		System.out.println("runtime env commit " + key);
+		return true;
+	}}
+
+	private String snapshotKey(Structure action) {{
+		if (action.getArity() == 0) {{
+			return "default";
+		}}
+		String[] args = new String[action.getArity()];
+		for (int i = 0; i < action.getArity(); i++) {{
+			args[i] = canonical(action.getTerm(i).toString());
+		}}
+		return String.join("|", args);
+	}}
+
 	private void seedInitialFacts() {{
 		world.clear();
+		snapshots.clear();
 {seed_lines if seed_lines else ""}
 	}}
 

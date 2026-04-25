@@ -94,6 +94,7 @@ def build_plan_library(
 				trigger_arguments=trigger_arguments,
 				context_certificate=binding_certificate,
 				body=body,
+				action_semantics_map=action_semantics_map,
 			)
 			variant_plan_name = plan_name
 			if len(ordered_step_variants) > 1:
@@ -564,6 +565,7 @@ def _plan_binding_certificate(
 	trigger_arguments: Sequence[str],
 	context_certificate: Sequence[Dict[str, Any]],
 	body: Sequence[AgentSpeakBodyStep],
+	action_semantics_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], ...]:
 	entries: List[Dict[str, Any]] = []
 	for index, argument in enumerate(trigger_arguments):
@@ -588,6 +590,14 @@ def _plan_binding_certificate(
 	for step_index, step in enumerate(body):
 		step_kind = str(step.kind or "").strip()
 		source = "subgoal-bound" if step_kind == "subgoal" else "action-bound"
+		action_precondition_bindings = (
+			_action_precondition_bindable_variables(
+				step=step,
+				action_semantics_map=action_semantics_map,
+			)
+			if step_kind == "action"
+			else {}
+		)
 		step_variables: set[str] = set()
 		for argument_index, argument in enumerate(step.arguments):
 			variable = str(argument or "").strip()
@@ -600,23 +610,78 @@ def _plan_binding_certificate(
 			if not was_bound and step_kind == "subgoal":
 				binding_status = "subgoal_output_bound"
 				role = "output_variable_from_subgoal"
+			elif not was_bound and variable in action_precondition_bindings:
+				binding_status = "action_precondition_bound"
+				role = "output_variable_from_action_precondition"
 			elif not was_bound:
 				binding_status = "unbound_at_use"
-			entries.append(
-				{
-					"variable": variable,
-					"source": source,
-					"role": role,
-					"step_index": step_index,
-					"argument_index": argument_index,
-					"step_kind": step_kind,
-					"step_symbol": step.symbol,
-					"binding_status": binding_status,
-				},
-			)
-		if step_kind == "subgoal":
+			entry = {
+				"variable": variable,
+				"source": source,
+				"role": role,
+				"step_index": step_index,
+				"argument_index": argument_index,
+				"step_kind": step_kind,
+				"step_symbol": step.symbol,
+				"binding_status": binding_status,
+			}
+			binding_literals = action_precondition_bindings.get(variable, ())
+			if binding_status == "action_precondition_bound" and binding_literals:
+				entry["binding_source"] = "positive_action_precondition"
+				entry["binding_literals"] = tuple(binding_literals)
+			entries.append(entry)
+		if step_kind == "subgoal" or (
+			step_kind == "action"
+			and step_variables - bound_variables <= set(action_precondition_bindings)
+		):
 			bound_variables.update(step_variables)
 	return _deduplicate_certificate(entries)
+
+
+def _action_precondition_bindable_variables(
+	*,
+	step: AgentSpeakBodyStep,
+	action_semantics_map: Dict[str, Dict[str, Any]],
+) -> Dict[str, Tuple[str, ...]]:
+	"""Return step variables that a primitive wrapper can bind via positive preconditions."""
+
+	action_name = str(step.symbol or "").strip()
+	action_entry = action_semantics_map.get(action_name) or action_semantics_map.get(
+		sanitize_identifier(action_name),
+	)
+	if action_entry is None:
+		return {}
+	action_parameters = tuple(
+		str(parameter)
+		for parameter in tuple(action_entry.get("parameters") or ())
+	)
+	action_arguments = tuple(str(argument) for argument in tuple(step.arguments or ()))
+	action_bindings: Dict[str, str] = {}
+	for parameter, argument in zip(action_parameters, action_arguments):
+		action_bindings[parameter] = argument
+		action_bindings[_symbol_token(parameter)] = argument
+	step_variables = _literal_variable_tokens(action_arguments)
+	bindable_literals: Dict[str, List[str]] = defaultdict(list)
+	for precondition in tuple(action_entry.get("preconditions") or ()):
+		if not _is_positive_predicate_literal(precondition):
+			continue
+		predicate = str(getattr(precondition, "predicate", "") or "").strip()
+		if not predicate or predicate == "object_type":
+			continue
+		bound_args = tuple(
+			action_bindings.get(str(argument), str(argument))
+			for argument in (getattr(precondition, "args", ()) or ())
+		)
+		literal_variables = _literal_variable_tokens(bound_args) & step_variables
+		if not literal_variables:
+			continue
+		rendered_literal = _canonical_literal_signature(predicate, bound_args)
+		for variable in literal_variables:
+			bindable_literals[variable].append(rendered_literal)
+	return {
+		variable: tuple(dict.fromkeys(literals))
+		for variable, literals in bindable_literals.items()
+	}
 
 
 def _literal_binding_certificate(

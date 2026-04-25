@@ -12,7 +12,13 @@ if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
 from method_library import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
-from plan_library import AgentSpeakBodyStep, AgentSpeakPlan, AgentSpeakTrigger, PlanLibrary, build_plan_library
+from plan_library import (
+	AgentSpeakBodyStep,
+	AgentSpeakPlan,
+	AgentSpeakTrigger,
+	PlanLibrary,
+	build_plan_library,
+)
 from plan_library.validation import build_library_validation_record
 
 
@@ -284,3 +290,92 @@ def test_library_validation_does_not_treat_object_type_as_binding_literal() -> N
 	assert record.passed is False
 	assert record.checked_layers["groundability_precheck"] is False
 	assert any("uses unbound variable 'MID'" in warning for warning in record.warnings)
+
+
+def test_library_validation_accepts_action_precondition_bound_variables() -> None:
+	domain = SimpleNamespace(
+		name="routing",
+		types=("object", "vehicle", "location"),
+		predicates=(
+			SimpleNamespace(name="at", parameters=("?vehicle:vehicle", "?loc:location")),
+		),
+		tasks=(
+			SimpleNamespace(name="dispatch", parameters=("?to:location",)),
+		),
+		actions=(
+			SimpleNamespace(
+				name="move",
+				parameters=("?vehicle:vehicle", "?from:location", "?to:location"),
+				preconditions="(at ?vehicle ?from)",
+				effects="(and (not (at ?vehicle ?from)) (at ?vehicle ?to))",
+			),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="dispatch", parameters=("?to",), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="move", parameters=("?vehicle", "?from", "?to"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m-dispatch",
+				task_name="dispatch",
+				parameters=("?vehicle", "?from", "?to"),
+				task_args=("?to",),
+				subtasks=(
+					HTNMethodStep(
+						"s1",
+						"move",
+						("?vehicle", "?from", "?to"),
+						"primitive",
+						action_name="move",
+					),
+				),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+	plan_library = PlanLibrary(
+		domain_name="routing",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="action_precondition_binding",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="dispatch",
+					arguments=("TO:location",),
+				),
+				context=(
+					"object_type(TO, location)",
+					"object_type(VEHICLE, vehicle)",
+					"object_type(FROM, location)",
+				),
+				body=(
+					AgentSpeakBodyStep(
+						kind="action",
+						symbol="move",
+						arguments=("VEHICLE", "FROM", "TO"),
+					),
+				),
+			),
+		),
+	)
+
+	record = build_library_validation_record(
+		domain_name="routing",
+		domain=domain,
+		method_library=method_library,
+		plan_library=plan_library,
+		translation_coverage=build_plan_library(
+			domain=domain,
+			method_library=method_library,
+		)[1],
+		method_validation=_all_pass_method_validation(),
+	)
+
+	assert record.passed is True
+	assert record.checked_layers["groundability_precheck"] is True
+	assert not any("uses unbound variable" in warning for warning in record.warnings)

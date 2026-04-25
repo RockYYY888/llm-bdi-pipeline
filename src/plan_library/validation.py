@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from method_library.synthesis.naming import sanitize_identifier
 from method_library.synthesis.schema import HTNMethodLibrary
+from utils.hddl_condition_parser import HDDLConditionParser
 
 from .models import LibraryValidationRecord, PlanLibrary, TranslationCoverage
 
@@ -80,6 +81,7 @@ def validate_plan_library_structure(
 		getattr(domain, "actions", ()) or (),
 		getattr(method_library, "primitive_tasks", ()) or (),
 	)
+	action_semantics_map = _action_semantics_map_for_validation(domain)
 	predicate_signatures = _symbol_signature_map(getattr(domain, "predicates", ()) or (), ())
 	predicate_signatures.setdefault("object_type", ("object", "object"))
 	layer_results = dict((method_validation or {}).get("layers") or {})
@@ -95,6 +97,7 @@ def validate_plan_library_structure(
 			plan=plan,
 			task_signatures=task_signatures,
 			action_signatures=action_signatures,
+			action_semantics_map=action_semantics_map,
 			predicate_signatures=predicate_signatures,
 		)
 		for plan in tuple(plan_library.plans or ())
@@ -187,6 +190,7 @@ def _validate_plan(
 	plan: Any,
 	task_signatures: Dict[str, Tuple[str, ...]],
 	action_signatures: Dict[str, Tuple[str, ...]],
+	action_semantics_map: Dict[str, Dict[str, Any]],
 	predicate_signatures: Dict[str, Tuple[str, ...]],
 ) -> Dict[str, Any]:
 	plan_name = str(getattr(plan, "plan_name", "") or "").strip() or "<unnamed-plan>"
@@ -360,13 +364,23 @@ def _validate_plan(
 		if step_kind == "subgoal":
 			bound_variables.update(step_variables)
 		else:
-			for variable in unbound_step_variables:
+			action_precondition_bindings = _action_precondition_bindable_variables(
+				step_symbol=step_symbol,
+				step_arguments=step_arguments,
+				action_semantics_map=action_semantics_map,
+			)
+			unsafe_unbound_variables = sorted(
+				variable
+				for variable in unbound_step_variables
+				if variable not in action_precondition_bindings
+			)
+			for variable in unsafe_unbound_variables:
 				groundability_precheck = False
 				warnings.append(
 					f"Plan '{plan_name}' {step_kind} step '{step_symbol}' uses unbound "
 					f"variable '{variable}'.",
 				)
-			if not unbound_step_variables:
+			if not unsafe_unbound_variables:
 				bound_variables.update(step_variables)
 
 	for variable_name, inferred_types in variable_types.items():
@@ -436,6 +450,65 @@ def _symbol_signature_map(
 		signatures.setdefault(name, signature)
 		signatures.setdefault(sanitize_identifier(name), signature)
 	return signatures
+
+
+def _action_semantics_map_for_validation(domain: Any) -> Dict[str, Dict[str, Any]]:
+	parser = HDDLConditionParser()
+	mapping: Dict[str, Dict[str, Any]] = {}
+	for action in getattr(domain, "actions", ()) or ():
+		action_name = str(getattr(action, "name", "") or "").strip()
+		if not action_name:
+			continue
+		if not hasattr(action, "preconditions") or not hasattr(action, "effects"):
+			continue
+		try:
+			parsed = parser.parse_action(action)
+		except Exception:
+			continue
+		entry = {
+			"parameters": parsed.parameters,
+			"preconditions": parsed.preconditions,
+		}
+		mapping[action_name] = entry
+		mapping.setdefault(sanitize_identifier(action_name), entry)
+	return mapping
+
+
+def _action_precondition_bindable_variables(
+	*,
+	step_symbol: str,
+	step_arguments: Sequence[Any],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+) -> set[str]:
+	action_name = str(step_symbol or "").strip()
+	action_entry = action_semantics_map.get(action_name) or action_semantics_map.get(
+		sanitize_identifier(action_name),
+	)
+	if action_entry is None:
+		return set()
+	action_parameters = tuple(
+		str(parameter)
+		for parameter in tuple(action_entry.get("parameters") or ())
+	)
+	action_arguments = tuple(str(argument) for argument in tuple(step_arguments or ()))
+	action_bindings: Dict[str, str] = {}
+	for parameter, argument in zip(action_parameters, action_arguments):
+		action_bindings[parameter] = argument
+		action_bindings[_symbol_token(parameter)] = argument
+	step_variables = _argument_variables(action_arguments)
+	bindable_variables: set[str] = set()
+	for precondition in tuple(action_entry.get("preconditions") or ()):
+		if not bool(getattr(precondition, "is_positive", True)):
+			continue
+		predicate = str(getattr(precondition, "predicate", "") or "").strip()
+		if not predicate or predicate in {"=", "object_type"}:
+			continue
+		bound_args = tuple(
+			action_bindings.get(str(argument), str(argument))
+			for argument in (getattr(precondition, "args", ()) or ())
+		)
+		bindable_variables.update(_argument_variables(bound_args) & step_variables)
+	return bindable_variables
 
 
 def _jason_functor_collisions(plan_library: PlanLibrary) -> Tuple[Dict[str, Any], ...]:
@@ -554,6 +627,17 @@ def _parameter_type(parameter: Any) -> str:
 	if "-" in text and text.startswith("?"):
 		return text.split("-", 1)[1].strip() or "object"
 	return "object"
+
+
+def _symbol_token(raw_value: Any) -> str:
+	text = str(raw_value or "").strip()
+	if not text:
+		return ""
+	if text.startswith("?") and " - " in text:
+		return text.split(" - ", 1)[0].strip()
+	if text.startswith("?") and ":" in text:
+		return text.split(":", 1)[0].strip()
+	return text
 
 
 def _looks_like_variable(token: str) -> bool:
