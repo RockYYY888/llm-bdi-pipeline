@@ -476,7 +476,7 @@ def _translated_context_literals(
 			context_literals.append(rendered)
 	type_guard_literals = _type_guard_context_literals(
 		method_variable_types=method_variable_types,
-		guard_variables=context_guard_variables,
+		guard_variables=context_guard_variables | local_variables,
 		variable_map=variable_map,
 	)
 	context_literals = [*type_guard_literals, *context_literals]

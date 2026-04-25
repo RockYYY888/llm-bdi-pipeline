@@ -1567,12 +1567,12 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
 
 	assert "!finish_or_retry_0;" in execute_section
-	assert "+!finish_or_retry_0 : done(a) <-" in runtime_program
+	assert "+!finish_or_retry_0 : done(a) & not runtime_pass_failed <-" in runtime_program
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
 	assert "+!execute_query_pass_1 : true <-" in runtime_program
 	assert '.print("runtime query pass ", 1)' in runtime_program
 	assert "!task_a." in runtime_program
-	assert "runtime_pass_failed" not in runtime_program
+	assert "runtime_pass_failed" in runtime_program
 	assert runner._extract_goal_repair_pass_count("runtime query pass 1\nruntime query pass 3") == 3
 
 

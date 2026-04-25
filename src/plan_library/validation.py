@@ -239,6 +239,11 @@ def _validate_plan(
 					f"but task '{trigger_symbol}' expects '{expected_type}'.",
 				)
 
+	bound_variables = {
+		_split_typed_argument(raw_argument)[0]
+		for raw_argument in trigger_arguments
+		if _is_agentspeak_variable(_split_typed_argument(raw_argument)[0])
+	}
 	for raw_literal in tuple(getattr(plan, "context", ()) or ()):
 		literal = _parse_plan_context_literal(raw_literal)
 		if literal is None:
@@ -247,6 +252,14 @@ def _validate_plan(
 			warnings.append(f"Plan '{plan_name}' context literal '{raw_literal}' is not parseable.")
 			continue
 		if literal["kind"] == "equality":
+			literal_variables = _context_literal_variables(literal)
+			unbound_variables = sorted(literal_variables - bound_variables)
+			for variable in unbound_variables:
+				groundability_precheck = False
+				warnings.append(
+					f"Plan '{plan_name}' context equality '{raw_literal}' uses unbound "
+					f"variable '{variable}'.",
+				)
 			for token in literal["args"]:
 				if _looks_like_variable(token) and not _is_agentspeak_variable(token):
 					typed_structure = False
@@ -280,6 +293,17 @@ def _validate_plan(
 						"AgentSpeak(L) variable form.",
 					)
 				variable_types.setdefault(argument, set()).add(expected_type)
+		literal_variables = _context_literal_variables(literal)
+		if bool(literal.get("positive", True)):
+			bound_variables.update(literal_variables)
+		else:
+			unbound_variables = sorted(literal_variables - bound_variables)
+			for variable in unbound_variables:
+				groundability_precheck = False
+				warnings.append(
+					f"Plan '{plan_name}' negative context literal '{raw_literal}' uses unbound "
+					f"variable '{variable}'.",
+				)
 
 	for step in tuple(getattr(plan, "body", ()) or ()):
 		step_kind = str(getattr(step, "kind", "") or "").strip()
@@ -330,6 +354,16 @@ def _validate_plan(
 						"AgentSpeak(L) variable form.",
 					)
 				variable_types.setdefault(argument, set()).add(expected_type)
+		step_variables = _argument_variables(step_arguments)
+		unbound_step_variables = sorted(step_variables - bound_variables)
+		for variable in unbound_step_variables:
+			groundability_precheck = False
+			warnings.append(
+				f"Plan '{plan_name}' {step_kind} step '{step_symbol}' uses unbound "
+				f"variable '{variable}'.",
+			)
+		if not unbound_step_variables:
+			bound_variables.update(step_variables)
 
 	for variable_name, inferred_types in variable_types.items():
 		if not inferred_types:
@@ -456,6 +490,13 @@ def _parse_plan_context_literal(raw_literal: Any) -> Dict[str, Any] | None:
 	text = str(raw_literal or "").strip()
 	if not text:
 		return None
+	positive = True
+	if text.startswith("!"):
+		positive = False
+		text = text[1:].strip()
+	if text.lower().startswith("not "):
+		positive = False
+		text = text[4:].strip()
 	equality_match = re.fullmatch(r"(.+?)(==|!=)(.+)", text)
 	if equality_match is not None:
 		return {
@@ -464,15 +505,12 @@ def _parse_plan_context_literal(raw_literal: Any) -> Dict[str, Any] | None:
 				equality_match.group(1).strip(),
 				equality_match.group(3).strip(),
 			),
+			"positive": equality_match.group(2) == "==" and positive,
 		}
-	if text.startswith("!"):
-		text = text[1:].strip()
-	if text.lower().startswith("not "):
-		text = text[4:].strip()
 	if not text:
 		return None
 	if "(" not in text:
-		return {"kind": "predicate", "symbol": text, "args": ()}
+		return {"kind": "predicate", "symbol": text, "args": (), "positive": positive}
 	if not text.endswith(")"):
 		return None
 	symbol, args_text = text.split("(", 1)
@@ -485,6 +523,19 @@ def _parse_plan_context_literal(raw_literal: Any) -> Dict[str, Any] | None:
 		"kind": "predicate",
 		"symbol": symbol.strip(),
 		"args": args,
+		"positive": positive,
+	}
+
+
+def _context_literal_variables(literal: Dict[str, Any]) -> set[str]:
+	return _argument_variables(tuple(literal.get("args") or ()))
+
+
+def _argument_variables(arguments: Sequence[Any]) -> set[str]:
+	return {
+		str(argument).strip()
+		for argument in tuple(arguments or ())
+		if _looks_like_variable(str(argument).strip())
 	}
 
 

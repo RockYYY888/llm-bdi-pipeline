@@ -249,6 +249,7 @@ def test_translation_canonicalises_local_method_variables() -> None:
 		("MID",),
 		("PKG", "LOC"),
 	)
+	assert "object_type(MID, location)" in plan_library.plans[0].context
 
 
 def test_translation_lifts_local_witness_action_preconditions_into_context() -> None:
@@ -391,6 +392,7 @@ def test_translation_adds_type_guards_for_context_bound_method_variables() -> No
 		"object_type(P, package)",
 		"object_type(L1, location)",
 		"object_type(L2, location)",
+		"object_type(V, vehicle)",
 		"at(P, L1)",
 	)
 	assert "at(P, L)" in plans_by_name["m-load"].context

@@ -741,6 +741,10 @@ class JasonRunner:
 	@staticmethod
 	def _failure_repair_enabled() -> bool:
 		raw_value = os.getenv("JASON_RUNTIME_FAILURE_REPAIR", "").strip().lower()
+		if not raw_value:
+			return True
+		if raw_value in {"0", "false", "no", "off"}:
+			return False
 		return raw_value in {"1", "true", "yes", "on"}
 
 	def _render_goal_fact_context(self, goal_facts: Sequence[str]) -> str:

@@ -204,3 +204,41 @@ def test_library_validation_record_rejects_jason_functor_collisions() -> None:
 	assert record.checked_layers["signature_conformance"] is False
 	assert record.checked_layers["body_symbol_validity"] is False
 	assert any("Jason functor collision" in warning for warning in record.warnings)
+
+
+def test_library_validation_record_rejects_body_variables_without_context_binding() -> None:
+	method_library = _method_library_with_auxiliary_step_semantics()
+	plan_library = PlanLibrary(
+		domain_name="courier",
+		plans=(
+			AgentSpeakPlan(
+				plan_name="unbound_local_variable",
+				trigger=AgentSpeakTrigger(
+					event_type="achievement_goal",
+					symbol="deliver",
+					arguments=("PKG:package", "LOC:location"),
+				),
+				context=("object_type(PKG, package)", "object_type(LOC, location)"),
+				body=(
+					AgentSpeakBodyStep(kind="action", symbol="move", arguments=("MID",)),
+					AgentSpeakBodyStep(kind="action", symbol="drop", arguments=("PKG", "LOC")),
+				),
+			),
+		),
+	)
+
+	record = build_library_validation_record(
+		domain_name="courier",
+		domain=_domain(),
+		method_library=method_library,
+		plan_library=plan_library,
+		translation_coverage=build_plan_library(
+			domain=_domain(),
+			method_library=method_library,
+		)[1],
+		method_validation=_all_pass_method_validation(),
+	)
+
+	assert record.passed is False
+	assert record.checked_layers["groundability_precheck"] is False
+	assert any("uses unbound variable 'MID'" in warning for warning in record.warnings)
