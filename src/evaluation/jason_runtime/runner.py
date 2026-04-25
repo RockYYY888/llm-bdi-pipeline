@@ -1328,31 +1328,6 @@ class JasonRunner:
 		return match.group(1).strip(), args
 
 	@staticmethod
-	def _trace_method_name_from_chunk(chunk: Sequence[str]) -> str:
-		for line in chunk:
-			match = re.search(r'"runtime trace method flat "\s*,\s*"([^"]+)"', line)
-			if match is not None:
-				return match.group(1).strip()
-		return ""
-
-	@staticmethod
-	def _method_is_runtime_noop(method: Any) -> bool:
-		subtasks = tuple(getattr(method, "subtasks", ()) or ())
-		if not subtasks:
-			return True
-		if len(subtasks) != 1:
-			return False
-		step = subtasks[0]
-		if str(getattr(step, "kind", "") or "") != "primitive":
-			return False
-		action_name = str(
-			getattr(step, "action_name", None)
-			or getattr(step, "task_name", "")
-			or "",
-		).strip()
-		return action_name in {"nop", "noop"}
-
-	@staticmethod
 	def _combine_contexts(*contexts: str) -> str:
 		parts: List[str] = []
 		seen: set[str] = set()
@@ -2320,19 +2295,12 @@ class JasonRunner:
 					)
 					if goal is not None
 				]
-				trace_method_name = self._trace_method_name_from_chunk(body_lines)
 				body_goal_count = len(body_goals)
 				has_self_recursive_goal = any(
 					str(goal[0]).strip() == str(item.get("task_name") or "").strip()
 					for goal in body_goals
 				)
-				via_like_method = "via" in trace_method_name.lower() or has_self_recursive_goal
 				variable_safe = self._chunk_runtime_variables_are_safe(lines)
-				action_setup_penalty = self._runtime_method_action_setup_penalty(
-					context_parts=tuple(item.get("context_parts") or ()),
-					body_goals=body_goals,
-					fact_index=fact_index,
-				)
 				weighted_noop_support = 0
 				for goal_index, goal in enumerate(body_goals, start=1):
 					if self._goal_has_noop_runtime_support(
@@ -2379,9 +2347,7 @@ class JasonRunner:
 				item["sort_key"] = (
 					0 if self._chunk_is_noop_method_plan(body_lines) else 1,
 					0 if variable_safe else 1,
-					action_setup_penalty,
 					0 if not has_self_recursive_goal else 1,
-					0 if not via_like_method else 1,
 					body_goal_count,
 					-non_type_context_count,
 					-grounded_head_arg_count,
@@ -2398,99 +2364,6 @@ class JasonRunner:
 			ordered_chunks.extend(str(item["chunk"]) for item in group_items)
 
 		return ordered_chunks
-
-	def _runtime_method_action_setup_penalty(
-		self,
-		*,
-		context_parts: Sequence[str],
-		body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
-		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
-	) -> int:
-		penalty = 0
-		for goal_index, (goal_name, goal_args) in enumerate(body_goals):
-			if str(goal_name) == "take_image" and len(goal_args) >= 2:
-				satellite = str(goal_args[0])
-				image_direction = str(goal_args[1])
-				if self._context_contains_runtime_atom(
-					context_parts,
-					"pointing",
-					(satellite, image_direction),
-				):
-					continue
-				if self._prior_body_goal_contains_turn_to(
-					body_goals[:goal_index],
-					satellite=satellite,
-					image_direction=image_direction,
-				):
-					continue
-				penalty += 1
-			if str(goal_name) == "turn_to" and len(goal_args) >= 3:
-				penalty += self._turn_to_source_after_activation_penalty(
-					body_goals[:goal_index],
-					satellite=str(goal_args[0]),
-					source_direction=str(goal_args[2]),
-					fact_index=fact_index,
-				)
-		return penalty
-
-	def _context_contains_runtime_atom(
-		self,
-		context_parts: Sequence[str],
-		predicate: str,
-		args: Sequence[str],
-	) -> bool:
-		for part in context_parts:
-			parsed = self._parse_asl_context_conjunct(str(part))
-			if parsed is None or parsed.get("kind") != "atom":
-				continue
-			if str(parsed.get("predicate") or "") != predicate:
-				continue
-			parsed_args = tuple(str(arg) for arg in tuple(parsed.get("args") or ()))
-			if len(parsed_args) != len(tuple(args)):
-				continue
-			if all(str(left) == str(right) for left, right in zip(parsed_args, args)):
-				return True
-		return False
-
-	@staticmethod
-	def _prior_body_goal_contains_turn_to(
-		prior_body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
-		*,
-		satellite: str,
-		image_direction: str,
-	) -> bool:
-		for goal_name, goal_args in prior_body_goals:
-			if str(goal_name) != "turn_to" or len(goal_args) < 2:
-				continue
-			if str(goal_args[0]) == satellite and str(goal_args[1]) == image_direction:
-				return True
-		return False
-
-	def _turn_to_source_after_activation_penalty(
-		self,
-		prior_body_goals: Sequence[Tuple[str, Tuple[str, ...]]],
-		*,
-		satellite: str,
-		source_direction: str,
-		fact_index: Dict[Tuple[str, int], Tuple[Tuple[str, ...], ...]],
-	) -> int:
-		source_token = self._canonical_runtime_token(source_direction)
-		for goal_name, goal_args in prior_body_goals:
-			if str(goal_name) != "activate_instrument" or len(goal_args) < 2:
-				continue
-			if self._canonical_runtime_token(str(goal_args[0])) != self._canonical_runtime_token(satellite):
-				continue
-			instrument = self._canonical_runtime_token(str(goal_args[1]))
-			if self._looks_like_asl_variable(instrument):
-				continue
-			targets = {
-				self._canonical_runtime_token(str(target))
-				for actual_instrument, target in fact_index.get(("calibration_target", 2), ())
-				if self._canonical_runtime_token(str(actual_instrument)) == instrument
-			}
-			if targets and source_token not in targets:
-				return 1
-		return 0
 
 	def _runtime_fact_arg_pair_index(
 		self,
@@ -2976,7 +2849,7 @@ class JasonRunner:
 			return False
 		if statements[0].startswith('.print("runtime trace method flat "'):
 			statements = statements[1:]
-		return statements in (["true"], ["nop"], ["!nop"])
+		return statements == ["true"]
 
 	@staticmethod
 	def _parse_asl_goal_call(line: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
@@ -4249,8 +4122,7 @@ public class {self.environment_class_name} extends Environment {{
 		Apply delete effects before add effects.
 
 		PDDL state-transition semantics treats a fact that is both deleted and added
-		by the same action instance as true in the successor state. This matters for
-		no-op-like grounded calls such as ``turn_to(s, d, d)``.
+		by the same action instance as true in the successor state.
 		"""
 
 		normalized_effects = tuple(dict(effect) for effect in effects)

@@ -792,16 +792,28 @@ def test_jason_runner_rejects_unbound_runtime_variables_in_method_bodies() -> No
 		"\t!drive(V, MID, DEST).",
 	]
 	primitive_wrapper_binding_chunk = [
-		"+!do_observation(DIR, MODE) : on_board(I, SAT) & supports(I, MODE) <-",
+		"+!collect_data(TARGET, MODE) : resource_ready(DEVICE, HOST) & supports(DEVICE, MODE) <-",
 		'\t.print("runtime trace method flat ", "method0");',
-		"\t!activate_instrument(SAT, I);",
-		"\t!turn_to(SAT, DIR, OLD_DIR);",
-		"\t!take_image(SAT, DIR, I, MODE).",
+		"\t!activate_resource(HOST, DEVICE);",
+		"\t!align_resource(HOST, TARGET, OLD_TARGET);",
+		"\t!capture_data(HOST, TARGET, DEVICE, MODE).",
 	]
 
 	assert runner._chunk_runtime_variables_are_safe(unsafe_chunk) is False
 	assert runner._chunk_runtime_variables_are_safe(safe_chunk) is True
 	assert runner._chunk_runtime_variables_are_safe(primitive_wrapper_binding_chunk) is True
+
+
+def test_jason_runtime_ordering_contains_no_domain_named_heuristics() -> None:
+	source = (SRC_ROOT / "evaluation" / "jason_runtime" / "runner.py").read_text()
+	for forbidden_token in (
+		"take_image",
+		"turn_to",
+		"activate_instrument",
+		"calibration_target",
+		"via_like_method",
+	):
+		assert forbidden_token not in source
 
 
 def test_jason_runner_orders_noop_then_direct_then_via_chunks() -> None:
@@ -1024,7 +1036,7 @@ def test_jason_runner_keeps_deepest_child_prefix_context_candidate() -> None:
 	)
 
 
-def test_jason_runner_orders_satellite_observation_methods_with_required_turn_before_image() -> None:
+def test_jason_runner_does_not_apply_domain_named_action_setup_ordering() -> None:
 	runner = JasonRunner()
 	chunks = [
 		"\n".join(
@@ -1060,11 +1072,11 @@ def test_jason_runner_orders_satellite_observation_methods_with_required_turn_be
 	)
 
 	assert "method_already_pointing" in ordered_chunks[0]
-	assert "method_with_turn" in ordered_chunks[1]
-	assert "method_without_turn" in ordered_chunks[2]
+	assert "method_without_turn" in ordered_chunks[1]
+	assert "method_with_turn" in ordered_chunks[2]
 
 
-def test_jason_runner_prefers_turn_source_created_by_prior_activation() -> None:
+def test_jason_runner_ignores_domain_named_fact_indexes_during_chunk_ordering() -> None:
 	runner = JasonRunner()
 	chunks = [
 		"\n".join(
@@ -1095,8 +1107,8 @@ def test_jason_runner_prefers_turn_source_created_by_prior_activation() -> None:
 		type_domains={},
 	)
 
-	assert "method_calibration_source" in ordered_chunks[0]
-	assert "method_bad_source" in ordered_chunks[1]
+	assert "method_bad_source" in ordered_chunks[0]
+	assert "method_calibration_source" in ordered_chunks[1]
 
 
 def test_jason_runner_build_asl_applies_runtime_method_lowering() -> None:
@@ -1312,17 +1324,17 @@ def test_jason_runner_renders_failure_handlers_from_plan_library_and_action_sche
 	assert "-!pick_up(X) : true <-" in rendered
 
 
-def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions() -> None:
+def test_jason_runner_orders_delete_effects_before_add_effects() -> None:
 	runner = JasonRunner()
 	agentspeak_code = "\n".join(
 		[
 			"/* Initial Beliefs */",
 			"",
 			"/* Primitive Action Plans */",
-			"+!turn_to(SAT, TO, FROM) : pointing(SAT, FROM) <-",
-			"\tturn_to(SAT, TO, FROM);",
-			"\t+pointing(SAT, TO);",
-			"\t-pointing(SAT, FROM).",
+			"+!update_position(OBJ, TO, FROM) : at(OBJ, FROM) <-",
+			"\tupdate_position(OBJ, TO, FROM);",
+			"\t+at(OBJ, TO);",
+			"\t-at(OBJ, FROM).",
 			"",
 			"/* HTN Method Plans */",
 			"",
@@ -1332,11 +1344,11 @@ def test_jason_runner_orders_delete_effects_before_add_effects_for_noop_actions(
 
 	rewritten = runner._rewrite_primitive_wrappers_for_environment(agentspeak_code)
 
-	assert rewritten.index("-pointing(SAT, FROM)") < rewritten.index("+pointing(SAT, TO)")
+	assert rewritten.index("-at(OBJ, FROM)") < rewritten.index("+at(OBJ, TO)")
 	assert runner._ordered_runtime_effects(
 		(
-			{"predicate": "pointing", "args": ("sat0", "star0"), "is_positive": True},
-			{"predicate": "pointing", "args": ("sat0", "star0"), "is_positive": False},
+			{"predicate": "at", "args": ("obj0", "loc0"), "is_positive": True},
+			{"predicate": "at", "args": ("obj0", "loc0"), "is_positive": False},
 		),
 	)[-1]["is_positive"] is True
 
