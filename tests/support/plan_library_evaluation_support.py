@@ -845,7 +845,7 @@ def run_plan_library_evaluation_benchmark_for_domain(
 ) -> Dict[str, Any]:
 	normalized_library_source = str(library_source or BENCHMARK_EVALUATION_LIBRARY_SOURCE).strip().lower()
 	normalized_runtime_backend = str(runtime_backend or BENCHMARK_EVALUATION_RUNTIME_BACKEND).strip().lower()
-	if normalized_runtime_backend not in {"jason", "jadex"}:
+	if normalized_runtime_backend != "jason":
 		raise ValueError(f"Unsupported runtime backend '{runtime_backend}'.")
 	if normalized_library_source == "generated":
 		library_artifact_ref: str | None = str(ensure_generated_library_artifact(domain_key))

@@ -64,7 +64,7 @@ def test_full_benchmark_domain_launcher_forwards_selected_query_ids(
 	monkeypatch.setattr(benchmark_runner, "_RUN_QUERY_IDS", ["query_1"])
 	monkeypatch.setattr(benchmark_runner, "_RUN_FAILED_ONLY_QUERY_IDS", {})
 	monkeypatch.setattr(benchmark_runner, "_RUN_LIBRARY_SOURCE", "official")
-	monkeypatch.setattr(benchmark_runner, "_RUN_RUNTIME_BACKEND", "jadex")
+	monkeypatch.setattr(benchmark_runner, "_RUN_RUNTIME_BACKEND", "jason")
 	monkeypatch.setattr(benchmark_runner, "_RUN_RESUME", False)
 
 	domain_run = benchmark_runner._start_domain_run(tmp_path, "blocksworld", {})
@@ -74,7 +74,7 @@ def test_full_benchmark_domain_launcher_forwards_selected_query_ids(
 	query_flag_index = captured["command"].index("--query-id")
 	assert captured["command"][query_flag_index + 1] == "query_1"
 	assert "--runtime-backend" in captured["command"]
-	assert captured["command"][captured["command"].index("--runtime-backend") + 1] == "jadex"
+	assert captured["command"][captured["command"].index("--runtime-backend") + 1] == "jason"
 
 
 def test_evaluation_benchmark_execution_source_defaults_to_benchmark_when_metadata_missing() -> None:

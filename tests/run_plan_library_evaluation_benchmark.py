@@ -472,7 +472,7 @@ def main() -> int:
 	)
 	parser.add_argument(
 		"--runtime-backend",
-		choices=("jason", "jadex"),
+		choices=("jason",),
 		default="jason",
 	)
 	args = parser.parse_args()
