@@ -82,6 +82,8 @@ class JadexBDIRunner:
 	failed_goal_record_limit = 64
 	candidate_retry_limit = 1_000_000
 	candidate_rejection_log_limit = 64
+	max_debug_lines = 4_096
+	max_debug_chars = 200_000
 
 	def __init__(self, *, timeout_seconds: int = 1800) -> None:
 		self.timeout_seconds = timeout_seconds
@@ -93,6 +95,8 @@ class JadexBDIRunner:
 		self._nodes_expanded = 0
 		self._deadline = 0.0
 		self._debug_lines: List[str] = []
+		self._debug_chars = 0
+		self._debug_truncated = False
 		self._failed_goals: List[str] = []
 
 	def validate(
@@ -119,7 +123,11 @@ class JadexBDIRunner:
 		output_path.mkdir(parents=True, exist_ok=True)
 		self._deadline = total_start + max(1, int(self.timeout_seconds))
 		self._nodes_expanded = 0
-		self._debug_lines = ["jadex runtime ready", "execute start"]
+		self._debug_lines = []
+		self._debug_chars = 0
+		self._debug_truncated = False
+		self._append_debug_line("jadex runtime ready")
+		self._append_debug_line("execute start")
 		self._failed_goals = []
 		self._schema_by_name = self._build_schema_lookup(action_schemas)
 		self._object_types = {
@@ -181,11 +189,11 @@ class JadexBDIRunner:
 					break
 				candidates_rejected += 1
 				if candidates_rejected <= self.candidate_rejection_log_limit:
-					self._debug_lines.append(
+					self._append_debug_line(
 						f"runtime candidate rejected candidate={candidates_considered}",
 					)
 				elif candidates_rejected == self.candidate_rejection_log_limit + 1:
-					self._debug_lines.append("runtime candidate rejection log limit reached")
+					self._append_debug_line("runtime candidate rejection log limit reached")
 				if candidates_considered >= candidate_limit_value:
 					break
 		except TimeoutError as exc:
@@ -223,7 +231,7 @@ class JadexBDIRunner:
 				metadata=metadata,
 			)
 
-		self._debug_lines.append("execute success")
+		self._append_debug_line("execute success", force=True)
 		artifacts = self._write_artifacts(
 			output_path=output_path,
 			stdout="\n".join(self._debug_lines) + "\n",
@@ -268,7 +276,7 @@ class JadexBDIRunner:
 		candidates_considered: int = 0,
 		candidates_rejected: int = 0,
 	) -> Dict[str, Any]:
-		self._debug_lines.append("execute failed")
+		self._append_debug_line("execute failed", force=True)
 		artifacts = self._write_artifacts(
 			output_path=output_path,
 			stdout="\n".join(self._debug_lines) + "\n",
@@ -338,6 +346,9 @@ class JadexBDIRunner:
 			"stderr_chars": len(stderr),
 			"stdout_sha256": hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
 			"stderr_sha256": hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
+			"debug_log_truncated": self._debug_truncated,
+			"debug_log_lines": len(self._debug_lines),
+			"debug_log_chars": sum(len(line) + 1 for line in self._debug_lines),
 			"nodes_expanded": self._nodes_expanded,
 			"candidates_considered": candidates_considered,
 			"candidates_rejected": candidates_rejected,
@@ -436,7 +447,7 @@ class JadexBDIRunner:
 						"method_name": plan.plan_name,
 						"task_args": list(grounded_trace_args),
 					}
-					self._debug_lines.append(
+					self._append_debug_line(
 						"runtime trace method flat "
 						+ "|".join([plan.plan_name, *grounded_trace_args]),
 					)
@@ -541,7 +552,7 @@ class JadexBDIRunner:
 						next_world.discard(atom)
 				source_name = str(schema.get("source_name") or action_name)
 				rendered_action = self._render_action_call(source_name, ground_args)
-				self._debug_lines.append(f"runtime env action success {rendered_action}")
+				self._append_debug_line(f"runtime env action success {rendered_action}")
 				yield _SearchState(
 					world=frozenset(next_world),
 					bindings={
@@ -908,7 +919,7 @@ class JadexBDIRunner:
 		if payload in self._failed_goals:
 			return
 		self._failed_goals.append(payload)
-		self._debug_lines.append(f"runtime goal failed fail_goal({payload})")
+		self._append_debug_line(f"runtime goal failed fail_goal({payload})")
 
 	def _check_budget(self) -> None:
 		self._check_deadline()
@@ -933,3 +944,37 @@ class JadexBDIRunner:
 			f"sha256={hashlib.sha256(value.encode('utf-8')).hexdigest()}]\n"
 		)
 		return f"{prefix}{value[-limit:]}", True
+
+	def _append_debug_line(self, line: str, *, force: bool = False) -> None:
+		text = str(line)
+		line_chars = len(text) + 1
+		if force:
+			if len(self._debug_lines) < self.max_debug_lines:
+				self._debug_lines.append(text)
+			elif self._debug_lines:
+				self._debug_lines[-1] = text
+			else:
+				self._debug_lines.append(text)
+			self._debug_chars = sum(len(item) + 1 for item in self._debug_lines)
+			return
+		if self._debug_truncated:
+			return
+		if (
+			len(self._debug_lines) >= self.max_debug_lines
+			or self._debug_chars + line_chars > self.max_debug_chars
+		):
+			notice = (
+				"runtime debug log limit reached "
+				f"lines={len(self._debug_lines)} chars={self._debug_chars}"
+			)
+			if len(self._debug_lines) < self.max_debug_lines:
+				self._debug_lines.append(notice)
+			elif self._debug_lines:
+				self._debug_lines[-1] = notice
+			else:
+				self._debug_lines.append(notice)
+			self._debug_truncated = True
+			self._debug_chars = sum(len(item) + 1 for item in self._debug_lines)
+			return
+		self._debug_lines.append(text)
+		self._debug_chars += line_chars

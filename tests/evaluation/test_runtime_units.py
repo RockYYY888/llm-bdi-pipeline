@@ -26,7 +26,7 @@ from evaluation.goal_grounding.grounder import (
 )
 from evaluation.jason_runtime.environment_adapter import EnvironmentAdapterResult
 from evaluation.jason_runtime.runner import JasonRunner, JasonValidationResult
-from evaluation.jadex_runtime.runner import JadexBDIRunner
+from evaluation.jadex_runtime.runner import JadexBDIRunner, JadexValidationError
 from evaluation.failure_signature import infer_missing_goal_facts
 from evaluation.official_verification import resolve_verification_domain_file
 from evaluation.orchestrator import PlanLibraryEvaluationOrchestrator
@@ -3098,3 +3098,51 @@ def test_jadex_runtime_retries_until_candidate_acceptor_passes(tmp_path: Path) -
 	assert result.action_path == ("second",)
 	assert result.consistency_checks["candidates_considered"] == 2
 	assert result.consistency_checks["candidates_rejected"] == 1
+
+
+def test_jadex_runtime_caps_debug_log_in_memory(tmp_path: Path) -> None:
+	plans = tuple(
+		AgentSpeakPlan(
+			plan_name=f"m-{index}",
+			trigger=AgentSpeakTrigger(
+				event_type="achievement_goal",
+				symbol="choose",
+				arguments=(),
+			),
+			context=(),
+			body=(AgentSpeakBodyStep(kind="action", symbol=f"act_{index}", arguments=()),),
+		)
+		for index in range(20)
+	)
+	action_schemas = tuple(
+		{
+			"functor": f"act_{index}",
+			"source_name": f"act_{index}",
+			"parameters": [],
+			"preconditions": [],
+			"precondition_clauses": [[]],
+			"effects": [],
+		}
+		for index in range(20)
+	)
+	runner = JadexBDIRunner(timeout_seconds=5)
+	runner.max_debug_chars = 300
+
+	with pytest.raises(JadexValidationError) as error_info:
+		runner.validate(
+			action_schemas=action_schemas,
+			plan_library=PlanLibrary(domain_name="retry", plans=plans),
+			query_goals=({"task_name": "choose", "args": []},),
+			output_dir=tmp_path,
+			accept_candidate=lambda _action_path, _method_trace, _metadata: False,
+			candidate_limit=20,
+		)
+
+	artifacts = error_info.value.metadata["artifacts"]
+	stdout_path = Path(artifacts["jadex_stdout"])
+	stdout_text = stdout_path.read_text()
+
+	assert artifacts["debug_log_truncated"] is True
+	assert artifacts["stdout_chars"] < 1_000
+	assert "runtime debug log limit reached" in stdout_text
+	assert "execute failed" in stdout_text
