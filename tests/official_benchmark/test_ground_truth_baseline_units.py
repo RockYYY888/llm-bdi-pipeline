@@ -14,7 +14,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
 	sys.path.insert(0, str(SRC_ROOT))
 
-from planning.backends import LiftedPandaBackend, PandaDealerBackend
+from planning.backends import LiftedPandaBackend
 from planning.official_benchmark import OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
 from planning.panda_portfolio import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
@@ -30,13 +30,13 @@ import htn_evaluation.problem_root_evaluator as problem_root_evaluator
 import htn_evaluation.problem_root_runtime as problem_root_runtime
 from htn_evaluation.result_tables import (
 	HTN_PLANNER_IDS,
-	PLANNER_OR_RACE_MODE,
+	PRIMARY_HTN_PLANNER_ID,
 	SINGLE_PLANNER_MODE,
 	build_planner_capability_rows,
-	build_planner_or_race_track_summary_from_single_planner_tracks,
 	build_problem_capability_rows,
 	build_problem_result_row,
 	build_track_summary,
+	validate_planner_id,
 	write_planner_capability_matrix,
 	write_problem_capability_matrix,
 )
@@ -104,31 +104,11 @@ def test_official_problem_root_resource_profile_matches_ipc_limits() -> None:
 	}
 
 
-def test_pandadealer_backend_uses_full_backend_timeout_budget() -> None:
-	backend = PandaDealerBackend()
-	backend.planner.plan_hddl_files = Mock(  # type: ignore[method-assign]
-		return_value=Mock(spec=PANDAPlanResult),
+def test_only_lifted_panda_sat_is_supported_as_primary_baseline() -> None:
+	assert HTN_PLANNER_IDS == (PRIMARY_HTN_PLANNER_ID,)
+	assert validate_planner_id(None, evaluation_mode=SINGLE_PLANNER_MODE) == (
+		PRIMARY_HTN_PLANNER_ID
 	)
-	representation = PlanningRepresentation(
-		representation_id="linearized_total_order",
-		representation_source="linearized",
-		ordering_kind="total_order",
-		domain_file="/tmp/domain.hddl",
-		problem_file="/tmp/problem.hddl",
-		compilation_profile="semantics_preserving_linearization",
-	)
-	backend.solve(
-		domain=object(),
-		representation=representation,
-		task_name="deliver",
-		task_args=("package-0", "city-loc-0"),
-		timeout_seconds=1800.0,
-	)
-	kwargs = backend.planner.plan_hddl_files.call_args.kwargs  # type: ignore[union-attr]
-	solver_configs = kwargs["solver_configs"]
-	assert len(solver_configs) == 1
-	assert "timeout_seconds" not in solver_configs[0]
-	assert kwargs["timeout_seconds"] == 1800.0
 
 
 def test_panda_plan_parser_decodes_linearized_identifier_tokens() -> None:
@@ -243,7 +223,7 @@ def test_run_official_problem_root_baseline_for_domain_filters_query_ids(
 		summary = baseline_support.run_official_problem_root_baseline_for_domain(
 			"transport",
 			query_ids=("query_03", "query_01"),
-			output_root=tmp_path / "planner_or_race" / "transport",
+			output_root=tmp_path / PRIMARY_HTN_PLANNER_ID / "transport",
 		)
 	finally:
 		baseline_support.load_domain_query_cases = original_load
@@ -257,7 +237,7 @@ def test_run_official_problem_root_baseline_for_domain_filters_query_ids(
 	assert run_case.call_args_list[0].args == ("transport", "query_01")
 	assert run_case.call_args_list[1].args == ("transport", "query_03")
 	assert run_case.call_args_list[0].kwargs["logs_dir"] == (
-		tmp_path / "planner_or_race" / "transport" / "query_logs"
+		tmp_path / PRIMARY_HTN_PLANNER_ID / "transport" / "query_logs"
 	)
 
 
@@ -334,8 +314,8 @@ def test_parallel_solver_race_delegates_to_hierarchical_task_network_evaluator()
 	assert fake_evaluator.calls == [
 		{
 			"method_library": "sentinel",
-			"evaluation_mode": PLANNER_OR_RACE_MODE,
-			"planner_id": None,
+			"evaluation_mode": SINGLE_PLANNER_MODE,
+			"planner_id": PRIMARY_HTN_PLANNER_ID,
 		},
 	]
 
@@ -513,16 +493,16 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries(
 	tmp_path: Path,
 ) -> None:
-	output_root = tmp_path / "planner_or_race" / "transport"
+	output_root = tmp_path / PRIMARY_HTN_PLANNER_ID / "transport"
 	output_root.mkdir(parents=True, exist_ok=True)
 	existing_problem_row = {
 		"domain_key": "transport",
 		"query_id": "query_01",
 		"problem_file": "pfile01.hddl",
 		"instruction": "q1",
-		"evaluation_mode": PLANNER_OR_RACE_MODE,
-		"requested_planner_id": None,
-		"track_id": PLANNER_OR_RACE_MODE,
+		"evaluation_mode": SINGLE_PLANNER_MODE,
+		"requested_planner_id": PRIMARY_HTN_PLANNER_ID,
+		"track_id": PRIMARY_HTN_PLANNER_ID,
 		"ipc_verified_success": True,
 		"outcome_bucket": "hierarchical_plan_verified",
 		"log_dir": "/tmp/query-01",
@@ -623,7 +603,7 @@ def test_htn_query_log_timestamp_includes_query_id_to_avoid_collisions() -> None
 def test_run_official_problem_root_baseline_for_domain_preserves_unselected_existing_query_rows(
 	tmp_path: Path,
 ) -> None:
-	output_root = tmp_path / "planner_or_race" / "transport"
+	output_root = tmp_path / PRIMARY_HTN_PLANNER_ID / "transport"
 	output_root.mkdir(parents=True, exist_ok=True)
 	(output_root / "problem_results.json").write_text(
 		json.dumps(
@@ -633,9 +613,9 @@ def test_run_official_problem_root_baseline_for_domain_preserves_unselected_exis
 					"query_id": "query_01",
 					"problem_file": "pfile01.hddl",
 					"instruction": "q1",
-					"evaluation_mode": PLANNER_OR_RACE_MODE,
-					"requested_planner_id": None,
-					"track_id": PLANNER_OR_RACE_MODE,
+					"evaluation_mode": SINGLE_PLANNER_MODE,
+					"requested_planner_id": PRIMARY_HTN_PLANNER_ID,
+					"track_id": PRIMARY_HTN_PLANNER_ID,
 					"ipc_verified_success": True,
 					"outcome_bucket": "hierarchical_plan_verified",
 					"log_dir": "/tmp/query-01",
@@ -721,7 +701,7 @@ def test_run_official_problem_root_baseline_for_domain_preserves_unselected_exis
 def test_run_official_problem_root_baseline_for_domain_persists_partial_query_checkpoint_before_failure(
 	tmp_path: Path,
 ) -> None:
-	output_root = tmp_path / "planner_or_race" / "transport"
+	output_root = tmp_path / PRIMARY_HTN_PLANNER_ID / "transport"
 	load_cases = Mock(
 		return_value={
 			"query_01": {"problem_file": "pfile01.hddl", "instruction": "q1"},
@@ -839,7 +819,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 				},
 			},
 		},
-		evaluation_mode=PLANNER_OR_RACE_MODE,
+		evaluation_mode=SINGLE_PLANNER_MODE,
 		planner_id=None,
 	)
 	track_summary = build_track_summary(
@@ -882,7 +862,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 				],
 			},
 		},
-		evaluation_mode=PLANNER_OR_RACE_MODE,
+		evaluation_mode=SINGLE_PLANNER_MODE,
 		planner_id=None,
 	)
 	rows = build_planner_capability_rows((track_summary,))
@@ -892,7 +872,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 
 	assert problem_row["selected_backend_name"] == "lifted_panda_sat"
 	assert problem_row["execution_time_seconds"] == 17.0
-	assert rows[0]["track_id"] == PLANNER_OR_RACE_MODE
+	assert rows[0]["track_id"] == PRIMARY_HTN_PLANNER_ID
 	assert rows[0]["execution_time_seconds_total"] == 17.0
 	assert rows[0]["plan_solve_time_seconds_total"] == 12.0
 	assert rows[0]["plan_verification_time_seconds_total"] == 5.0
@@ -906,188 +886,6 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	assert Path(problem_paths["problem_capability_matrix_json"]).exists()
 	assert Path(problem_paths["problem_capability_matrix_csv"]).exists()
 	assert "query_id" in Path(problem_paths["problem_capability_matrix_csv"]).read_text()
-
-
-def test_planner_or_race_aggregate_is_union_of_single_planner_successes(
-	tmp_path: Path,
-) -> None:
-	def domain_summary(planner_id: str, query_results: list[dict[str, object]]) -> dict[str, object]:
-		return {
-			"domain_key": "transport",
-			"evaluation_mode": SINGLE_PLANNER_MODE,
-			"requested_planner_id": planner_id,
-			"attempted_problem_count": len(query_results),
-			"execution_time_seconds_total": sum(
-				float(query_result["execution_time_seconds"])
-				for query_result in query_results
-			),
-			"execution_time_seconds_average": 1.0,
-			"plan_solve_time_seconds_total": 0.0,
-			"plan_solve_time_seconds_average": 0.0,
-			"plan_verification_time_seconds_total": 0.0,
-			"plan_verification_time_seconds_average": 0.0,
-			"verified_success_count": sum(
-				1
-				for query_result in query_results
-				if bool(query_result["success"])
-			),
-			"bucket_counts": {
-				"hierarchical_plan_verified": sum(
-					1
-					for query_result in query_results
-					if bool(query_result["success"])
-				),
-				"primitive_plan_valid_but_hierarchical_rejected": 0,
-				"primitive_plan_invalid": 0,
-				"no_plan_from_solver": sum(
-					1
-					for query_result in query_results
-					if not bool(query_result["success"])
-				),
-				"unknown_failure": 0,
-			},
-			"query_results": query_results,
-			"total_queries": len(query_results),
-			"verified_successes": sum(
-				1
-				for query_result in query_results
-				if bool(query_result["success"])
-			),
-			"hierarchical_rejection_failures": 0,
-			"primitive_invalid_failures": 0,
-			"solver_no_plan_failures": sum(
-				1
-				for query_result in query_results
-				if not bool(query_result["success"])
-			),
-			"unknown_failures": 0,
-		}
-
-	def query_result(
-		query_id: str,
-		*,
-		success: bool,
-		planner_id: str,
-		seconds: float,
-	) -> dict[str, object]:
-		return {
-			"query_id": query_id,
-			"problem_file": f"{query_id}.hddl",
-			"log_dir": f"/tmp/{planner_id}/{query_id}",
-			"success": success,
-			"outcome_bucket": "hierarchical_plan_verified" if success else "no_plan_from_solver",
-			"execution_time_seconds": seconds,
-			"plan_solve_time_seconds": seconds,
-			"plan_verification_time_seconds": 0.0,
-			"representation_build_seconds": 0.0,
-			"solver_race_wallclock_seconds": seconds,
-			"plan_solve_status": "success" if success else "failed",
-			"plan_verification_status": "success" if success else "failed",
-			"selected_solver_id": planner_id,
-			"selected_backend_name": planner_id,
-			"selected_representation_id": "linearized_total_order",
-		}
-
-	track_summaries = {
-		"panda_pi_portfolio": {
-			"track_summary": {
-				"track_id": "panda_pi_portfolio",
-				"evaluation_mode": SINGLE_PLANNER_MODE,
-				"requested_planner_id": "panda_pi_portfolio",
-				"complete": True,
-				"domains": {
-					"transport": domain_summary(
-						"panda_pi_portfolio",
-						[
-							query_result(
-								"query_1",
-								success=True,
-								planner_id="panda_pi_portfolio",
-								seconds=10.0,
-							),
-							query_result(
-								"query_2",
-								success=False,
-								planner_id="panda_pi_portfolio",
-								seconds=1800.0,
-							),
-						],
-					),
-				},
-			},
-		},
-		"pandadealer_agile_lama": {
-			"track_summary": {
-				"track_id": "pandadealer_agile_lama",
-				"evaluation_mode": SINGLE_PLANNER_MODE,
-				"requested_planner_id": "pandadealer_agile_lama",
-				"complete": True,
-				"domains": {
-					"transport": domain_summary(
-						"pandadealer_agile_lama",
-						[
-							query_result(
-								"query_1",
-								success=False,
-								planner_id="pandadealer_agile_lama",
-								seconds=1.0,
-							),
-							query_result(
-								"query_2",
-								success=False,
-								planner_id="pandadealer_agile_lama",
-								seconds=1.0,
-							),
-						],
-					),
-				},
-			},
-		},
-		"lifted_panda_sat": {
-			"track_summary": {
-				"track_id": "lifted_panda_sat",
-				"evaluation_mode": SINGLE_PLANNER_MODE,
-				"requested_planner_id": "lifted_panda_sat",
-				"complete": True,
-				"domains": {
-					"transport": domain_summary(
-						"lifted_panda_sat",
-						[
-							query_result(
-								"query_1",
-								success=False,
-								planner_id="lifted_panda_sat",
-								seconds=5.0,
-							),
-							query_result(
-								"query_2",
-								success=True,
-								planner_id="lifted_panda_sat",
-								seconds=30.0,
-							),
-						],
-					),
-				},
-			},
-		},
-	}
-
-	aggregate = build_planner_or_race_track_summary_from_single_planner_tracks(
-		run_dir=tmp_path,
-		track_summaries=track_summaries,
-		domain_keys=("transport",),
-	)
-
-	transport = aggregate["domains"]["transport"]
-	query_results = {
-		query_result["query_id"]: query_result
-		for query_result in transport["query_results"]
-	}
-	assert aggregate["verified_success_count"] == 2
-	assert transport["verified_success_count"] == 2
-	assert query_results["query_1"]["selected_planner_track_id"] == "panda_pi_portfolio"
-	assert query_results["query_2"]["selected_planner_track_id"] == "lifted_panda_sat"
-	assert query_results["query_2"]["successful_planner_ids"] == ["lifted_panda_sat"]
 
 
 def test_sequential_full_baseline_writes_incremental_track_outputs(
@@ -1148,9 +946,9 @@ def test_sequential_full_baseline_writes_incremental_track_outputs(
 
 		summary = baseline_runner._run_sequential_full_baseline(
 			run_dir=tmp_path,
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
-			track_id=PLANNER_OR_RACE_MODE,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
+			track_id=PRIMARY_HTN_PLANNER_ID,
 			domain_runner=fake_domain_runner,
 		)
 	finally:
@@ -1278,9 +1076,9 @@ def test_sequential_full_baseline_resumes_from_existing_domain_summaries(
 
 		summary = baseline_runner._run_sequential_full_baseline(
 			run_dir=tmp_path,
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
-			track_id=PLANNER_OR_RACE_MODE,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
+			track_id=PRIMARY_HTN_PLANNER_ID,
 			domain_runner=fake_domain_runner,
 		)
 	finally:
@@ -1298,37 +1096,24 @@ def test_track_pass_matrix_writes_compact_pass_status(
 	paths = baseline_runner._write_track_pass_matrix(
 		tmp_path,
 		{
-			"planner_or_race": {
-				"evaluation_mode": "planner_or_race",
-				"requested_planner_id": None,
+			PRIMARY_HTN_PLANNER_ID: {
+				"evaluation_mode": SINGLE_PLANNER_MODE,
+				"requested_planner_id": PRIMARY_HTN_PLANNER_ID,
 				"complete": True,
 				"completed_domains": ["blocksworld", "marsrover", "satellite", "transport"],
 				"track_summary": {
 					"total_queries": 115,
-					"verified_success_count": 115,
-				},
-			},
-			"panda_pi_portfolio": {
-				"evaluation_mode": "single_planner",
-				"requested_planner_id": "panda_pi_portfolio",
-				"complete": True,
-				"completed_domains": ["blocksworld", "marsrover", "satellite", "transport"],
-				"track_summary": {
-					"total_queries": 115,
-					"verified_success_count": 80,
+					"verified_success_count": 110,
 				},
 			},
 		},
 	)
 	rows = json.loads(Path(paths["track_pass_matrix_json"]).read_text())
-	assert rows[0]["track_id"] == "planner_or_race"
-	assert rows[0]["pass"] is True
-	assert rows[0]["all_queries_verified"] is True
-	assert rows[1]["track_id"] == "panda_pi_portfolio"
-	assert rows[1]["pass"] is False
-	assert rows[1]["sweep_complete"] is True
-	assert rows[1]["all_queries_verified"] is False
-	assert rows[1]["total_query_count"] == 115
+	assert rows[0]["track_id"] == PRIMARY_HTN_PLANNER_ID
+	assert rows[0]["pass"] is False
+	assert rows[0]["all_queries_verified"] is False
+	assert rows[0]["sweep_complete"] is True
+	assert rows[0]["total_query_count"] == 115
 	assert "verified_success_count" in Path(paths["track_pass_matrix_csv"]).read_text()
 	assert "all_queries_verified" in Path(paths["track_pass_matrix_csv"]).read_text()
 
@@ -1375,8 +1160,8 @@ def test_run_single_domain_uses_domain_output_root_without_marking_partial_domai
 	) as run_domain:
 		try:
 			baseline_runner._RUN_QUERY_IDS = ["query_10"]
-			baseline_runner._RUN_EVALUATION_MODE = PLANNER_OR_RACE_MODE
-			baseline_runner._RUN_PLANNER_ID = None
+			baseline_runner._RUN_EVALUATION_MODE = SINGLE_PLANNER_MODE
+			baseline_runner._RUN_PLANNER_ID = PRIMARY_HTN_PLANNER_ID
 			result = baseline_runner._run_single_domain("transport", tmp_path)
 		finally:
 			baseline_runner._RUN_QUERY_IDS = original_query_ids
@@ -1407,8 +1192,8 @@ def test_run_single_domain_writes_top_level_summary_when_domain_is_complete(
 	):
 		try:
 			baseline_runner._RUN_QUERY_IDS = []
-			baseline_runner._RUN_EVALUATION_MODE = PLANNER_OR_RACE_MODE
-			baseline_runner._RUN_PLANNER_ID = None
+			baseline_runner._RUN_EVALUATION_MODE = SINGLE_PLANNER_MODE
+			baseline_runner._RUN_PLANNER_ID = PRIMARY_HTN_PLANNER_ID
 			result = baseline_runner._run_single_domain("transport", tmp_path)
 		finally:
 			baseline_runner._RUN_QUERY_IDS = original_query_ids
@@ -1437,8 +1222,8 @@ def test_launch_detached_controller_spawns_new_session_and_writes_state(
 			all_tracks=True,
 			domain=None,
 			query_ids=("query_1", "query_2"),
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
 		)
 
 	assert state["status"] == "launched"
@@ -1487,8 +1272,8 @@ def test_launch_detached_controller_reuses_existing_live_controller(
 			all_tracks=True,
 			domain=None,
 			query_ids=(),
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
 		)
 
 	assert state["status"] == "already_running"
@@ -1560,9 +1345,9 @@ def test_sequential_full_baseline_cleans_resources_between_domains(
 		):
 			summary = baseline_runner._run_sequential_full_baseline(
 				run_dir=tmp_path,
-				evaluation_mode=PLANNER_OR_RACE_MODE,
-				planner_id=None,
-				track_id=PLANNER_OR_RACE_MODE,
+				evaluation_mode=SINGLE_PLANNER_MODE,
+				planner_id=PRIMARY_HTN_PLANNER_ID,
+				track_id=PRIMARY_HTN_PLANNER_ID,
 				domain_runner=fake_domain_runner,
 			)
 	finally:
@@ -1582,11 +1367,7 @@ def test_register_controller_runtime_creates_missing_run_dir(tmp_path: Path) -> 
 
 
 def test_supported_planner_ids_are_stable() -> None:
-	assert HTN_PLANNER_IDS == (
-		"panda_pi_portfolio",
-		"pandadealer_agile_lama",
-		"lifted_panda_sat",
-	)
+	assert HTN_PLANNER_IDS == (PRIMARY_HTN_PLANNER_ID,)
 
 
 def test_apply_official_resource_profile_records_memory_and_cpu_enforcement() -> None:
@@ -1748,8 +1529,8 @@ def test_primitive_executable_goal_reached_plan_is_hierarchical_rejection(
 		plan_solve_artifacts={
 			"solver_candidates": [
 				{
-					"solver_id": "pandadealer_agile_lama",
-					"mode": "agile_lama",
+					"solver_id": PRIMARY_HTN_PLANNER_ID,
+					"mode": "sat",
 					"status": "success",
 					"action_path": ["drive(truck-0, a, b)"],
 					"actual_plan_path": str(actual_plan),
@@ -1772,7 +1553,7 @@ def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(
 	payload = {
 		"summary": {"status": "success", "step_count": 2},
 		"artifacts": {
-			"backend": "panda_pi_portfolio",
+			"backend": PRIMARY_HTN_PLANNER_ID,
 			"status": "success",
 			"planning_mode": "official_problem_root",
 			"engine_mode": "progression",

@@ -16,7 +16,8 @@ sys.path.insert(0, str(SRC_ROOT))
 from execution_logging.execution_logger import ExecutionLogger
 from htn_evaluation.pipeline import HTNEvaluationPipeline
 from htn_evaluation.result_tables import (
-	PLANNER_OR_RACE_MODE,
+	PRIMARY_HTN_PLANNER_ID,
+	SINGLE_PLANNER_MODE,
 	build_domain_summary,
 	build_problem_result_row,
 	planner_track_id,
@@ -89,8 +90,8 @@ def run_domain_problem_root_case(
 	domain_key: str,
 	query_id: str,
 	*,
-	evaluation_mode: str = PLANNER_OR_RACE_MODE,
-	planner_id: Optional[str] = None,
+	evaluation_mode: str = SINGLE_PLANNER_MODE,
+	planner_id: Optional[str] = PRIMARY_HTN_PLANNER_ID,
 	logs_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
 	mode = validate_evaluation_mode(evaluation_mode)
@@ -164,8 +165,8 @@ def run_official_problem_root_baseline_for_domain(
 	domain_key: str,
 	*,
 	query_ids: Optional[Sequence[str]] = None,
-	evaluation_mode: str = PLANNER_OR_RACE_MODE,
-	planner_id: Optional[str] = None,
+	evaluation_mode: str = SINGLE_PLANNER_MODE,
+	planner_id: Optional[str] = PRIMARY_HTN_PLANNER_ID,
 	output_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
 	mode = validate_evaluation_mode(evaluation_mode)
@@ -289,7 +290,10 @@ def run_generated_problem_root_case(
 		pipeline.logger.current_record.output_dir = str(pipeline.output_dir)
 		pipeline.logger._save_current_state()
 
-	race_result = pipeline._execute_official_problem_root_parallel_solver_race()
+	race_result = pipeline.execute_problem_root_evaluation(
+		evaluation_mode=SINGLE_PLANNER_MODE,
+		planner_id=PRIMARY_HTN_PLANNER_ID,
+	)
 	plan_solve = dict(race_result.get("plan_solve") or {})
 	plan_verification = dict(race_result.get("plan_verification") or {})
 	success = (

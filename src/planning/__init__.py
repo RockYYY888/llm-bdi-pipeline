@@ -14,8 +14,6 @@ from .problem_encoding import PANDAProblemBuilder, PANDAProblemBuilderConfig
 from .backends import (
 	HierarchicalPlanningBackend,
 	LiftedPandaBackend,
-	PandaDealerBackend,
-	PandaPortfolioBackend,
 	PlanningBackendTask,
 	backend_by_name,
 	default_official_backends,
@@ -35,8 +33,6 @@ __all__ = [
 	"PANDAProblemBuilder",
 	"PANDAProblemBuilderConfig",
 	"HierarchicalPlanningBackend",
-	"PandaPortfolioBackend",
-	"PandaDealerBackend",
 	"LiftedPandaBackend",
 	"PlanningBackendTask",
 	"default_official_backends",

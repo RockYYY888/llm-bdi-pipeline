@@ -12,12 +12,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from planning.backends import default_official_backends
 
 
-PLANNER_OR_RACE_MODE = "planner_or_race"
 SINGLE_PLANNER_MODE = "single_planner"
 HTN_EVALUATION_MODES: Tuple[str, ...] = (
-	PLANNER_OR_RACE_MODE,
 	SINGLE_PLANNER_MODE,
 )
+PRIMARY_HTN_PLANNER_ID = "lifted_panda_sat"
 HTN_OUTCOME_BUCKETS: Tuple[str, ...] = (
 	"hierarchical_plan_verified",
 	"primitive_plan_valid_but_hierarchical_rejected",
@@ -29,14 +28,10 @@ HTN_PLANNER_IDS: Tuple[str, ...] = tuple(
 	backend.backend_name
 	for backend in default_official_backends()
 )
-OR_AGGREGATION_MODE = "single_planner_success_union"
-OR_FAILURE_BUCKET_PRIORITY: Mapping[str, int] = {
-	"primitive_plan_valid_but_hierarchical_rejected": 0,
-	"primitive_plan_invalid": 1,
-	"no_plan_from_solver": 2,
-	"unknown_failure": 3,
-	"hierarchical_plan_verified": 4,
-}
+if HTN_PLANNER_IDS != (PRIMARY_HTN_PLANNER_ID,):
+	raise RuntimeError(
+		"HTN evaluation must expose exactly the lifted_panda_sat primary baseline.",
+	)
 
 
 def validate_evaluation_mode(evaluation_mode: str) -> str:
@@ -56,14 +51,8 @@ def validate_planner_id(
 ) -> Optional[str]:
 	mode = validate_evaluation_mode(evaluation_mode)
 	normalized = str(planner_id or "").strip() or None
-	if mode == PLANNER_OR_RACE_MODE:
-		if normalized is not None:
-			raise ValueError(
-				"planner_or_race does not accept a planner_id; it runs all planner paths.",
-			)
-		return None
 	if normalized is None:
-		raise ValueError("single_planner mode requires a planner_id.")
+		normalized = PRIMARY_HTN_PLANNER_ID
 	if normalized not in HTN_PLANNER_IDS:
 		raise ValueError(
 			f"Unsupported HTN planner id '{normalized}'. "
@@ -82,8 +71,6 @@ def planner_track_id(
 		planner_id,
 		evaluation_mode=mode,
 	)
-	if mode == PLANNER_OR_RACE_MODE:
-		return PLANNER_OR_RACE_MODE
 	return str(normalized_planner_id)
 
 
@@ -98,208 +85,6 @@ def _coerce_float(value: Any) -> Optional[float]:
 		return float(value)
 	except (TypeError, ValueError):
 		return None
-
-
-def _coerce_bool(value: Any) -> bool:
-	if isinstance(value, bool):
-		return value
-	if isinstance(value, str):
-		return value.strip().lower() in {"1", "true", "yes", "y"}
-	return bool(value)
-
-
-def _inner_track_summary(summary: Mapping[str, Any]) -> Mapping[str, Any]:
-	return dict(summary.get("track_summary") or summary)
-
-
-def _index_single_planner_track_summaries(
-	track_summaries: Mapping[str, Mapping[str, Any]],
-) -> Dict[str, Mapping[str, Any]]:
-	indexed: Dict[str, Mapping[str, Any]] = {}
-	for fallback_track_id, summary in track_summaries.items():
-		inner = _inner_track_summary(summary)
-		if str(inner.get("evaluation_mode") or "") != SINGLE_PLANNER_MODE:
-			continue
-		planner_id = str(
-			inner.get("requested_planner_id")
-			or inner.get("track_id")
-			or fallback_track_id,
-		)
-		if planner_id in HTN_PLANNER_IDS:
-			indexed[planner_id] = inner
-	return indexed
-
-
-def _query_order_key(query_id: str) -> Tuple[str, int, str]:
-	prefix, sep, suffix = query_id.rpartition("_")
-	if sep and suffix.isdigit():
-		return (prefix, int(suffix), query_id)
-	return (query_id, 0, query_id)
-
-
-def _ordered_query_ids(
-	domain_summaries: Sequence[Mapping[str, Any]],
-) -> Tuple[str, ...]:
-	ordered: List[str] = []
-	seen: set[str] = set()
-	for domain_summary in domain_summaries:
-		for query_result in list(domain_summary.get("query_results") or ()):
-			query_id = str(query_result.get("query_id") or "")
-			if not query_id or query_id in seen:
-				continue
-			seen.add(query_id)
-			ordered.append(query_id)
-	return tuple(sorted(ordered, key=_query_order_key))
-
-
-def _query_results_by_id(
-	domain_summary: Mapping[str, Any],
-) -> Dict[str, Mapping[str, Any]]:
-	results: Dict[str, Mapping[str, Any]] = {}
-	for query_result in list(domain_summary.get("query_results") or ()):
-		query_id = str(query_result.get("query_id") or "")
-		if query_id:
-			results[query_id] = dict(query_result)
-	return results
-
-
-def _select_or_query_result(
-	query_id: str,
-	candidates: Sequence[Tuple[str, Mapping[str, Any]]],
-) -> Dict[str, Any]:
-	successful = [
-		(planner_id, query_result)
-		for planner_id, query_result in candidates
-		if _coerce_bool(query_result.get("success"))
-	]
-	attempted_planner_ids = [planner_id for planner_id, _query_result in candidates]
-	successful_planner_ids = [planner_id for planner_id, _query_result in successful]
-	if successful:
-		selected_planner_id, selected_query_result = successful[0]
-		selected = dict(selected_query_result)
-		selected["success"] = True
-		selected["ipc_verified_success"] = True
-		selected["outcome_bucket"] = "hierarchical_plan_verified"
-		selected["failure_reason"] = ""
-	else:
-		def failure_sort_key(candidate: Tuple[str, Mapping[str, Any]]) -> Tuple[int, int]:
-			planner_id, query_result = candidate
-			bucket = str(query_result.get("outcome_bucket") or "unknown_failure")
-			planner_order = HTN_PLANNER_IDS.index(planner_id) if planner_id in HTN_PLANNER_IDS else 999
-			return (int(OR_FAILURE_BUCKET_PRIORITY.get(bucket, 999)), planner_order)
-
-		selected_planner_id, selected_query_result = sorted(candidates, key=failure_sort_key)[0]
-		selected = dict(selected_query_result)
-		selected["success"] = False
-		selected["ipc_verified_success"] = False
-		selected["outcome_bucket"] = str(selected.get("outcome_bucket") or "unknown_failure")
-		if not str(selected.get("failure_reason") or ""):
-			buckets = ",".join(
-				f"{planner_id}:{query_result.get('outcome_bucket') or 'unknown_failure'}"
-				for planner_id, query_result in candidates
-			)
-			selected["failure_reason"] = f"planner_or_race_all_planners_failed: {buckets}"
-	selected["query_id"] = query_id
-	selected["selected_planner_track_id"] = selected_planner_id
-	selected["successful_planner_ids"] = tuple(successful_planner_ids)
-	selected["attempted_planner_ids"] = tuple(attempted_planner_ids)
-	selected["aggregation_mode"] = OR_AGGREGATION_MODE
-	return selected
-
-
-def build_planner_or_race_track_summary_from_single_planner_tracks(
-	*,
-	run_dir: Path,
-	track_summaries: Mapping[str, Mapping[str, Any]],
-	domain_keys: Optional[Sequence[str]] = None,
-) -> Dict[str, Any]:
-	"""
-	Build planner_or_race as a capability union over completed single-planner tracks.
-
-	The aggregate is intentionally not a runtime solver invocation. It answers the
-	evaluation question "does any official planner path produce an IPC-verified
-	plan for this problem?" without imposing an artificial sequential shared
-	timeout that can starve later planner paths.
-	"""
-	single_planner_summaries = _index_single_planner_track_summaries(track_summaries)
-	missing_planner_ids = [
-		planner_id
-		for planner_id in HTN_PLANNER_IDS
-		if planner_id not in single_planner_summaries
-	]
-	if missing_planner_ids:
-		raise ValueError(
-			"Cannot build planner_or_race aggregate without completed single-planner "
-			f"tracks: {', '.join(missing_planner_ids)}.",
-		)
-	for planner_id, track_summary in single_planner_summaries.items():
-		if not bool(track_summary.get("complete", True)):
-			raise ValueError(
-				f"Cannot build planner_or_race aggregate from incomplete track '{planner_id}'.",
-			)
-
-	if domain_keys is None:
-		discovered_domain_keys: List[str] = []
-		seen_domains: set[str] = set()
-		for planner_id in HTN_PLANNER_IDS:
-			for domain_key in dict(single_planner_summaries[planner_id].get("domains") or {}):
-				if domain_key in seen_domains:
-					continue
-				seen_domains.add(str(domain_key))
-				discovered_domain_keys.append(str(domain_key))
-		domain_keys = tuple(discovered_domain_keys)
-
-	aggregate_domain_summaries: Dict[str, Mapping[str, Any]] = {}
-	for domain_key in domain_keys:
-		planner_domain_summaries = [
-			dict(single_planner_summaries[planner_id].get("domains") or {}).get(domain_key)
-			for planner_id in HTN_PLANNER_IDS
-		]
-		if any(domain_summary is None for domain_summary in planner_domain_summaries):
-			raise ValueError(
-				f"Cannot build planner_or_race aggregate; domain '{domain_key}' is missing "
-				"from at least one single-planner track.",
-			)
-		non_null_domain_summaries = [
-			dict(domain_summary)
-			for domain_summary in planner_domain_summaries
-			if domain_summary is not None
-		]
-		query_maps = {
-			planner_id: _query_results_by_id(domain_summary)
-			for planner_id, domain_summary in zip(HTN_PLANNER_IDS, non_null_domain_summaries)
-		}
-		problem_rows: List[Dict[str, Any]] = []
-		for query_id in _ordered_query_ids(non_null_domain_summaries):
-			candidates = [
-				(planner_id, query_maps[planner_id][query_id])
-				for planner_id in HTN_PLANNER_IDS
-				if query_id in query_maps[planner_id]
-			]
-			if len(candidates) != len(HTN_PLANNER_IDS):
-				raise ValueError(
-					f"Cannot build planner_or_race aggregate; query '{query_id}' in "
-					f"domain '{domain_key}' is missing from at least one single-planner track.",
-				)
-			problem_rows.append(_select_or_query_result(query_id, candidates))
-		aggregate_domain_summaries[str(domain_key)] = build_domain_summary(
-			domain_key=str(domain_key),
-			problem_rows=problem_rows,
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
-		)
-
-	track_summary = build_track_summary(
-		run_dir=run_dir,
-		domain_summaries=aggregate_domain_summaries,
-		evaluation_mode=PLANNER_OR_RACE_MODE,
-		planner_id=None,
-	)
-	track_summary["aggregation_mode"] = OR_AGGREGATION_MODE
-	track_summary["aggregation_source_tracks"] = list(HTN_PLANNER_IDS)
-	track_summary["complete"] = True
-	track_summary["completed_domains"] = sorted(aggregate_domain_summaries)
-	return track_summary
 
 
 def build_problem_result_row(

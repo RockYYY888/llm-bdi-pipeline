@@ -54,6 +54,7 @@ tests/method_library/generated/
 *.tmp
 *.bak
 *.log
+*local.settings.xml
 
 # PyCharm
 .idea/

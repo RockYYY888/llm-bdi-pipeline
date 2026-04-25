@@ -24,9 +24,6 @@ from method_library.synthesis.schema import (
 	HTNMethodLibrary,
 )
 from planning.official_benchmark import (
-	OFFICIAL_PANDADEALER_ENGINE_ARGS,
-	OFFICIAL_PANDADEALER_SOLVER_ID,
-	OFFICIAL_PANDA_PI_SOLVER_IDS,
 	OFFICIAL_TRANSLATION_FAST_DOWNWARD_CONFIGURATION,
 )
 from planning.process_capture import read_full_process_output, run_subprocess_to_files
@@ -50,8 +47,6 @@ class PANDAPlanningError(RuntimeError):
 class PANDAPlanner:
 	"""Invoke the PANDA PI toolchain on an exported HDDL planning problem."""
 
-	OFFICIAL_PANDA_PI_SOLVER_IDS: Tuple[str, ...] = OFFICIAL_PANDA_PI_SOLVER_IDS
-	OFFICIAL_DEALER_SOLVER_IDS: Tuple[str, ...] = (OFFICIAL_PANDADEALER_SOLVER_ID,)
 	_LINEARIZED_TOKEN_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
 		("BAR_", "|"),
 		("SEM_", ";"),
@@ -511,22 +506,6 @@ class PANDAPlanner:
 			selected = ["sat", "progression_rc2_ff", "bdd"]
 		return tuple(self._solver_config_by_id(solver_id) for solver_id in selected)
 
-	def official_solver_portfolio(self) -> Tuple[Dict[str, Any], ...]:
-		return self.official_solver_portfolio_for_backend("panda_pi_portfolio")
-
-	def official_solver_portfolio_for_backend(
-		self,
-		backend_name: str,
-	) -> Tuple[Dict[str, Any], ...]:
-		backend = str(backend_name or "").strip().lower()
-		if backend in {"pandadealer", "pandadealer_agile_lama", "dealer", "dealer_only"}:
-			solver_ids = self.OFFICIAL_DEALER_SOLVER_IDS
-		elif backend in {"panda_pi_portfolio", "panda_pi", "pandapi"}:
-			solver_ids = self.OFFICIAL_PANDA_PI_SOLVER_IDS
-		else:
-			raise ValueError(f"Unknown official solver backend '{backend_name}'")
-		return tuple(self._solver_config_by_id(solver_id) for solver_id in solver_ids)
-
 	def _solver_config_by_id(self, solver_id: str) -> Dict[str, Any]:
 		configs = {
 			"progression_rc2_ff": {
@@ -576,13 +555,6 @@ class PANDAPlanner:
 				"requires_binary": "fast_downward",
 				"timeout_seconds": 120.0,
 			},
-			OFFICIAL_PANDADEALER_SOLVER_ID: {
-				"solver_id": OFFICIAL_PANDADEALER_SOLVER_ID,
-				"engine_mode": "progression",
-				"engine_args": OFFICIAL_PANDADEALER_ENGINE_ARGS,
-				"requires_binary": "panda_dealer_engine",
-				"timeout_seconds": 180.0,
-			},
 		}
 		try:
 			return dict(configs[solver_id])
@@ -604,17 +576,6 @@ class PANDAPlanner:
 					"required_binary": "fast-downward.py",
 				}
 			engine_args = (*engine_args, "--downward", downward)
-		elif prepared.get("requires_binary") == "panda_dealer_engine":
-			dealer_engine = self._resolve_panda_dealer_engine()
-			if dealer_engine is None:
-				return {
-					"solver_id": prepared.get("solver_id"),
-					"engine_mode": prepared.get("engine_mode"),
-					"status": "skipped",
-					"reason": "panda_dealer_unavailable",
-					"required_binary": "PandaDealer pandaPIengine",
-				}
-			engine_cmd = dealer_engine
 		prepared["engine_args"] = engine_args
 		prepared["engine_cmd"] = engine_cmd
 		prepared["command"] = self._build_command(
@@ -666,39 +627,6 @@ class PANDAPlanner:
 			resolved = Path(candidate).expanduser().resolve()
 			if wrapper_path is not None and resolved == wrapper_path:
 				continue
-			if resolved.exists():
-				return resolved
-		return None
-
-	@staticmethod
-	def _resolve_panda_dealer_engine() -> Optional[str]:
-		resolved = PANDAPlanner._discover_panda_dealer_engine()
-		return str(resolved) if resolved is not None else None
-
-	@staticmethod
-	def _discover_panda_dealer_engine() -> Optional[Path]:
-		repo_root = Path(__file__).resolve().parents[2]
-		dealer_home = os.getenv("PANDA_DEALER_HOME")
-		candidates: List[Optional[str | Path]] = [
-			os.getenv("PANDA_DEALER_ENGINE"),
-			(
-				Path(dealer_home).expanduser()
-				/ "03-lama-planner"
-				/ "src"
-				/ "bin"
-				/ "pandaPIengine"
-			)
-			if dealer_home
-			else None,
-			repo_root / ".external" / "PandaDealer" / "03-lama-planner" / "src" / "bin" / "pandaPIengine",
-			Path("/tmp/PandaDealer_probe/03-lama-planner/src/bin/pandaPIengine"),
-			Path.home() / "Downloads" / "PandaDealer" / "03-lama-planner" / "src" / "bin" / "pandaPIengine",
-			Path.home() / "Downloads" / "PandaDealer_probe" / "03-lama-planner" / "src" / "bin" / "pandaPIengine",
-		]
-		for candidate in candidates:
-			if not candidate:
-				continue
-			resolved = Path(candidate).expanduser().resolve()
 			if resolved.exists():
 				return resolved
 		return None

@@ -11,6 +11,7 @@ from execution_logging.execution_logger import ExecutionLogger
 
 from .context import HTNEvaluationContext
 from .problem_root_evaluator import HTNProblemRootEvaluator
+from .result_tables import PRIMARY_HTN_PLANNER_ID, SINGLE_PLANNER_MODE
 
 
 class HTNEvaluationPipeline:
@@ -88,18 +89,19 @@ class HTNEvaluationPipeline:
 		self,
 		method_library: Any = None,
 	) -> Dict[str, Any]:
+		"""Compatibility wrapper for the now-single primary HTN baseline."""
 		return self.execute_problem_root_evaluation(
 			method_library=method_library,
-			evaluation_mode="planner_or_race",
-			planner_id=None,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
 		)
 
 	def execute_problem_root_evaluation(
 		self,
 		*,
 		method_library: Any = None,
-		evaluation_mode: str = "planner_or_race",
-		planner_id: Optional[str] = None,
+		evaluation_mode: str = SINGLE_PLANNER_MODE,
+		planner_id: Optional[str] = PRIMARY_HTN_PLANNER_ID,
 	) -> Dict[str, Any]:
 		_ = method_library
 		evaluator = self._htn_problem_root_evaluator_instance

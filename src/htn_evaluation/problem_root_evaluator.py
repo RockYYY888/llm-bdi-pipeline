@@ -20,12 +20,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
 from planning.linearization import LiftedLinearPlanner
-from planning.official_benchmark import OFFICIAL_BACKEND_SELECTION_RULE
 from planning.panda_portfolio import PANDAPlanningError
 from planning.representations import PlanningRepresentation, RepresentationBuildResult
 from .problem_root_runtime import official_problem_root_planning_task_worker
 from .result_tables import (
-	PLANNER_OR_RACE_MODE,
+	PRIMARY_HTN_PLANNER_ID,
+	SINGLE_PLANNER_MODE,
 	validate_evaluation_mode,
 	validate_planner_id,
 )
@@ -175,11 +175,11 @@ class HTNProblemRootEvaluator:
 	def run_backend_evaluation(
 		self,
 		*,
-		evaluation_mode: str = PLANNER_OR_RACE_MODE,
-		planner_id: Optional[str] = None,
+		evaluation_mode: str = SINGLE_PLANNER_MODE,
+		planner_id: Optional[str] = PRIMARY_HTN_PLANNER_ID,
 	) -> Dict[str, Any]:
 		if self.context.output_dir is None:
-			raise ValueError("Official problem-root backend race requires an output directory.")
+			raise ValueError("Official problem-root planner evaluation requires an output directory.")
 
 		mode = validate_evaluation_mode(evaluation_mode)
 		normalized_planner_id = validate_planner_id(
@@ -187,7 +187,7 @@ class HTNProblemRootEvaluator:
 			evaluation_mode=mode,
 		)
 		planning_timeout_seconds = self.context._official_problem_root_planning_timeout_seconds()
-		backend_root = Path(self.context.output_dir) / "backend_race"
+		backend_root = Path(self.context.output_dir) / "primary_planner"
 		backend_root.mkdir(parents=True, exist_ok=True)
 		representation_build_start = time.perf_counter()
 		try:
@@ -217,7 +217,6 @@ class HTNProblemRootEvaluator:
 		attempts: List[Dict[str, Any]] = []
 		race_start = time.perf_counter()
 		selected_attempt: Optional[Dict[str, Any]] = None
-		stop_on_success = mode == PLANNER_OR_RACE_MODE
 
 		def incomplete_attempt(
 			planning_task: PlanningBackendTask,
@@ -329,7 +328,7 @@ class HTNProblemRootEvaluator:
 		for planning_task in planning_tasks:
 			attempt = run_single_task(planning_task)
 			attempts.append(attempt)
-			if stop_on_success and bool(attempt.get("success")):
+			if bool(attempt.get("success")):
 				selected_attempt = dict(attempt)
 				break
 
@@ -440,16 +439,16 @@ class HTNProblemRootEvaluator:
 
 	def run_backend_race(self) -> Dict[str, Any]:
 		return self.run_backend_evaluation(
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
 		)
 
 	def execute_problem_root_evaluation(
 		self,
 		method_library=None,
 		*,
-		evaluation_mode: str = PLANNER_OR_RACE_MODE,
-		planner_id: Optional[str] = None,
+		evaluation_mode: str = SINGLE_PLANNER_MODE,
+		planner_id: Optional[str] = PRIMARY_HTN_PLANNER_ID,
 	) -> Dict[str, Any]:
 		mode = validate_evaluation_mode(evaluation_mode)
 		normalized_planner_id = validate_planner_id(
@@ -501,9 +500,7 @@ class HTNProblemRootEvaluator:
 		plan_solve_summary.update(
 			{
 				"solver_race_strategy": (
-					OFFICIAL_BACKEND_SELECTION_RULE
-					if mode == PLANNER_OR_RACE_MODE
-					else "single_planner_best_attempt"
+					"lifted_panda_sat_primary"
 				),
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
@@ -519,9 +516,7 @@ class HTNProblemRootEvaluator:
 		plan_solve_artifacts.update(
 			{
 				"solver_race_strategy": (
-					OFFICIAL_BACKEND_SELECTION_RULE
-					if mode == PLANNER_OR_RACE_MODE
-					else "single_planner_best_attempt"
+					"lifted_panda_sat_primary"
 				),
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
@@ -536,9 +531,7 @@ class HTNProblemRootEvaluator:
 		plan_verification_summary.update(
 			{
 				"selection_rule": (
-					OFFICIAL_BACKEND_SELECTION_RULE
-					if mode == PLANNER_OR_RACE_MODE
-					else "single_planner_best_attempt"
+					"lifted_panda_sat_primary"
 				),
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
@@ -553,9 +546,7 @@ class HTNProblemRootEvaluator:
 		plan_verification_artifacts.update(
 			{
 				"selection_rule": (
-					OFFICIAL_BACKEND_SELECTION_RULE
-					if mode == PLANNER_OR_RACE_MODE
-					else "single_planner_best_attempt"
+					"lifted_panda_sat_primary"
 				),
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
@@ -670,8 +661,8 @@ class HTNProblemRootEvaluator:
 	) -> Dict[str, Any]:
 		return self.execute_problem_root_evaluation(
 			method_library=method_library,
-			evaluation_mode=PLANNER_OR_RACE_MODE,
-			planner_id=None,
+			evaluation_mode=SINGLE_PLANNER_MODE,
+			planner_id=PRIMARY_HTN_PLANNER_ID,
 		)
 
 	@staticmethod

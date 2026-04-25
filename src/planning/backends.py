@@ -1,8 +1,9 @@
 """
-Backend capability declarations and solver dispatch for official HTN planning.
+Backend capability declarations and solver dispatch for HTN evaluation.
 
-This module is the solving layer. Backends declare which compiled representations they
-can solve, and the caller is free to run all applicable backends in parallel.
+The dissertation baseline intentionally exposes one primary planner configuration:
+lifted_panda_sat. Other local planner sweeps are diagnostic artifacts and are not part
+of the supported evaluation path.
 """
 
 from __future__ import annotations
@@ -15,9 +16,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from planning.linearization import LiftedLinearPlanner
 from planning.official_benchmark import (
 	OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
-	OFFICIAL_PANDADEALER_SOLVER_ID,
 )
-from planning.panda_portfolio import PANDAPlanner
 from planning.plan_models import PANDAPlanResult
 from planning.representations import PlanningRepresentation
 
@@ -26,9 +25,8 @@ def _solver_config_with_backend_budget(solver_config: Dict[str, Any]) -> Dict[st
 	"""
 	Standalone backends should inherit the full backend budget.
 
-	Per-attempt caps are useful inside the sequential PANDA portfolio, but they
-	artificially truncate standalone official backends such as PandaDealer and the
-	linearized Lifted-PANDA solver.
+	Per-attempt caps are useful inside PANDA portfolios, but the primary
+	lifted_panda_sat baseline should inherit the full benchmark timeout.
 	"""
 	prepared = dict(solver_config)
 	prepared.pop("timeout_seconds", None)
@@ -90,89 +88,6 @@ class HierarchicalPlanningBackend(ABC):
 		"""Run the backend on one representation."""
 
 
-class PandaPortfolioBackend(HierarchicalPlanningBackend):
-	"""PANDA PI fixed official solver matrix."""
-
-	def __init__(
-		self,
-		workspace: Optional[str | Path] = None,
-	) -> None:
-		self.backend_name = "panda_pi_portfolio"
-		self.plan_source_label = "panda_plan"
-		self.supported_sources = frozenset({"original", "linearized"})
-		self.supported_ordering_kinds = frozenset({"total_order", "partial_order"})
-		self.planner = PANDAPlanner(workspace=workspace)
-
-	def toolchain_available(self) -> bool:
-		return self.planner.toolchain_available()
-
-	def solve(
-		self,
-		*,
-		domain: Any,
-		representation: PlanningRepresentation,
-		task_name: str,
-		task_args: Sequence[str],
-		timeout_seconds: Optional[float],
-	) -> PANDAPlanResult:
-		return self.planner.plan_hddl_files(
-			domain=domain,
-			domain_file=representation.domain_file,
-			problem_file=representation.problem_file,
-			task_name=str(task_name),
-			transition_name=representation.representation_id,
-			task_args=tuple(task_args),
-			target_literal=None,
-			allow_empty_plan=False,
-			timeout_seconds=timeout_seconds,
-			solver_configs=self.planner.official_solver_portfolio_for_backend(self.backend_name),
-			collect_all_candidates=True,
-		)
-
-
-class PandaDealerBackend(HierarchicalPlanningBackend):
-	"""PandaDealer agile-lama official total-order backend."""
-
-	def __init__(
-		self,
-		workspace: Optional[str | Path] = None,
-	) -> None:
-		self.backend_name = "pandadealer_agile_lama"
-		self.plan_source_label = "panda_plan"
-		self.supported_sources = frozenset({"original", "linearized"})
-		self.supported_ordering_kinds = frozenset({"total_order"})
-		self.planner = PANDAPlanner(workspace=workspace)
-
-	def toolchain_available(self) -> bool:
-		return self.planner.toolchain_available()
-
-	def solve(
-		self,
-		*,
-		domain: Any,
-		representation: PlanningRepresentation,
-		task_name: str,
-		task_args: Sequence[str],
-		timeout_seconds: Optional[float],
-	) -> PANDAPlanResult:
-		solver_config = _solver_config_with_backend_budget(
-			self.planner._solver_config_by_id(OFFICIAL_PANDADEALER_SOLVER_ID),
-		)
-		return self.planner.plan_hddl_files(
-			domain=domain,
-			domain_file=representation.domain_file,
-			problem_file=representation.problem_file,
-			task_name=str(task_name),
-			transition_name=representation.representation_id,
-			task_args=tuple(task_args),
-			target_literal=None,
-			allow_empty_plan=False,
-			timeout_seconds=timeout_seconds,
-			solver_configs=(solver_config,),
-			collect_all_candidates=True,
-		)
-
-
 class LiftedPandaBackend(HierarchicalPlanningBackend):
 	"""Lifted PANDA SAT over a linearized total-order representation."""
 
@@ -221,11 +136,9 @@ class LiftedPandaBackend(HierarchicalPlanningBackend):
 def default_official_backends(
 	workspace: Optional[str | Path] = None,
 ) -> Tuple[HierarchicalPlanningBackend, ...]:
-	"""Backends used by the official baseline by default."""
+	"""Primary HTN planner baseline used by dissertation evaluation."""
 
 	return (
-		PandaPortfolioBackend(workspace=workspace),
-		PandaDealerBackend(workspace=workspace),
 		LiftedPandaBackend(workspace=workspace),
 	)
 

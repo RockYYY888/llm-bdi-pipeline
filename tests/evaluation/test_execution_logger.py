@@ -152,7 +152,7 @@ def test_execution_logger_serializes_backend_bytes_payloads(tmp_path) -> None:
 		{
 			"backend_attempts": [
 				{
-					"backend_name": "pandadealer_agile_lama",
+					"backend_name": "lifted_panda_sat",
 					"stdout": b"solver-bytes",
 					"stderr": b"",
 				},
