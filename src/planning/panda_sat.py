@@ -1,9 +1,8 @@
 """
-PANDA-backed Hierarchical Task Network planner.
+PANDA SAT wrapper for the primary HTN evaluation baseline.
 
-This module exports the HTN method library into temporary HDDL files, invokes
-the PANDA toolchain, and captures solver-portfolio artifacts for verifier-aware
-selection.
+This module exports HDDL inputs, runs the PANDA parser, grounder, and SAT engine,
+then returns the hierarchical plan artifact consumed by the IPC verifier.
 """
 
 from __future__ import annotations
@@ -22,9 +21,6 @@ from method_library.synthesis.schema import (
 	HTNLiteral,
 	HTNMethod,
 	HTNMethodLibrary,
-)
-from planning.official_benchmark import (
-	OFFICIAL_TRANSLATION_FAST_DOWNWARD_CONFIGURATION,
 )
 from planning.process_capture import read_full_process_output, run_subprocess_to_files
 from planning.problem_encoding import PANDAProblemBuilder
@@ -45,7 +41,7 @@ class PANDAPlanningError(RuntimeError):
 
 
 class PANDAPlanner:
-	"""Invoke the PANDA PI toolchain on an exported HDDL planning problem."""
+	"""Invoke the SAT path of the PANDA PI toolchain on an HDDL problem."""
 
 	_LINEARIZED_TOKEN_REPLACEMENTS: Tuple[Tuple[str, str], ...] = (
 		("BAR_", "|"),
@@ -258,7 +254,7 @@ class PANDAPlanner:
 		steps: List[PANDAPlanStep] = []
 		configured_solvers = tuple(
 			dict(config)
-			for config in (solver_configs or self.default_solver_portfolio())
+			for config in (solver_configs or self.default_solver_configs())
 		)
 		for solver_config in configured_solvers:
 			solver_id = str(solver_config.get("solver_id") or "").strip()
@@ -487,73 +483,18 @@ class PANDAPlanner:
 			solver_candidates=list(engine_attempts),
 		)
 
-	def default_solver_portfolio(self) -> Tuple[Dict[str, Any], ...]:
-		raw_value = os.getenv("PANDA_PI_ENGINE_MODES", "sat,default,bdd")
-		canonical_modes = {
-			"default": ("progression_rc2_ff",),
-			"engine": ("progression_rc2_ff",),
-			"sat": ("sat",),
-			"bdd": ("bdd",),
-			"translate": ("translation_fd",),
-			"translation": ("translation_fd",),
-		}
-		selected: List[str] = []
-		for token in raw_value.split(","):
-			for solver_id in canonical_modes.get(token.strip().lower(), ()):
-				if solver_id not in selected:
-					selected.append(solver_id)
-		if not selected:
-			selected = ["sat", "progression_rc2_ff", "bdd"]
-		return tuple(self._solver_config_by_id(solver_id) for solver_id in selected)
+	def default_solver_configs(self) -> Tuple[Dict[str, Any], ...]:
+		"""Return the single SAT engine configuration used by lifted_panda_sat."""
+
+		return (self._solver_config_by_id("sat"),)
 
 	def _solver_config_by_id(self, solver_id: str) -> Dict[str, Any]:
 		configs = {
-			"progression_rc2_ff": {
-				"solver_id": "progression_rc2_ff",
-				"engine_mode": "progression",
-				"engine_args": ("-p", "-H", "rc2(ff)"),
-				"timeout_seconds": 75.0,
-			},
-			"progression_rc2_add": {
-				"solver_id": "progression_rc2_add",
-				"engine_mode": "progression",
-				"engine_args": ("-p", "-H", "rc2(add)"),
-				"timeout_seconds": 75.0,
-			},
-			"progression_rc2_lmc": {
-				"solver_id": "progression_rc2_lmc",
-				"engine_mode": "progression",
-				"engine_args": ("-p", "-H", "rc2(lmc)"),
-				"timeout_seconds": 75.0,
-			},
-			"progression_suboptimal": {
-				"solver_id": "progression_suboptimal",
-				"engine_mode": "progression",
-				"engine_args": ("-p", "-H", "rc2(ff)", "--suboptimal"),
-				"timeout_seconds": 75.0,
-			},
 			"sat": {
 				"solver_id": "sat",
 				"engine_mode": "sat",
 				"engine_args": ("-s",),
 				"timeout_seconds": 90.0,
-			},
-			"bdd": {
-				"solver_id": "bdd",
-				"engine_mode": "bdd",
-				"engine_args": ("-b",),
-				"timeout_seconds": 90.0,
-			},
-			"translation_fd": {
-				"solver_id": "translation_fd",
-				"engine_mode": "translation",
-				"engine_args": (
-					"-2",
-					"--downwardConf",
-					OFFICIAL_TRANSLATION_FAST_DOWNWARD_CONFIGURATION,
-				),
-				"requires_binary": "fast_downward",
-				"timeout_seconds": 120.0,
 			},
 		}
 		try:
@@ -565,17 +506,6 @@ class PANDAPlanner:
 		prepared = dict(solver_config)
 		engine_args = tuple(str(value) for value in (prepared.get("engine_args") or ()))
 		engine_cmd = str(prepared.get("engine_cmd") or self.engine_cmd)
-		if prepared.get("requires_binary") == "fast_downward":
-			downward = self._resolve_fast_downward()
-			if downward is None:
-				return {
-					"solver_id": prepared.get("solver_id"),
-					"engine_mode": prepared.get("engine_mode"),
-					"status": "skipped",
-					"reason": "fast_downward_unavailable",
-					"required_binary": "fast-downward.py",
-				}
-			engine_args = (*engine_args, "--downward", downward)
 		prepared["engine_args"] = engine_args
 		prepared["engine_cmd"] = engine_cmd
 		prepared["command"] = self._build_command(
@@ -597,39 +527,6 @@ class PANDAPlanner:
 			*engine_args,
 			grounded_path,
 		)
-
-	@staticmethod
-	def _resolve_fast_downward() -> Optional[str]:
-		wrapper_path = Path(__file__).with_name("fast_downward_compat.py").resolve()
-		if not wrapper_path.exists():
-			return None
-		if PANDAPlanner._discover_fast_downward_binary(wrapper_path) is None:
-			return None
-		return str(wrapper_path)
-
-	@staticmethod
-	def _discover_fast_downward_binary(wrapper_path: Optional[Path] = None) -> Optional[Path]:
-		candidates: List[Optional[str | Path]] = [
-			os.getenv("PANDA_PI_FAST_DOWNWARD_REAL"),
-			os.getenv("FAST_DOWNWARD_REAL"),
-			os.getenv("PANDA_PI_FAST_DOWNWARD"),
-			os.getenv("FAST_DOWNWARD"),
-			shutil.which("fast-downward.py"),
-			shutil.which("downward"),
-			shutil.which("fast-downward"),
-		]
-		downloads_dir = Path.home() / "Downloads"
-		if downloads_dir.exists():
-			candidates.extend(downloads_dir.rglob("fast-downward.py"))
-		for candidate in candidates:
-			if not candidate:
-				continue
-			resolved = Path(candidate).expanduser().resolve()
-			if wrapper_path is not None and resolved == wrapper_path:
-				continue
-			if resolved.exists():
-				return resolved
-		return None
 
 	@staticmethod
 	def _remaining_timeout_seconds(

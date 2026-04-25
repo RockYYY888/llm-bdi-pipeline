@@ -85,11 +85,11 @@ class HTNEvaluationPipeline:
 	def _merge_official_backend_output_dir(self, source_root: Path) -> None:
 		self._context._merge_official_backend_output_dir(source_root)
 
-	def _execute_official_problem_root_parallel_solver_race(
+	def _execute_primary_htn_planner(
 		self,
 		method_library: Any = None,
 	) -> Dict[str, Any]:
-		"""Compatibility wrapper for the now-single primary HTN baseline."""
+		"""Run the supported lifted_panda_sat primary HTN baseline."""
 		return self.execute_problem_root_evaluation(
 			method_library=method_library,
 			evaluation_mode=SINGLE_PLANNER_MODE,
@@ -115,5 +115,5 @@ class HTNEvaluationPipeline:
 		)
 
 	@staticmethod
-	def _close_backend_race_queue(result_queue: Any) -> None:
-		HTNProblemRootEvaluator.close_backend_race_queue(result_queue)
+	def _close_planner_queue(result_queue: Any) -> None:
+		HTNProblemRootEvaluator.close_planner_queue(result_queue)

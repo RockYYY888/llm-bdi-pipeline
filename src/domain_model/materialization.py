@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from method_library.synthesis.schema import HTNMethodLibrary
-from planning.panda_portfolio import PANDAPlanner
+from planning.panda_sat import PANDAPlanner
 from utils.hddl_parser import HDDLParser
 
 

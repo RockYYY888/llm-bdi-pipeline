@@ -2,8 +2,7 @@
 Backend capability declarations and solver dispatch for HTN evaluation.
 
 The dissertation baseline intentionally exposes one primary planner configuration:
-lifted_panda_sat. Other local planner sweeps are diagnostic artifacts and are not part
-of the supported evaluation path.
+lifted_panda_sat.
 """
 
 from __future__ import annotations
@@ -25,8 +24,8 @@ def _solver_config_with_backend_budget(solver_config: Dict[str, Any]) -> Dict[st
 	"""
 	Standalone backends should inherit the full backend budget.
 
-	Per-attempt caps are useful inside PANDA portfolios, but the primary
-	lifted_panda_sat baseline should inherit the full benchmark timeout.
+	The primary lifted_panda_sat baseline should inherit the full benchmark
+	timeout instead of the lower standalone SAT wrapper default.
 	"""
 	prepared = dict(solver_config)
 	prepared.pop("timeout_seconds", None)

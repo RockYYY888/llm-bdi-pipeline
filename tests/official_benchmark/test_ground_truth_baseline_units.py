@@ -16,7 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from planning.backends import LiftedPandaBackend
 from planning.official_benchmark import OFFICIAL_BENCHMARK_PLANNING_TIMEOUT_SECONDS
-from planning.panda_portfolio import PANDAPlanner, PANDAPlanningError
+from planning.panda_sat import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
 from planning.process_capture import (
 	PROCESS_OUTPUT_PREVIEW_BYTE_LIMIT,
@@ -266,18 +266,18 @@ def test_merge_official_backend_output_dir_skips_unreadable_backend_root(
 	assert (tmp_path / "selected-root").exists()
 
 
-def test_close_backend_race_queue_closes_and_joins_thread() -> None:
+def test_close_planner_queue_closes_and_joins_thread() -> None:
 	close = Mock()
 	join_thread = Mock()
 	queue_stub = SimpleNamespace(close=close, join_thread=join_thread)
 
-	HTNEvaluationPipeline._close_backend_race_queue(queue_stub)
+	HTNEvaluationPipeline._close_planner_queue(queue_stub)
 
 	close.assert_called_once_with()
 	join_thread.assert_called_once_with()
 
 
-def test_parallel_solver_race_delegates_to_hierarchical_task_network_evaluator() -> None:
+def test_primary_htn_planner_delegates_to_hierarchical_task_network_evaluator() -> None:
 	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["blocksworld"],
 		problem_file=str(
@@ -308,7 +308,7 @@ def test_parallel_solver_race_delegates_to_hierarchical_task_network_evaluator()
 	fake_evaluator = FakeEvaluator()
 	pipeline._htn_problem_root_evaluator_instance = fake_evaluator  # type: ignore[assignment]
 
-	result = pipeline._execute_official_problem_root_parallel_solver_race(method_library="sentinel")
+	result = pipeline._execute_primary_htn_planner(method_library="sentinel")
 
 	assert result["plan_solve"]["summary"]["status"] == "success"
 	assert fake_evaluator.calls == [
@@ -390,13 +390,13 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 							"total_seconds": 10.0,
 							"metadata": {
 								"representation_build_seconds": 1.25,
-								"race_wallclock_seconds": 11.0,
+								"planner_wallclock_seconds": 11.0,
 							},
 						},
 						"plan_verification": {
 							"total_seconds": 2.0,
 							"metadata": {
-								"race_wallclock_seconds": 11.0,
+								"planner_wallclock_seconds": 11.0,
 							},
 						},
 					},
@@ -424,13 +424,13 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 							"total_seconds": 19.0,
 							"metadata": {
 								"representation_build_seconds": 0.5,
-								"race_wallclock_seconds": 19.0,
+								"planner_wallclock_seconds": 19.0,
 							},
 						},
 						"plan_verification": {
 							"total_seconds": 0.5,
 							"metadata": {
-								"race_wallclock_seconds": 19.0,
+								"planner_wallclock_seconds": 19.0,
 							},
 						},
 					},
@@ -487,7 +487,7 @@ def test_run_official_problem_root_baseline_for_domain_writes_mode_specific_resu
 	assert problem_rows[0]["plan_solve_time_seconds"] == 10.0
 	assert problem_rows[0]["plan_verification_time_seconds"] == 2.0
 	assert problem_rows[0]["representation_build_seconds"] == 1.25
-	assert problem_rows[0]["solver_race_wallclock_seconds"] == 11.0
+	assert problem_rows[0]["planner_wallclock_seconds"] == 11.0
 
 
 def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries(
@@ -510,7 +510,7 @@ def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries
 		"plan_solve_time_seconds": 8.0,
 		"plan_verification_time_seconds": 2.0,
 		"representation_build_seconds": 0.5,
-		"solver_race_wallclock_seconds": 9.0,
+		"planner_wallclock_seconds": 9.0,
 		"plan_solve_status": "success",
 		"plan_verification_status": "success",
 		"selected_solver_id": "sat",
@@ -554,12 +554,12 @@ def test_run_official_problem_root_baseline_for_domain_resumes_completed_queries
 						"total_seconds": 19.0,
 						"metadata": {
 							"representation_build_seconds": 0.5,
-							"race_wallclock_seconds": 19.0,
+							"planner_wallclock_seconds": 19.0,
 						},
 					},
 					"plan_verification": {
 						"total_seconds": 0.5,
-						"metadata": {"race_wallclock_seconds": 19.0},
+						"metadata": {"planner_wallclock_seconds": 19.0},
 					},
 				},
 			},
@@ -623,7 +623,7 @@ def test_run_official_problem_root_baseline_for_domain_preserves_unselected_exis
 					"plan_solve_time_seconds": 8.0,
 					"plan_verification_time_seconds": 2.0,
 					"representation_build_seconds": 0.5,
-					"solver_race_wallclock_seconds": 9.0,
+					"planner_wallclock_seconds": 9.0,
 					"plan_solve_status": "success",
 					"plan_verification_status": "success",
 					"selected_solver_id": "sat",
@@ -658,12 +658,12 @@ def test_run_official_problem_root_baseline_for_domain_preserves_unselected_exis
 						"total_seconds": 10.0,
 						"metadata": {
 							"representation_build_seconds": 1.25,
-							"race_wallclock_seconds": 11.0,
+							"planner_wallclock_seconds": 11.0,
 						},
 					},
 					"plan_verification": {
 						"total_seconds": 2.0,
-						"metadata": {"race_wallclock_seconds": 11.0},
+						"metadata": {"planner_wallclock_seconds": 11.0},
 					},
 				},
 			},
@@ -723,12 +723,12 @@ def test_run_official_problem_root_baseline_for_domain_persists_partial_query_ch
 							"total_seconds": 10.0,
 							"metadata": {
 								"representation_build_seconds": 1.25,
-								"race_wallclock_seconds": 11.0,
+								"planner_wallclock_seconds": 11.0,
 							},
 						},
 						"plan_verification": {
 							"total_seconds": 2.0,
-							"metadata": {"race_wallclock_seconds": 11.0},
+							"metadata": {"planner_wallclock_seconds": 11.0},
 						},
 					},
 				},
@@ -800,12 +800,12 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 						"total_seconds": 12.0,
 						"metadata": {
 							"representation_build_seconds": 0.7,
-							"race_wallclock_seconds": 13.5,
+							"planner_wallclock_seconds": 13.5,
 						},
 					},
 					"plan_verification": {
 						"total_seconds": 5.0,
-						"metadata": {"race_wallclock_seconds": 13.5},
+						"metadata": {"planner_wallclock_seconds": 13.5},
 					},
 				},
 			},
@@ -852,7 +852,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 						"plan_solve_time_seconds": 12.0,
 						"plan_verification_time_seconds": 5.0,
 						"representation_build_seconds": 0.7,
-						"solver_race_wallclock_seconds": 13.5,
+						"planner_wallclock_seconds": 13.5,
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
@@ -882,7 +882,7 @@ def test_result_tables_build_planner_capability_matrix_rows_and_csv(
 	assert "domain_key" in Path(paths["planner_capability_matrix_csv"]).read_text()
 	assert problem_rows[0]["query_id"] == "query_01"
 	assert problem_rows[0]["execution_time_seconds"] == 17.0
-	assert problem_rows[0]["solver_race_wallclock_seconds"] == 13.5
+	assert problem_rows[0]["planner_wallclock_seconds"] == 13.5
 	assert Path(problem_paths["problem_capability_matrix_json"]).exists()
 	assert Path(problem_paths["problem_capability_matrix_csv"]).exists()
 	assert "query_id" in Path(problem_paths["problem_capability_matrix_csv"]).read_text()
@@ -934,7 +934,7 @@ def test_sequential_full_baseline_writes_incremental_track_outputs(
 						"plan_solve_time_seconds": 9.0,
 						"plan_verification_time_seconds": 3.0,
 						"representation_build_seconds": 0.5,
-						"solver_race_wallclock_seconds": 10.5,
+						"planner_wallclock_seconds": 10.5,
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
@@ -1009,7 +1009,7 @@ def test_sequential_full_baseline_resumes_from_existing_domain_summaries(
 						"plan_solve_time_seconds": 4.0,
 						"plan_verification_time_seconds": 1.0,
 						"representation_build_seconds": 0.2,
-						"solver_race_wallclock_seconds": 4.5,
+						"planner_wallclock_seconds": 4.5,
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
@@ -1064,7 +1064,7 @@ def test_sequential_full_baseline_resumes_from_existing_domain_summaries(
 						"plan_solve_time_seconds": 9.0,
 						"plan_verification_time_seconds": 3.0,
 						"representation_build_seconds": 0.5,
-						"solver_race_wallclock_seconds": 10.5,
+						"planner_wallclock_seconds": 10.5,
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
@@ -1328,7 +1328,7 @@ def test_sequential_full_baseline_cleans_resources_between_domains(
 						"plan_solve_time_seconds": 9.0,
 						"plan_verification_time_seconds": 3.0,
 						"representation_build_seconds": 0.5,
-						"solver_race_wallclock_seconds": 10.5,
+						"planner_wallclock_seconds": 10.5,
 						"plan_solve_status": "success",
 						"plan_verification_status": "success",
 						"selected_solver_id": "sat",
@@ -1522,7 +1522,7 @@ def test_primitive_executable_goal_reached_plan_is_hierarchical_rejection(
 		_record_step_timing=lambda *_args, **_kwargs: None,
 	)
 
-	result = problem_root_runtime.verify_problem_root_solver_race(
+	result = problem_root_runtime.verify_primary_planner_solution(
 		fake_context,
 		verifier=FakeVerifier(),
 		plan_solve_data={"summary": {"status": "success"}},
@@ -1556,8 +1556,8 @@ def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(
 			"backend": PRIMARY_HTN_PLANNER_ID,
 			"status": "success",
 			"planning_mode": "official_problem_root",
-			"engine_mode": "progression",
-			"solver_id": "progression_rc2_add",
+			"engine_mode": "sat",
+			"solver_id": "sat",
 			"planning_representation": {
 				"representation_id": "linearized_total_order",
 				"representation_source": "linearized",
@@ -1573,7 +1573,7 @@ def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(
 			"guided_hierarchical_plan_text": "plan text" * 1000,
 			"solver_candidates": [
 				{
-					"solver_id": "progression_rc2_add",
+					"solver_id": "sat",
 					"status": "success",
 					"action_path": ["a", "b"],
 					"actual_plan_path": str(actual_plan),

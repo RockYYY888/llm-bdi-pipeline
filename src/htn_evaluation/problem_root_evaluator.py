@@ -20,18 +20,19 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from planning.backends import PlanningBackendTask, default_official_backends, expand_backend_tasks_for_representations
 from planning.linearization import LiftedLinearPlanner
-from planning.panda_portfolio import PANDAPlanningError
+from planning.panda_sat import PANDAPlanningError
 from planning.representations import PlanningRepresentation, RepresentationBuildResult
 from .problem_root_runtime import official_problem_root_planning_task_worker
 from .result_tables import (
 	PRIMARY_HTN_PLANNER_ID,
+	PRIMARY_PLANNER_SELECTION_RULE,
 	SINGLE_PLANNER_MODE,
 	validate_evaluation_mode,
 	validate_planner_id,
 )
 
 
-BACKEND_RESULT_MESSAGE = "backend_attempt"
+BACKEND_RESULT_MESSAGE = "primary_planner_attempt"
 HTN_ATTEMPT_TEXT_PREVIEW_CHARS = 4096
 
 
@@ -210,12 +211,12 @@ class HTNProblemRootEvaluator:
 				"attempts": [selected_attempt],
 				"selected_attempt": selected_attempt,
 				"representation_build_seconds": representation_build_seconds,
-				"race_wallclock_seconds": 0.0,
+				"planner_wallclock_seconds": 0.0,
 			}
 		representation_build_seconds = time.perf_counter() - representation_build_start
 		context = multiprocessing.get_context("spawn")
 		attempts: List[Dict[str, Any]] = []
-		race_start = time.perf_counter()
+		planner_start = time.perf_counter()
 		selected_attempt: Optional[Dict[str, Any]] = None
 
 		def incomplete_attempt(
@@ -251,13 +252,13 @@ class HTNProblemRootEvaluator:
 					"summary": {
 						"backend": "pandaPIparser",
 						"status": "failed",
-						"selection_rule": "first_hierarchical_verification_success",
+						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "no_plan_from_solver",
 					},
 					"artifacts": {
 						"backend": planning_task.backend_name,
 						"status": "failed",
-						"selection_rule": "first_hierarchical_verification_success",
+						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "no_plan_from_solver",
 						"failure_reason": failure_reason,
 					},
@@ -272,7 +273,7 @@ class HTNProblemRootEvaluator:
 			}
 
 		def run_single_task(planning_task: PlanningBackendTask) -> Dict[str, Any]:
-			raw_remaining_timeout = planning_timeout_seconds - (time.perf_counter() - race_start)
+			raw_remaining_timeout = planning_timeout_seconds - (time.perf_counter() - planner_start)
 			if raw_remaining_timeout <= 0.0:
 				return incomplete_attempt(
 					planning_task,
@@ -316,7 +317,7 @@ class HTNProblemRootEvaluator:
 						self.terminate_backend_process(process)
 						process.join(timeout=1.0)
 			finally:
-				self.close_backend_race_queue(result_queue)
+				self.close_planner_queue(result_queue)
 			if attempt is not None:
 				return attempt
 			return incomplete_attempt(
@@ -342,7 +343,7 @@ class HTNProblemRootEvaluator:
 			"attempts": attempts,
 			"selected_attempt": selected_attempt,
 			"representation_build_seconds": representation_build_seconds,
-			"race_wallclock_seconds": time.perf_counter() - race_start,
+			"planner_wallclock_seconds": time.perf_counter() - planner_start,
 		}
 
 	def representation_build_failure_attempt(
@@ -398,30 +399,30 @@ class HTNProblemRootEvaluator:
 					"failure_metadata": failure_metadata,
 					"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
 				},
-			},
-			"plan_verification_data": {
-				"summary": {
-					"backend": "pandaPIparser",
-					"status": "failed",
-					"selection_rule": "first_hierarchical_verification_success",
-					"failure_bucket": "no_plan_from_solver",
-					"failure_stage": "representation_build",
-					"failure_reason": failure_reason,
 				},
-				"artifacts": {
-					"backend": backend_name,
-					"status": "failed",
-					"selection_rule": "first_hierarchical_verification_success",
-					"failure_bucket": "no_plan_from_solver",
-					"failure_stage": "representation_build",
-					"failure_reason": failure_reason,
-					"selected_solver_id": backend_name,
-					"selected_backend_name": backend_name,
-					"selected_representation_id": representation_id,
-					"selected_bucket": "no_plan_from_solver",
-					"failure_metadata": failure_metadata,
-					"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
-				},
+				"plan_verification_data": {
+					"summary": {
+						"backend": "pandaPIparser",
+						"status": "failed",
+						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+						"failure_bucket": "no_plan_from_solver",
+						"failure_stage": "representation_build",
+						"failure_reason": failure_reason,
+					},
+					"artifacts": {
+						"backend": backend_name,
+						"status": "failed",
+						"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+						"failure_bucket": "no_plan_from_solver",
+						"failure_stage": "representation_build",
+						"failure_reason": failure_reason,
+						"selected_solver_id": backend_name,
+						"selected_backend_name": backend_name,
+						"selected_representation_id": representation_id,
+						"selected_bucket": "no_plan_from_solver",
+						"failure_metadata": failure_metadata,
+						"solver_candidates": list(failure_metadata.get("engine_attempts") or ()),
+					},
 			},
 			"plan_solve_seconds": 0.0,
 			"plan_verification_seconds": 0.0,
@@ -437,7 +438,7 @@ class HTNProblemRootEvaluator:
 	def _safe_json_dump(payload: Dict[str, Any]) -> str:
 		return json.dumps(payload, indent=2, default=str)
 
-	def run_backend_race(self) -> Dict[str, Any]:
+	def run_primary_planner(self) -> Dict[str, Any]:
 		return self.run_backend_evaluation(
 			evaluation_mode=SINGLE_PLANNER_MODE,
 			planner_id=PRIMARY_HTN_PLANNER_ID,
@@ -457,11 +458,11 @@ class HTNProblemRootEvaluator:
 		)
 		print("\n[PLAN SOLVE]")
 		print("-" * 80)
-		race_result = self.run_backend_evaluation(
+		planner_result = self.run_backend_evaluation(
 			evaluation_mode=mode,
 			planner_id=normalized_planner_id,
 		)
-		planning_tasks = list(race_result.get("planning_tasks") or ())
+		planning_tasks = list(planner_result.get("planning_tasks") or ())
 		task_labels = [
 			(
 				f"{task.get('backend_name')}@"
@@ -470,8 +471,8 @@ class HTNProblemRootEvaluator:
 			for task in planning_tasks
 		]
 		print(f"• Running official planning tasks sequentially: {', '.join(task_labels)}")
-		attempts = list(race_result.get("attempts") or ())
-		selected_attempt = dict(race_result.get("selected_attempt") or {})
+		attempts = list(planner_result.get("attempts") or ())
+		selected_attempt = dict(planner_result.get("selected_attempt") or {})
 		selected_output_dir = Path(str(selected_attempt.get("output_dir") or self.context.output_dir)).resolve()
 		self.context._merge_official_backend_output_dir(selected_output_dir)
 
@@ -499,28 +500,28 @@ class HTNProblemRootEvaluator:
 		plan_verification_artifacts = dict((plan_verification_data.get("artifacts") or {}))
 		plan_solve_summary.update(
 			{
-				"solver_race_strategy": (
-					"lifted_panda_sat_primary"
-				),
+				"primary_planner_strategy": "lifted_panda_sat_primary",
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
-				"solver_attempts": attempt_summaries,
-				"selected_solver_id": str(plan_solve_summary.get("solver_id") or selected_attempt.get("backend_name") or "unknown"),
+				"planner_attempts": attempt_summaries,
+				"selected_solver_id": str(
+					plan_solve_summary.get("solver_id")
+					or selected_attempt.get("backend_name")
+					or "unknown"
+				),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
-				"representation_build_seconds": race_result.get("representation_build_seconds"),
-				"race_wallclock_seconds": race_result.get("race_wallclock_seconds"),
+				"representation_build_seconds": planner_result.get("representation_build_seconds"),
+				"planner_wallclock_seconds": planner_result.get("planner_wallclock_seconds"),
 				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
 		plan_solve_artifacts.update(
 			{
-				"solver_race_strategy": (
-					"lifted_panda_sat_primary"
-				),
+				"primary_planner_strategy": "lifted_panda_sat_primary",
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
-				"solver_attempts": attempt_summaries,
+				"planner_attempts": attempt_summaries,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
@@ -530,30 +531,26 @@ class HTNProblemRootEvaluator:
 		)
 		plan_verification_summary.update(
 			{
-				"selection_rule": (
-					"lifted_panda_sat_primary"
-				),
+				"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
-				"representation_build_seconds": race_result.get("representation_build_seconds"),
-				"race_wallclock_seconds": race_result.get("race_wallclock_seconds"),
+				"representation_build_seconds": planner_result.get("representation_build_seconds"),
+				"planner_wallclock_seconds": planner_result.get("planner_wallclock_seconds"),
 				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
 		plan_verification_artifacts.update(
 			{
-				"selection_rule": (
-					"lifted_panda_sat_primary"
-				),
+				"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 				"evaluation_mode": mode,
 				"requested_planner_id": normalized_planner_id,
 				"selected_solver_id": str(plan_solve_summary.get("selected_solver_id") or ""),
 				"selected_backend_name": str(selected_attempt.get("backend_name") or "unknown"),
 				"selected_representation_id": str(selected_attempt.get("representation_id") or "unknown"),
-				"solver_attempts": attempt_summaries,
+				"planner_attempts": attempt_summaries,
 				"official_resource_profile": dict(selected_attempt.get("resource_profile") or {}),
 			}
 		)
@@ -582,23 +579,23 @@ class HTNProblemRootEvaluator:
 			metadata=plan_solve_summary,
 		)
 		self.context.logger.record_step_timing(
-			"plan_solve",
-			float(selected_attempt.get("plan_solve_seconds") or 0.0)
-			+ float(race_result.get("representation_build_seconds") or 0.0),
-			metadata={
-				"selected_backend_name": selected_backend_name,
-				"selected_representation_id": selected_representation_id,
-				"representation_build_seconds": round(
-					float(race_result.get("representation_build_seconds") or 0.0),
-					6,
-				),
-				"race_wallclock_seconds": round(
-					float(race_result.get("race_wallclock_seconds") or 0.0),
-					6,
-				),
-				"backend_attempt_count": len(attempt_summaries),
-			},
-		)
+				"plan_solve",
+				float(selected_attempt.get("plan_solve_seconds") or 0.0)
+				+ float(planner_result.get("representation_build_seconds") or 0.0),
+				metadata={
+					"selected_backend_name": selected_backend_name,
+					"selected_representation_id": selected_representation_id,
+					"representation_build_seconds": round(
+						float(planner_result.get("representation_build_seconds") or 0.0),
+						6,
+					),
+					"planner_wallclock_seconds": round(
+						float(planner_result.get("planner_wallclock_seconds") or 0.0),
+						6,
+					),
+					"backend_attempt_count": len(attempt_summaries),
+				},
+			)
 		if plan_solve_summary.get("status") == "success":
 			print(
 				f"✓ Planner returned via backend: {selected_backend_name} "
@@ -626,18 +623,18 @@ class HTNProblemRootEvaluator:
 			metadata=plan_verification_summary,
 		)
 		self.context.logger.record_step_timing(
-			"plan_verification",
-			float(selected_attempt.get("plan_verification_seconds") or 0.0),
-			metadata={
-				"selected_backend_name": selected_backend_name,
-				"selected_representation_id": selected_representation_id,
-				"race_wallclock_seconds": round(
-					float(race_result.get("race_wallclock_seconds") or 0.0),
-					6,
-				),
-				"backend_attempt_count": len(attempt_summaries),
-			},
-		)
+				"plan_verification",
+				float(selected_attempt.get("plan_verification_seconds") or 0.0),
+				metadata={
+					"selected_backend_name": selected_backend_name,
+					"selected_representation_id": selected_representation_id,
+					"planner_wallclock_seconds": round(
+						float(planner_result.get("planner_wallclock_seconds") or 0.0),
+						6,
+					),
+					"backend_attempt_count": len(attempt_summaries),
+				},
+			)
 		if plan_verification_summary.get("status") == "success":
 			print("✓ Official IPC verification complete")
 			print(f"  Selected backend: {selected_backend_name}")
@@ -655,7 +652,7 @@ class HTNProblemRootEvaluator:
 			"plan_verification": plan_verification_data,
 		}
 
-	def execute_parallel_solver_race(
+	def execute_primary_planner(
 		self,
 		method_library=None,
 	) -> Dict[str, Any]:
@@ -698,7 +695,7 @@ class HTNProblemRootEvaluator:
 		return min(attempts, key=self.official_problem_root_failure_rank)
 
 	@staticmethod
-	def close_backend_race_queue(result_queue: Any) -> None:
+	def close_planner_queue(result_queue: Any) -> None:
 		close_fn = getattr(result_queue, "close", None)
 		if callable(close_fn):
 			close_fn()

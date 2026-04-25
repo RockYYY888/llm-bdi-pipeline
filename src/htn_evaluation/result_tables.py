@@ -17,6 +17,7 @@ HTN_EVALUATION_MODES: Tuple[str, ...] = (
 	SINGLE_PLANNER_MODE,
 )
 PRIMARY_HTN_PLANNER_ID = "lifted_panda_sat"
+PRIMARY_PLANNER_SELECTION_RULE = "primary_lifted_panda_sat_hierarchical_verification"
 HTN_OUTCOME_BUCKETS: Tuple[str, ...] = (
 	"hierarchical_plan_verified",
 	"primitive_plan_valid_but_hierarchical_rejected",
@@ -146,9 +147,9 @@ def build_problem_result_row(
 		"representation_build_seconds": _coerce_float(
 			plan_solve_timing_metadata.get("representation_build_seconds"),
 		),
-		"solver_race_wallclock_seconds": _coerce_float(
-			plan_solve_timing_metadata.get("race_wallclock_seconds")
-			or plan_verification_timing_metadata.get("race_wallclock_seconds"),
+			"planner_wallclock_seconds": _coerce_float(
+				plan_solve_timing_metadata.get("planner_wallclock_seconds")
+				or plan_verification_timing_metadata.get("planner_wallclock_seconds"),
 		),
 		"plan_solve_status": plan_solve_summary.get("status"),
 		"plan_verification_status": plan_verification_summary.get("status"),
@@ -243,18 +244,14 @@ def build_domain_summary(
 				"execution_time_seconds": row.get("execution_time_seconds"),
 				"plan_solve_time_seconds": row.get("plan_solve_time_seconds"),
 				"plan_verification_time_seconds": row.get("plan_verification_time_seconds"),
-				"representation_build_seconds": row.get("representation_build_seconds"),
-				"solver_race_wallclock_seconds": row.get("solver_race_wallclock_seconds"),
-				"plan_solve_status": row.get("plan_solve_status"),
-				"plan_verification_status": row.get("plan_verification_status"),
+					"representation_build_seconds": row.get("representation_build_seconds"),
+					"planner_wallclock_seconds": row.get("planner_wallclock_seconds"),
+					"plan_solve_status": row.get("plan_solve_status"),
+					"plan_verification_status": row.get("plan_verification_status"),
 					"selected_solver_id": row.get("selected_solver_id"),
 					"selected_backend_name": row.get("selected_backend_name"),
 					"selected_representation_id": row.get("selected_representation_id"),
 					"failure_reason": row.get("failure_reason"),
-					"selected_planner_track_id": row.get("selected_planner_track_id"),
-					"successful_planner_ids": list(row.get("successful_planner_ids") or ()),
-					"attempted_planner_ids": list(row.get("attempted_planner_ids") or ()),
-					"aggregation_mode": row.get("aggregation_mode"),
 				}
 				for row in problem_rows
 			],
@@ -425,8 +422,8 @@ def build_problem_capability_rows(
 					"representation_build_seconds": _coerce_float(
 						query_result.get("representation_build_seconds"),
 					),
-					"solver_race_wallclock_seconds": _coerce_float(
-						query_result.get("solver_race_wallclock_seconds"),
+					"planner_wallclock_seconds": _coerce_float(
+						query_result.get("planner_wallclock_seconds"),
 					),
 					"plan_solve_status": query_result.get("plan_solve_status"),
 					"plan_verification_status": query_result.get("plan_verification_status"),
@@ -434,16 +431,6 @@ def build_problem_capability_rows(
 					"selected_backend_name": query_result.get("selected_backend_name"),
 					"selected_representation_id": query_result.get("selected_representation_id"),
 					"failure_reason": str(query_result.get("failure_reason") or ""),
-					"selected_planner_track_id": query_result.get("selected_planner_track_id"),
-					"successful_planner_ids": ",".join(
-						str(planner_id)
-						for planner_id in list(query_result.get("successful_planner_ids") or ())
-					),
-					"attempted_planner_ids": ",".join(
-						str(planner_id)
-						for planner_id in list(query_result.get("attempted_planner_ids") or ())
-					),
-					"aggregation_mode": query_result.get("aggregation_mode"),
 				}
 				rows.append(row)
 	return tuple(rows)
@@ -509,17 +496,13 @@ def write_problem_capability_matrix(
 		"plan_solve_time_seconds",
 		"plan_verification_time_seconds",
 		"representation_build_seconds",
-		"solver_race_wallclock_seconds",
+		"planner_wallclock_seconds",
 		"plan_solve_status",
 		"plan_verification_status",
-		"selected_solver_id",
-		"selected_backend_name",
-		"selected_representation_id",
+			"selected_solver_id",
+			"selected_backend_name",
+			"selected_representation_id",
 			"failure_reason",
-			"selected_planner_track_id",
-			"successful_planner_ids",
-			"attempted_planner_ids",
-			"aggregation_mode",
 		]
 	with csv_path.open("w", newline="") as handle:
 		writer = csv.DictWriter(handle, fieldnames=fieldnames)

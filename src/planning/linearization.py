@@ -3,7 +3,8 @@ Lifted Linear wrapper for plan solve official problem-root planning.
 
 This adapter mirrors the IPC 2023 Lifted Linear config-2 flow for partial-order
 HTN problems:
-1. Linearize the original PO HDDL instance into a TO HDDL instance.
+1. Linearize the original partial-order HDDL instance into a total-order HDDL
+   instance.
 2. Solve the linearized instance with lifted PANDA SAT search.
 3. Decode the tokenized plan text back into the original symbol space before
    handing it to the official verifier.
@@ -22,7 +23,7 @@ from planning.official_benchmark import (
 	OFFICIAL_LIFTED_LINEAR_INNER_SOLVER_ID,
 	OFFICIAL_LIFTED_LINEAR_SOLVER_ID,
 )
-from planning.panda_portfolio import PANDAPlanner, PANDAPlanningError
+from planning.panda_sat import PANDAPlanner, PANDAPlanningError
 from planning.plan_models import PANDAPlanResult
 from planning.process_capture import run_subprocess_to_files
 

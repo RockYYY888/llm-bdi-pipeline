@@ -3,7 +3,7 @@ Planning-layer exports for structure analysis, representation building, and solv
 """
 
 from .problem_structure import ProblemStructure, ProblemStructureAnalyzer, TaskNetworkStructure
-from .panda_portfolio import PANDAPlanner, PANDAPlanningError
+from .panda_sat import PANDAPlanner, PANDAPlanningError
 from .linearization import LiftedLinearPlanner
 from .representations import (
 	PlanningRepresentation,

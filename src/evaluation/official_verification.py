@@ -15,7 +15,7 @@ from evaluation.domain_selection import (
 	EvaluationDomainContext,
 )
 from evaluation.failure_signature import infer_missing_goal_facts
-from planning.panda_portfolio import PANDAPlanner
+from planning.panda_sat import PANDAPlanner
 from verification.official_plan_verifier import IPCPlanVerifier
 
 

@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - not expected on Unix CI, but keep runt
 	resource = None  # type: ignore[assignment]
 
 from planning.backends import PlanningBackendTask, backend_by_name
-from planning.panda_portfolio import PANDAPlanner
+from planning.panda_sat import PANDAPlanner
 from planning.official_benchmark import (
 	OFFICIAL_BENCHMARK_CPU_COUNT,
 	OFFICIAL_BENCHMARK_MEMORY_LIMIT_MIB,
@@ -34,6 +34,7 @@ from planning.official_benchmark import (
 from verification.official_plan_verifier import IPCPlanVerifier
 
 from .context import HTNEvaluationContext
+from .result_tables import PRIMARY_PLANNER_SELECTION_RULE
 
 
 class _NullExecutionLogger:
@@ -573,7 +574,7 @@ def solve_problem_root_backend_task(
 		return {"summary": summary, "artifacts": failure_artifacts}
 
 
-def verify_problem_root_solver_race(
+def verify_primary_planner_solution(
 	context: HTNEvaluationContext,
 	*,
 	verifier: IPCPlanVerifier,
@@ -589,7 +590,7 @@ def verify_problem_root_solver_race(
 		summary = {
 			"backend": "pandaPIparser",
 			"status": "failed",
-			"selection_rule": "first_hierarchical_verification_success",
+			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 			"failure_bucket": "no_plan_from_solver",
 			"solver_candidate_count": len(solver_candidates),
 			"verification_domain_file": str(verification_domain_file),
@@ -603,7 +604,7 @@ def verify_problem_root_solver_race(
 			"reached_goal_state": None,
 			"selected_solver_id": None,
 			"selected_bucket": "no_plan_from_solver",
-			"selection_rule": "first_hierarchical_verification_success",
+			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 			"solver_candidates": solver_candidates,
 		}
 		context.logger.log_official_verification(
@@ -644,7 +645,11 @@ def verify_problem_root_solver_race(
 
 		if context.output_dir is None:
 			raise ValueError("Official verification requires an output directory.")
-		candidate_output_dir = context.output_dir / "solver_portfolio" / _sanitize_identifier(solver_id)
+		candidate_output_dir = (
+			context.output_dir
+			/ "primary_planner_verification"
+			/ _sanitize_identifier(solver_id)
+		)
 		candidate_output_dir.mkdir(parents=True, exist_ok=True)
 		action_path = list(candidate.get("action_path") or ())
 		primitive_result = verifier.verify_primitive_plan(
@@ -795,17 +800,17 @@ def verify_problem_root_solver_race(
 		shutil.copyfile(Path(str(selected_json_path)), official_json_file)
 		composite_artifacts["json_file"] = str(official_json_file)
 
-	artifacts = {
-		**composite_artifacts,
-		"selected_solver_id": selected_solver_id,
-		"selected_bucket": selected_bucket,
-		"selection_rule": "first_hierarchical_verification_success",
-		"solver_candidates": verified_candidates,
-	}
-	summary = {
-		"backend": "pandaPIparser",
-		"status": "success" if selected_success is not None else "failed",
-		"selection_rule": "first_hierarchical_verification_success",
+		artifacts = {
+			**composite_artifacts,
+			"selected_solver_id": selected_solver_id,
+			"selected_bucket": selected_bucket,
+			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
+			"solver_candidates": verified_candidates,
+		}
+		summary = {
+			"backend": "pandaPIparser",
+			"status": "success" if selected_success is not None else "failed",
+			"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 		"failure_bucket": None if selected_success is not None else selected_bucket,
 		"selected_solver_id": selected_solver_id,
 		"selected_bucket": selected_bucket,
@@ -895,7 +900,7 @@ def verify_plan_officially(
 		raise ValueError(
 			f"Unsupported HTN evaluation planning mode '{planning_mode or 'unknown'}'.",
 		)
-	return verify_problem_root_solver_race(
+	return verify_primary_planner_solution(
 		context,
 		verifier=verifier,
 		plan_solve_data=plan_solve_data,
@@ -957,7 +962,7 @@ def official_problem_root_planning_task_worker(
 		plan_verification_summary = dict((plan_verification_data or {}).get("summary") or {})
 		result_queue.put(
 			{
-				"message_type": "backend_attempt",
+					"message_type": "primary_planner_attempt",
 				"backend_name": planning_task.backend_name,
 				"task_id": planning_task.task_id,
 				"representation_id": planning_task.representation.representation_id,
@@ -985,7 +990,7 @@ def official_problem_root_planning_task_worker(
 	except Exception as exc:
 		result_queue.put(
 			{
-				"message_type": "backend_attempt",
+					"message_type": "primary_planner_attempt",
 				"backend_name": planning_task.backend_name,
 				"task_id": planning_task.task_id,
 				"representation_id": planning_task.representation.representation_id,
@@ -1010,13 +1015,13 @@ def official_problem_root_planning_task_worker(
 					"summary": {
 						"backend": "pandaPIparser",
 						"status": "failed",
-						"selection_rule": "first_hierarchical_verification_success",
+							"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "worker_exception",
 					},
 					"artifacts": {
 						"backend": planning_task.backend_name,
 						"status": "failed",
-						"selection_rule": "first_hierarchical_verification_success",
+							"selection_rule": PRIMARY_PLANNER_SELECTION_RULE,
 						"failure_bucket": "worker_exception",
 						"error": str(exc),
 					},

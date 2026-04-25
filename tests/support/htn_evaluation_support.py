@@ -125,13 +125,13 @@ def run_domain_problem_root_case(
 		pipeline.logger._save_current_state()
 
 	method_library = build_official_method_library(domain_file)
-	race_result = pipeline.execute_problem_root_evaluation(
+	planner_result = pipeline.execute_problem_root_evaluation(
 		method_library=method_library,
 		evaluation_mode=mode,
 		planner_id=normalized_planner_id,
 	)
-	plan_solve = dict(race_result.get("plan_solve") or {})
-	plan_verification = dict(race_result.get("plan_verification") or {})
+	plan_solve = dict(planner_result.get("plan_solve") or {})
+	plan_verification = dict(planner_result.get("plan_verification") or {})
 	success = (
 		(plan_solve.get("summary") or {}).get("status") == "success"
 		and (plan_verification.get("summary") or {}).get("status") == "success"
@@ -290,12 +290,12 @@ def run_generated_problem_root_case(
 		pipeline.logger.current_record.output_dir = str(pipeline.output_dir)
 		pipeline.logger._save_current_state()
 
-	race_result = pipeline.execute_problem_root_evaluation(
+	planner_result = pipeline.execute_problem_root_evaluation(
 		evaluation_mode=SINGLE_PLANNER_MODE,
 		planner_id=PRIMARY_HTN_PLANNER_ID,
 	)
-	plan_solve = dict(race_result.get("plan_solve") or {})
-	plan_verification = dict(race_result.get("plan_verification") or {})
+	plan_solve = dict(planner_result.get("plan_solve") or {})
+	plan_verification = dict(planner_result.get("plan_verification") or {})
 	success = (
 		(plan_solve.get("summary") or {}).get("status") == "success"
 		and (plan_verification.get("summary") or {}).get("status") == "success"
