@@ -1725,7 +1725,7 @@ def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
 	monkeypatch.setattr(runner, "_run_consistency_checks", lambda **kwargs: {})
 	monkeypatch.setattr("evaluation.jason_runtime.runner.subprocess.run", lambda *args, **kwargs: FakeCompletedProcess())
 
-	runner.validate(
+	result = runner.validate(
 		agentspeak_code="""
 /* Initial Beliefs */
 
@@ -1754,6 +1754,15 @@ def test_jason_runner_validate_passes_raw_agentspeak_program_to_runtime_builder(
 	assert captured["agentspeak_code"].index("m-navigate_abs-1") < captured["agentspeak_code"].index(
 		"m-navigate_abs-3"
 	)
+	projection_path = tmp_path / "runtime_grounding_projection.asl"
+	assert projection_path.exists()
+	projection_text = projection_path.read_text()
+	assert "/* HTN Method Plans */" in projection_text
+	assert "+!navigate_abs(rover1, waypoint5)" in projection_text
+	assert "/* Failure Handlers */" not in projection_text
+	assert result.artifacts["source_plan_library_kind"] == "S"
+	assert result.artifacts["runtime_projection_kind"] == "S_{I,g}"
+	assert result.artifacts["runtime_grounding_projection"] == str(projection_path)
 
 
 def test_jason_runner_validate_downgrades_consistency_check_failures_to_diagnostics(

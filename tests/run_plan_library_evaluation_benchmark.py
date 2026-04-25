@@ -189,6 +189,28 @@ def _aggregate_domain_summaries(
 			int(summary.get("verified_successes", 0))
 			for summary in domain_summaries.values()
 		),
+		"bdi_runtime_successes": sum(
+			int(
+				summary.get(
+					"bdi_runtime_successes",
+					summary.get("verified_successes", 0),
+				),
+			)
+			for summary in domain_summaries.values()
+		),
+		"hierarchical_compatibility_successes": sum(
+			int(
+				summary.get(
+					"hierarchical_compatibility_successes",
+					summary.get("hierarchical_verified_successes", 0),
+				),
+			)
+			for summary in domain_summaries.values()
+		),
+		"runtime_goal_verified_successes": sum(
+			int(summary.get("runtime_goal_verified_successes", 0))
+			for summary in domain_summaries.values()
+		),
 		"goal_grounding_failures": sum(
 			int(summary.get("goal_grounding_failures", 0))
 			for summary in domain_summaries.values()
@@ -232,6 +254,15 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 		f"completed_query_count: {summary.get('completed_query_count', 0)}",
 		f"remaining_query_count: {summary.get('remaining_query_count', 0)}",
 		f"verified_successes: {summary['verified_successes']}",
+		(
+			"bdi_runtime_successes: "
+			f"{summary.get('bdi_runtime_successes', summary['verified_successes'])}"
+		),
+		(
+			"hierarchical_compatibility_successes: "
+			f"{summary.get('hierarchical_compatibility_successes', 0)}"
+		),
+		f"runtime_goal_verified_successes: {summary.get('runtime_goal_verified_successes', 0)}",
 		f"goal_grounding_failures: {summary['goal_grounding_failures']}",
 		f"goal_grounding_provider_failures: {summary.get('goal_grounding_provider_failures', 0)}",
 		f"agentspeak_rendering_failures: {summary['agentspeak_rendering_failures']}",
@@ -241,11 +272,21 @@ def _write_human_summary(run_dir: Path, summary: Dict[str, object]) -> None:
 		f"unknown_failures: {summary['unknown_failures']}",
 	]
 	for domain_key, domain_summary in dict(summary.get("domains") or {}).items():
+		bdi_runtime_count = domain_summary.get(
+			"bdi_runtime_successes",
+			domain_summary.get("verified_successes"),
+		)
+		hierarchical_compatibility_count = domain_summary.get(
+			"hierarchical_compatibility_successes",
+			domain_summary.get("hierarchical_verified_successes", 0),
+		)
 		lines.append(
 			f"{domain_key}: queries={domain_summary.get('total_queries')}, "
 			f"completed={len(domain_summary.get('completed_query_ids') or domain_summary.get('query_results') or [])}, "
 			f"remaining={len(domain_summary.get('remaining_query_ids') or [])}, "
-			f"verified={domain_summary.get('verified_successes')}, "
+			f"bdi_runtime={bdi_runtime_count}, "
+			f"hierarchical_compatibility={hierarchical_compatibility_count}, "
+			f"runtime_goal={domain_summary.get('runtime_goal_verified_successes', 0)}, "
 			f"grounding_failed={domain_summary.get('goal_grounding_failures')}, "
 			f"grounding_provider_failed={domain_summary.get('goal_grounding_provider_failures', 0)}, "
 			f"runtime_failed={domain_summary.get('runtime_execution_failures')}, "
@@ -299,6 +340,11 @@ def _write_latest_run_manifest(run_dir: Path, summary: Dict[str, object]) -> Non
 		"completed_query_count": summary.get("completed_query_count"),
 		"remaining_query_count": summary.get("remaining_query_count"),
 		"verified_successes": summary.get("verified_successes"),
+		"bdi_runtime_successes": summary.get("bdi_runtime_successes"),
+		"hierarchical_compatibility_successes": summary.get(
+			"hierarchical_compatibility_successes",
+		),
+		"runtime_goal_verified_successes": summary.get("runtime_goal_verified_successes"),
 		"goal_grounding_provider_failures": summary.get("goal_grounding_provider_failures"),
 		"completed_domains": list(summary.get("completed_domains") or []),
 		"internal_failures": list(summary.get("internal_failures") or []),

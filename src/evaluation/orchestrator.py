@@ -500,6 +500,8 @@ class PlanLibraryEvaluationOrchestrator:
 			asl_path.write_text(agentspeak_code)
 			artifacts = {
 				"asl_file": str(asl_path),
+				"plan_library_kind": "S",
+				"runtime_rendering_role": "ungrounded_plan_library_rendering",
 				"task_event_count": len(grounding_result.subgoals),
 			}
 			self.logger.log_agentspeak_rendering(

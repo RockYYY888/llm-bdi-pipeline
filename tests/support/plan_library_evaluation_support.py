@@ -23,10 +23,12 @@ from plan_library import (
 	PlanLibraryArtifactBundle,
 	build_library_validation_record,
 	build_plan_library,
+	deduplicate_plan_library,
 	load_plan_library_artifact_bundle,
 	persist_plan_library_artifact_bundle,
 	render_plan_library_asl,
 )
+from plan_library.models import TranslationCoverage
 from utils.benchmark_query_dataset import load_problem_query_cases
 from utils.hddl_parser import HDDLParser
 
@@ -49,7 +51,7 @@ BENCHMARK_EVALUATION_DOMAIN_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_LIBRARY_SOURCE = "benchmark"
 BENCHMARK_EVALUATION_RUNTIME_BACKEND = "jason"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
-OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v10"
+OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v11"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
 COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
 EXECUTION_SUMMARY_KEYS = (
@@ -379,6 +381,17 @@ def ensure_official_library_artifact(domain_key: str) -> Path:
 		domain=domain,
 		method_library=method_library,
 	)
+	set_result = deduplicate_plan_library(plan_library)
+	plan_library = set_result.plan_library
+	if set_result.removed_duplicate_plans:
+		translation_coverage = TranslationCoverage(
+			domain_name=translation_coverage.domain_name,
+			methods_considered=translation_coverage.methods_considered,
+			plans_generated=len(plan_library.plans),
+			accepted_translation=translation_coverage.accepted_translation,
+			unsupported_buckets=dict(translation_coverage.unsupported_buckets),
+			unsupported_methods=tuple(translation_coverage.unsupported_methods),
+		)
 	library_validation = build_library_validation_record(
 		domain_name=str(getattr(domain, "name", "") or domain_key),
 		domain=domain,
@@ -407,6 +420,7 @@ def ensure_official_library_artifact(domain_key: str) -> Path:
 			"domain_file": domain_file,
 			"domain_key": domain_key,
 			"translation_version": OFFICIAL_LIBRARY_TRANSLATION_VERSION,
+			"plan_set_normalisation": set_result.to_dict(),
 		},
 		artifact_root=str(artifact_root),
 		plan_library_asl_file=str(artifact_root / "plan_library.asl"),
@@ -735,6 +749,10 @@ def _build_domain_summary(
 		for query_id in selected_query_ids
 		if query_id not in completed_query_id_set
 	]
+	bdi_runtime_successes = (
+		counts.get("hierarchical_plan_verified", 0)
+		+ counts.get("runtime_goal_verified", 0)
+	)
 	summary = {
 		"run_id": run_id,
 		"domain_key": domain_key,
@@ -754,10 +772,9 @@ def _build_domain_summary(
 		"resumed_query_ids": list(resumed_query_ids),
 		"resume_enabled": bool(resume),
 		"complete": not remaining_query_ids,
-		"verified_successes": (
-			counts.get("hierarchical_plan_verified", 0)
-			+ counts.get("runtime_goal_verified", 0)
-		),
+		"verified_successes": bdi_runtime_successes,
+		"bdi_runtime_successes": bdi_runtime_successes,
+		"hierarchical_compatibility_successes": counts.get("hierarchical_plan_verified", 0),
 		"hierarchical_verified_successes": counts.get("hierarchical_plan_verified", 0),
 		"runtime_goal_verified_successes": counts.get("runtime_goal_verified", 0),
 		"goal_grounding_failures": counts.get("goal_grounding_failed", 0),

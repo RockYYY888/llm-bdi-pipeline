@@ -125,6 +125,24 @@ def _tail_text(text: str, *, limit: int = 4000) -> str:
 	return value[-limit:]
 
 
+def _extract_runtime_plan_projection(agentspeak_code: str) -> str:
+	"""Extract the runtime-grounded method-plan projection from a runnable program."""
+
+	text = str(agentspeak_code or "")
+	start_marker = "/* HTN Method Plans */"
+	start_index = text.find(start_marker)
+	if start_index == -1:
+		return ""
+	end_candidates = [
+		index
+		for marker in ("/* Failure Handlers */", "/* Execution Entry */")
+		for index in [text.find(marker, start_index + len(start_marker))]
+		if index != -1
+	]
+	end_index = min(end_candidates) if end_candidates else len(text)
+	return text[start_index:end_index].strip() + "\n"
+
+
 class JasonRunner:
 	"""Run rendered AgentSpeak code in Jason and validate runtime outcomes."""
 
@@ -202,6 +220,7 @@ class JasonRunner:
 		)
 
 		runner_asl_path = output_path / "agentspeak_generated.asl"
+		runtime_projection_path = output_path / "runtime_grounding_projection.asl"
 		runner_mas2j_path = output_path / "jason_runner.mas2j"
 		env_java_path = output_path / f"{self.environment_class_name}.java"
 		env_class_path = output_path / f"{self.environment_class_name}.class"
@@ -238,7 +257,9 @@ class JasonRunner:
 		no_ancestor_goal_source = self._build_no_ancestor_goal_internal_action_source()
 		timing_profile["source_build_seconds"] = time.perf_counter() - source_build_start
 		write_sources_start = time.perf_counter()
+		runtime_plan_projection = _extract_runtime_plan_projection(runner_asl)
 		runner_asl_path.write_text(runner_asl)
+		runtime_projection_path.write_text(runtime_plan_projection)
 		runner_mas2j_path.write_text(runner_mas2j)
 		env_java_path.write_text(env_source)
 		no_ancestor_goal_java_path.parent.mkdir(parents=True, exist_ok=True)
@@ -334,7 +355,11 @@ class JasonRunner:
 		timing_profile["artifact_write_seconds"] = time.perf_counter() - artifact_write_start
 
 		artifacts = {
+			"source_plan_library_kind": "S",
+			"runtime_projection_kind": "S_{I,g}",
+			"runtime_projection_scope": "evaluation_grounding_projection",
 			"agentspeak_generated": str(runner_asl_path),
+			"runtime_grounding_projection": str(runtime_projection_path),
 			"jason_runner_mas2j": str(runner_mas2j_path),
 			"runtime_environment_java": str(env_java_path),
 			"runtime_environment_class": str(env_class_path),

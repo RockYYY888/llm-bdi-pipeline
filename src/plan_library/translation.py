@@ -78,7 +78,7 @@ def build_plan_library(
 			action_type_map=action_type_map,
 			predicate_type_map=predicate_type_map,
 		)
-		context_literals = _translated_context_literals(
+		context_literals, binding_certificate = _translated_context_literals(
 			method=method,
 			task_schema=task_schema,
 			variable_map=variable_map,
@@ -90,6 +90,11 @@ def build_plan_library(
 		plan_name = str(method.method_name).strip()
 		for variant_index, ordered_steps in enumerate(ordered_step_variants, start=1):
 			body = tuple(_translate_step(step, variable_map=variable_map) for step in ordered_steps)
+			plan_binding_certificate = _plan_binding_certificate(
+				trigger_arguments=trigger_arguments,
+				context_certificate=binding_certificate,
+				body=body,
+			)
 			variant_plan_name = plan_name
 			if len(ordered_step_variants) > 1:
 				variant_plan_name = f"{plan_name}__variant_{variant_index}"
@@ -108,6 +113,7 @@ def build_plan_library(
 						for value in tuple(getattr(method, "source_instruction_ids", ()) or ())
 						if str(value).strip()
 					),
+					binding_certificate=plan_binding_certificate,
 				),
 			)
 
@@ -442,7 +448,7 @@ def _translated_context_literals(
 	methods_by_task: Dict[str, List[HTNMethod]],
 	mutable_predicates: set[str],
 	action_semantics_map: Dict[str, Dict[str, Any]],
-) -> Tuple[str, ...]:
+) -> Tuple[Tuple[str, ...], Tuple[Dict[str, Any], ...]]:
 	trigger_variables = {
 		_symbol_token(argument)
 		for argument in _trigger_argument_tokens(method=method, task_schema=task_schema)
@@ -457,10 +463,21 @@ def _translated_context_literals(
 	context_bound_variables.update(_positive_context_variable_tokens(method))
 	context_guard_variables = set(trigger_variables)
 	context_literals: List[str] = []
+	binding_certificate: List[Dict[str, Any]] = []
 	for literal in tuple(getattr(method, "context", ()) or ()):
 		if _is_positive_predicate_literal(literal):
 			context_guard_variables.update(_literal_variable_tokens(getattr(literal, "args", ()) or ()))
-		context_literals.append(_translate_context_literal(literal, variable_map=variable_map))
+		rendered = _translate_context_literal(literal, variable_map=variable_map)
+		context_literals.append(rendered)
+		binding_certificate.extend(
+			_literal_binding_certificate(
+				literal,
+				variable_map=variable_map,
+				source="context-bound",
+				origin="method_context",
+				rendered_literal=rendered,
+			),
+		)
 	for literal in _local_witness_binding_literals(
 		method=method,
 		local_variables=local_variables,
@@ -474,13 +491,26 @@ def _translated_context_literals(
 		rendered = _translate_context_literal(literal, variable_map=variable_map)
 		if rendered not in context_literals:
 			context_literals.append(rendered)
-	type_guard_literals = _type_guard_context_literals(
+		binding_certificate.extend(
+			_literal_binding_certificate(
+				literal,
+				variable_map=variable_map,
+				source="witness-literal-bound",
+				origin="safe_precondition_lift",
+				rendered_literal=rendered,
+			),
+		)
+	type_guard_literals, type_guard_certificate = _type_guard_context_literals(
 		method_variable_types=method_variable_types,
 		guard_variables=context_guard_variables | local_variables,
 		variable_map=variable_map,
 	)
 	context_literals = [*type_guard_literals, *context_literals]
-	return tuple(sorted(context_literals, key=_context_literal_order_key))
+	binding_certificate.extend(type_guard_certificate)
+	return (
+		tuple(sorted(context_literals, key=_context_literal_order_key)),
+		_deduplicate_certificate(binding_certificate),
+	)
 
 
 def _is_positive_predicate_literal(literal: Any) -> bool:
@@ -495,8 +525,9 @@ def _type_guard_context_literals(
 	method_variable_types: Dict[str, str],
 	guard_variables: set[str],
 	variable_map: Dict[str, str],
-) -> List[str]:
+) -> Tuple[List[str], Tuple[Dict[str, Any], ...]]:
 	context_literals: List[str] = []
+	binding_certificate: List[Dict[str, Any]] = []
 	seen: set[Tuple[str, str]] = set()
 	for variable, type_name in method_variable_types.items():
 		canonical_variable = _translate_term(variable, variable_map=variable_map)
@@ -510,8 +541,126 @@ def _type_guard_context_literals(
 		if key in seen:
 			continue
 		seen.add(key)
-		context_literals.append(f"object_type({canonical_variable}, {type_name})")
-	return context_literals
+		literal = f"object_type({canonical_variable}, {type_name})"
+		context_literals.append(literal)
+		binding_certificate.append(
+			{
+				"variable": canonical_variable,
+				"source": "type-domain-bound",
+				"type": type_name,
+				"literal": literal,
+			},
+		)
+	return context_literals, tuple(binding_certificate)
+
+
+def _plan_binding_certificate(
+	*,
+	trigger_arguments: Sequence[str],
+	context_certificate: Sequence[Dict[str, Any]],
+	body: Sequence[AgentSpeakBodyStep],
+) -> Tuple[Dict[str, Any], ...]:
+	entries: List[Dict[str, Any]] = []
+	for index, argument in enumerate(trigger_arguments):
+		variable, type_name = _split_typed_argument(argument)
+		if not variable:
+			continue
+		entries.append(
+			{
+				"variable": variable,
+				"source": "trigger-bound",
+				"position": index,
+				"type": type_name or "object",
+			},
+		)
+	entries.extend(dict(item) for item in context_certificate)
+	bound_variables = {
+		str(item.get("variable") or "").strip()
+		for item in entries
+		if str(item.get("variable") or "").strip()
+	}
+	for step_index, step in enumerate(body):
+		step_kind = str(step.kind or "").strip()
+		source = "subgoal-bound" if step_kind == "subgoal" else "action-bound"
+		for argument_index, argument in enumerate(step.arguments):
+			variable = str(argument or "").strip()
+			if not _looks_like_variable(variable):
+				continue
+			entries.append(
+				{
+					"variable": variable,
+					"source": source,
+					"role": "input_variable_already_bound",
+					"step_index": step_index,
+					"argument_index": argument_index,
+					"step_kind": step_kind,
+					"step_symbol": step.symbol,
+					"binding_status": (
+						"previously_bound"
+						if variable in bound_variables
+						else "unbound_at_use"
+					),
+				},
+			)
+	return _deduplicate_certificate(entries)
+
+
+def _literal_binding_certificate(
+	literal: Any,
+	*,
+	variable_map: Dict[str, str],
+	source: str,
+	origin: str,
+	rendered_literal: str,
+) -> Tuple[Dict[str, Any], ...]:
+	if not _is_positive_predicate_literal(literal):
+		return ()
+	entries: List[Dict[str, Any]] = []
+	for argument in tuple(getattr(literal, "args", ()) or ()):
+		token = _symbol_token(argument)
+		if not _looks_like_variable(token):
+			continue
+		entries.append(
+			{
+				"variable": _translate_term(token, variable_map=variable_map),
+				"source": source,
+				"origin": origin,
+				"literal": rendered_literal,
+			},
+		)
+	return tuple(entries)
+
+
+def _split_typed_argument(argument: str) -> Tuple[str, str]:
+	text = str(argument or "").strip()
+	if not text:
+		return "", ""
+	if ":" not in text:
+		return text, "object"
+	variable, type_name = text.split(":", 1)
+	return variable.strip(), type_name.strip() or "object"
+
+
+def _deduplicate_certificate(entries: Sequence[Dict[str, Any]]) -> Tuple[Dict[str, Any], ...]:
+	seen: set[Tuple[Tuple[str, str], ...]] = set()
+	result: List[Dict[str, Any]] = []
+	for entry in entries:
+		clean_entry = {
+			str(key): value
+			for key, value in dict(entry).items()
+			if value is not None and str(value) != ""
+		}
+		key = tuple(
+			sorted(
+				(str(item_key), str(item_value))
+				for item_key, item_value in clean_entry.items()
+			)
+		)
+		if key in seen:
+			continue
+		seen.add(key)
+		result.append(clean_entry)
+	return tuple(result)
 
 
 def _context_literal_order_key(literal: str) -> int:

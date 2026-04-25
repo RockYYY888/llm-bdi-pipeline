@@ -17,7 +17,9 @@ from .artifacts import (
 	PlanLibraryArtifactBundle,
 	persist_plan_library_artifact_bundle,
 )
+from .models import TranslationCoverage
 from .rendering import render_plan_library_asl
+from .set_semantics import deduplicate_plan_library
 from .translation import build_plan_library
 from .validation import build_library_validation_record
 
@@ -104,12 +106,27 @@ class PlanLibraryGenerationPipeline:
 				domain=self._context.domain,
 				method_library=method_library,
 			)
+			set_result = deduplicate_plan_library(plan_library)
+			plan_library = set_result.plan_library
+			if set_result.removed_duplicate_plans:
+				translation_coverage = TranslationCoverage(
+					domain_name=translation_coverage.domain_name,
+					methods_considered=translation_coverage.methods_considered,
+					plans_generated=len(plan_library.plans),
+					accepted_translation=translation_coverage.accepted_translation,
+					unsupported_buckets=dict(translation_coverage.unsupported_buckets),
+					unsupported_methods=tuple(translation_coverage.unsupported_methods),
+				)
+			method_synthesis_metadata = dict(method_synthesis_metadata or {})
+			method_synthesis_metadata["plan_set_normalisation"] = set_result.to_dict()
 			self._context._record_step_timing(
 				"plan_library_translation",
 				translation_start,
 				metadata={
 					"methods_considered": translation_coverage.methods_considered,
 					"plans_generated": translation_coverage.plans_generated,
+					"removed_duplicate_plans": set_result.removed_duplicate_plans,
+					"renamed_plans": set_result.renamed_plans,
 				},
 			)
 			render_start = time.perf_counter()
@@ -153,7 +170,7 @@ class PlanLibraryGenerationPipeline:
 				plan_library=plan_library,
 				translation_coverage=translation_coverage,
 				library_validation=library_validation,
-				method_synthesis_metadata=dict(method_synthesis_metadata or {}),
+				method_synthesis_metadata=method_synthesis_metadata,
 				artifact_root=str(artifact_root),
 				masked_domain_file=str(masked_domain_inputs["masked_domain_file"]),
 				plan_library_asl_file=str(artifact_root / "plan_library.asl"),

@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from method_library import HTNLiteral, HTNMethod, HTNMethodLibrary, HTNMethodStep, HTNTask
 from plan_library import build_plan_library, render_plan_library_asl
+from plan_library.models import PlanLibrary
 from tests.support.plan_library_generation_support import (
 	DOMAIN_FILES,
 	build_official_method_library,
@@ -111,11 +112,29 @@ def test_translation_reports_accepted_and_rejected_methods() -> None:
 		("LOC",),
 		("PKG", "LOC"),
 	)
+	certificate = plan_library.plans[0].binding_certificate
+	assert {
+		"variable": "PKG",
+		"source": "trigger-bound",
+		"position": 0,
+		"type": "package",
+	} in certificate
+	assert {
+		"variable": "PKG",
+		"source": "context-bound",
+		"origin": "method_context",
+		"literal": "loaded(PKG)",
+	} in certificate
+	assert all(
+		entry.get("binding_status") != "unbound_at_use"
+		for entry in certificate
+	)
 	assert coverage.methods_considered == 2
 	assert coverage.accepted_translation == 2
 	assert coverage.plans_generated == 3
 	assert coverage.unsupported_buckets == {}
 	assert coverage.unsupported_methods == ()
+	assert PlanLibrary.from_dict(plan_library.to_dict()).plans[0].binding_certificate == certificate
 
 	assert plan_library.plans[1].plan_name == "m_deliver_branching__variant_1"
 	assert tuple(step.symbol for step in plan_library.plans[1].body) == (
@@ -399,6 +418,23 @@ def test_translation_adds_type_guards_for_context_bound_method_variables() -> No
 	assert "at(V, L)" in plans_by_name["m-load"].context
 	assert "object_type(V, vehicle)" in plans_by_name["m-drive-to"].context
 	assert "object_type(L1, location)" in plans_by_name["m-drive-to"].context
+	certificate = plans_by_name["m-deliver"].binding_certificate
+	assert {
+		"variable": "L1",
+		"source": "witness-literal-bound",
+		"origin": "safe_precondition_lift",
+		"literal": "at(P, L1)",
+	} in certificate
+	assert {
+		"variable": "V",
+		"source": "type-domain-bound",
+		"type": "vehicle",
+		"literal": "object_type(V, vehicle)",
+	} in certificate
+	assert all(
+		entry.get("binding_status") != "unbound_at_use"
+		for entry in certificate
+	)
 
 
 def test_translation_does_not_lift_preconditions_achieved_by_prior_compound_steps() -> None:

@@ -73,6 +73,7 @@ class AgentSpeakPlan:
 	context: Tuple[str, ...] = ()
 	body: Tuple[AgentSpeakBodyStep, ...] = ()
 	source_instruction_ids: Tuple[str, ...] = ()
+	binding_certificate: Tuple[Dict[str, Any], ...] = ()
 
 	def to_dict(self) -> Dict[str, Any]:
 		return {
@@ -81,6 +82,7 @@ class AgentSpeakPlan:
 			"context": list(self.context),
 			"body": [step.to_dict() for step in self.body],
 			"source_instruction_ids": list(self.source_instruction_ids),
+			"binding_certificate": [dict(item) for item in self.binding_certificate],
 		}
 
 	@classmethod
@@ -102,6 +104,11 @@ class AgentSpeakPlan:
 				str(value).strip()
 				for value in (payload.get("source_instruction_ids") or ())
 				if str(value).strip()
+			),
+			binding_certificate=tuple(
+				dict(item)
+				for item in (payload.get("binding_certificate") or ())
+				if isinstance(item, dict)
 			),
 		)
 

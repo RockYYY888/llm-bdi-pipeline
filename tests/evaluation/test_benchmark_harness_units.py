@@ -658,6 +658,9 @@ def test_full_sweep_summary_snapshot_writes_incremental_run_state(tmp_path: Path
 	assert summary["completed_domains"] == ["blocksworld"]
 	assert summary["partial_domains"] == []
 	assert summary["completed_query_count"] == 2
+	assert summary["bdi_runtime_successes"] == 2
+	assert summary["hierarchical_compatibility_successes"] == 0
+	assert summary["runtime_goal_verified_successes"] == 0
 	assert "transport" in summary["internal_failures"]
 	assert (tmp_path / "20260420_220000" / "summary.json").exists()
 	assert (tmp_path / "20260420_220000" / "summary.txt").read_text().startswith(

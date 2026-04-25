@@ -32,12 +32,10 @@ from plan_library.artifacts import (
 	persist_plan_library_artifact_bundle,
 )
 from plan_library.models import (
-	AgentSpeakBodyStep,
-	AgentSpeakPlan,
-	PlanLibrary,
 	TranslationCoverage,
 )
 from plan_library.rendering import render_plan_library_asl
+from plan_library.set_semantics import deduplicate_plan_library
 from plan_library.translation import build_plan_library
 from plan_library.validation import build_library_validation_record
 from temporal_specification import (
@@ -67,22 +65,6 @@ class MethodLibraryMergeResult:
 			"renamed_methods": self.renamed_methods,
 			"merged_source_instruction_ids": self.merged_source_instruction_ids,
 			"method_count": len(self.method_library.methods),
-		}
-
-
-@dataclass(frozen=True)
-class PlanLibrarySetResult:
-	"""Structured S after set-normalisation."""
-
-	plan_library: PlanLibrary
-	removed_duplicate_plans: int
-	renamed_plans: int
-
-	def to_dict(self) -> Dict[str, Any]:
-		return {
-			"plan_count": len(self.plan_library.plans),
-			"removed_duplicate_plans": self.removed_duplicate_plans,
-			"renamed_plans": self.renamed_plans,
 		}
 
 
@@ -362,39 +344,6 @@ def merge_method_libraries(
 		duplicate_methods=duplicate_methods,
 		renamed_methods=renamed_methods,
 		merged_source_instruction_ids=merged_source_instruction_ids,
-	)
-
-
-def deduplicate_plan_library(plan_library: PlanLibrary) -> PlanLibrarySetResult:
-	"""Enforce S as a finite set of unique AgentSpeak(L) plan schemas."""
-
-	plans: list[AgentSpeakPlan] = []
-	index_by_fingerprint: Dict[str, int] = {}
-	used_plan_names: set[str] = set()
-	removed_duplicates = 0
-	renamed_plans = 0
-	for plan in plan_library.plans:
-		fingerprint = plan_fingerprint(plan)
-		existing_index = index_by_fingerprint.get(fingerprint)
-		if existing_index is not None:
-			removed_duplicates += 1
-			plans[existing_index] = _merge_plan_source_instruction_ids(
-				plans[existing_index],
-				plan,
-			)
-			continue
-		plan_name = str(plan.plan_name or "").strip() or f"plan_{len(plans) + 1}"
-		unique_plan_name = _unique_name(plan_name, used_plan_names)
-		if unique_plan_name != plan_name:
-			renamed_plans += 1
-			plan = replace(plan, plan_name=unique_plan_name)
-		used_plan_names.add(unique_plan_name)
-		index_by_fingerprint[fingerprint] = len(plans)
-		plans.append(plan)
-	return PlanLibrarySetResult(
-		plan_library=PlanLibrary(domain_name=plan_library.domain_name, plans=tuple(plans)),
-		removed_duplicate_plans=removed_duplicates,
-		renamed_plans=renamed_plans,
 	)
 
 
@@ -804,24 +753,6 @@ def method_fingerprint(method: HTNMethod) -> str:
 	return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def plan_fingerprint(plan: AgentSpeakPlan) -> str:
-	"""Return a stable semantic fingerprint for a plan, excluding its name."""
-
-	payload = {
-		"trigger": {
-			"event_type": plan.trigger.event_type,
-			"symbol": plan.trigger.symbol,
-			"arguments": list(plan.trigger.arguments),
-		},
-		"context": sorted(str(literal) for literal in plan.context),
-		"body": [
-			_body_step_fingerprint(step)
-			for step in plan.body
-		],
-	}
-	return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
 def _merge_tasks(existing_tasks: Sequence[HTNTask], patch_tasks: Sequence[HTNTask]) -> list[HTNTask]:
 	merged: list[HTNTask] = []
 	seen: set[str] = set()
@@ -835,18 +766,6 @@ def _merge_tasks(existing_tasks: Sequence[HTNTask], patch_tasks: Sequence[HTNTas
 
 
 def _merge_method_source_instruction_ids(base: HTNMethod, patch: HTNMethod) -> HTNMethod:
-	source_ids = tuple(
-		dict.fromkeys(
-			[
-				*list(base.source_instruction_ids),
-				*list(patch.source_instruction_ids),
-			],
-		)
-	)
-	return replace(base, source_instruction_ids=source_ids)
-
-
-def _merge_plan_source_instruction_ids(base: AgentSpeakPlan, patch: AgentSpeakPlan) -> AgentSpeakPlan:
 	source_ids = tuple(
 		dict.fromkeys(
 			[
@@ -889,14 +808,6 @@ def _step_fingerprint(step: HTNMethodStep) -> Dict[str, Any]:
 		"args": list(step.args),
 		"kind": step.kind,
 		"action_name": step.action_name,
-	}
-
-
-def _body_step_fingerprint(step: AgentSpeakBodyStep) -> Dict[str, Any]:
-	return {
-		"kind": step.kind,
-		"symbol": step.symbol,
-		"arguments": list(step.arguments),
 	}
 
 

@@ -17,11 +17,14 @@ __all__ = [
 	"PlanLibrary",
 	"PlanLibraryArtifactBundle",
 	"PlanLibraryGenerationPipeline",
+	"PlanLibrarySetResult",
 	"TranslationCoverage",
 	"build_plan_library",
 	"build_library_validation_record",
+	"deduplicate_plan_library",
 	"load_plan_library_artifact_bundle",
 	"persist_plan_library_artifact_bundle",
+	"plan_fingerprint",
 	"render_plan_library_asl",
 ]
 
@@ -84,4 +87,16 @@ def __getattr__(name: str) -> Any:
 		from .validation import build_library_validation_record
 
 		return build_library_validation_record
+	if name in {"PlanLibrarySetResult", "deduplicate_plan_library", "plan_fingerprint"}:
+		from .set_semantics import (
+			PlanLibrarySetResult,
+			deduplicate_plan_library,
+			plan_fingerprint,
+		)
+
+		return {
+			"PlanLibrarySetResult": PlanLibrarySetResult,
+			"deduplicate_plan_library": deduplicate_plan_library,
+			"plan_fingerprint": plan_fingerprint,
+		}[name]
 	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
