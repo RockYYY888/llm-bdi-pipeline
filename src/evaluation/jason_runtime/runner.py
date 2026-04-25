@@ -624,6 +624,16 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 		)
+		runtime_ready_code = self._inject_runtime_reachability_beliefs(
+			runtime_ready_code,
+			reachability_facts=self._runtime_reachability_facts(
+				seed_facts=seed_facts,
+				runtime_objects=runtime_objects,
+				object_types=object_types or {},
+				type_parent_map=type_parent_map or {},
+				action_schemas=action_schemas,
+			),
+		)
 		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
 		method_goal_ready_code = self._rewrite_method_primitive_actions_to_goals(
 			environment_ready_code,
@@ -647,6 +657,15 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 			enable_blocked_goal_guards=failure_repair_enabled,
+		)
+		lowered_code = self._insert_runtime_reachability_guards(
+			lowered_code,
+			method_library=method_library,
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+			runtime_objects=runtime_objects,
+			object_types=object_types or {},
+			type_parent_map=type_parent_map or {},
 		)
 		lines = [
 			lowered_code.rstrip(),
@@ -1378,6 +1397,187 @@ class JasonRunner:
 
 		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
 		return f"{prefix}{injected_section}{suffix}"
+
+	def _inject_runtime_reachability_beliefs(
+		self,
+		agentspeak_code: str,
+		*,
+		reachability_facts: Sequence[str],
+	) -> str:
+		if not reachability_facts:
+			return agentspeak_code
+		start_marker = "/* Initial Beliefs */"
+		end_marker = "/* Primitive Action Plans */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1 or end_index == -1 or end_index <= start_index:
+			return agentspeak_code
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		body_lines = [line for line in section_lines[1:] if line.strip()]
+		existing = {line.strip() for line in body_lines}
+		inserted: List[str] = []
+		for fact in reachability_facts:
+			line = f"{fact}."
+			if line in existing:
+				continue
+			existing.add(line)
+			inserted.append(line)
+		if not inserted:
+			return agentspeak_code
+		injected_section = "\n".join([header, *inserted, *body_lines]).rstrip() + "\n\n"
+		return f"{prefix}{injected_section}{suffix}"
+
+	def _runtime_reachability_facts(
+		self,
+		*,
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+		action_schemas: Sequence[Dict[str, Any]],
+	) -> Tuple[str, ...]:
+		world_atoms = {
+			atom
+			for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
+			if atom
+		}
+		if not world_atoms:
+			return ()
+		world = {
+			parsed
+			for parsed in (self._parse_runtime_atom(atom) for atom in world_atoms)
+			if parsed is not None
+		}
+		objects_by_type: Dict[str, List[str]] = {}
+		for obj in runtime_objects:
+			for type_name in self._type_closure(object_types.get(str(obj)), type_parent_map):
+				objects_by_type.setdefault(type_name, []).append(str(obj))
+			if str(obj) not in objects_by_type.setdefault("object", []):
+				objects_by_type["object"].append(str(obj))
+
+		reachability_facts: Set[str] = set()
+		for transition in self._transition_action_schemas(action_schemas):
+			entity_type = str(transition.get("entity_type") or "object")
+			from_type = str(transition.get("from_type") or "object")
+			to_type = str(transition.get("to_type") or from_type)
+			entities = tuple(objects_by_type.get(entity_type, ()))
+			from_objects = tuple(objects_by_type.get(from_type, ()))
+			to_objects = tuple(objects_by_type.get(to_type, ()))
+			if not entities or not from_objects or not to_objects:
+				continue
+			state_predicate = str(transition["state_predicate"])
+			initial_locations = {
+				args[0]: args[1]
+				for predicate, args in world
+				if predicate == state_predicate and len(args) >= 2
+			}
+			for entity in entities:
+				start = initial_locations.get(entity)
+				if not start:
+					continue
+				edges: Dict[str, Set[str]] = {}
+				for source in from_objects:
+					for target in to_objects:
+						bindings = {
+							str(transition["entity_var"]): entity,
+							str(transition["from_var"]): source,
+							str(transition["to_var"]): target,
+						}
+						if self._transition_preconditions_hold(
+							transition,
+							bindings=bindings,
+							world=world,
+						):
+							edges.setdefault(source, set()).add(target)
+				for target in self._reachable_targets(start, edges):
+					reachability_facts.add(
+						self._call(
+							"runtime_reachable",
+							(self._runtime_atom_term(entity), self._runtime_atom_term(target)),
+						),
+					)
+		return tuple(sorted(reachability_facts))
+
+	def _transition_action_schemas(
+		self,
+		action_schemas: Sequence[Dict[str, Any]],
+	) -> Tuple[Dict[str, Any], ...]:
+		transitions: List[Dict[str, Any]] = []
+		for schema in action_schemas:
+			parameter_types = dict(schema.get("parameter_types") or {})
+			effects = tuple(schema.get("effects") or ())
+			positive_effects = [effect for effect in effects if bool(effect.get("is_positive", True))]
+			negative_effects = [effect for effect in effects if not bool(effect.get("is_positive", True))]
+			for positive in positive_effects:
+				positive_args = tuple(str(arg) for arg in (positive.get("args") or ()))
+				if len(positive_args) < 2:
+					continue
+				for negative in negative_effects:
+					if str(negative.get("predicate") or "") != str(positive.get("predicate") or ""):
+						continue
+					negative_args = tuple(str(arg) for arg in (negative.get("args") or ()))
+					if len(negative_args) != len(positive_args):
+						continue
+					if negative_args[0] != positive_args[0] or negative_args[1] == positive_args[1]:
+						continue
+					entity_var = positive_args[0]
+					from_var = negative_args[1]
+					to_var = positive_args[1]
+					transitions.append(
+						{
+							"schema": schema,
+							"state_predicate": self._sanitize_name(str(positive.get("predicate"))),
+							"entity_var": entity_var,
+							"from_var": from_var,
+							"to_var": to_var,
+							"entity_type": parameter_types.get(entity_var, "object"),
+							"from_type": parameter_types.get(from_var, "object"),
+							"to_type": parameter_types.get(to_var, parameter_types.get(from_var, "object")),
+						},
+					)
+		return tuple(transitions)
+
+	def _transition_preconditions_hold(
+		self,
+		transition: Dict[str, Any],
+		*,
+		bindings: Dict[str, str],
+		world: Set[Tuple[str, Tuple[str, ...]]],
+	) -> bool:
+		state_predicate = str(transition["state_predicate"])
+		from_var = str(transition["from_var"])
+		for precondition in transition["schema"].get("preconditions") or ():
+			if not bool(precondition.get("is_positive", True)):
+				continue
+			predicate = self._sanitize_name(str(precondition.get("predicate") or ""))
+			args = tuple(str(arg) for arg in (precondition.get("args") or ()))
+			if predicate == state_predicate and len(args) >= 2 and args[1] == from_var:
+				continue
+			grounded_args = tuple(self._resolve_summary_token(arg, bindings) for arg in args)
+			if (predicate, grounded_args) not in world:
+				return False
+		return True
+
+	@staticmethod
+	def _reachable_targets(start: str, edges: Dict[str, Set[str]]) -> Tuple[str, ...]:
+		visited: Set[str] = {start}
+		frontier: List[str] = [start]
+		while frontier:
+			current = frontier.pop(0)
+			for target in sorted(edges.get(current, ())):
+				if target in visited:
+					continue
+				visited.add(target)
+				frontier.append(target)
+		return tuple(sorted(visited))
 
 	def _render_query_goal_calls(self, query_goals: Sequence[Any]) -> Tuple[str, ...]:
 		goal_calls: List[str] = []
@@ -2276,6 +2476,497 @@ class JasonRunner:
 
 		rewritten_section = "\n\n".join([header, *specialised_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _insert_runtime_reachability_guards(
+		self,
+		agentspeak_code: str,
+		*,
+		method_library: HTNMethodLibrary | None,
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> str:
+		if method_library is None:
+			return agentspeak_code
+		start_marker = "/* HTN Method Plans */"
+		end_marker = "/* Failure Handlers */"
+		start_index = agentspeak_code.find(start_marker)
+		end_index = agentspeak_code.find(end_marker)
+		if start_index == -1:
+			return agentspeak_code
+		if end_index == -1 or end_index <= start_index:
+			end_index = len(agentspeak_code)
+
+		prefix = agentspeak_code[:start_index]
+		section = agentspeak_code[start_index:end_index]
+		suffix = agentspeak_code[end_index:]
+		section_lines = section.splitlines()
+		if not section_lines:
+			return agentspeak_code
+
+		header = section_lines[0]
+		chunks = self._split_asl_plan_chunks(section_lines[1:])
+		if not chunks:
+			return agentspeak_code
+		task_transitions = self._transition_task_argument_positions(
+			chunks=chunks,
+			method_library=method_library,
+			action_schemas=action_schemas,
+			type_parent_map=type_parent_map,
+		)
+		if not task_transitions:
+			return agentspeak_code
+		path_chunks = self._runtime_transition_path_chunks(
+			task_transitions=task_transitions,
+			action_schemas=action_schemas,
+			seed_facts=seed_facts,
+			runtime_objects=runtime_objects,
+			object_types=object_types,
+			type_parent_map=type_parent_map,
+		)
+
+		rewritten_chunks: List[str] = []
+		changed = bool(path_chunks)
+		for chunk in chunks:
+			rewritten = self._insert_runtime_reachability_guards_for_chunk(
+				chunk,
+				task_transitions=task_transitions,
+			)
+			if rewritten != "\n".join(chunk):
+				changed = True
+			rewritten_chunks.append(rewritten)
+		if not changed:
+			return agentspeak_code
+		rewritten_section = "\n\n".join([header, *path_chunks, *rewritten_chunks]).rstrip() + "\n\n"
+		return f"{prefix}{rewritten_section}{suffix}"
+
+	def _split_asl_plan_chunks(self, lines: Sequence[str]) -> List[List[str]]:
+		chunks: List[List[str]] = []
+		current: List[str] = []
+		for line in lines:
+			if not str(line).strip():
+				if current:
+					chunks.append(current)
+					current = []
+				continue
+			current.append(str(line))
+		if current:
+			chunks.append(current)
+		return chunks
+
+	def _transition_task_argument_positions(
+		self,
+		*,
+		chunks: Sequence[Sequence[str]],
+		method_library: HTNMethodLibrary,
+		action_schemas: Sequence[Dict[str, Any]],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> Dict[str, Dict[str, Any]]:
+		transition_schemas = self._transition_action_schemas(action_schemas)
+		if not transition_schemas:
+			return {}
+
+		transitions_by_action: Dict[str, List[Dict[str, Any]]] = {}
+		for transition in transition_schemas:
+			schema = dict(transition.get("schema") or {})
+			for raw_name in (schema.get("functor"), schema.get("source_name")):
+				action_key = self._sanitize_name(str(raw_name or ""))
+				if not action_key:
+					continue
+				transitions_by_action.setdefault(action_key, []).append(transition)
+
+		task_type_index = self._task_head_argument_type_index(
+			chunks,
+			type_parent_map=type_parent_map,
+		)
+		task_positions: Dict[str, Dict[str, Any]] = {}
+		for method in getattr(method_library, "methods", ()) or ():
+			task_name = self._sanitize_name(str(getattr(method, "task_name", "") or ""))
+			if not task_name:
+				continue
+			task_parameters = self._task_parameters_for_name(method_library, task_name)
+			canonical_parameters = tuple(self._canonical_runtime_token(item) for item in task_parameters)
+			if not canonical_parameters:
+				continue
+			method_task_bindings = self._method_task_bindings(method, task_parameters)
+			for step in getattr(method, "subtasks", ()) or ():
+				step_kind = str(getattr(getattr(step, "kind", ""), "value", getattr(step, "kind", "")) or "")
+				if step_kind != "primitive":
+					continue
+				action_key = self._sanitize_name(
+					str(getattr(step, "action_name", None) or getattr(step, "task_name", "") or ""),
+				)
+				if not action_key:
+					continue
+				for transition in transitions_by_action.get(action_key, ()):
+					schema = dict(transition.get("schema") or {})
+					bindings = dict(method_task_bindings)
+					for parameter, arg in zip(
+						tuple(str(item) for item in (schema.get("parameters") or ())),
+						tuple(str(item) for item in (getattr(step, "args", ()) or ())),
+					):
+						parameter_token = self._canonical_runtime_token(parameter)
+						resolved_arg = self._resolve_summary_token(arg, method_task_bindings)
+						bindings[parameter_token] = resolved_arg
+						if parameter_token.startswith("?"):
+							bindings[parameter_token[1:]] = resolved_arg
+
+					entity_arg = self._canonical_runtime_token(
+						self._resolve_summary_token(str(transition["entity_var"]), bindings),
+					)
+					source_arg = self._canonical_runtime_token(
+						self._resolve_summary_token(str(transition["from_var"]), bindings),
+					)
+					target_arg = self._canonical_runtime_token(
+						self._resolve_summary_token(str(transition["to_var"]), bindings),
+					)
+					if entity_arg not in canonical_parameters or target_arg not in canonical_parameters:
+						continue
+					entity_index = canonical_parameters.index(entity_arg)
+					target_index = canonical_parameters.index(target_arg)
+					source_index = (
+						canonical_parameters.index(source_arg)
+						if source_arg in canonical_parameters
+						else None
+					)
+					declared_types = task_type_index.get(task_name, {}).get(entity_index, set())
+					entity_type = str(transition.get("entity_type") or "object")
+					if not self._type_sets_overlap(declared_types, {entity_type}, type_parent_map):
+						continue
+					task_positions.setdefault(task_name, {
+						"entity_index": entity_index,
+						"source_index": source_index,
+						"target_index": target_index,
+						"arity": len(canonical_parameters),
+						"entity_type": entity_type,
+						"state_predicate": str(transition["state_predicate"]),
+					})
+		return task_positions
+
+	def _task_head_argument_type_index(
+		self,
+		chunks: Sequence[Sequence[str]],
+		*,
+		type_parent_map: Dict[str, Optional[str]],
+	) -> Dict[str, Dict[int, Set[str]]]:
+		index: Dict[str, Dict[int, Set[str]]] = {}
+		for chunk in chunks:
+			if not chunk:
+				continue
+			parsed_head = self._parse_asl_method_head(chunk[0])
+			if parsed_head is None:
+				continue
+			task_name, head_args, context_parts = parsed_head
+			for part in context_parts:
+				parsed = self._parse_asl_context_conjunct(part)
+				if parsed is None or parsed.get("kind") != "atom":
+					continue
+				if str(parsed.get("predicate") or "") != "object_type":
+					continue
+				args = tuple(str(arg) for arg in (parsed.get("args") or ()))
+				if len(args) != 2:
+					continue
+				term, type_name = args
+				if term not in head_args:
+					continue
+				position = head_args.index(term)
+				type_closure = {str(type_name), *self._type_closure(type_name, type_parent_map)}
+				index.setdefault(task_name, {}).setdefault(position, set()).update(type_closure)
+		return index
+
+	def _type_sets_overlap(
+		self,
+		left_types: Set[str],
+		right_types: Set[str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> bool:
+		if not left_types or not right_types:
+			return False
+		expanded_left = set(left_types)
+		for type_name in tuple(left_types):
+			expanded_left.update(self._type_closure(type_name, type_parent_map))
+		expanded_right = set(right_types)
+		for type_name in tuple(right_types):
+			expanded_right.update(self._type_closure(type_name, type_parent_map))
+		return bool(expanded_left & expanded_right)
+
+	def _runtime_transition_path_chunks(
+		self,
+		*,
+		task_transitions: Dict[str, Dict[str, Any]],
+		action_schemas: Sequence[Dict[str, Any]],
+		seed_facts: Sequence[str],
+		runtime_objects: Sequence[str],
+		object_types: Dict[str, str],
+		type_parent_map: Dict[str, Optional[str]],
+	) -> Tuple[str, ...]:
+		transition_schemas = self._transition_action_schemas(action_schemas)
+		if not transition_schemas:
+			return ()
+		world = {
+			parsed
+			for parsed in (
+				self._parse_runtime_atom(atom)
+				for atom in (self._hddl_fact_to_atom(fact) for fact in seed_facts)
+				if atom
+			)
+			if parsed is not None
+		}
+		objects_by_type: Dict[str, List[str]] = {}
+		for obj in runtime_objects:
+			objects_by_type.setdefault("object", []).append(str(obj))
+			for type_name in self._type_closure(object_types.get(str(obj)), type_parent_map):
+				objects_by_type.setdefault(type_name, []).append(str(obj))
+
+		chunks: List[str] = []
+		limit = self._runtime_transition_path_plan_limit()
+		for task_name, task_transition in task_transitions.items():
+			matching_transitions = [
+				transition
+				for transition in transition_schemas
+				if str(transition.get("state_predicate")) == str(task_transition.get("state_predicate"))
+				and str(transition.get("entity_type") or "object")
+				== str(task_transition.get("entity_type") or "object")
+			]
+			for transition in matching_transitions:
+				entity_type = str(transition.get("entity_type") or "object")
+				from_type = str(transition.get("from_type") or "object")
+				to_type = str(transition.get("to_type") or from_type)
+				for entity in objects_by_type.get(entity_type, ()):
+					edges = self._transition_edges_for_entity(
+						transition,
+						entity=entity,
+						from_objects=objects_by_type.get(from_type, ()),
+						to_objects=objects_by_type.get(to_type, ()),
+						world=world,
+					)
+					for source in sorted(edges):
+						paths = self._shortest_paths_from(source, edges)
+						for target, path in sorted(paths.items()):
+							chunk = self._render_transition_path_chunk(
+								task_name=task_name,
+								task_transition=task_transition,
+								transition=transition,
+								entity=entity,
+								source=source,
+								target=target,
+								path=path,
+							)
+							if chunk:
+								chunks.append(chunk)
+								if len(chunks) >= limit:
+									return tuple(chunks)
+		return tuple(chunks)
+
+	@staticmethod
+	def _runtime_transition_path_plan_limit() -> int:
+		raw_value = os.getenv("JASON_RUNTIME_PATH_PLAN_LIMIT", "").strip()
+		if not raw_value:
+			return 50000
+		try:
+			return max(0, int(raw_value))
+		except ValueError:
+			return 50000
+
+	def _transition_edges_for_entity(
+		self,
+		transition: Dict[str, Any],
+		*,
+		entity: str,
+		from_objects: Sequence[str],
+		to_objects: Sequence[str],
+		world: Set[Tuple[str, Tuple[str, ...]]],
+	) -> Dict[str, Set[str]]:
+		edges: Dict[str, Set[str]] = {}
+		for source in from_objects:
+			for target in to_objects:
+				bindings = {
+					str(transition["entity_var"]): entity,
+					str(transition["from_var"]): source,
+					str(transition["to_var"]): target,
+				}
+				if self._transition_preconditions_hold(
+					transition,
+					bindings=bindings,
+					world=world,
+				):
+					edges.setdefault(source, set()).add(target)
+		return edges
+
+	@staticmethod
+	def _shortest_paths_from(
+		source: str,
+		edges: Dict[str, Set[str]],
+	) -> Dict[str, Tuple[Tuple[str, str], ...]]:
+		paths: Dict[str, Tuple[Tuple[str, str], ...]] = {source: ()}
+		frontier: List[str] = [source]
+		while frontier:
+			current = frontier.pop(0)
+			for target in sorted(edges.get(current, ())):
+				if target in paths:
+					continue
+				paths[target] = (*paths[current], (current, target))
+				frontier.append(target)
+		return paths
+
+	def _render_transition_path_chunk(
+		self,
+		*,
+		task_name: str,
+		task_transition: Dict[str, Any],
+		transition: Dict[str, Any],
+		entity: str,
+		source: str,
+		target: str,
+		path: Sequence[Tuple[str, str]],
+	) -> str:
+		entity_index = int(task_transition["entity_index"])
+		target_index = int(task_transition["target_index"])
+		source_index = task_transition.get("source_index")
+		arity = int(task_transition.get("arity") or (max(entity_index, target_index) + 1))
+		args = ["_"] * arity
+		if entity_index >= arity or target_index >= arity:
+			return ""
+		args[entity_index] = self._runtime_atom_term(entity)
+		args[target_index] = self._runtime_atom_term(target)
+		if source_index is not None:
+			source_position = int(source_index)
+			if source_position >= arity:
+				return ""
+			args[source_position] = self._runtime_atom_term(source)
+		if any(arg == "_" for arg in args):
+			return ""
+		head = self._runtime_call(task_name, args)
+		method_identity = f"runtime_path_{task_name}_{entity}_{source}_{target}"
+		binding = self._call("runtime_binding", (self._runtime_atom_term(source),))
+		active_method = self._runtime_method_state_atom(
+			"active_runtime_method",
+			method_identity=method_identity,
+			task_name=task_name,
+			args=args,
+			binding_term=binding,
+		)
+		blocked_method = self._runtime_method_state_atom(
+			"blocked_runtime_method",
+			method_identity=method_identity,
+			task_name=task_name,
+			args=args,
+			binding_term=binding,
+		)
+		context = self._combine_contexts(
+			self._call(
+				str(task_transition["state_predicate"]),
+				(self._runtime_atom_term(entity), self._runtime_atom_term(source)),
+			),
+			f"not {blocked_method}",
+		)
+		lines = [f"+!{head} : {context} <-"]
+		trace = self._render_flat_runtime_trace(method_identity, (entity, target))
+		lines.append(f"\t{trace};")
+		lines.append(f"\t+{active_method};")
+		if path:
+			for step_source, step_target in path:
+				action = self._render_transition_action_goal(
+					transition,
+					entity=entity,
+					source=step_source,
+					target=step_target,
+				)
+				if not action:
+					return ""
+				lines.append(f"\t!{action};")
+		else:
+			lines.append("\ttrue;")
+		lines.append(f"\t-{active_method}.")
+		return "\n".join(lines)
+
+	def _render_transition_action_goal(
+		self,
+		transition: Dict[str, Any],
+		*,
+		entity: str,
+		source: str,
+		target: str,
+	) -> str:
+		schema = dict(transition["schema"])
+		bindings = {
+			str(transition["entity_var"]): entity,
+			str(transition["from_var"]): source,
+			str(transition["to_var"]): target,
+		}
+		args: List[str] = []
+		for parameter in schema.get("parameters") or ():
+			resolved = bindings.get(str(parameter))
+			if resolved is None:
+				return ""
+			args.append(resolved)
+		return self._runtime_call(str(schema.get("functor") or schema.get("source_name")), args)
+
+	def _render_flat_runtime_trace(
+		self,
+		method_identity: str,
+		task_args: Sequence[str],
+	) -> str:
+		parts: List[str] = [self._asl_string("runtime trace method flat "), self._asl_string(method_identity)]
+		for arg in task_args:
+			parts.append(self._asl_string("|"))
+			parts.append(self._runtime_atom_term(arg))
+		return f".print({', '.join(parts)})"
+
+	def _insert_runtime_reachability_guards_for_chunk(
+		self,
+		chunk: Sequence[str],
+		*,
+		task_transitions: Dict[str, Dict[str, Any]],
+	) -> str:
+		if not chunk:
+			return ""
+		rewritten_lines = list(chunk)
+		parsed_head = self._parse_asl_method_head(rewritten_lines[0])
+		if parsed_head is not None:
+			task_name, head_args, _context_parts = parsed_head
+			transition = task_transitions.get(task_name)
+			if transition is not None:
+				entity_index = int(transition["entity_index"])
+				target_index = int(transition["target_index"])
+				if entity_index < len(head_args) and target_index < len(head_args):
+					guard = self._call(
+						"runtime_reachable",
+						(head_args[entity_index], head_args[target_index]),
+					)
+					rewritten_lines[0] = self._append_asl_method_context_parts(
+						rewritten_lines[0],
+						(guard,),
+					)
+
+		body_lines: List[str] = [rewritten_lines[0]]
+		for line in rewritten_lines[1:]:
+			goal = self._parse_asl_goal_call(line)
+			if goal is None:
+				body_lines.append(line)
+				continue
+			goal_name, goal_args = goal
+			transition = task_transitions.get(goal_name)
+			if transition is None:
+				body_lines.append(line)
+				continue
+			entity_index = int(transition["entity_index"])
+			target_index = int(transition["target_index"])
+			if entity_index >= len(goal_args) or target_index >= len(goal_args):
+				body_lines.append(line)
+				continue
+			guard = self._call(
+				"runtime_reachable",
+				(goal_args[entity_index], goal_args[target_index]),
+			)
+			indent = re.match(r"^(\s*)", line).group(1) if re.match(r"^(\s*)", line) else ""
+			guard_line = f"{indent}?{guard};"
+			if not body_lines or body_lines[-1].strip() != guard_line.strip():
+				body_lines.append(guard_line)
+			body_lines.append(line)
+		return "\n".join(body_lines)
 
 	def _defer_type_only_local_context_guards(self, agentspeak_code: str) -> str:
 		"""
