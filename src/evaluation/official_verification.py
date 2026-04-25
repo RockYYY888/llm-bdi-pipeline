@@ -186,6 +186,8 @@ def verify_jason_hierarchical_plan(
 	)
 
 	verifier_start = time.perf_counter()
+	hierarchical_verifier_result = None
+	primitive_verifier_result = None
 	if hierarchical_plan_text:
 		hierarchical_plan_text = rewrite_hierarchical_plan_source_names(
 			str(hierarchical_plan_text),
@@ -193,7 +195,7 @@ def verify_jason_hierarchical_plan(
 		)
 		if hierarchical_plan_text and not hierarchical_plan_text.endswith("\n"):
 			hierarchical_plan_text = f"{hierarchical_plan_text}\n"
-		verifier_result = verifier.verify_plan_text(
+		hierarchical_verifier_result = verifier.verify_plan_text(
 			domain_file=verification_domain_file,
 			problem_file=verification_problem_file,
 			plan_text=hierarchical_plan_text,
@@ -201,18 +203,33 @@ def verify_jason_hierarchical_plan(
 			plan_kind="hierarchical",
 			build_warning=None,
 		)
+		verifier_result = hierarchical_verifier_result
+		if hierarchical_verifier_result.verification_result is not True:
+			primitive_verifier_result = verifier.verify_primitive_plan(
+				domain_file=verification_domain_file,
+				problem_file=verification_problem_file,
+				action_path=plan_solve_artifacts.get("action_path") or [],
+				output_dir=output_dir,
+				plan_filename="ipc_official_primitive_plan.txt",
+				output_filename="ipc_official_primitive_verifier.txt",
+				json_filename="ipc_official_primitive_verification.json",
+			)
+			verifier_result = primitive_verifier_result
 	else:
-		verifier_result = verifier.verify_plan(
+		primitive_verifier_result = verifier.verify_primitive_plan(
 			domain_file=verification_domain_file,
 			problem_file=verification_problem_file,
 			action_path=plan_solve_artifacts.get("action_path") or [],
-			method_library=method_library,
-			method_trace=plan_solve_artifacts.get("method_trace") or [],
 			output_dir=output_dir,
 		)
+		verifier_result = primitive_verifier_result
 	verifier_seconds = time.perf_counter() - verifier_start
 
 	artifacts = verifier_result.to_dict()
+	if hierarchical_verifier_result is not None:
+		artifacts["hierarchical_verification"] = hierarchical_verifier_result.to_dict()
+	if primitive_verifier_result is not None and primitive_verifier_result is not verifier_result:
+		artifacts["primitive_runtime_verification"] = primitive_verifier_result.to_dict()
 	replayed_world_facts = (
 		(((plan_solve_artifacts.get("consistency_checks") or {}).get("action_path_schema_replay") or {}).get(
 			"world_facts",
@@ -254,6 +271,15 @@ def verify_jason_hierarchical_plan(
 		"verification_domain_file": str(verification_domain_file),
 		"verification_problem_file": verification_problem_file,
 		"missing_goal_facts": list(missing_goal_facts),
+		"hierarchical_verification_result": (
+			hierarchical_verifier_result.verification_result
+			if hierarchical_verifier_result is not None
+			else None
+		),
+		"primitive_runtime_fallback_used": (
+			hierarchical_verifier_result is not None
+			and primitive_verifier_result is verifier_result
+		),
 	}
 
 	error = None

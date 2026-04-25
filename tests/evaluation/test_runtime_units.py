@@ -2718,7 +2718,7 @@ def test_verify_plan_officially_accepts_runtime_repair_primitive_goal_reach(
 		def tool_available(self) -> bool:
 			return True
 
-		def verify_plan(self, **_kwargs):
+		def verify_primitive_plan(self, **_kwargs):
 			return IPCPrimitivePlanVerificationResult(
 				tool_available=True,
 				command=["fake"],
@@ -2770,6 +2770,101 @@ def test_verify_plan_officially_accepts_runtime_repair_primitive_goal_reach(
 	assert plan_verification["summary"]["status"] == "success"
 	assert plan_verification["summary"]["plan_kind"] == "primitive_only"
 	assert plan_verification["summary"]["runtime_goal_reached"] is True
+
+
+def test_verify_plan_officially_accepts_primitive_goal_reach_after_hierarchical_rejection(
+	monkeypatch: pytest.MonkeyPatch,
+	tmp_path: Path,
+) -> None:
+	orchestrator = PlanLibraryEvaluationOrchestrator(
+		domain_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"),
+		problem_file=str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"),
+		evaluation_domain_source="benchmark",
+	)
+	orchestrator.output_dir = tmp_path
+	evaluation_domain = orchestrator._resolve_evaluation_domain_context(source="benchmark")
+
+	class FakeVerifier:
+		def tool_available(self) -> bool:
+			return True
+
+		def verify_plan_text(self, **kwargs):
+			assert str(kwargs["plan_text"]).endswith("\n")
+			return IPCPrimitivePlanVerificationResult(
+				tool_available=True,
+				command=["fake"],
+				plan_file=str(tmp_path / "hierarchical_plan.txt"),
+				output_file=str(tmp_path / "hierarchical_verifier.txt"),
+				stdout="Plan verification result: false",
+				stderr="",
+				primitive_plan_only=False,
+				primitive_plan_executable=None,
+				verification_result=False,
+				reached_goal_state=False,
+				plan_kind="hierarchical",
+				build_warning=None,
+				error="verifier exited with code 1",
+			)
+
+		def verify_primitive_plan(self, **kwargs):
+			assert kwargs["plan_filename"] == "ipc_official_primitive_plan.txt"
+			return IPCPrimitivePlanVerificationResult(
+				tool_available=True,
+				command=["fake"],
+				plan_file=str(tmp_path / "primitive_plan.txt"),
+				output_file=str(tmp_path / "primitive_verifier.txt"),
+				stdout="Primitive plan alone executable: true\nPlan verification result: false",
+				stderr="",
+				primitive_plan_only=True,
+				primitive_plan_executable=True,
+				verification_result=False,
+				reached_goal_state=True,
+				plan_kind="primitive_only",
+				build_warning=None,
+				error="verifier exited with code 1",
+			)
+
+		def verify_plan(self, **_kwargs):
+			raise AssertionError("verify_plan should not be called")
+
+	monkeypatch.setattr(
+		evaluation_official_verification_module,
+		"IPCPlanVerifier",
+		lambda: FakeVerifier(),
+	)
+
+	plan_verification = orchestrator._verify_plan_officially(
+		method_library=_sample_method_library(),
+		plan_solve_data={
+			"summary": {
+				"backend": "jason",
+				"status": "success",
+			},
+			"artifacts": {
+				"planning_mode": "jason_runtime",
+				"verification_problem_file": str(
+					PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl"
+				),
+				"verification_mode": "original_problem",
+				"hierarchical_plan_text": "==>\nroot",
+				"action_path": ["pick-up(b1)", "stack(b1,b4)"],
+				"method_trace": [],
+				"consistency_checks": {
+					"action_path_schema_replay": {
+						"world_facts": ["on(b1,b4)", "on(b3,b1)"],
+					},
+				},
+			},
+		},
+		evaluation_domain=evaluation_domain,
+	)
+
+	assert plan_verification is not None
+	assert plan_verification["summary"]["status"] == "success"
+	assert plan_verification["summary"]["plan_kind"] == "primitive_only"
+	assert plan_verification["summary"]["primitive_runtime_fallback_used"] is True
+	assert plan_verification["summary"]["hierarchical_verification_result"] is False
+	assert plan_verification["artifacts"]["hierarchical_verification"]["plan_kind"] == "hierarchical"
 
 
 def test_official_plan_verifier_result_dict_omits_full_process_output() -> None:
