@@ -1745,6 +1745,69 @@ def test_jason_runner_derives_query_completion_context_from_lifted_action_effect
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" not in runtime_program
 
 
+def test_jason_runner_does_not_treat_consumed_preconditions_as_completion_context() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
++!consume(A, T) : true <-
+	consume(A, T).
+
+/* HTN Method Plans */
++!collect(T) : true <-
+	!consume(A, T).
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[HTNTask(name="collect", parameters=("?target",), is_primitive=False)],
+			primitive_tasks=[
+				HTNTask(name="consume", parameters=("?agent", "?target"), is_primitive=True),
+			],
+			methods=[
+				HTNMethod(
+					method_name="m-collect",
+					task_name="collect",
+					parameters=("?target", "?agent"),
+					task_args=("?target",),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="consume",
+							args=("?agent", "?target"),
+							kind="primitive",
+							action_name="consume",
+						),
+					),
+				),
+			],
+		),
+		action_schemas=[
+			{
+				"functor": "consume",
+				"source_name": "consume",
+				"parameters": ["?agent", "?target"],
+				"preconditions": [
+					{"predicate": "available", "args": ["?target"], "is_positive": True},
+				],
+				"effects": [
+					{"predicate": "done_by", "args": ["?agent"], "is_positive": True},
+					{"predicate": "available", "args": ["?target"], "is_positive": False},
+				],
+			},
+		],
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "collect", "args": ["sample-0"]},),
+		goal_facts=(),
+	)
+
+	assert '+!runtime_query_goal_1 : available("sample-0") <-' not in runtime_program
+	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
+
+
 def test_jason_runner_repair_mode_blocks_failed_child_goal_choices(
 	monkeypatch: pytest.MonkeyPatch,
 ) -> None:

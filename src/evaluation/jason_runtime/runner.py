@@ -1068,6 +1068,8 @@ class JasonRunner:
 		)
 		if effect_atoms:
 			return effect_atoms
+		if schema.get("effects"):
+			return ()
 		return self._summary_atoms_from_patterns(
 			schema.get("preconditions") or (),
 			bindings=step_bindings,
