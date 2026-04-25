@@ -575,10 +575,82 @@ def test_translation_adds_type_guards_for_context_bound_method_variables() -> No
 		"type": "vehicle",
 		"literal": "object_type(V, vehicle)",
 	} in certificate
-	assert all(
-		entry.get("binding_status") != "unbound_at_use"
+	assert {
+		"variable": "V",
+		"source": "subgoal-bound",
+		"role": "output_variable_from_subgoal",
+		"step_index": 0,
+		"argument_index": 0,
+		"step_kind": "subgoal",
+		"step_symbol": "get-to",
+		"binding_status": "subgoal_output_bound",
+	} in certificate
+	assert not any(
+		entry.get("variable") == "V"
+		and entry.get("step_index") in {1, 2, 3}
+		and entry.get("binding_status") == "unbound_at_use"
 		for entry in certificate
 	)
+
+
+def test_translation_does_not_treat_type_guards_as_semantic_bindings() -> None:
+	domain = SimpleNamespace(
+		name="routing",
+		tasks=(
+			SimpleNamespace(name="dispatch", parameters=("?to:location",)),
+		),
+		predicates=(),
+		actions=(
+			SimpleNamespace(name="move", parameters=("?vehicle:vehicle", "?to:location")),
+		),
+	)
+	method_library = HTNMethodLibrary(
+		compound_tasks=[
+			HTNTask(name="dispatch", parameters=("?to",), is_primitive=False),
+		],
+		primitive_tasks=[
+			HTNTask(name="move", parameters=("?vehicle", "?to"), is_primitive=True),
+		],
+		methods=[
+			HTNMethod(
+				method_name="m-dispatch",
+				task_name="dispatch",
+				parameters=("?vehicle", "?to"),
+				task_args=("?to",),
+				subtasks=(
+					HTNMethodStep(
+						"s1",
+						"move",
+						("?vehicle", "?to"),
+						"primitive",
+						action_name="move",
+					),
+				),
+			),
+		],
+		target_literals=[],
+		target_task_bindings=[],
+	)
+
+	plan_library, _coverage = build_plan_library(domain=domain, method_library=method_library)
+
+	certificate = plan_library.plans[0].binding_certificate
+	assert {
+		"variable": "VEHICLE",
+		"source": "type-domain-bound",
+		"type": "vehicle",
+		"literal": "object_type(VEHICLE, vehicle)",
+	} in certificate
+	assert {
+		"variable": "VEHICLE",
+		"source": "action-bound",
+		"role": "input_variable_already_bound",
+		"step_index": 0,
+		"argument_index": 0,
+		"step_kind": "action",
+		"step_symbol": "move",
+		"binding_status": "unbound_at_use",
+	} in certificate
 
 
 def test_translation_does_not_lift_preconditions_achieved_by_prior_compound_steps() -> None:

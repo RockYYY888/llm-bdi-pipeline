@@ -2103,6 +2103,8 @@ class JasonRunner:
 					if parsed is None:
 						continue
 					if parsed.get("kind") == "atom":
+						if str(parsed.get("predicate") or "").strip() == "object_type":
+							continue
 						local_context_variables.update(
 							str(arg)
 							for arg in tuple(parsed.get("args") or ())
@@ -2305,6 +2307,8 @@ class JasonRunner:
 			if parsed is None:
 				continue
 			if parsed.get("kind") == "atom":
+				if str(parsed.get("predicate") or "").strip() == "object_type":
+					continue
 				bound_variables.update(
 					str(arg)
 					for arg in tuple(parsed.get("args") or ())

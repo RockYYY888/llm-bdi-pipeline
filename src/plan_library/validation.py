@@ -295,7 +295,8 @@ def _validate_plan(
 				variable_types.setdefault(argument, set()).add(expected_type)
 		literal_variables = _context_literal_variables(literal)
 		if bool(literal.get("positive", True)):
-			bound_variables.update(literal_variables)
+			if literal["symbol"] != "object_type":
+				bound_variables.update(literal_variables)
 		else:
 			unbound_variables = sorted(literal_variables - bound_variables)
 			for variable in unbound_variables:
@@ -356,14 +357,17 @@ def _validate_plan(
 				variable_types.setdefault(argument, set()).add(expected_type)
 		step_variables = _argument_variables(step_arguments)
 		unbound_step_variables = sorted(step_variables - bound_variables)
-		for variable in unbound_step_variables:
-			groundability_precheck = False
-			warnings.append(
-				f"Plan '{plan_name}' {step_kind} step '{step_symbol}' uses unbound "
-				f"variable '{variable}'.",
-			)
-		if not unbound_step_variables:
+		if step_kind == "subgoal":
 			bound_variables.update(step_variables)
+		else:
+			for variable in unbound_step_variables:
+				groundability_precheck = False
+				warnings.append(
+					f"Plan '{plan_name}' {step_kind} step '{step_symbol}' uses unbound "
+					f"variable '{variable}'.",
+				)
+			if not unbound_step_variables:
+				bound_variables.update(step_variables)
 
 	for variable_name, inferred_types in variable_types.items():
 		if not inferred_types:

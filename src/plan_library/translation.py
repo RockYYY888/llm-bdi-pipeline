@@ -583,30 +583,39 @@ def _plan_binding_certificate(
 		str(item.get("variable") or "").strip()
 		for item in entries
 		if str(item.get("variable") or "").strip()
+		and str(item.get("source") or "").strip() != "type-domain-bound"
 	}
 	for step_index, step in enumerate(body):
 		step_kind = str(step.kind or "").strip()
 		source = "subgoal-bound" if step_kind == "subgoal" else "action-bound"
+		step_variables: set[str] = set()
 		for argument_index, argument in enumerate(step.arguments):
 			variable = str(argument or "").strip()
 			if not _looks_like_variable(variable):
 				continue
+			step_variables.add(variable)
+			was_bound = variable in bound_variables
+			binding_status = "previously_bound"
+			role = "input_variable_already_bound"
+			if not was_bound and step_kind == "subgoal":
+				binding_status = "subgoal_output_bound"
+				role = "output_variable_from_subgoal"
+			elif not was_bound:
+				binding_status = "unbound_at_use"
 			entries.append(
 				{
 					"variable": variable,
 					"source": source,
-					"role": "input_variable_already_bound",
+					"role": role,
 					"step_index": step_index,
 					"argument_index": argument_index,
 					"step_kind": step_kind,
 					"step_symbol": step.symbol,
-					"binding_status": (
-						"previously_bound"
-						if variable in bound_variables
-						else "unbound_at_use"
-					),
+					"binding_status": binding_status,
 				},
 			)
+		if step_kind == "subgoal":
+			bound_variables.update(step_variables)
 	return _deduplicate_certificate(entries)
 
 
@@ -619,6 +628,8 @@ def _literal_binding_certificate(
 	rendered_literal: str,
 ) -> Tuple[Dict[str, Any], ...]:
 	if not _is_positive_predicate_literal(literal):
+		return ()
+	if str(getattr(literal, "predicate", "") or "").strip() == "object_type":
 		return ()
 	entries: List[Dict[str, Any]] = []
 	for argument in tuple(getattr(literal, "args", ()) or ()):
@@ -710,6 +721,8 @@ def _lifted_structural_plan_order_key(
 	for literal in tuple(plan.context or ()):
 		text = str(literal or "").strip()
 		if not text:
+			continue
+		if text.startswith("object_type("):
 			continue
 		if text.startswith("!") or text.lower().startswith("not ") or "!=" in text:
 			continue
@@ -1311,7 +1324,7 @@ def _positive_context_variable_tokens(method: HTNMethod) -> set[str]:
 		if not bool(getattr(literal, "is_positive", True)):
 			continue
 		predicate = str(getattr(literal, "predicate", "") or "").strip()
-		if not predicate or predicate == "=":
+		if not predicate or predicate in {"=", "object_type"}:
 			continue
 		tokens.update(_literal_variable_tokens(getattr(literal, "args", ()) or ()))
 	return tokens
