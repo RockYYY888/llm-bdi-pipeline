@@ -674,7 +674,14 @@ class JasonRunner:
 		lines.append("")
 		if goal_retry_enabled:
 			if query_goals:
-				lines.extend(self._render_retry_query_goal_plans(query_goals))
+				lines.extend(
+					self._render_retry_query_goal_plans(
+						query_goals,
+						goal_facts=goal_facts,
+						method_library=method_library,
+						action_schemas=action_schemas,
+					),
+				)
 			lines.extend(
 				self._render_goal_repair_plans(
 					query_goals=query_goals,
@@ -768,15 +775,35 @@ class JasonRunner:
 			lines.append("")
 		return lines
 
-	def _render_retry_query_goal_plans(self, query_goals: Sequence[Any]) -> List[str]:
+	def _render_retry_query_goal_plans(
+		self,
+		query_goals: Sequence[Any],
+		*,
+		goal_facts: Sequence[str] = (),
+		method_library: HTNMethodLibrary | None = None,
+		action_schemas: Sequence[Dict[str, Any]] = (),
+	) -> List[str]:
 		lines: List[str] = ["/* Runtime Query Goal Wrappers */"]
+		completion_contexts = self._query_goal_completion_contexts(
+			query_goals,
+			goal_facts=goal_facts,
+			method_library=method_library,
+			action_schemas=action_schemas,
+		)
 		for index, goal_call in enumerate(self._render_query_goal_calls(query_goals), start=1):
 			goal_name = f"runtime_query_goal_{index}"
 			marker = f"runtime_query_goal_completed({index})"
 			mark_goal = f"runtime_mark_query_goal_{index}"
-			lines.append(f"+!{goal_name} : {marker} <-")
-			lines.extend(self._indent_body(("true",)))
-			lines.append("")
+			context_alternatives = completion_contexts[index - 1] if index - 1 < len(completion_contexts) else ()
+			if context_alternatives:
+				for context in context_alternatives:
+					lines.append(f"+!{goal_name} : {context} <-")
+					lines.extend(self._indent_body(("true",)))
+					lines.append("")
+			else:
+				lines.append(f"+!{goal_name} : {marker} <-")
+				lines.extend(self._indent_body(("true",)))
+				lines.append("")
 			lines.append(f"+!{goal_name} : true <-")
 			lines.extend(
 				self._indent_body(
@@ -809,6 +836,429 @@ class JasonRunner:
 			)
 			lines.append("")
 		return lines
+
+	def _query_goal_completion_contexts(
+		self,
+		query_goals: Sequence[Any],
+		*,
+		goal_facts: Sequence[str] = (),
+		method_library: HTNMethodLibrary | None = None,
+		action_schemas: Sequence[Dict[str, Any]] = (),
+	) -> Tuple[Tuple[str, ...], ...]:
+		query_specs = tuple(self._query_goal_specs(query_goals))
+		goal_atoms = tuple(
+			atom
+			for atom in (self._hddl_fact_to_atom(fact) for fact in goal_facts)
+			if atom
+		)
+		semantic_summaries = self._task_completion_summary_contexts(
+			method_library=method_library,
+			action_schemas=action_schemas,
+		)
+		contexts: List[Tuple[str, ...]] = []
+		for task_name, args in query_specs:
+			argument_set = {
+				self._canonical_runtime_token(arg)
+				for arg in args
+				if self._canonical_runtime_token(arg)
+			}
+			matched_goal_atoms = tuple(
+				atom
+				for atom in goal_atoms
+				if self._runtime_atom_args_are_subset(atom, argument_set)
+			)
+			if matched_goal_atoms:
+				contexts.append((self._join_context_atoms(matched_goal_atoms),))
+				continue
+
+			summary_key = self._sanitize_name(task_name)
+			summary_alternatives = semantic_summaries.get(summary_key, ())
+			contexts.append(
+				self._ground_query_summary_contexts(
+					summary_alternatives,
+					task_name=task_name,
+					args=args,
+					method_library=method_library,
+				),
+			)
+		return tuple(contexts)
+
+	def _task_completion_summary_contexts(
+		self,
+		*,
+		method_library: HTNMethodLibrary | None,
+		action_schemas: Sequence[Dict[str, Any]],
+	) -> Dict[str, Tuple[Tuple[str, ...], ...]]:
+		if method_library is None:
+			return {}
+
+		action_lookup = self._action_schema_lookup(action_schemas)
+		task_lookup = {
+			self._sanitize_name(getattr(task, "name", "")): task
+			for task in (
+				*(getattr(method_library, "compound_tasks", ()) or ()),
+				*(getattr(method_library, "primitive_tasks", ()) or ()),
+			)
+			if str(getattr(task, "name", "") or "").strip()
+		}
+		task_source_names = {
+			self._sanitize_name(getattr(task, "name", "")): str(getattr(task, "name", "") or "").strip()
+			for task in (
+				*(getattr(method_library, "compound_tasks", ()) or ()),
+				*(getattr(method_library, "primitive_tasks", ()) or ()),
+			)
+			if str(getattr(task, "name", "") or "").strip()
+		}
+		memo: Dict[str, Tuple[Tuple[str, ...], ...]] = {}
+
+		def summarize(task_name: str, stack: Tuple[str, ...] = ()) -> Tuple[Tuple[str, ...], ...]:
+			task_key = self._sanitize_name(task_name)
+			if task_key in memo:
+				return memo[task_key]
+			if task_key in stack:
+				return ()
+
+			task = task_lookup.get(task_key)
+			task_parameters = tuple(str(item) for item in (getattr(task, "parameters", ()) or ()))
+			task_formals = {
+				self._canonical_runtime_token(parameter)
+				for parameter in task_parameters
+				if self._canonical_runtime_token(parameter).startswith("?")
+			}
+			alternatives: List[Tuple[str, ...]] = []
+			for method in method_library.methods_for_task(task_source_names.get(task_key, task_name)):
+				bindings = self._method_task_bindings(method, task_parameters)
+				body_atoms: List[str] = []
+				for step in getattr(method, "subtasks", ()) or ():
+					step_kind = str(getattr(getattr(step, "kind", ""), "value", getattr(step, "kind", "")) or "")
+					if step_kind == "primitive":
+						body_atoms.extend(
+							self._primitive_step_summary_atoms(
+								step,
+								bindings=bindings,
+								task_formals=task_formals,
+								action_lookup=action_lookup,
+							),
+						)
+						continue
+					child_name = str(getattr(step, "task_name", "") or "").strip()
+					if not child_name:
+						continue
+					child_task = task_lookup.get(self._sanitize_name(child_name))
+					child_parameters = tuple(
+						str(item) for item in (getattr(child_task, "parameters", ()) or ())
+					)
+					child_bindings = {
+						self._canonical_runtime_token(parameter): self._resolve_summary_token(arg, bindings)
+						for parameter, arg in zip(child_parameters, getattr(step, "args", ()) or ())
+					}
+					for child_atoms in summarize(child_name, (*stack, task_key)):
+						body_atoms.extend(
+							self._ground_summary_atoms(
+								child_atoms,
+								bindings=child_bindings,
+								task_formals=task_formals,
+							),
+						)
+				selected = self._select_task_completion_atoms(body_atoms, task_formals)
+				if not selected:
+					selected = self._select_task_completion_atoms(
+						self._method_context_summary_atoms(
+							method,
+							bindings=bindings,
+							task_formals=task_formals,
+						),
+						task_formals,
+					)
+				if selected:
+					alternatives.append(selected)
+			deduped = self._dedupe_context_alternatives(alternatives)
+			memo[task_key] = deduped
+			return deduped
+
+		for task_name in tuple(task_lookup):
+			summarize(task_name)
+		return {task_name: alternatives for task_name, alternatives in memo.items() if alternatives}
+
+	def _ground_query_summary_contexts(
+		self,
+		alternatives: Sequence[Sequence[str]],
+		*,
+		task_name: str,
+		args: Sequence[str],
+		method_library: HTNMethodLibrary | None,
+	) -> Tuple[str, ...]:
+		if method_library is None:
+			return ()
+		task_parameters = self._task_parameters_for_name(method_library, task_name)
+		if not task_parameters:
+			return ()
+		bindings = {
+			self._canonical_runtime_token(parameter): self._canonical_runtime_token(arg)
+			for parameter, arg in zip(task_parameters, args)
+		}
+		contexts: List[str] = []
+		for atoms in alternatives:
+			grounded = self._ground_summary_atoms(
+				atoms,
+				bindings=bindings,
+				task_formals=set(),
+				render_runtime_terms=True,
+			)
+			if grounded:
+				contexts.append(self._join_context_atoms(grounded))
+		return tuple(dict.fromkeys(contexts))
+
+	def _task_parameters_for_name(
+		self,
+		method_library: HTNMethodLibrary,
+		task_name: str,
+	) -> Tuple[str, ...]:
+		task = method_library.task_for_name(task_name)
+		if task is None:
+			sanitized = self._sanitize_name(task_name)
+			for candidate in (
+				*(getattr(method_library, "compound_tasks", ()) or ()),
+				*(getattr(method_library, "primitive_tasks", ()) or ()),
+			):
+				if self._sanitize_name(getattr(candidate, "name", "")) == sanitized:
+					task = candidate
+					break
+		return tuple(str(item) for item in (getattr(task, "parameters", ()) or ()))
+
+	def _method_task_bindings(
+		self,
+		method: Any,
+		task_parameters: Sequence[str],
+	) -> Dict[str, str]:
+		bindings: Dict[str, str] = {}
+		for task_arg, task_parameter in zip(getattr(method, "task_args", ()) or (), task_parameters):
+			arg_token = self._canonical_runtime_token(str(task_arg))
+			parameter_token = self._canonical_runtime_token(str(task_parameter))
+			if arg_token:
+				bindings[arg_token] = parameter_token
+				if arg_token.startswith("?"):
+					bindings[arg_token[1:]] = parameter_token
+		return bindings
+
+	def _primitive_step_summary_atoms(
+		self,
+		step: Any,
+		*,
+		bindings: Dict[str, str],
+		task_formals: Set[str],
+		action_lookup: Dict[str, Dict[str, Any]],
+	) -> Tuple[str, ...]:
+		action_name = str(getattr(step, "action_name", None) or getattr(step, "task_name", "") or "")
+		schema = action_lookup.get(action_name) or action_lookup.get(self._sanitize_name(action_name))
+		if schema is None:
+			return ()
+		step_bindings = dict(bindings)
+		for parameter, arg in zip(schema.get("parameters") or (), getattr(step, "args", ()) or ()):
+			resolved = self._resolve_summary_token(str(arg), bindings)
+			parameter_token = self._canonical_runtime_token(str(parameter))
+			step_bindings[parameter_token] = resolved
+			if parameter_token.startswith("?"):
+				step_bindings[parameter_token[1:]] = resolved
+
+		effect_atoms = self._summary_atoms_from_patterns(
+			schema.get("effects") or (),
+			bindings=step_bindings,
+			task_formals=task_formals,
+		)
+		if effect_atoms:
+			return effect_atoms
+		return self._summary_atoms_from_patterns(
+			schema.get("preconditions") or (),
+			bindings=step_bindings,
+			task_formals=task_formals,
+		)
+
+	def _method_context_summary_atoms(
+		self,
+		method: Any,
+		*,
+		bindings: Dict[str, str],
+		task_formals: Set[str],
+	) -> Tuple[str, ...]:
+		patterns = (
+			{
+				"predicate": getattr(literal, "predicate", ""),
+				"args": tuple(getattr(literal, "args", ()) or ()),
+				"is_positive": getattr(literal, "is_positive", True),
+			}
+			for literal in (getattr(method, "context", ()) or ())
+		)
+		return self._summary_atoms_from_patterns(
+			tuple(patterns),
+			bindings=bindings,
+			task_formals=task_formals,
+		)
+
+	def _summary_atoms_from_patterns(
+		self,
+		patterns: Sequence[Dict[str, Any]],
+		*,
+		bindings: Dict[str, str],
+		task_formals: Set[str],
+	) -> Tuple[str, ...]:
+		atoms: List[str] = []
+		for pattern in patterns:
+			if not bool(pattern.get("is_positive", True)):
+				continue
+			predicate = str(pattern.get("predicate", "") or "").strip()
+			if not predicate or predicate == "=":
+				continue
+			resolved_args = tuple(
+				self._resolve_summary_token(str(arg), bindings)
+				for arg in (pattern.get("args") or ())
+			)
+			if not resolved_args:
+				continue
+			if any(self._is_unbound_summary_variable(arg, task_formals) for arg in resolved_args):
+				continue
+			atoms.append(self._call(predicate, resolved_args))
+		return tuple(atoms)
+
+	def _ground_summary_atoms(
+		self,
+		atoms: Sequence[str],
+		*,
+		bindings: Dict[str, str],
+		task_formals: Set[str],
+		render_runtime_terms: bool = False,
+	) -> Tuple[str, ...]:
+		grounded: List[str] = []
+		for atom in atoms:
+			parsed = self._parse_runtime_atom(atom)
+			if parsed is None:
+				continue
+			predicate, args = parsed
+			resolved_args = tuple(self._resolve_summary_token(arg, bindings) for arg in args)
+			if any(self._is_unbound_summary_variable(arg, task_formals) for arg in resolved_args):
+				continue
+			rendered_args = (
+				tuple(self._runtime_atom_term(arg) for arg in resolved_args)
+				if render_runtime_terms
+				else resolved_args
+			)
+			grounded.append(self._call(predicate, rendered_args))
+		return tuple(grounded)
+
+	def _select_task_completion_atoms(
+		self,
+		atoms: Sequence[str],
+		task_formals: Set[str],
+	) -> Tuple[str, ...]:
+		scored: List[Tuple[int, str]] = []
+		for atom in atoms:
+			parsed = self._parse_runtime_atom(atom)
+			if parsed is None:
+				continue
+			_, args = parsed
+			coverage = len({
+				self._canonical_runtime_token(arg)
+				for arg in args
+				if self._canonical_runtime_token(arg) in task_formals
+			})
+			if coverage <= 0:
+				continue
+			scored.append((coverage, atom))
+		if not scored:
+			return ()
+		best_coverage = max(score for score, _atom in scored)
+		return tuple(
+			atom
+			for _score, atom in self._dedupe_scored_atoms(
+				(score, atom) for score, atom in scored if score == best_coverage
+			)
+		)
+
+	@staticmethod
+	def _dedupe_scored_atoms(scored_atoms: Iterable[Tuple[int, str]]) -> Tuple[Tuple[int, str], ...]:
+		seen: Set[str] = set()
+		deduped: List[Tuple[int, str]] = []
+		for score, atom in scored_atoms:
+			if atom in seen:
+				continue
+			seen.add(atom)
+			deduped.append((score, atom))
+		return tuple(deduped)
+
+	def _dedupe_context_alternatives(
+		self,
+		alternatives: Sequence[Sequence[str]],
+	) -> Tuple[Tuple[str, ...], ...]:
+		seen: Set[Tuple[str, ...]] = set()
+		deduped: List[Tuple[str, ...]] = []
+		for atoms in alternatives:
+			normalised = tuple(dict.fromkeys(atom for atom in atoms if atom))
+			if not normalised or normalised in seen:
+				continue
+			seen.add(normalised)
+			deduped.append(normalised)
+		return tuple(deduped)
+
+	@classmethod
+	def _query_goal_specs(cls, query_goals: Sequence[Any]) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+		specs: List[Tuple[str, Tuple[str, ...]]] = []
+		for goal in query_goals:
+			if isinstance(goal, dict):
+				task_name = str(goal.get("task_name") or "").strip()
+				args = tuple(
+					str(arg).strip()
+					for arg in (goal.get("args") or ())
+					if str(arg).strip()
+				)
+			else:
+				task_name = str(getattr(goal, "task_name", "") or "").strip()
+				args = tuple(
+					str(arg).strip()
+					for arg in (getattr(goal, "args", ()) or ())
+					if str(arg).strip()
+				)
+			if task_name:
+				specs.append((task_name, args))
+		return tuple(specs)
+
+	def _runtime_atom_args_are_subset(self, atom: str, argument_set: Set[str]) -> bool:
+		parsed = self._parse_runtime_atom(atom)
+		if parsed is None:
+			return False
+		_, args = parsed
+		if not args:
+			return False
+		return all(self._canonical_runtime_token(arg) in argument_set for arg in args)
+
+	@staticmethod
+	def _join_context_atoms(atoms: Sequence[str]) -> str:
+		return " & ".join(dict.fromkeys(atom for atom in atoms if atom))
+
+	def _resolve_summary_token(self, token: str, bindings: Dict[str, str]) -> str:
+		canonical = self._canonical_runtime_token(token)
+		if canonical in bindings:
+			return bindings[canonical]
+		if canonical.startswith("?") and canonical[1:] in bindings:
+			return bindings[canonical[1:]]
+		return canonical
+
+	@staticmethod
+	def _is_unbound_summary_variable(token: str, task_formals: Set[str]) -> bool:
+		canonical = JasonRunner._canonical_runtime_token(token)
+		return canonical.startswith("?") and canonical not in task_formals
+
+	def _parse_runtime_atom(self, atom: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
+		text = str(atom or "").strip()
+		if not text:
+			return None
+		if "(" not in text:
+			return self._sanitize_name(text), ()
+		if not text.endswith(")"):
+			return None
+		predicate, args_text = text.split("(", 1)
+		predicate = self._sanitize_name(predicate)
+		args = self._split_asl_arguments(args_text[:-1])
+		return predicate, tuple(self._canonical_runtime_token(arg) for arg in args)
 
 	def _render_retry_query_goal_calls(self, query_goals: Sequence[Any]) -> Tuple[str, ...]:
 		return tuple(

@@ -1625,7 +1625,7 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 /* Primitive Action Plans */
 
 /* HTN Method Plans */
-+!task_a : true <-
++!task_a(X) : true <-
 	true.
 """.strip(),
 		method_library=_sample_method_library(),
@@ -1633,7 +1633,7 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 		runtime_objects=(),
 		object_types={},
 		type_parent_map={},
-		query_goals=({"task_name": "task_a", "args": []},),
+		query_goals=({"task_name": "task_a", "args": ["a"]},),
 		goal_facts=("(done a)",),
 	)
 
@@ -1645,15 +1645,104 @@ def test_jason_runner_retries_query_goal_sequence_until_problem_goals_hold() -> 
 	assert "+!execute_query_pass_1 : true <-" in runtime_program
 	assert '.print("runtime query pass ", 1)' in runtime_program
 	assert "!runtime_query_goal_1." in runtime_program
-	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
+	assert "+!runtime_query_goal_1 : done(a) <-" in runtime_program
+	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" not in runtime_program
 	assert "+!runtime_mark_query_goal_1 : not runtime_pass_failed <-" in runtime_program
 	assert "runtime_snapshot(1);" in runtime_program
 	assert "runtime_commit(1);" in runtime_program
 	assert "runtime_restore(1);" in runtime_program
 	assert ".perceive." in runtime_program
-	assert "!task_a;" in runtime_program
+	assert "!task_a(a);" in runtime_program
 	assert "runtime_pass_failed" in runtime_program
 	assert runner._extract_goal_repair_pass_count("runtime query pass 1\nruntime query pass 3") == 3
+
+
+def test_jason_runner_uses_matching_goal_fact_as_query_completion_context() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!deliver(P, L) : true <-
+	true.
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[HTNTask(name="deliver", parameters=("?p", "?l"), is_primitive=False)],
+			primitive_tasks=[],
+			methods=[],
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "deliver", "args": ["package-0", "city-loc-1"]},),
+		goal_facts=("(at package-0 city-loc-1)",),
+	)
+
+	assert '+!runtime_query_goal_1 : at("package-0","city-loc-1") <-' in runtime_program
+	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" not in runtime_program
+
+
+def test_jason_runner_derives_query_completion_context_from_lifted_action_effects() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
++!drop(V, L, P) : true <-
+	drop(V, L, P).
+
+/* HTN Method Plans */
++!deliver(P, L) : true <-
+	!drop(V, L, P).
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[HTNTask(name="deliver", parameters=("?p", "?l"), is_primitive=False)],
+			primitive_tasks=[HTNTask(name="drop", parameters=("?v", "?l", "?p"), is_primitive=True)],
+			methods=[
+				HTNMethod(
+					method_name="m-deliver",
+					task_name="deliver",
+					parameters=("?p", "?l", "?v"),
+					task_args=("?p", "?l"),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="drop",
+							args=("?v", "?l", "?p"),
+							kind="primitive",
+							action_name="drop",
+						),
+					),
+				),
+			],
+		),
+		action_schemas=[
+			{
+				"functor": "drop",
+				"source_name": "drop",
+				"parameters": ["?v", "?l", "?p"],
+				"preconditions": [],
+				"effects": [
+					{"predicate": "in", "args": ["?p", "?v"], "is_positive": False},
+					{"predicate": "at", "args": ["?p", "?l"], "is_positive": True},
+				],
+			},
+		],
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "deliver", "args": ["package-0", "city-loc-1"]},),
+		goal_facts=(),
+	)
+
+	assert '+!runtime_query_goal_1 : at("package-0", "city-loc-1") <-' in runtime_program
+	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" not in runtime_program
 
 
 def test_jason_runner_repair_mode_blocks_failed_child_goal_choices(
