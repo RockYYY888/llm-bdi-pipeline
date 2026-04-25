@@ -301,8 +301,16 @@ def test_translation_does_not_lift_preconditions_delegated_to_prior_compound_ste
 	context = plans_by_name["m-get_rock_data"].context
 	assert "equipped_for_rock_analysis(ROVER)" in context
 	assert "store_of(S, ROVER)" in context
+	assert "at_rock_sample(WAYPOINT)" in context
 	assert all(not literal.startswith("empty(") for literal in context)
 	assert all(not literal.startswith("at(") for literal in context)
+	soil_context = plans_by_name["m-get_soil_data"].context
+	assert "at_soil_sample(WAYPOINT)" in soil_context
+	assert all(not literal.startswith("empty(") for literal in soil_context)
+	assert all(not literal.startswith("at(") for literal in soil_context)
+	send_soil_context = plans_by_name["m-send_soil_data"].context
+	assert "have_soil_analysis(ROVER, WAYPOINT)" in send_soil_context
+	assert "channel_free(L)" in send_soil_context
 	image_context = plans_by_name["m-get_image_data"].context
 	assert "calibration_target(CAMERA, OBJECTIVE)" not in image_context
 	assert all(not literal.startswith("have_image(") for literal in image_context)

@@ -482,6 +482,10 @@ def _translated_context_literals(
 		method=method,
 		local_variables=local_variables,
 		initial_bound_variables=context_bound_variables,
+		variable_types={
+			_translate_term(variable, variable_map=variable_map): type_name
+			for variable, type_name in method_variable_types.items()
+		},
 		methods_by_task=methods_by_task,
 		mutable_predicates=mutable_predicates,
 		action_semantics_map=action_semantics_map,
@@ -681,6 +685,7 @@ def _local_witness_binding_literals(
 	method: HTNMethod,
 	local_variables: set[str],
 	initial_bound_variables: set[str],
+	variable_types: Dict[str, str],
 	methods_by_task: Dict[str, List[HTNMethod]],
 	mutable_predicates: set[str],
 	action_semantics_map: Dict[str, Dict[str, Any]],
@@ -688,6 +693,7 @@ def _local_witness_binding_literals(
 	binding_literals: List[Any] = []
 	seen_signatures: set[str] = set()
 	produced_positive_signatures: set[str] = set()
+	deleted_positive_signatures: set[str] = set()
 	previous_compound_arg_tuples: set[Tuple[str, ...]] = set()
 	bound_variables = set(initial_bound_variables)
 	prior_compound_step_seen = False
@@ -710,6 +716,12 @@ def _local_witness_binding_literals(
 				bound_args = tuple(str(arg) for arg in (getattr(precondition, "args", ()) or ()))
 				signature = _canonical_literal_signature(predicate, bound_args)
 				if signature in produced_positive_signatures:
+					continue
+				if _may_be_invalidated_by_previous_negative_effect(
+					signature,
+					deleted_positive_signatures,
+					variable_types=variable_types,
+				):
 					continue
 				bound_arg_variables = _literal_variable_tokens(bound_args)
 				if (
@@ -747,6 +759,14 @@ def _local_witness_binding_literals(
 					stack=(),
 				),
 			)
+			deleted_positive_signatures.update(
+				_compound_step_negative_effect_signatures(
+					step=step,
+					methods_by_task=methods_by_task,
+					action_semantics_map=action_semantics_map,
+					stack=(),
+				),
+			)
 			continue
 		if step_kind != "primitive":
 			continue
@@ -772,14 +792,18 @@ def _local_witness_binding_literals(
 			predicate = str(getattr(precondition, "predicate", "") or "").strip()
 			if not predicate or predicate == "=":
 				continue
-			if prior_compound_step_seen and predicate in mutable_predicates:
-				continue
 			bound_args = tuple(
 				bindings.get(str(argument), str(argument))
 				for argument in (getattr(precondition, "args", ()) or ())
 			)
 			signature = _canonical_literal_signature(predicate, bound_args)
 			if signature in produced_positive_signatures:
+				continue
+			if _may_be_invalidated_by_previous_negative_effect(
+				signature,
+				deleted_positive_signatures,
+				variable_types=variable_types,
+			):
 				continue
 			bound_arg_variables = _literal_variable_tokens(bound_args)
 			if (
@@ -803,8 +827,6 @@ def _local_witness_binding_literals(
 				),
 			)
 		for effect in tuple(action_entry.get("effects") or ()):
-			if not bool(getattr(effect, "is_positive", True)):
-				continue
 			predicate = str(getattr(effect, "predicate", "") or "").strip()
 			if not predicate or predicate == "=":
 				continue
@@ -812,7 +834,11 @@ def _local_witness_binding_literals(
 				bindings.get(str(argument), str(argument))
 				for argument in (getattr(effect, "args", ()) or ())
 			)
-			produced_positive_signatures.add(_canonical_literal_signature(predicate, bound_args))
+			signature = _canonical_literal_signature(predicate, bound_args)
+			if bool(getattr(effect, "is_positive", True)):
+				produced_positive_signatures.add(signature)
+			else:
+				deleted_positive_signatures.add(signature)
 	return tuple(binding_literals)
 
 
@@ -941,12 +967,115 @@ def _canonical_literal_signature(predicate: str, args: Iterable[Any]) -> str:
 	return f"{predicate}({','.join(_lifted_child_argument(argument) for argument in args)})"
 
 
+def _may_be_invalidated_by_previous_negative_effect(
+	literal_signature: str,
+	negative_effect_signatures: Iterable[str],
+	*,
+	variable_types: Dict[str, str],
+) -> bool:
+	for negative_signature in negative_effect_signatures:
+		if _literal_signatures_may_unify(
+			literal_signature,
+			negative_signature,
+			variable_types=variable_types,
+		):
+			return True
+	return False
+
+
+def _literal_signatures_may_unify(
+	left_signature: str,
+	right_signature: str,
+	*,
+	variable_types: Dict[str, str],
+) -> bool:
+	left = _parse_literal_signature(left_signature)
+	right = _parse_literal_signature(right_signature)
+	if left is None or right is None:
+		return left_signature == right_signature
+	left_predicate, left_args = left
+	right_predicate, right_args = right
+	if left_predicate != right_predicate or len(left_args) != len(right_args):
+		return False
+	for left_arg, right_arg in zip(left_args, right_args):
+		if (
+			_looks_like_variable(left_arg)
+			and _looks_like_variable(right_arg)
+			and not _variable_types_may_overlap(left_arg, right_arg, variable_types)
+		):
+			return False
+		if _looks_like_variable(left_arg) or _looks_like_variable(right_arg):
+			continue
+		if left_arg != right_arg:
+			return False
+	return True
+
+
+def _parse_literal_signature(signature: str) -> Tuple[str, Tuple[str, ...]] | None:
+	text = str(signature or "").strip()
+	if "(" not in text or not text.endswith(")"):
+		return None
+	predicate, raw_args = text.split("(", 1)
+	predicate = predicate.strip()
+	if not predicate:
+		return None
+	args = tuple(argument.strip() for argument in raw_args[:-1].split(",") if argument.strip())
+	return predicate, args
+
+
+def _variable_types_may_overlap(
+	left_variable: str,
+	right_variable: str,
+	variable_types: Dict[str, str],
+) -> bool:
+	left_type = str(variable_types.get(left_variable) or "").strip()
+	right_type = str(variable_types.get(right_variable) or "").strip()
+	if not left_type or not right_type:
+		return True
+	if left_type == "object" or right_type == "object":
+		return True
+	return left_type == right_type
+
+
 def _compound_step_positive_effect_signatures(
 	*,
 	step: Any,
 	methods_by_task: Dict[str, List[HTNMethod]],
 	action_semantics_map: Dict[str, Dict[str, Any]],
 	stack: Tuple[str, ...],
+) -> set[str]:
+	return _compound_step_effect_signatures(
+		step=step,
+		methods_by_task=methods_by_task,
+		action_semantics_map=action_semantics_map,
+		stack=stack,
+		is_positive=True,
+	)
+
+
+def _compound_step_negative_effect_signatures(
+	*,
+	step: Any,
+	methods_by_task: Dict[str, List[HTNMethod]],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+	stack: Tuple[str, ...],
+) -> set[str]:
+	return _compound_step_effect_signatures(
+		step=step,
+		methods_by_task=methods_by_task,
+		action_semantics_map=action_semantics_map,
+		stack=stack,
+		is_positive=False,
+	)
+
+
+def _compound_step_effect_signatures(
+	*,
+	step: Any,
+	methods_by_task: Dict[str, List[HTNMethod]],
+	action_semantics_map: Dict[str, Dict[str, Any]],
+	stack: Tuple[str, ...],
+	is_positive: bool,
 ) -> set[str]:
 	task_name = str(getattr(step, "task_name", "") or "").strip()
 	if not task_name:
@@ -961,6 +1090,7 @@ def _compound_step_positive_effect_signatures(
 			method=child_method,
 			methods_by_task=methods_by_task,
 			action_semantics_map=action_semantics_map,
+			is_positive=is_positive,
 			stack=stack + ((method_key or task_name),),
 		)
 		child_task_args = _trigger_argument_tokens(method=child_method, task_schema=None)
@@ -968,6 +1098,12 @@ def _compound_step_positive_effect_signatures(
 			str(parameter): str(argument)
 			for parameter, argument in zip(child_task_args, step_args)
 		}
+		bindings.update(
+			{
+				_lifted_child_argument(parameter): _lifted_child_argument(argument)
+				for parameter, argument in zip(child_task_args, step_args)
+			},
+		)
 		for effect in child_effects:
 			bound_args = tuple(
 				_lifted_child_argument(bindings.get(str(argument), str(argument)))
@@ -982,6 +1118,7 @@ def _method_positive_effect_literals(
 	method: HTNMethod,
 	methods_by_task: Dict[str, List[HTNMethod]],
 	action_semantics_map: Dict[str, Dict[str, Any]],
+	is_positive: bool = True,
 	stack: Tuple[str, ...],
 ) -> Tuple[Any, ...]:
 	effects: List[Any] = []
@@ -1005,7 +1142,7 @@ def _method_positive_effect_literals(
 				for parameter, argument in zip(action_parameters, step_args)
 			}
 			for effect in tuple(action_entry.get("effects") or ()):
-				if not bool(getattr(effect, "is_positive", True)):
+				if bool(getattr(effect, "is_positive", True)) is not is_positive:
 					continue
 				predicate = str(getattr(effect, "predicate", "") or "").strip()
 				if not predicate or predicate == "=":
@@ -1023,10 +1160,11 @@ def _method_positive_effect_literals(
 				)
 			continue
 		if step_kind == "compound":
-			for signature in _compound_step_positive_effect_signatures(
+			for signature in _compound_step_effect_signatures(
 				step=step,
 				methods_by_task=methods_by_task,
 				action_semantics_map=action_semantics_map,
+				is_positive=is_positive,
 				stack=stack,
 			):
 				predicate, raw_args = signature.split("(", 1)
