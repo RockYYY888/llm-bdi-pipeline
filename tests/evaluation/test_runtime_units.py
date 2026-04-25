@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sys
+import shutil
 import time
 from pathlib import Path
 
@@ -2834,315 +2836,158 @@ def test_official_plan_verifier_result_dict_omits_full_process_output() -> None:
 	assert "full text in output_file" in str(payload["stdout_preview"])
 
 
-def test_jadex_runtime_propagates_subgoal_variable_aliases(tmp_path: Path) -> None:
+def test_jadex_runtime_generates_true_bdiv3_bridge() -> None:
+	runner = JadexBDIRunner(timeout_seconds=5)
 	plan_library = PlanLibrary(
-		domain_name="alias",
+		domain_name="bridge",
 		plans=(
 			AgentSpeakPlan(
-				plan_name="m-select",
+				plan_name="m-choose",
 				trigger=AgentSpeakTrigger(
 					event_type="achievement_goal",
-					symbol="select",
-					arguments=("P:package",),
+					symbol="choose",
+					arguments=(),
 				),
-				context=("at(P, L)",),
-				body=(
-					AgentSpeakBodyStep(kind="subgoal", symbol="vehicle-at", arguments=("V", "L")),
-					AgentSpeakBodyStep(kind="action", symbol="inspect", arguments=("V",)),
-				),
-			),
-			AgentSpeakPlan(
-				plan_name="m-vehicle-at",
-				trigger=AgentSpeakTrigger(
-					event_type="achievement_goal",
-					symbol="vehicle-at",
-					arguments=("V:vehicle", "L:location"),
-				),
-				context=("object_type(V, vehicle)", "at(V, L)"),
-				body=(AgentSpeakBodyStep(kind="action", symbol="noop", arguments=("V", "L")),),
+				context=(),
+				body=(AgentSpeakBodyStep(kind="action", symbol="ok", arguments=()),),
 			),
 		),
 	)
-	action_schemas = (
-		{
-			"functor": "noop",
-			"source_name": "noop",
-			"parameters": ["?v", "?l"],
-			"preconditions": [{"predicate": "at", "args": ["?v", "?l"], "is_positive": True}],
-			"precondition_clauses": [[{"predicate": "at", "args": ["?v", "?l"], "is_positive": True}]],
-			"effects": [],
-		},
-		{
-			"functor": "inspect",
-			"source_name": "inspect",
-			"parameters": ["?v"],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		},
-	)
-
-	result = JadexBDIRunner(timeout_seconds=5).validate(
-		action_schemas=action_schemas,
+	payload = runner._build_payload(
+		action_schemas=(
+			{
+				"functor": "ok",
+				"source_name": "ok",
+				"parameters": [],
+				"precondition_clauses": [[]],
+				"effects": [],
+			},
+		),
 		plan_library=plan_library,
-		seed_facts=("(at Package0 Loc0)", "(at Truck0 Loc0)"),
-		runtime_objects=("Package0", "Truck0", "Loc0"),
-		object_types={"Package0": "package", "Truck0": "vehicle", "Loc0": "location"},
-		query_goals=({"task_name": "select", "args": ["Package0"]},),
-		output_dir=tmp_path,
+		seed_facts=(),
+		goal_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "choose", "args": []},),
 	)
+	agent_source = runner._render_agent_source(payload)
+	main_source = runner._render_main_source()
+	pom_source = runner._render_pom()
 
-	assert result.status == "success"
-	assert result.action_path == ("noop(Truck0, Loc0)", "inspect(Truck0)")
-	assert result.method_trace == (
-		{"method_name": "m-select", "task_args": ["Package0"]},
-		{"method_name": "m-vehicle-at", "task_args": ["Truck0", "Loc0"]},
-	)
+	assert runner.backend_name == "JadexBDIV3"
+	assert runner.jadex_version == "4.0.267"
+	assert runner.jna_version == "5.18.1"
+	assert "jackson-databind" in pom_source
+	assert "@Agent(type=\"bdi\", keepalive=Boolean3.FALSE)" in agent_source
+	assert "@Goal(retry=true, excludemode=ExcludeMode.WhenTried)" in agent_source
+	assert "@Plan(trigger=@Trigger(goals=TaskGoal.class))" in agent_source
+	assert "pipeline.payload.path" in agent_source
+	assert "private static String[][] INITIAL_FACTS = new String[0][0];" in agent_source
+	assert "new ActionSchema[]{" not in agent_source
+	assert "Starter.createAgent(" in main_source
+	assert "BDIAgentFactory.NOPLATFORM_DEFAULT_FEATURES" in main_source
+	assert "PipelineBDI.done.await()" not in main_source
+	assert "jadex_done.txt" in main_source
 
 
-def test_jadex_runtime_keeps_action_schema_bindings_local(tmp_path: Path) -> None:
-	plan_library = PlanLibrary(
-		domain_name="route",
-		plans=(
-			AgentSpeakPlan(
-				plan_name="m-route-two-hop",
-				trigger=AgentSpeakTrigger(
-					event_type="achievement_goal",
-					symbol="route",
-					arguments=("V:vehicle", "A:location", "B:location", "C:location"),
-				),
-				context=("object_type(V, vehicle)",),
-				body=(
-					AgentSpeakBodyStep(kind="action", symbol="drive", arguments=("V", "A", "B")),
-					AgentSpeakBodyStep(kind="action", symbol="drive", arguments=("V", "B", "C")),
-				),
-			),
-		),
-	)
-	drive_schema = {
-		"functor": "drive",
-		"source_name": "drive",
-		"parameters": ["?v", "?from", "?to"],
-		"preconditions": [
-			{"predicate": "at", "args": ["?v", "?from"], "is_positive": True},
-			{"predicate": "road", "args": ["?from", "?to"], "is_positive": True},
+def test_jadex_runtime_streamed_process_caps_large_output(tmp_path: Path) -> None:
+	runner = JadexBDIRunner(timeout_seconds=5)
+	runner.stdout_limit_chars = 1024
+
+	result = runner._run_streamed_process(
+		[
+			sys.executable,
+			"-c",
+			"import sys; print('ok'); sys.stderr.write('x' * 200000)",
 		],
-		"precondition_clauses": [
-			[
-				{"predicate": "at", "args": ["?v", "?from"], "is_positive": True},
-				{"predicate": "road", "args": ["?from", "?to"], "is_positive": True},
-			],
-		],
-		"effects": [
-			{"predicate": "at", "args": ["?v", "?from"], "is_positive": False},
-			{"predicate": "at", "args": ["?v", "?to"], "is_positive": True},
-		],
-	}
-
-	result = JadexBDIRunner(timeout_seconds=5).validate(
-		action_schemas=(drive_schema,),
-		plan_library=plan_library,
-		seed_facts=(
-			"(at truck-0 loc-0)",
-			"(road loc-0 loc-1)",
-			"(road loc-1 loc-2)",
-		),
-		runtime_objects=("truck-0", "loc-0", "loc-1", "loc-2"),
-		object_types={
-			"truck-0": "vehicle",
-			"loc-0": "location",
-			"loc-1": "location",
-			"loc-2": "location",
-		},
-		query_goals=({"task_name": "route", "args": ["truck-0", "loc-0", "loc-1", "loc-2"]},),
-		output_dir=tmp_path,
+		cwd=PROJECT_ROOT,
+		env=os.environ.copy(),
+		stdout_path=tmp_path / "stdout.txt",
+		stderr_path=tmp_path / "stderr.txt",
+		timeout_seconds=10,
 	)
 
-	assert result.status == "success"
-	assert result.action_path == (
-		"drive(truck-0, loc-0, loc-1)",
-		"drive(truck-0, loc-1, loc-2)",
+	assert result.returncode == 0
+	assert result.stdout.strip() == "ok"
+	assert "truncated: captured last" in result.stderr
+	assert (tmp_path / "stderr.txt").stat().st_size <= 1024
+
+
+def test_jadex_runtime_uses_framework_retry_without_python_candidate_gate(
+	tmp_path: Path,
+) -> None:
+	if shutil.which("mvn") is None:
+		pytest.skip("Maven is required for the real Jadex BDIV3 bridge.")
+	runner = JadexBDIRunner(timeout_seconds=120)
+	java_home = runner._resolve_java_home()
+	java_major = (
+		runner._java_major(str(Path(java_home) / "bin" / "java"))
+		if java_home is not None
+		else None
 	)
+	if java_major is None or java_major < 17:
+		pytest.skip("Java 17+ is required for the real Jadex BDIV3 bridge.")
 
-
-def test_jadex_runtime_prefers_low_side_effect_retry_candidates(tmp_path: Path) -> None:
-	plan_library = PlanLibrary(
-		domain_name="priority",
-		plans=(
-			AgentSpeakPlan(
-				plan_name="m-destructive",
-				trigger=AgentSpeakTrigger(
-					event_type="achievement_goal",
-					symbol="keep",
-					arguments=("X:block",),
-				),
-				context=("clear(X)", "!ontable(X)"),
-				body=(
-					AgentSpeakBodyStep(kind="action", symbol="unstack", arguments=("X", "Y")),
-					AgentSpeakBodyStep(kind="action", symbol="put-down", arguments=("X",)),
-				),
-			),
-			AgentSpeakPlan(
-				plan_name="m-idempotent",
-				trigger=AgentSpeakTrigger(
-					event_type="achievement_goal",
-					symbol="keep",
-					arguments=("X:block",),
-				),
-				context=("clear(X)",),
-				body=(AgentSpeakBodyStep(kind="action", symbol="nop", arguments=()),),
-			),
-		),
-	)
-	action_schemas = (
-		{
-			"functor": "nop",
-			"source_name": "nop",
-			"parameters": [],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		},
-		{
-			"functor": "unstack",
-			"source_name": "unstack",
-			"parameters": ["?x", "?y"],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		},
-		{
-			"functor": "put_down",
-			"source_name": "put-down",
-			"parameters": ["?x"],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		},
-	)
-
-	result = JadexBDIRunner(timeout_seconds=5).validate(
-		action_schemas=action_schemas,
-		plan_library=plan_library,
-		seed_facts=("(clear b1)", "(on b1 b2)"),
-		runtime_objects=("b1", "b2"),
-		object_types={"b1": "block", "b2": "block"},
-		query_goals=({"task_name": "keep", "args": ["b1"]},),
-		output_dir=tmp_path,
-	)
-
-	assert result.status == "success"
-	assert result.action_path == ("nop",)
-	assert result.method_trace == ({"method_name": "m-idempotent", "task_args": ["b1"]},)
-
-
-def test_jadex_runtime_retries_until_candidate_acceptor_passes(tmp_path: Path) -> None:
 	plan_library = PlanLibrary(
 		domain_name="retry",
 		plans=(
 			AgentSpeakPlan(
-				plan_name="m-first",
+				plan_name="m-delete-protected-goal",
 				trigger=AgentSpeakTrigger(
 					event_type="achievement_goal",
 					symbol="choose",
 					arguments=(),
 				),
 				context=(),
-				body=(AgentSpeakBodyStep(kind="action", symbol="first", arguments=()),),
+				body=(AgentSpeakBodyStep(kind="action", symbol="delete_ready", arguments=()),),
 			),
 			AgentSpeakPlan(
-				plan_name="m-second",
+				plan_name="m-second-passes",
 				trigger=AgentSpeakTrigger(
 					event_type="achievement_goal",
 					symbol="choose",
 					arguments=(),
 				),
-				context=(),
-				body=(AgentSpeakBodyStep(kind="action", symbol="second", arguments=()),),
+				context=("ready()", "object_type(V, thing)", "at(V, target)"),
+				body=(AgentSpeakBodyStep(kind="action", symbol="ok", arguments=("V",)),),
 			),
 		),
 	)
-	action_schemas = (
-		{
-			"functor": "first",
-			"source_name": "first",
-			"parameters": [],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		},
-		{
-			"functor": "second",
-			"source_name": "second",
-			"parameters": [],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		},
-	)
-	seen_candidates: list[tuple[str, ...]] = []
 
-	def accept_candidate(action_path, method_trace, candidate_metadata):
-		seen_candidates.append(tuple(action_path))
-		return tuple(action_path) == ("second",)
-
-	result = JadexBDIRunner(timeout_seconds=5).validate(
-		action_schemas=action_schemas,
+	result = runner.validate(
+		action_schemas=(
+			{
+				"functor": "delete_ready",
+				"source_name": "delete-ready",
+				"parameters": [],
+				"preconditions": [],
+				"precondition_clauses": [[]],
+				"effects": [
+					{"predicate": "ready", "args": [], "is_positive": False},
+				],
+			},
+			{
+				"functor": "ok",
+				"source_name": "ok",
+				"parameters": ["?x"],
+				"preconditions": [],
+				"precondition_clauses": [[]],
+				"effects": [],
+			},
+		),
 		plan_library=plan_library,
+		seed_facts=("(ready)", "(at second target)"),
+		goal_facts=("(ready)",),
+		runtime_objects=("first", "second", "target"),
+		object_types={"first": "thing", "second": "thing", "target": "location"},
 		query_goals=({"task_name": "choose", "args": []},),
 		output_dir=tmp_path,
-		accept_candidate=accept_candidate,
 	)
 
-	assert seen_candidates == [("first",), ("second",)]
-	assert result.action_path == ("second",)
-	assert result.consistency_checks["candidates_considered"] == 2
-	assert result.consistency_checks["candidates_rejected"] == 1
-
-
-def test_jadex_runtime_caps_debug_log_in_memory(tmp_path: Path) -> None:
-	plans = tuple(
-		AgentSpeakPlan(
-			plan_name=f"m-{index}",
-			trigger=AgentSpeakTrigger(
-				event_type="achievement_goal",
-				symbol="choose",
-				arguments=(),
-			),
-			context=(),
-			body=(AgentSpeakBodyStep(kind="action", symbol=f"act_{index}", arguments=()),),
-		)
-		for index in range(20)
-	)
-	action_schemas = tuple(
-		{
-			"functor": f"act_{index}",
-			"source_name": f"act_{index}",
-			"parameters": [],
-			"preconditions": [],
-			"precondition_clauses": [[]],
-			"effects": [],
-		}
-		for index in range(20)
-	)
-	runner = JadexBDIRunner(timeout_seconds=5)
-	runner.max_debug_chars = 300
-
-	with pytest.raises(JadexValidationError) as error_info:
-		runner.validate(
-			action_schemas=action_schemas,
-			plan_library=PlanLibrary(domain_name="retry", plans=plans),
-			query_goals=({"task_name": "choose", "args": []},),
-			output_dir=tmp_path,
-			accept_candidate=lambda _action_path, _method_trace, _metadata: False,
-			candidate_limit=20,
-		)
-
-	artifacts = error_info.value.metadata["artifacts"]
-	stdout_path = Path(artifacts["jadex_stdout"])
-	stdout_text = stdout_path.read_text()
-
-	assert artifacts["debug_log_truncated"] is True
-	assert artifacts["stdout_chars"] < 1_000
-	assert "runtime debug log limit reached" in stdout_text
-	assert "execute failed" in stdout_text
+	assert result.status == "success"
+	assert result.backend == "JadexBDIV3"
+	assert result.action_path == ("ok(second)",)
+	assert result.method_trace == ({"method_name": "m-second-passes", "task_args": []},)
+	assert result.consistency_checks["runtime_semantics"] == "jadex_bdiv3_framework"
+	assert Path(result.artifacts["jadex_project"]).exists()

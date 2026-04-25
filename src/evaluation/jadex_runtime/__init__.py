@@ -1,4 +1,4 @@
-"""Jadex-style BDI runtime backend for plan-library evaluation."""
+"""True Jadex BDIV3 runtime backend for plan-library evaluation."""
 
 from evaluation.jadex_runtime.runner import JadexBDIRunner, JadexValidationError
 
