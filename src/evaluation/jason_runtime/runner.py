@@ -3176,9 +3176,6 @@ class JasonRunner:
 					int(item.get("index", 0)),
 				)
 				item["variable_safe"] = variable_safe
-			safe_group_items = [item for item in group_items if bool(item.get("variable_safe"))]
-			if safe_group_items:
-				group_items = safe_group_items
 			group_items.sort(key=lambda item: tuple(item.get("sort_key") or ()))
 			ordered_chunks.extend(str(item["chunk"]) for item in group_items)
 
@@ -3322,7 +3319,7 @@ class JasonRunner:
 
 		if not specialised_chunks:
 			return [original]
-		if self._chunk_runtime_variables_are_safe(chunk):
+		if original not in seen_chunks:
 			specialised_chunks.append(original)
 		return specialised_chunks
 

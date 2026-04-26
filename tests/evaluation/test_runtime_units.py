@@ -951,6 +951,81 @@ def test_jason_runner_keeps_recursive_transport_via_after_current_context_via() 
 	assert "road(MID, DEST) <-" in ordered_chunks[1]
 
 
+def test_jason_runner_orders_safe_chunks_without_dropping_lifted_fallbacks() -> None:
+	runner = JasonRunner()
+	unsafe_lifted_fallback = "\n".join(
+		[
+			"+!achieve(TARGET) : object_type(WITNESS, witness) <-",
+			'\t.print("runtime trace method flat ", "unsafe-lifted");',
+			"\t-+runtime_current_call(method, achieve, runtime_args(TARGET), "
+			"runtime_binding(WITNESS));",
+			"\t!step(TARGET, WITNESS).",
+		],
+	)
+	safe_chunk = "\n".join(
+		[
+			"+!achieve(TARGET) : ready(TARGET) <-",
+			'\t.print("runtime trace method flat ", "safe");',
+			"\t!finish(TARGET).",
+		],
+	)
+
+	ordered_chunks = runner._order_runtime_method_plan_chunks(
+		[unsafe_lifted_fallback, safe_chunk],
+		fact_index={("ready", 1): (("goal0",),)},
+	)
+
+	assert len(ordered_chunks) == 2
+	assert "safe" in ordered_chunks[0]
+	assert "unsafe-lifted" in ordered_chunks[1]
+
+
+def test_jason_runner_local_witness_specialisation_keeps_canonical_fallback() -> None:
+	runner = JasonRunner()
+	chunk = [
+		"+!observe(DIR, MODE) : object_type(PREV, direction) & "
+		"object_type(SAT, satellite) & object_type(INST, instrument) & "
+		"object_type(MODE, mode) & on_board(INST, SAT) & supports(INST, MODE) <-",
+		'\t.print("runtime trace method flat ", "observe-with-turn");',
+		"\t-+runtime_current_call(method, observe, runtime_args(DIR, MODE), "
+		"runtime_binding(PREV, SAT, INST));",
+		"\t!activate_instrument(SAT, INST);",
+		"\t!turn_to(SAT, DIR, PREV);",
+		"\t!take_image(SAT, DIR, INST, MODE).",
+	]
+	fact_index, type_domains = runner._runtime_fact_index_for_local_witness_grounding(
+		seed_facts=("(on_board instrument0 satellite0)", "(supports instrument0 mode0)"),
+		runtime_objects=("instrument0", "satellite0", "mode0", "old_direction"),
+		object_types={
+			"instrument0": "instrument",
+			"satellite0": "satellite",
+			"mode0": "mode",
+			"old_direction": "direction",
+		},
+		type_parent_map={
+			"instrument": "object",
+			"satellite": "object",
+			"mode": "object",
+			"direction": "object",
+			"object": None,
+		},
+	)
+
+	specialised_chunks = runner._specialise_method_chunk_local_witnesses(
+		chunk,
+		fact_index=fact_index,
+		type_domains=type_domains,
+		max_candidates_per_clause=64,
+	)
+
+	original = "\n".join(chunk)
+	assert original in specialised_chunks
+	assert any(
+		"old_direction" in specialised_chunk and specialised_chunk != original
+		for specialised_chunk in specialised_chunks
+	)
+
+
 def test_jason_runner_inserts_no_ancestor_guard_for_self_recursive_methods() -> None:
 	runner = JasonRunner()
 	chunks = [
