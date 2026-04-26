@@ -328,6 +328,7 @@ def run_direct_plan_baseline_case(
 			goal_reached=False,
 			success=False,
 			diagnostics=(),
+			verification_skipped=not verify,
 			error=str(exc),
 		)
 	validation_file.write_text(json.dumps(result.to_dict(), indent=2))

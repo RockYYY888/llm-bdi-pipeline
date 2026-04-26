@@ -122,3 +122,30 @@ def test_run_direct_plan_case_can_persist_without_verifier(tmp_path: Path) -> No
 	assert result.verification_skipped is True
 	assert validation["verification_skipped"] is True
 	assert (tmp_path / "plan.txt").read_text() == "==>\n0 unstack b2 b3\n1 put-down b2\nroot\n"
+
+
+def test_run_direct_plan_case_marks_parse_failure_as_collection_only(tmp_path: Path) -> None:
+	temporal_specification = TemporalSpecificationRecord(
+		instruction_id="query_1",
+		source_text="complete the tasks",
+		ltlf_formula="do_put_on(b4, b2)",
+		referenced_events=(),
+		problem_file="p01.hddl",
+	)
+
+	result = run_direct_plan_baseline_case(
+		domain_key="blocksworld",
+		query_id="query_1",
+		domain_file=PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl",
+		problem_file=PROJECT_ROOT / "src" / "domains" / "blocksworld" / "problems" / "p01.hddl",
+		instruction="complete the tasks",
+		temporal_specification=temporal_specification,
+		output_dir=tmp_path,
+		response_text="not json",
+		verify=False,
+	)
+
+	validation = json.loads((tmp_path / "direct_plan_validation.json").read_text())
+	assert result.parseable is False
+	assert result.verification_skipped is True
+	assert validation["verification_skipped"] is True
