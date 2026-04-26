@@ -16,34 +16,46 @@ def test_stage_specific_generation_config_reads_expected_fields(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
     monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
+    monkeypatch.setenv("DIRECT_PLAN_GENERATION_API_KEY", "sk-direct")
     monkeypatch.setenv("LTLF_GENERATION_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("METHOD_SYNTHESIS_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("DIRECT_PLAN_GENERATION_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("LTLF_GENERATION_TIMEOUT", "120")
     monkeypatch.setenv("METHOD_SYNTHESIS_TIMEOUT", "240")
+    monkeypatch.setenv("DIRECT_PLAN_GENERATION_TIMEOUT", "360")
     monkeypatch.setenv("LTLF_GENERATION_MAX_TOKENS", "2048")
     monkeypatch.setenv("METHOD_SYNTHESIS_MAX_TOKENS", "4096")
+    monkeypatch.setenv("DIRECT_PLAN_GENERATION_MAX_TOKENS", "8192")
     monkeypatch.setenv("PLANNING_TIMEOUT", "900")
     monkeypatch.setenv("LTLF_GENERATION_BASE_URL", "https://api.ltlf.example/v1")
     monkeypatch.setenv("METHOD_SYNTHESIS_BASE_URL", "https://api.method.example/v1")
+    monkeypatch.setenv("DIRECT_PLAN_GENERATION_BASE_URL", "https://api.direct.example/v1")
     monkeypatch.setenv("LTLF_GENERATION_SESSION_ID", "ltlf-session")
     monkeypatch.setenv("METHOD_SYNTHESIS_SESSION_ID", "method-session")
+    monkeypatch.setenv("DIRECT_PLAN_GENERATION_SESSION_ID", "direct-session")
     monkeypatch.setenv("EVALUATION_DOMAIN_SOURCE", "generated")
 
     config = Config()
 
     assert config.ltlf_generation_api_key == "sk-ltlf"
     assert config.method_synthesis_api_key == "sk-method"
+    assert config.direct_plan_generation_api_key == "sk-direct"
     assert config.ltlf_generation_model == "deepseek-v4-pro"
     assert config.method_synthesis_model == "deepseek-v4-pro"
+    assert config.direct_plan_generation_model == "deepseek-v4-pro"
     assert config.ltlf_generation_timeout == 120
     assert config.method_synthesis_timeout == 240
+    assert config.direct_plan_generation_timeout == 360
     assert config.ltlf_generation_max_tokens == 2048
     assert config.method_synthesis_max_tokens == 4096
+    assert config.direct_plan_generation_max_tokens == 8192
     assert config.planning_timeout == 900
     assert config.ltlf_generation_base_url == "https://api.ltlf.example/v1"
     assert config.method_synthesis_base_url == "https://api.method.example/v1"
+    assert config.direct_plan_generation_base_url == "https://api.direct.example/v1"
     assert config.ltlf_generation_session_id == "ltlf-session"
     assert config.method_synthesis_session_id == "method-session"
+    assert config.direct_plan_generation_session_id == "direct-session"
     assert config.evaluation_domain_source == "generated"
 
 
@@ -72,6 +84,15 @@ def test_method_synthesis_timeout_defaults_to_longer_one_shot_budget(monkeypatch
     config = Config()
 
     assert config.method_synthesis_timeout == 2400
+
+
+def test_direct_plan_generation_timeout_defaults_to_evaluation_budget(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_TIMEOUT", raising=False)
+
+    config = Config()
+
+    assert config.direct_plan_generation_timeout == 1800
 
 
 def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
@@ -110,15 +131,26 @@ def test_method_synthesis_model_defaults_to_deepseek_v4_pro(monkeypatch):
     assert config.method_synthesis_model == "deepseek-v4-pro"
 
 
+def test_direct_plan_generation_model_defaults_to_deepseek_v4_pro(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_MODEL", raising=False)
+
+    config = Config()
+
+    assert config.direct_plan_generation_model == "deepseek-v4-pro"
+
+
 def test_generation_base_urls_default_to_deepseek_openai_endpoint(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("LTLF_GENERATION_BASE_URL", raising=False)
     monkeypatch.delenv("METHOD_SYNTHESIS_BASE_URL", raising=False)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_BASE_URL", raising=False)
 
     config = Config()
 
     assert config.ltlf_generation_base_url == "https://api.deepseek.com"
     assert config.method_synthesis_base_url == "https://api.deepseek.com"
+    assert config.direct_plan_generation_base_url == "https://api.deepseek.com"
 
 
 def test_method_synthesis_api_key_uses_method_specific_key(monkeypatch):
@@ -140,6 +172,17 @@ def test_method_synthesis_api_key_does_not_fall_back_to_ltlf_generation_key(monk
     config = Config()
 
     assert config.method_synthesis_api_key is None
+
+
+def test_direct_plan_generation_api_key_does_not_fall_back_to_other_keys(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
+    monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_API_KEY", raising=False)
+
+    config = Config()
+
+    assert config.direct_plan_generation_api_key is None
 
 
 def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):
@@ -177,12 +220,15 @@ def test_generation_session_ids_default_to_distinct_values(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
     monkeypatch.delenv("LTLF_GENERATION_SESSION_ID", raising=False)
     monkeypatch.delenv("METHOD_SYNTHESIS_SESSION_ID", raising=False)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_SESSION_ID", raising=False)
 
     config = Config()
 
     assert config.ltlf_generation_session_id == "ltlf-generation"
     assert config.method_synthesis_session_id == "method-synthesis"
+    assert config.direct_plan_generation_session_id == "direct-plan-generation"
     assert config.ltlf_generation_session_id != config.method_synthesis_session_id
+    assert config.direct_plan_generation_session_id != config.method_synthesis_session_id
 
 
 def test_evaluation_domain_source_defaults_to_benchmark(monkeypatch):

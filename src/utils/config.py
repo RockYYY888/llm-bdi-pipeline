@@ -12,12 +12,15 @@ from typing import Iterable, Optional
 DEFAULT_GENERATION_BASE_URL = "https://api.deepseek.com"
 DEFAULT_LTLF_GENERATION_MODEL = "deepseek-v4-pro"
 DEFAULT_METHOD_SYNTHESIS_MODEL = "deepseek-v4-pro"
+DEFAULT_DIRECT_PLAN_GENERATION_MODEL = "deepseek-v4-pro"
 DEFAULT_EVALUATION_DOMAIN_SOURCE = "benchmark"
 DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS = 1000
 DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 2400
+DEFAULT_DIRECT_PLAN_GENERATION_TIMEOUT_SECONDS = 1800
 DEFAULT_PLANNING_TIMEOUT_SECONDS = 600
 DEFAULT_LTLF_GENERATION_SESSION_ID = "ltlf-generation"
 DEFAULT_METHOD_SYNTHESIS_SESSION_ID = "method-synthesis"
+DEFAULT_DIRECT_PLAN_GENERATION_SESSION_ID = "direct-plan-generation"
 
 
 class Config:
@@ -52,6 +55,10 @@ class Config:
 		return os.getenv("METHOD_SYNTHESIS_API_KEY")
 
 	@property
+	def direct_plan_generation_api_key(self) -> Optional[str]:
+		return os.getenv("DIRECT_PLAN_GENERATION_API_KEY")
+
+	@property
 	def ltlf_generation_model(self) -> str:
 		"""
 		Get the model identifier for natural-language to LTLf generation.
@@ -69,6 +76,15 @@ class Config:
 		stable across runs.
 		"""
 		return os.getenv("METHOD_SYNTHESIS_MODEL", DEFAULT_METHOD_SYNTHESIS_MODEL)
+
+	@property
+	def direct_plan_generation_model(self) -> str:
+		"""Get the model identifier for direct verifier-plan generation."""
+
+		return os.getenv(
+			"DIRECT_PLAN_GENERATION_MODEL",
+			DEFAULT_DIRECT_PLAN_GENERATION_MODEL,
+		)
 
 	@property
 	def ltlf_generation_timeout(self) -> int:
@@ -95,8 +111,24 @@ class Config:
 		)
 
 	@property
+	def direct_plan_generation_timeout(self) -> int:
+		return max(
+			int(
+				os.getenv(
+					"DIRECT_PLAN_GENERATION_TIMEOUT",
+					str(DEFAULT_DIRECT_PLAN_GENERATION_TIMEOUT_SECONDS),
+				),
+			),
+			1,
+		)
+
+	@property
 	def method_synthesis_max_tokens(self) -> int:
 		return max(int(os.getenv("METHOD_SYNTHESIS_MAX_TOKENS", "144000")), 1)
+
+	@property
+	def direct_plan_generation_max_tokens(self) -> int:
+		return max(int(os.getenv("DIRECT_PLAN_GENERATION_MAX_TOKENS", "24000")), 1)
 
 	@property
 	def planning_timeout(self) -> int:
@@ -123,12 +155,23 @@ class Config:
 		return os.getenv("METHOD_SYNTHESIS_BASE_URL", DEFAULT_GENERATION_BASE_URL)
 
 	@property
+	def direct_plan_generation_base_url(self) -> Optional[str]:
+		return os.getenv("DIRECT_PLAN_GENERATION_BASE_URL", DEFAULT_GENERATION_BASE_URL)
+
+	@property
 	def ltlf_generation_session_id(self) -> str:
 		return os.getenv("LTLF_GENERATION_SESSION_ID", DEFAULT_LTLF_GENERATION_SESSION_ID)
 
 	@property
 	def method_synthesis_session_id(self) -> str:
 		return os.getenv("METHOD_SYNTHESIS_SESSION_ID", DEFAULT_METHOD_SYNTHESIS_SESSION_ID)
+
+	@property
+	def direct_plan_generation_session_id(self) -> str:
+		return os.getenv(
+			"DIRECT_PLAN_GENERATION_SESSION_ID",
+			DEFAULT_DIRECT_PLAN_GENERATION_SESSION_ID,
+		)
 
 	@property
 	def evaluation_domain_source(self) -> str:
