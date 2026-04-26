@@ -1636,6 +1636,12 @@ def test_jason_runner_wraps_query_goals_without_whole_query_retries() -> None:
 	assert "!finish_or_retry_0;" in execute_section
 	assert "+!finish_or_retry_0 : done(a) & not runtime_pass_failed <-" in runtime_program
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
+	finish_fallback = runtime_program.split("+!finish_or_retry_0 : true <-", maxsplit=1)[
+		1
+	].split("\n\n", maxsplit=1)[0]
+	assert '.print("runtime final goal failed")' in finish_fallback
+	assert "!runtime_backtrack_from_1." in finish_fallback
+	assert '.print("execute failed")' not in finish_fallback
 	assert "+!execute_query_pass_1 : true <-" not in runtime_program
 	assert "runtime query pass" not in runtime_program
 	assert "!runtime_execute_from_1;" in execute_section
@@ -1911,8 +1917,9 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	child_handlers = runtime_program.split("-!child(X)")
 	child_active_handler = child_handlers[1].split("\n\n", maxsplit=1)[0]
 	child_parent_caller_handler = child_handlers[2].split("\n\n", maxsplit=1)[0]
-	child_query_fallback_handler = child_handlers[3].split("\n\n", maxsplit=1)[0]
-	child_fallback_handler = child_handlers[4].split("\n\n", maxsplit=1)[0]
+	child_legacy_parent_caller_handler = child_handlers[3].split("\n\n", maxsplit=1)[0]
+	child_query_fallback_handler = child_handlers[4].split("\n\n", maxsplit=1)[0]
+	child_fallback_handler = child_handlers[5].split("\n\n", maxsplit=1)[0]
 	assert "!finish_or_retry_0" in runtime_program
 	assert "+!finish_or_retry_0 : not runtime_pass_failed <-" in runtime_program
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
@@ -1926,22 +1933,104 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	assert "runtime_restore(runtime_method_snapshot(METHOD, parent, X, BINDING))" in parent_failure_handler
 	assert "!child(X)" in child_active_handler
 	assert "+runtime_pass_failed" not in child_active_handler
-	assert "runtime_current_method(METHOD, parent, X, BINDING)" in child_parent_caller_handler
-	assert "runtime_restore(runtime_method_snapshot(METHOD, parent, X, BINDING))" in (
+	assert "runtime_current_call(METHOD, parent, runtime_args(PARENT_X), BINDING, SNAPSHOT" in (
 		child_parent_caller_handler
 	)
-	assert "+blocked_runtime_method(METHOD, parent, X, BINDING)" in child_parent_caller_handler
-	assert "!parent(X)" in child_parent_caller_handler
-	assert "runtime_commit(runtime_method_snapshot(METHOD, parent, X, BINDING))" in (
+	assert "child, runtime_args(X))" in child_parent_caller_handler
+	assert "runtime_restore(SNAPSHOT)" in child_parent_caller_handler
+	assert "+blocked_runtime_choice(runtime_method_choice(METHOD, parent, runtime_args(PARENT_X), BINDING))" in (
 		child_parent_caller_handler
 	)
-	assert ".succeed_goal(parent(X))." in child_parent_caller_handler
+	assert "+blocked_runtime_method(METHOD, parent, PARENT_X, BINDING)" in (
+		child_parent_caller_handler
+	)
+	assert "!parent(PARENT_X)" in child_parent_caller_handler
+	assert "runtime_commit(SNAPSHOT)" in child_parent_caller_handler
+	assert ".succeed_goal(parent(PARENT_X))." in child_parent_caller_handler
 	assert "runtime_current_method(METHOD, child, X, BINDING)" not in child_parent_caller_handler
+	assert "runtime_current_method(METHOD, parent, PARENT_X, BINDING)" in (
+		child_legacy_parent_caller_handler
+	)
 	assert "runtime_active_query_goal(1)" in child_query_fallback_handler
 	assert ".fail_goal(runtime_execute_from_1)." in child_query_fallback_handler
 	assert "if (not runtime_reported_failure(fail_goal(child, X)))" in child_fallback_handler
-	assert runtime_program.count("-!child(X)") == 4
+	assert runtime_program.count("-!child(X)") == 5
 	assert ".fail." in child_fallback_handler
+
+
+def test_jason_runner_records_recursive_caller_frames_with_separate_arguments() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!get_to(V, TARGET) : edge(VIA, TARGET) <-
+	!get_to(V, VIA);
+	drive(V, VIA, TARGET).
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(name="get_to", parameters=("v", "target"), is_primitive=False),
+			],
+			primitive_tasks=[
+				HTNTask(name="drive", parameters=("v", "from", "to"), is_primitive=True),
+			],
+			methods=[
+				HTNMethod(
+					method_name="m-get-to-via",
+					task_name="get_to",
+					parameters=("?v", "?via", "?target"),
+					task_args=("?v", "?target"),
+					subtasks=(
+						HTNMethodStep(
+							step_id="s1",
+							task_name="get_to",
+							args=("?v", "?via"),
+							kind="compound",
+						),
+						HTNMethodStep(
+							step_id="s2",
+							task_name="drive",
+							action_name="drive",
+							args=("?v", "?via", "?target"),
+							kind="primitive",
+						),
+					),
+				),
+			],
+		),
+		action_schemas=(
+			{
+				"source_name": "drive",
+				"functor": "drive",
+				"parameters": ["?v", "?from", "?to"],
+			},
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "get_to", "args": ["truck", "loc3"]},),
+		goal_facts=(),
+	)
+
+	assert (
+		'runtime_current_call("m-get-to-via", get_to, runtime_args(V, TARGET), '
+		'runtime_binding(VIA), runtime_method_snapshot("m-get-to-via", get_to, V, TARGET, '
+		"runtime_binding(VIA)), get_to, runtime_args(V, VIA))"
+	) in runtime_program
+	assert (
+		"-!get_to(V, TARGET) : runtime_current_call(METHOD, get_to, "
+		"runtime_args(PARENT_V, PARENT_TARGET), BINDING, SNAPSHOT, get_to, "
+		"runtime_args(V, TARGET))"
+	) in runtime_program
+	assert "!get_to(PARENT_V, PARENT_TARGET)" in runtime_program
+	assert "runtime_method_choice(METHOD, get_to, runtime_args(PARENT_V, PARENT_TARGET), BINDING)" in (
+		runtime_program
+	)
 
 
 def test_jason_runner_adds_query_level_chronological_backtracking() -> None:
@@ -1993,7 +2082,15 @@ def test_jason_runner_adds_query_level_chronological_backtracking() -> None:
 
 	assert "+!runtime_execute_from_1 : true <-" in runtime_program
 	assert "+!runtime_execute_from_2 : true <-" in runtime_program
+	assert "-!runtime_execute_from_1 : runtime_last_query_choice(1, CHOICE)" in runtime_program
+	assert "-!runtime_execute_from_1 : runtime_query_choice(1, CHOICE)" in runtime_program
+	assert "-!runtime_execute_from_2 : runtime_last_query_choice(2, CHOICE)" in runtime_program
+	assert "-!runtime_execute_from_2 : runtime_query_choice(2, CHOICE)" in runtime_program
 	assert "-!runtime_execute_from_2 : runtime_last_query_choice(1, CHOICE)" in runtime_program
+	assert "-!runtime_execute_from_2 : runtime_query_choice(1, CHOICE)" in runtime_program
+	assert "+!runtime_backtrack_from_2 : runtime_last_query_choice(2, CHOICE)" in runtime_program
+	assert "+!runtime_backtrack_from_2 : runtime_query_choice(1, CHOICE)" in runtime_program
+	assert "+!runtime_backtrack_from_2 : true <-" in runtime_program
 	assert "runtime_restore(runtime_query_checkpoint(1));" in runtime_program
 	assert "+runtime_backtracked_choice(1, CHOICE);" in runtime_program
 	assert "+blocked_runtime_choice(CHOICE);" in runtime_program

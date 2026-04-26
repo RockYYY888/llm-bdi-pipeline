@@ -754,7 +754,17 @@ class JasonRunner:
 		lines.extend(self._indent_body(['.print("execute success")']))
 		lines.append("")
 		lines.append("+!finish_or_retry_0 : true <-")
-		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		if goal_context and track_runtime_failures and query_goals:
+			lines.extend(
+				self._indent_body(
+					(
+						'.print("runtime final goal failed")',
+						f"!runtime_backtrack_from_{len(query_goals)}",
+					),
+				),
+			)
+		else:
+			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
 		lines.append("")
 		return lines
 
@@ -862,30 +872,28 @@ class JasonRunner:
 				),
 			)
 			lines.append("")
-			for target_index in range(index - 1, 0, -1):
-				checkpoint = f"runtime_query_checkpoint({target_index})"
-				lines.append(
-					f"-!runtime_execute_from_{index} : "
-					f"runtime_last_query_choice({target_index}, CHOICE) "
-					f"& not runtime_backtracked_choice({target_index}, CHOICE) <-",
-				)
-				lines.extend(
-					self._indent_body(
-						(
-							f'.print("runtime query backtrack ", {index}, " -> ", {target_index}, " ", CHOICE)',
-							f"runtime_restore({checkpoint})",
-							".perceive",
-							f"+runtime_backtracked_choice({target_index}, CHOICE)",
-							"+blocked_runtime_choice(CHOICE)",
-							"!runtime_clear_local_repair_state",
-							f"!runtime_clear_query_progress_from_{target_index}",
-							f"!runtime_execute_from_{target_index}",
-							"!finish_or_retry_0",
-							".stopMAS",
+			lines.extend(
+				self._render_runtime_query_backtrack_plans(
+					goal_name=f"runtime_backtrack_from_{index}",
+					source_index=index,
+				),
+			)
+			for target_index in range(index, 0, -1):
+				for choice_predicate in ("runtime_last_query_choice", "runtime_query_choice"):
+					lines.append(
+						f"-!runtime_execute_from_{index} : "
+						f"{choice_predicate}({target_index}, CHOICE) "
+						f"& not runtime_backtracked_choice({target_index}, CHOICE) <-",
+					)
+					lines.extend(
+						self._indent_body(
+							self._runtime_query_backtrack_body(
+								source_index=index,
+								target_index=target_index,
+							),
 						),
-					),
-				)
-				lines.append("")
+					)
+					lines.append("")
 			lines.append(f"-!runtime_execute_from_{index} : true <-")
 			lines.extend(
 				self._indent_body(
@@ -898,6 +906,61 @@ class JasonRunner:
 			)
 			lines.append("")
 		return lines
+
+	def _render_runtime_query_backtrack_plans(
+		self,
+		*,
+		goal_name: str,
+		source_index: int,
+	) -> List[str]:
+		lines: List[str] = []
+		for target_index in range(source_index, 0, -1):
+			for choice_predicate in ("runtime_last_query_choice", "runtime_query_choice"):
+				lines.append(
+					f"+!{goal_name} : {choice_predicate}({target_index}, CHOICE) "
+					f"& not runtime_backtracked_choice({target_index}, CHOICE) <-",
+				)
+				lines.extend(
+					self._indent_body(
+						self._runtime_query_backtrack_body(
+							source_index=source_index,
+							target_index=target_index,
+						),
+					),
+				)
+				lines.append("")
+		lines.append(f"+!{goal_name} : true <-")
+		lines.extend(
+			self._indent_body(
+				(
+					f'.print("runtime query branch exhausted ", {source_index})',
+					"+runtime_pass_failed",
+					".fail",
+				),
+			),
+		)
+		lines.append("")
+		return lines
+
+	def _runtime_query_backtrack_body(
+		self,
+		*,
+		source_index: int,
+		target_index: int,
+	) -> Tuple[str, ...]:
+		checkpoint = f"runtime_query_checkpoint({target_index})"
+		return (
+			f'.print("runtime query backtrack ", {source_index}, " -> ", {target_index}, " ", CHOICE)',
+			f"runtime_restore({checkpoint})",
+			".perceive",
+			f"+runtime_backtracked_choice({target_index}, CHOICE)",
+			"+blocked_runtime_choice(CHOICE)",
+			"!runtime_clear_local_repair_state",
+			f"!runtime_clear_query_progress_from_{target_index}",
+			f"!runtime_execute_from_{target_index}",
+			"!finish_or_retry_0",
+			".stopMAS",
+		)
 
 	def _render_runtime_local_repair_cleanup_plans(self) -> List[str]:
 		lines = ["/* Runtime Local Repair Cleanup */"]
@@ -912,6 +975,7 @@ class JasonRunner:
 			for arity in range(3, 12):
 				args = ", ".join("_" for _index in range(arity))
 				cleanup_statements.append(f".abolish({predicate}({args}))")
+		cleanup_statements.append(".abolish(runtime_current_call(_, _, _, _, _, _, _))")
 		lines.append("+!runtime_clear_local_repair_state : true <-")
 		lines.extend(self._indent_body(cleanup_statements))
 		lines.append("")
@@ -2019,7 +2083,11 @@ class JasonRunner:
 		return token
 
 	@staticmethod
-	def _failure_handler_args(parameters: Sequence[str]) -> Tuple[str, ...]:
+	def _failure_handler_args(
+		parameters: Sequence[str],
+		*,
+		prefix: str = "",
+	) -> Tuple[str, ...]:
 		used_counts: Dict[str, int] = {}
 		rendered_args: List[str] = []
 		for index, parameter in enumerate(parameters, start=1):
@@ -2027,6 +2095,9 @@ class JasonRunner:
 			token = re.sub(r"[^A-Za-z0-9]+", "_", token).strip("_").upper()
 			if not token:
 				token = f"ARG{index}"
+			prefix_token = re.sub(r"[^A-Za-z0-9]+", "_", str(prefix).strip()).strip("_").upper()
+			if prefix_token:
+				token = f"{prefix_token}_{token}"
 			if not token[0].isalpha():
 				token = f"ARG_{token}"
 			count = used_counts.get(token, 0) + 1
@@ -2126,9 +2197,34 @@ class JasonRunner:
 					method_library=method_library,
 					plan_library=plan_library,
 				):
-					parent_args = self._failure_handler_args(parent_parameters)
+					parent_args = self._failure_handler_args(
+						parent_parameters,
+						prefix="PARENT",
+					)
 					parent_trigger = self._call(self._sanitize_name(parent_task_name), parent_args)
 					parent_task_atom = self._asl_atom_or_string(self._sanitize_name(parent_task_name))
+					child_task_atom = self._asl_atom_or_string(self._sanitize_name(task_name))
+					parent_call_frame = self._call(
+						"runtime_current_call",
+						(
+							"METHOD",
+							parent_task_atom,
+							self._call("runtime_args", parent_args),
+							"BINDING",
+							"SNAPSHOT",
+							child_task_atom,
+							self._call("runtime_args", handler_args),
+						),
+					)
+					parent_choice = self._call(
+						"runtime_method_choice",
+						(
+							"METHOD",
+							parent_task_atom,
+							self._call("runtime_args", parent_args),
+							"BINDING",
+						),
+					)
 					parent_current_method = self._call(
 						"runtime_current_method",
 						("METHOD", parent_task_atom, *parent_args, "BINDING"),
@@ -2145,6 +2241,28 @@ class JasonRunner:
 						"blocked_runtime_method",
 						("METHOD", parent_task_atom, *parent_args, "BINDING"),
 					)
+					lines.append(
+						f"-!{trigger} : {parent_call_frame} & {parent_active_method} "
+						"& not runtime_pass_failed <-",
+					)
+					lines.extend(
+						self._indent_body(
+							[
+								f'.print("runtime caller frame failed ", {fail_term})',
+								"runtime_restore(SNAPSHOT)",
+								".perceive",
+								f"+blocked_runtime_choice({parent_choice})",
+								f"+{parent_blocked_method}",
+								f"-{parent_call_frame}",
+								f"!{parent_trigger}",
+								"runtime_commit(SNAPSHOT)",
+								f"-{parent_current_method}",
+								f"-{parent_active_method}",
+								f".succeed_goal({parent_trigger})",
+							],
+						),
+					)
+					lines.append("")
 					lines.append(
 						f"-!{trigger} : {parent_current_method} & {parent_active_method} "
 						"& not runtime_pass_failed <-",
@@ -3644,6 +3762,11 @@ class JasonRunner:
 				body_lines = self._mark_runtime_current_method_before_calls(
 					body_lines,
 					current_method,
+					method_identity=method_identity,
+					task_name=task_name,
+					args=trigger_args,
+					binding_term=binding_term,
+					method_snapshot=method_snapshot,
 				)
 				body_lines = self._append_success_cleanup_statement(
 					body_lines,
@@ -3672,10 +3795,23 @@ class JasonRunner:
 		self,
 		body_lines: Sequence[str],
 		current_method: str,
+		*,
+		method_identity: str,
+		task_name: str,
+		args: Sequence[str],
+		binding_term: str,
+		method_snapshot: str,
 	) -> List[str]:
 		current = str(current_method or "").strip()
 		if not current:
 			return list(body_lines)
+		parent_frame_prefix = (
+			self._asl_string(method_identity),
+			self._asl_atom_or_string(self._sanitize_name(task_name)),
+			self._call("runtime_args", tuple(args)),
+			binding_term,
+			method_snapshot,
+		)
 		rewritten: List[str] = []
 		for line in body_lines:
 			match = re.match(r"^(\s*)(.*?)([;.])\s*$", line)
@@ -3683,21 +3819,45 @@ class JasonRunner:
 				rewritten.append(line)
 				continue
 			indent, statement, _suffix = match.groups()
-			if self._is_runtime_current_method_call_statement(statement):
+			call_signature = self._parse_runtime_current_call_statement(statement)
+			if call_signature is not None:
+				child_name, child_args = call_signature
+				call_frame = self._call(
+					"runtime_current_call",
+					(
+						*parent_frame_prefix,
+						self._asl_atom_or_string(self._sanitize_name(child_name)),
+						self._call("runtime_args", child_args),
+					),
+				)
 				rewritten.append(f"{indent}-+{current};")
+				rewritten.append(f"{indent}-+{call_frame};")
+				rewritten.append(f"{indent}{statement};")
+				rewritten.append(f"{indent}-{call_frame}{_suffix}")
+				continue
 			rewritten.append(line)
 		return rewritten
 
 	@staticmethod
 	def _is_runtime_current_method_call_statement(statement: str) -> bool:
+		return JasonRunner._parse_runtime_current_call_statement(statement) is not None
+
+	@staticmethod
+	def _parse_runtime_current_call_statement(statement: str) -> Optional[Tuple[str, Tuple[str, ...]]]:
 		text = str(statement or "").strip()
 		if not text or text == "true":
-			return False
+			return None
 		if text.startswith("!"):
-			return True
-		if text.startswith(("+", "-", "?", ".", "not ")):
-			return False
-		return bool(re.match(r"^[a-z][A-Za-z0-9_]*\s*(?:\(|$)", text))
+			text = text[1:].strip()
+		elif text.startswith(("+", "-", "?", ".", "not ")):
+			return None
+		match = re.fullmatch(r"([a-z][A-Za-z0-9_]*)(?:\((.*)\))?", text)
+		if match is None:
+			return None
+		name = match.group(1).strip()
+		args_text = (match.group(2) or "").strip()
+		args = JasonRunner._split_asl_arguments(args_text) if args_text else ()
+		return name, args
 
 	def _runtime_method_identity(self, method: Any) -> str:
 		method_name = str(
