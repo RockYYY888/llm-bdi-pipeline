@@ -976,6 +976,8 @@ class JasonRunner:
 				args = ", ".join("_" for _index in range(arity))
 				cleanup_statements.append(f".abolish({predicate}({args}))")
 		cleanup_statements.append(".abolish(runtime_current_call(_, _, _, _, _, _, _))")
+		cleanup_statements.append(".abolish(runtime_method_choice_point(_, _, _, _))")
+		cleanup_statements.append(".abolish(runtime_latest_method_choice_point(_, _, _, _))")
 		lines.append("+!runtime_clear_local_repair_state : true <-")
 		lines.extend(self._indent_body(cleanup_statements))
 		lines.append("")
@@ -2175,6 +2177,30 @@ class JasonRunner:
 				if allow_repair
 				else active_method
 			)
+			choice_point = self._call(
+				"runtime_latest_method_choice_point",
+				(
+					"CHOICE",
+					self._asl_atom_or_string(self._sanitize_name(task_name)),
+					self._call("runtime_args", handler_args),
+					"SNAPSHOT",
+				),
+			)
+			if allow_repair:
+				lines.append(f"-!{trigger} : {choice_point} & not runtime_pass_failed <-")
+				lines.extend(
+					self._indent_body(
+						[
+							f'.print("runtime method choice failed ", {fail_term})',
+							"runtime_restore(SNAPSHOT)",
+							".perceive",
+							"+blocked_runtime_choice(CHOICE)",
+							"runtime_pop_method_choice(CHOICE)",
+							f"!{trigger}",
+						],
+					),
+				)
+				lines.append("")
 			active_handler_body = [
 				f'.print("runtime goal branch failed ", {fail_term})',
 				f"runtime_restore({method_snapshot})",
@@ -3759,6 +3785,14 @@ class JasonRunner:
 				active_line = f"\t+{active_method};"
 				snapshot_line = f"\truntime_snapshot({method_snapshot});"
 				choice_line = f"\truntime_record_query_choice({choice_term});"
+				choice_point_line = (
+					"\truntime_push_method_choice("
+					f"{choice_term}, "
+					f"{self._asl_atom_or_string(self._sanitize_name(task_name))}, "
+					f"{self._call('runtime_args', trigger_args)}, "
+					f"{method_snapshot}"
+					");"
+				)
 				body_lines = self._mark_runtime_current_method_before_calls(
 					body_lines,
 					current_method,
@@ -3767,6 +3801,10 @@ class JasonRunner:
 					args=trigger_args,
 					binding_term=binding_term,
 					method_snapshot=method_snapshot,
+				)
+				body_lines = self._append_success_cleanup_statement(
+					body_lines,
+					f"runtime_pop_method_choice({choice_term})",
 				)
 				body_lines = self._append_success_cleanup_statement(
 					body_lines,
@@ -3786,6 +3824,7 @@ class JasonRunner:
 				prefix_lines.append(active_line)
 				prefix_lines.append(snapshot_line)
 				prefix_lines.append(choice_line)
+				prefix_lines.append(choice_point_line)
 			instrumented_chunks.append("\n".join([*prefix_lines, *body_lines]))
 
 		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
@@ -4265,6 +4304,8 @@ public class {self.environment_class_name} extends Environment {{
 			&& !"runtime_set_active_query_goal".equals(functor)
 			&& !"runtime_clear_active_query_goal".equals(functor)
 			&& !"runtime_record_query_choice".equals(functor)
+			&& !"runtime_push_method_choice".equals(functor)
+			&& !"runtime_pop_method_choice".equals(functor)
 		) {{
 			return false;
 		}}
@@ -4287,6 +4328,14 @@ public class {self.environment_class_name} extends Environment {{
 		}}
 		if ("runtime_record_query_choice".equals(functor)) {{
 			recordRuntimeQueryChoice(action);
+			return true;
+		}}
+		if ("runtime_push_method_choice".equals(functor)) {{
+			pushRuntimeMethodChoice(action);
+			return true;
+		}}
+		if ("runtime_pop_method_choice".equals(functor)) {{
+			popRuntimeMethodChoice(action);
 			return true;
 		}}
 		String key = snapshotKey(action);
@@ -4325,6 +4374,61 @@ public class {self.environment_class_name} extends Environment {{
 		world.add(lastPrefix + choice + ")");
 		world.add("runtime_query_choice(" + activeQueryGoalIndex + "," + choice + ")");
 		syncPercepts();
+	}}
+
+	private void pushRuntimeMethodChoice(Structure action) {{
+		if (action.getArity() < 4) {{
+			return;
+		}}
+		String payload = action.getTerm(0).toString()
+			+ "," + action.getTerm(1)
+			+ "," + action.getTerm(2)
+			+ "," + action.getTerm(3);
+		String fact = "runtime_method_choice_point(" + payload + ")";
+		world.remove(fact);
+		clearLatestRuntimeMethodChoicePoint();
+		world.add(fact);
+		world.add("runtime_latest_method_choice_point(" + payload + ")");
+		syncPercepts();
+	}}
+
+	private void popRuntimeMethodChoice(Structure action) {{
+		if (action.getArity() == 0) {{
+			return;
+		}}
+		String choice = action.getTerm(0).toString();
+		String latestPrefix = "runtime_latest_method_choice_point(" + choice + ",";
+		String latest = null;
+		for (String fact : world) {{
+			if (fact.startsWith(latestPrefix)) {{
+				latest = fact;
+			}}
+		}}
+		if (latest != null) {{
+			String payload = latest.substring("runtime_latest_method_choice_point(".length(), latest.length() - 1);
+			world.remove("runtime_method_choice_point(" + payload + ")");
+		}} else {{
+			world.removeIf(fact -> fact.startsWith("runtime_method_choice_point(" + choice + ","));
+		}}
+		clearLatestRuntimeMethodChoicePoint();
+		recomputeLatestRuntimeMethodChoicePoint();
+		syncPercepts();
+	}}
+
+	private void clearLatestRuntimeMethodChoicePoint() {{
+		world.removeIf(fact -> fact.startsWith("runtime_latest_method_choice_point("));
+	}}
+
+	private void recomputeLatestRuntimeMethodChoicePoint() {{
+		String latestPayload = null;
+		for (String fact : world) {{
+			if (fact.startsWith("runtime_method_choice_point(")) {{
+				latestPayload = fact.substring("runtime_method_choice_point(".length(), fact.length() - 1);
+			}}
+		}}
+		if (latestPayload != null) {{
+			world.add("runtime_latest_method_choice_point(" + latestPayload + ")");
+		}}
 	}}
 
 	private String snapshotKey(Structure action) {{

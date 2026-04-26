@@ -1913,13 +1913,16 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 		goal_facts=(),
 	)
 
-	parent_failure_handler = runtime_program.split("-!parent(X)", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+	parent_handlers = runtime_program.split("-!parent(X)")
+	parent_choice_handler = parent_handlers[1].split("\n\n", maxsplit=1)[0]
+	parent_failure_handler = parent_handlers[2].split("\n\n", maxsplit=1)[0]
 	child_handlers = runtime_program.split("-!child(X)")
-	child_active_handler = child_handlers[1].split("\n\n", maxsplit=1)[0]
-	child_parent_caller_handler = child_handlers[2].split("\n\n", maxsplit=1)[0]
-	child_legacy_parent_caller_handler = child_handlers[3].split("\n\n", maxsplit=1)[0]
-	child_query_fallback_handler = child_handlers[4].split("\n\n", maxsplit=1)[0]
-	child_fallback_handler = child_handlers[5].split("\n\n", maxsplit=1)[0]
+	child_choice_handler = child_handlers[1].split("\n\n", maxsplit=1)[0]
+	child_active_handler = child_handlers[2].split("\n\n", maxsplit=1)[0]
+	child_parent_caller_handler = child_handlers[3].split("\n\n", maxsplit=1)[0]
+	child_legacy_parent_caller_handler = child_handlers[4].split("\n\n", maxsplit=1)[0]
+	child_query_fallback_handler = child_handlers[5].split("\n\n", maxsplit=1)[0]
+	child_fallback_handler = child_handlers[6].split("\n\n", maxsplit=1)[0]
 	assert "!finish_or_retry_0" in runtime_program
 	assert "+!finish_or_retry_0 : not runtime_pass_failed <-" in runtime_program
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
@@ -1927,10 +1930,20 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	assert "runtime query pass" not in runtime_program
 	assert "-!runtime_query_goal_1 : true <-" in runtime_program
 	assert "blocked_runtime_goal" not in runtime_program
+	assert "runtime_push_method_choice(" in runtime_program
+	assert "runtime_pop_method_choice(" in runtime_program
 	assert "+blocked_runtime_method(METHOD, child, X, BINDING)" in runtime_program
+	assert "runtime_latest_method_choice_point(CHOICE, parent, runtime_args(X), SNAPSHOT)" in (
+		parent_choice_handler
+	)
+	assert "!parent(X)" in parent_choice_handler
 	assert "+runtime_pass_failed" not in parent_failure_handler
 	assert "!parent(X)" in parent_failure_handler
 	assert "runtime_restore(runtime_method_snapshot(METHOD, parent, X, BINDING))" in parent_failure_handler
+	assert "runtime_latest_method_choice_point(CHOICE, child, runtime_args(X), SNAPSHOT)" in (
+		child_choice_handler
+	)
+	assert "!child(X)" in child_choice_handler
 	assert "!child(X)" in child_active_handler
 	assert "+runtime_pass_failed" not in child_active_handler
 	assert "runtime_current_call(METHOD, parent, runtime_args(PARENT_X), BINDING, SNAPSHOT" in (
@@ -1954,7 +1967,7 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	assert "runtime_active_query_goal(1)" in child_query_fallback_handler
 	assert ".fail_goal(runtime_execute_from_1)." in child_query_fallback_handler
 	assert "if (not runtime_reported_failure(fail_goal(child, X)))" in child_fallback_handler
-	assert runtime_program.count("-!child(X)") == 5
+	assert runtime_program.count("-!child(X)") == 6
 	assert ".fail." in child_fallback_handler
 
 
