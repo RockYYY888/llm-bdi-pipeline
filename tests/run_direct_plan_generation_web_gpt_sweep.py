@@ -21,6 +21,7 @@ sys.path.insert(0, str(SRC_ROOT))
 from domain_model import load_query_sequence_records
 from evaluation.direct_plan_baseline import (
 	build_direct_plan_system_prompt,
+	build_direct_plan_user_prompt,
 	run_direct_plan_baseline_case,
 )
 from tests.support.plan_library_evaluation_support import (
@@ -28,6 +29,7 @@ from tests.support.plan_library_evaluation_support import (
 	load_domain_query_cases,
 	query_id_sort_key,
 )
+from utils.hddl_parser import HDDLParser
 
 
 RUNS_ROOT = PROJECT_ROOT / "tests" / "generated" / "direct_plan_generation_baseline"
@@ -40,6 +42,12 @@ WEB_GPT_RUNNER = (
 	/ "run_chatgpt_project_prompt_batch_cdp.py"
 )
 DOMAIN_KEYS = ("blocksworld", "marsrover", "satellite", "transport")
+
+
+class WebGptCaseError(RuntimeError):
+	def __init__(self, message: str, *, log_path: Path | None = None) -> None:
+		super().__init__(message)
+		self.log_path = log_path
 
 
 def _timestamp() -> str:
@@ -63,13 +71,14 @@ def _build_prompt(domain_key: str, query_id: str) -> Dict[str, Any]:
 	query_cases = load_domain_query_cases(domain_key)
 	case = query_cases[query_id]
 	temporal_specification = _load_temporal_specifications(domain_key, (query_id,))[query_id]
+	domain = HDDLParser.parse_domain(DOMAIN_FILES[domain_key])
+	problem = HDDLParser.parse_problem(str(case["problem_file"]))
 	system_prompt = build_direct_plan_system_prompt()
-	user_prompt = _build_compact_web_gpt_user_prompt(
-		domain_file=Path(DOMAIN_FILES[domain_key]),
-		problem_file=Path(str(case["problem_file"])),
-		instruction_id=query_id,
+	user_prompt = build_direct_plan_user_prompt(
+		domain=domain,
+		problem=problem,
+		temporal_specification=temporal_specification,
 		instruction=str(case["instruction"]),
-		ltlf_formula=str(getattr(temporal_specification, "ltlf_formula", "") or ""),
 	)
 	return {
 		"id": _case_id(domain_key, query_id),
@@ -86,41 +95,6 @@ def _build_prompt(domain_key: str, query_id: str) -> Dict[str, Any]:
 		"case": case,
 		"temporal_specification": temporal_specification,
 	}
-
-
-def _build_compact_web_gpt_user_prompt(
-	*,
-	domain_file: Path,
-	problem_file: Path,
-	instruction_id: str,
-	instruction: str,
-	ltlf_formula: str,
-) -> str:
-	return "\n".join(
-		[
-			"TASK: Generate one verifier-readable primitive plan for this single benchmark case.",
-			"Return exactly one minified JSON object with keys plan_lines and diagnostics.",
-			"Each plan_lines item must be '<zero_based_index> <action_name> <arg1> ...'.",
-			"Do not include '==>' or 'root' in plan_lines. Do not emit markdown.",
-			"Use only primitive actions declared in DOMAIN_HDDL and object constants from PROBLEM_HDDL.",
-			"The plan must be executable from the problem initial state and reach the problem goal.",
-			"The action order must satisfy LTLF_SPEC.",
-			f"INSTRUCTION_ID: {instruction_id}",
-			f"QUERY_TEXT_SHA256: {_sha256_text(instruction)}",
-			"LTLF_SPEC:",
-			str(ltlf_formula).strip(),
-			"DOMAIN_HDDL:",
-			domain_file.read_text(),
-			"PROBLEM_HDDL:",
-			problem_file.read_text(),
-		],
-	)
-
-
-def _sha256_text(value: str) -> str:
-	import hashlib
-
-	return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
 
 
 def _write_single_prompt_file(
@@ -212,12 +186,16 @@ def _run_web_gpt_single(
 	)
 	item_path = output_dir / run_id / "items" / f"{_case_id(domain_key, query_id)}.json"
 	if completed.returncode != 0:
-		raise RuntimeError(
+		raise WebGptCaseError(
 			f"web-gpt failed for {domain_key}/{query_id}; "
 			f"log={run_log_path}; item={item_path if item_path.exists() else 'missing'}",
+			log_path=run_log_path,
 		)
 	if not item_path.exists():
-		raise FileNotFoundError(f"web-gpt did not write expected item file: {item_path}")
+		raise WebGptCaseError(
+			f"web-gpt did not write expected item file: {item_path}",
+			log_path=run_log_path,
+		)
 	return item_path
 
 
@@ -237,14 +215,25 @@ def _run_case(
 		query_id=query_id,
 		prompt=str(prompt_payload["prompt"]),
 	)
-	item_path = _run_web_gpt_single(
-		prompt_file=prompt_file,
-		run_root=run_root,
-		domain_key=domain_key,
-		query_id=query_id,
-		timeout_seconds=timeout_seconds,
-		settle_seconds=settle_seconds,
-	)
+	try:
+		item_path = _run_web_gpt_single(
+			prompt_file=prompt_file,
+			run_root=run_root,
+			domain_key=domain_key,
+			query_id=query_id,
+			timeout_seconds=timeout_seconds,
+			settle_seconds=settle_seconds,
+		)
+	except Exception as exc:
+		return _record_web_gpt_failure(
+			run_root=run_root,
+			domain_key=domain_key,
+			query_id=query_id,
+			prompt_payload=prompt_payload,
+			error=exc,
+			log_path=getattr(exc, "log_path", None),
+			verify=verify,
+		)
 	response_text = _extract_last_assistant_text(item_path)
 	response_text_path = run_root / "web_gpt_responses" / domain_key / f"{query_id}.txt"
 	response_text_path.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +256,76 @@ def _run_case(
 		**result.to_dict(),
 		"web_gpt_item_path": str(item_path.resolve()),
 		"web_gpt_response_text_path": str(response_text_path.resolve()),
+		"web_gpt_failed": False,
 	}
+
+
+def _record_web_gpt_failure(
+	*,
+	run_root: Path,
+	domain_key: str,
+	query_id: str,
+	prompt_payload: Dict[str, Any],
+	error: Exception,
+	log_path: Path | None,
+	verify: bool,
+) -> Dict[str, Any]:
+	case = prompt_payload["case"]
+	output_dir = run_root / domain_key / "query_results" / query_id
+	output_dir.mkdir(parents=True, exist_ok=True)
+	prompt_file = output_dir / "prompt.json"
+	raw_response_file = output_dir / "response.json"
+	plan_file = output_dir / "plan.txt"
+	validation_file = output_dir / "direct_plan_validation.json"
+	prompt_file.write_text(
+		json.dumps(
+			{
+				"domain_key": domain_key,
+				"query_id": query_id,
+				"domain_file": str(Path(DOMAIN_FILES[domain_key]).resolve()),
+				"problem_file": str(Path(str(case["problem_file"])).resolve()),
+				"system": str(prompt_payload["system_prompt"]),
+				"user": str(prompt_payload["user_prompt"]),
+			},
+			indent=2,
+		),
+	)
+	raw_response_file.write_text(
+		json.dumps(
+			{
+				"response_text": "",
+				"llm": {
+					"source": "web_gpt",
+					"status": "failed",
+					"error": str(error),
+					"log_path": str(log_path.resolve()) if log_path else None,
+				},
+			},
+			indent=2,
+		),
+	)
+	plan_file.write_text("")
+	payload = {
+		"domain_key": domain_key,
+		"query_id": query_id,
+		"problem_file": str(Path(str(case["problem_file"])).resolve()),
+		"output_dir": str(output_dir.resolve()),
+		"prompt_file": str(prompt_file.resolve()),
+		"raw_response_file": str(raw_response_file.resolve()),
+		"plan_file": str(plan_file.resolve()),
+		"validation_file": str(validation_file.resolve()),
+		"parseable": False,
+		"executable": False,
+		"goal_reached": False,
+		"success": False,
+		"diagnostics": [],
+		"verification_skipped": not verify,
+		"error": str(error),
+		"web_gpt_failed": True,
+		"web_gpt_log_path": str(log_path.resolve()) if log_path else None,
+	}
+	validation_file.write_text(json.dumps(payload, indent=2))
+	return payload
 
 
 def _validation_path(run_root: Path, domain_key: str, query_id: str) -> Path:
@@ -297,6 +355,8 @@ def _write_summary(
 			],
 			"resumed_query_ids": list(resumed.get(domain_key, [])),
 			"parseable": sum(1 for result in results if result.get("parseable") is True),
+			"parse_failures": sum(1 for result in results if result.get("parseable") is not True),
+			"web_gpt_failures": sum(1 for result in results if result.get("web_gpt_failed") is True),
 			"executable": sum(1 for result in results if result.get("executable") is True),
 			"goal_reached": sum(1 for result in results if result.get("goal_reached") is True),
 			"successes": sum(1 for result in results if result.get("success") is True),
@@ -318,6 +378,8 @@ def _write_summary(
 			len(summary["remaining_query_ids"]) for summary in domain_summaries.values()
 		),
 		"parseable": sum(int(summary["parseable"]) for summary in domain_summaries.values()),
+		"parse_failures": sum(int(summary["parse_failures"]) for summary in domain_summaries.values()),
+		"web_gpt_failures": sum(int(summary["web_gpt_failures"]) for summary in domain_summaries.values()),
 		"executable": sum(int(summary["executable"]) for summary in domain_summaries.values()),
 		"goal_reached": sum(int(summary["goal_reached"]) for summary in domain_summaries.values()),
 		"successes": sum(int(summary["successes"]) for summary in domain_summaries.values()),
