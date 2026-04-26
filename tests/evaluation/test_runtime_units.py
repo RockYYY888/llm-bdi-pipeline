@@ -1320,6 +1320,22 @@ def test_agentspeak_renderer_emits_plan_library_without_temporal_runtime() -> No
 	assert "HTN Method Plans" in asl
 
 
+def test_agentspeak_renderer_treats_empty_hddl_precondition_as_true() -> None:
+	domain = HDDLParser.parse_domain(str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"))
+	renderer = AgentSpeakRenderer()
+	asl = renderer.generate(
+		domain=domain,
+		objects=("a",),
+		method_library=_sample_method_library(),
+		plan_records=(),
+		typed_objects=(("a", "block"),),
+		subgoals=(),
+	)
+
+	assert "+!nop : true <-" in asl
+	assert "__hddl_unsat_condition__" not in asl
+
+
 def test_agentspeak_renderer_renders_structured_plan_library_as_method_plans() -> None:
 	domain = HDDLParser.parse_domain(str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl"))
 	renderer = AgentSpeakRenderer()

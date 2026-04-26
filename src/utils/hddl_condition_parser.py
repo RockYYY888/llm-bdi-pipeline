@@ -143,7 +143,8 @@ class HDDLConditionParser:
         action_name: str | None = None,
         scope: str = "condition",
     ) -> Tuple[Tuple[HDDLLiteralPattern, ...], ...]:
-        if not expression or expression.strip() == "none":
+        normalised_expression = str(expression or "").strip()
+        if not normalised_expression or normalised_expression in {"none", "()"}:
             return ((),)
         tree = HDDLSExpressionParser.parse_expression(expression)
         return self._walk_dnf(
