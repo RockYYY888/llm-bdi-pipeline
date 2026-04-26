@@ -701,18 +701,19 @@ class JasonRunner:
 		goal_context: str,
 		repair_enabled: bool = False,
 	) -> Tuple[str, ...]:
-		if goal_context:
-			return (
-				'.print("execute start")',
-				".perceive",
-				"!finish_or_retry_0",
-				".stopMAS",
-			)
 		if repair_enabled:
 			return (
 				'.print("execute start")',
 				".perceive",
 				*self._render_retry_query_goal_calls(query_goals),
+				"!finish_or_retry_0",
+				".stopMAS",
+			)
+		if goal_context:
+			return (
+				'.print("execute start")',
+				".perceive",
+				*self._render_query_goal_calls(query_goals),
 				"!finish_or_retry_0",
 				".stopMAS",
 			)
@@ -731,48 +732,20 @@ class JasonRunner:
 		goal_context: str,
 		track_runtime_failures: bool = False,
 	) -> List[str]:
-		pass_count = self._goal_repair_pass_count()
 		lines: List[str] = []
-		query_goal_calls = self._render_retry_query_goal_calls(query_goals)
-		for pass_index in range(0, pass_count + 1):
-			success_context = (
-				f"{goal_context} & not runtime_pass_failed"
-				if goal_context and track_runtime_failures
-				else goal_context
-				if goal_context
-				else "not runtime_pass_failed"
-			)
-			lines.append(f"+!finish_or_retry_{pass_index} : {success_context} <-")
-			lines.extend(self._indent_body(['.print("execute success")']))
-			lines.append("")
-			if pass_index >= pass_count:
-				lines.append(f"+!finish_or_retry_{pass_index} : true <-")
-				lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
-				lines.append("")
-				continue
-			next_pass = pass_index + 1
-			lines.append(f"+!finish_or_retry_{pass_index} : true <-")
-			lines.extend(
-				self._indent_body(
-					[
-						*(("-runtime_pass_failed",) if track_runtime_failures else ()),
-						f"!execute_query_pass_{next_pass}",
-						f"!finish_or_retry_{next_pass}",
-					],
-				),
-			)
-			lines.append("")
-			lines.append(f"+!execute_query_pass_{next_pass} : true <-")
-			lines.extend(
-				self._indent_body(
-					(
-						f'.print("runtime query pass ", {next_pass})',
-						*(("-runtime_pass_failed",) if track_runtime_failures else ()),
-						*(query_goal_calls or ("true",)),
-					),
-				),
-			)
-			lines.append("")
+		success_context = (
+			f"{goal_context} & not runtime_pass_failed"
+			if goal_context and track_runtime_failures
+			else goal_context
+			if goal_context
+			else "not runtime_pass_failed"
+		)
+		lines.append(f"+!finish_or_retry_0 : {success_context} <-")
+		lines.extend(self._indent_body(['.print("execute success")']))
+		lines.append("")
+		lines.append("+!finish_or_retry_0 : true <-")
+		lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+		lines.append("")
 		return lines
 
 	def _render_retry_query_goal_plans(
@@ -804,6 +777,9 @@ class JasonRunner:
 				lines.append(f"+!{goal_name} : {marker} <-")
 				lines.extend(self._indent_body(("true",)))
 				lines.append("")
+			lines.append(f"+!{goal_name} : runtime_pass_failed <-")
+			lines.extend(self._indent_body(("true",)))
+			lines.append("")
 			lines.append(f"+!{goal_name} : true <-")
 			lines.extend(
 				self._indent_body(
@@ -831,6 +807,17 @@ class JasonRunner:
 					(
 						f"runtime_restore({index})",
 						".perceive",
+					),
+				),
+			)
+			lines.append("")
+			lines.append(f"-!{goal_name} : true <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f"runtime_restore({index})",
+						".perceive",
+						"+runtime_pass_failed",
 					),
 				),
 			)
@@ -1287,16 +1274,6 @@ class JasonRunner:
 			seen.add(atom)
 			goal_atoms.append(atom)
 		return " & ".join(goal_atoms)
-
-	@staticmethod
-	def _goal_repair_pass_count() -> int:
-		raw_value = os.getenv("JASON_RUNTIME_GOAL_REPAIR_PASSES", "").strip()
-		if not raw_value:
-			return 3
-		try:
-			return max(1, int(raw_value))
-		except ValueError:
-			return 3
 
 	def _render_chained_goal_plans(
 		self,
@@ -1951,8 +1928,26 @@ class JasonRunner:
 					"BINDING",
 				),
 			)
+			method_snapshot = self._call(
+				"runtime_method_snapshot",
+				(
+					"METHOD",
+					self._asl_atom_or_string(self._sanitize_name(task_name)),
+					*handler_args,
+					"BINDING",
+				),
+			)
 			blocked_method = self._call(
 				"blocked_runtime_method",
+				(
+					"METHOD",
+					self._asl_atom_or_string(self._sanitize_name(task_name)),
+					*handler_args,
+					"BINDING",
+				),
+			)
+			current_method = self._call(
+				"runtime_current_method",
 				(
 					"METHOD",
 					self._asl_atom_or_string(self._sanitize_name(task_name)),
@@ -1965,39 +1960,158 @@ class JasonRunner:
 				if allow_repair
 				else active_method
 			)
+			active_handler_body = [
+				f'.print("runtime goal branch failed ", {fail_term})',
+				f"runtime_restore({method_snapshot})",
+				".perceive",
+				f"runtime_commit({method_snapshot})",
+				f"+{blocked_method}",
+				f"-{active_method}",
+			]
+			if allow_repair:
+				active_handler_body.append(f"-{current_method}")
+				active_handler_body.append(f"!{trigger}")
+			else:
+				active_handler_body.append(".fail")
 			lines.append(f"-!{trigger} : {active_handler_context} <-")
-			lines.extend(
-				self._indent_body(
-					[
-						f'.print("runtime goal failed ", {fail_term})',
-						f"+{blocked_method}",
-						f"-{active_method}",
-						*(
-							("+runtime_pass_failed",)
-							if allow_repair
-							else ()
-						),
-						*(() if allow_repair else (".fail",)),
-					],
-				),
-			)
+			lines.extend(self._indent_body(active_handler_body))
 			lines.append("")
+			if allow_repair:
+				for parent_task_name, parent_parameters in self._runtime_caller_signatures(
+					failed_task_name=task_name,
+					method_library=method_library,
+					plan_library=plan_library,
+				):
+					parent_args = self._failure_handler_args(parent_parameters)
+					parent_trigger = self._call(self._sanitize_name(parent_task_name), parent_args)
+					parent_task_atom = self._asl_atom_or_string(self._sanitize_name(parent_task_name))
+					parent_current_method = self._call(
+						"runtime_current_method",
+						("METHOD", parent_task_atom, *parent_args, "BINDING"),
+					)
+					parent_active_method = self._call(
+						"active_runtime_method",
+						("METHOD", parent_task_atom, *parent_args, "BINDING"),
+					)
+					parent_snapshot = self._call(
+						"runtime_method_snapshot",
+						("METHOD", parent_task_atom, *parent_args, "BINDING"),
+					)
+					parent_blocked_method = self._call(
+						"blocked_runtime_method",
+						("METHOD", parent_task_atom, *parent_args, "BINDING"),
+					)
+					lines.append(
+						f"-!{trigger} : {parent_current_method} & {parent_active_method} "
+						"& not runtime_pass_failed <-",
+					)
+					lines.extend(
+						self._indent_body(
+							[
+								f'.print("runtime caller branch failed ", {fail_term})',
+								f"runtime_restore({parent_snapshot})",
+								".perceive",
+								f"+{parent_blocked_method}",
+								f"!{parent_trigger}",
+								f"runtime_commit({parent_snapshot})",
+								f"-{parent_current_method}",
+								f"-{parent_active_method}",
+								f".succeed_goal({parent_trigger})",
+							],
+						),
+					)
+					lines.append("")
 			lines.append(f"-!{trigger} : true <-")
 			lines.extend(
 				self._indent_body(
 					[
 						f'.print("runtime goal failed ", {fail_term})',
-						*(
-							("+runtime_pass_failed",)
-							if allow_repair
-							else ()
-						),
-						*(() if allow_repair else (".fail",)),
+						".fail",
 					],
 				),
 			)
 			lines.append("")
 		return lines
+
+	def _runtime_caller_signatures(
+		self,
+		*,
+		failed_task_name: str,
+		method_library: HTNMethodLibrary | None,
+		plan_library: PlanLibrary | None,
+	) -> List[Tuple[str, Tuple[str, ...]]]:
+		signatures: List[Tuple[str, Tuple[str, ...]]] = []
+		seen: set[str] = set()
+		failed_key = self._sanitize_name(str(failed_task_name or "").strip())
+
+		def register(name: Any, parameters: Sequence[str]) -> None:
+			task_name = str(name or "").strip()
+			if not task_name or task_name in seen:
+				return
+			seen.add(task_name)
+			signatures.append(
+				(
+					task_name,
+					tuple(str(parameter).strip() for parameter in parameters if str(parameter).strip()),
+				),
+			)
+
+		def maybe_register(
+			child_name: Any,
+			parent_name: Any,
+			parent_parameters: Sequence[str],
+		) -> None:
+			child_key = self._sanitize_name(str(child_name or "").strip())
+			if child_key and child_key == failed_key:
+				register(parent_name, parent_parameters)
+
+		if plan_library is not None:
+			trigger_signatures = {
+				str(getattr(plan.trigger, "symbol", "") or "").strip(): tuple(
+					self._strip_type_annotation(str(argument).strip())
+					for argument in (getattr(plan.trigger, "arguments", ()) or ())
+					if str(argument).strip()
+				)
+				for plan in tuple(plan_library.plans or ())
+				if getattr(plan, "trigger", None) is not None
+			}
+			for plan in tuple(plan_library.plans or ()):
+				trigger = getattr(plan, "trigger", None)
+				if trigger is None:
+					continue
+				parent_name = str(getattr(trigger, "symbol", "") or "").strip()
+				parent_parameters = trigger_signatures.get(parent_name, ())
+				for step in tuple(getattr(plan, "body", ()) or ()):
+					step_kind = str(getattr(step, "kind", "") or "").strip()
+					if step_kind not in {"subgoal", "action"}:
+						continue
+					maybe_register(getattr(step, "symbol", ""), parent_name, parent_parameters)
+		if method_library is not None:
+			compound_task_signatures = {
+				str(getattr(task, "name", "") or "").strip(): tuple(
+					getattr(task, "parameters", ()) or (),
+				)
+				for task in tuple(method_library.compound_tasks or ())
+			}
+			for method in tuple(method_library.methods or ()):
+				parent_name = str(getattr(method, "task_name", "") or "").strip()
+				parent_parameters = compound_task_signatures.get(
+					parent_name,
+					tuple(getattr(method, "task_args", ()) or getattr(method, "parameters", ()) or ()),
+				)
+				for step in tuple(getattr(method, "subtasks", ()) or ()):
+					step_kind = str(getattr(step, "kind", "") or "").strip()
+					child_name = (
+						getattr(step, "action_name", None)
+						if step_kind == "primitive"
+						else getattr(step, "task_name", "")
+					)
+					maybe_register(
+						child_name or getattr(step, "task_name", ""),
+						parent_name,
+						parent_parameters,
+					)
+		return signatures
 
 	def _failure_handler_signatures(
 		self,
@@ -3298,7 +3412,6 @@ class JasonRunner:
 			body_lines = chunk[1:]
 			parsed_head = self._parse_asl_method_head(head_line)
 			active_line = ""
-			cleanup_statement = ""
 			if parsed_head is not None:
 				task_name, trigger_args, _context_parts = parsed_head
 				method_identity = self._runtime_method_identity(method_like)
@@ -3308,6 +3421,20 @@ class JasonRunner:
 				)
 				active_method = self._runtime_method_state_atom(
 					"active_runtime_method",
+					method_identity=method_identity,
+					task_name=task_name,
+					args=trigger_args,
+					binding_term=binding_term,
+				)
+				method_snapshot = self._runtime_method_state_atom(
+					"runtime_method_snapshot",
+					method_identity=method_identity,
+					task_name=task_name,
+					args=trigger_args,
+					binding_term=binding_term,
+				)
+				current_method = self._runtime_method_state_atom(
+					"runtime_current_method",
 					method_identity=method_identity,
 					task_name=task_name,
 					args=trigger_args,
@@ -3325,19 +3452,63 @@ class JasonRunner:
 					(f"not {blocked_method}",),
 				)
 				active_line = f"\t+{active_method};"
-				cleanup_statement = f"-{active_method}"
+				snapshot_line = f"\truntime_snapshot({method_snapshot});"
+				body_lines = self._mark_runtime_current_method_before_calls(
+					body_lines,
+					current_method,
+				)
 				body_lines = self._append_success_cleanup_statement(
 					body_lines,
-					cleanup_statement,
+					f"runtime_commit({method_snapshot})",
+				)
+				body_lines = self._append_success_cleanup_statement(
+					body_lines,
+					f"-{current_method}",
+				)
+				body_lines = self._append_success_cleanup_statement(
+					body_lines,
+					f"-{active_method}",
 				)
 			trace_line = self._render_method_trace_statement(method_like, head_line)
 			prefix_lines = [head_line, trace_line]
 			if active_line:
 				prefix_lines.append(active_line)
+				prefix_lines.append(snapshot_line)
 			instrumented_chunks.append("\n".join([*prefix_lines, *body_lines]))
 
 		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
 		return f"{prefix}{instrumented_section}{suffix}"
+
+	def _mark_runtime_current_method_before_calls(
+		self,
+		body_lines: Sequence[str],
+		current_method: str,
+	) -> List[str]:
+		current = str(current_method or "").strip()
+		if not current:
+			return list(body_lines)
+		rewritten: List[str] = []
+		for line in body_lines:
+			match = re.match(r"^(\s*)(.*?)([;.])\s*$", line)
+			if match is None:
+				rewritten.append(line)
+				continue
+			indent, statement, _suffix = match.groups()
+			if self._is_runtime_current_method_call_statement(statement):
+				rewritten.append(f"{indent}-+{current};")
+			rewritten.append(line)
+		return rewritten
+
+	@staticmethod
+	def _is_runtime_current_method_call_statement(statement: str) -> bool:
+		text = str(statement or "").strip()
+		if not text or text == "true":
+			return False
+		if text.startswith("!"):
+			return True
+		if text.startswith(("+", "-", "?", ".", "not ")):
+			return False
+		return bool(re.match(r"^[a-z][A-Za-z0-9_]*\s*(?:\(|$)", text))
 
 	def _runtime_method_identity(self, method: Any) -> str:
 		method_name = str(
