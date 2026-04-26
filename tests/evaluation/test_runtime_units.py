@@ -1588,9 +1588,13 @@ clear(b1).
 	assert '.print("execute start")' in runtime_program
 	assert ".perceive" in runtime_program
 	assert "clear(b1)." in runtime_program
-	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
+	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1].split(
+		"\n\n",
+		maxsplit=1,
+	)[0]
 	assert execute_section.index('.print("execute start")') < execute_section.index(".perceive")
-	assert execute_section.index(".perceive") < execute_section.index("!do_put_on(b1, b2)")
+	assert execute_section.index(".perceive") < execute_section.index("!runtime_execute_from_1")
+	assert "!do_put_on(b1, b2);" in runtime_program
 
 
 def test_jason_runner_execution_entry_runs_query_goals_directly() -> None:
@@ -1619,14 +1623,18 @@ def test_jason_runner_execution_entry_runs_query_goals_directly() -> None:
 		),
 	)
 
-	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
+	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1].split(
+		"\n\n",
+		maxsplit=1,
+	)[0]
 
-	assert "!task_a;" in execute_section
-	assert "!task_b;" in execute_section
-	assert '.print("execute success")' in execute_section
+	assert "!runtime_execute_from_1;" in execute_section
+	assert "!finish_or_retry_0;" in execute_section
+	assert "!task_a;" in runtime_program
+	assert "!task_b;" in runtime_program
 
 
-def test_jason_runner_wraps_query_goals_without_whole_query_retries() -> None:
+def test_jason_runner_repairs_final_goal_state_with_whole_query_passes() -> None:
 	runner = JasonRunner()
 	runtime_program = runner._build_runner_asl(
 		agentspeak_code="""
@@ -1647,20 +1655,24 @@ def test_jason_runner_wraps_query_goals_without_whole_query_retries() -> None:
 		goal_facts=("(done a)",),
 	)
 
-	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1]
+	execute_section = runtime_program.split("+!execute : true <-", maxsplit=1)[1].split(
+		"\n\n",
+		maxsplit=1,
+	)[0]
 
 	assert "!finish_or_retry_0;" in execute_section
+	assert "!runtime_execute_from_1;" not in execute_section
 	assert "+!finish_or_retry_0 : done(a) & not runtime_pass_failed <-" in runtime_program
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
 	finish_fallback = runtime_program.split("+!finish_or_retry_0 : true <-", maxsplit=1)[
 		1
 	].split("\n\n", maxsplit=1)[0]
-	assert '.print("runtime final goal failed")' in finish_fallback
-	assert "!runtime_backtrack_from_1." in finish_fallback
+	assert '.print("runtime query pass ", 1);' in finish_fallback
+	assert "!runtime_execute_from_1;" in finish_fallback
+	assert "!finish_or_retry_1." in finish_fallback
 	assert '.print("execute failed")' not in finish_fallback
 	assert "+!execute_query_pass_1 : true <-" not in runtime_program
-	assert "runtime query pass" not in runtime_program
-	assert "!runtime_execute_from_1;" in execute_section
+	assert "runtime query pass" in runtime_program
 	assert "!runtime_query_goal_1;" in runtime_program
 	assert "+!runtime_query_goal_1 : done(a) <-" in runtime_program
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" not in runtime_program
@@ -1675,7 +1687,7 @@ def test_jason_runner_wraps_query_goals_without_whole_query_retries() -> None:
 	assert ".perceive;" in runtime_program
 	assert "!task_a(a);" in runtime_program
 	assert "runtime_pass_failed" in runtime_program
-	assert runner._extract_goal_repair_pass_count(runtime_program) == 0
+	assert "+!finish_or_retry_3 : true <-" in runtime_program
 
 
 def test_jason_runner_uses_matching_goal_fact_as_query_completion_context() -> None:
@@ -2184,8 +2196,8 @@ def test_jason_runner_records_domain_agnostic_runtime_method_choices() -> None:
 	assert f"not blocked_runtime_choice({choice})" in runtime_program
 	assert f"runtime_record_query_choice({choice});" in runtime_program
 	assert "+!runtime_record_query_choice" not in runtime_program
-	assert "runtime_query_choice_frame(1, SEQUENCE, CHOICE)" in runtime_program
-	assert "runtime_last_query_choice_frame(1, SEQUENCE, CHOICE)" in runtime_program
+	assert "runtime_query_choice_frame(1, _, _)" in runtime_program
+	assert "runtime_last_query_choice_frame(1, _, _)" in runtime_program
 	assert "runtime_last_query_choice(1, CHOICE)" in runtime_program
 
 

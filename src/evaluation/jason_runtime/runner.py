@@ -719,6 +719,13 @@ class JasonRunner:
 		goal_context: str,
 		repair_enabled: bool = False,
 	) -> Tuple[str, ...]:
+		if goal_context:
+			return (
+				'.print("execute start")',
+				".perceive",
+				"!finish_or_retry_0",
+				".stopMAS",
+			)
 		if repair_enabled:
 			query_execution = (
 				("!runtime_execute_from_1",)
@@ -729,14 +736,6 @@ class JasonRunner:
 				'.print("execute start")',
 				".perceive",
 				*query_execution,
-				"!finish_or_retry_0",
-				".stopMAS",
-			)
-		if goal_context:
-			return (
-				'.print("execute start")',
-				".perceive",
-				*self._render_query_goal_calls(query_goals),
 				"!finish_or_retry_0",
 				".stopMAS",
 			)
@@ -755,31 +754,71 @@ class JasonRunner:
 		goal_context: str,
 		track_runtime_failures: bool = False,
 	) -> List[str]:
-		lines: List[str] = []
-		success_context = (
-			f"{goal_context} & not runtime_pass_failed"
-			if goal_context and track_runtime_failures
-			else goal_context
-			if goal_context
-			else "not runtime_pass_failed"
-		)
-		lines.append(f"+!finish_or_retry_0 : {success_context} <-")
-		lines.extend(self._indent_body(['.print("execute success")']))
-		lines.append("")
-		lines.append("+!finish_or_retry_0 : true <-")
-		if goal_context and track_runtime_failures and query_goals:
-			lines.extend(
-				self._indent_body(
-					(
-						'.print("runtime final goal failed")',
-						f"!runtime_backtrack_from_{len(query_goals)}",
-					),
-				),
-			)
-		else:
+		if not goal_context:
+			lines: List[str] = []
+			success_context = "not runtime_pass_failed"
+			lines.append(f"+!finish_or_retry_0 : {success_context} <-")
+			lines.extend(self._indent_body(['.print("execute success")']))
+			lines.append("")
+			lines.append("+!finish_or_retry_0 : true <-")
 			lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
-		lines.append("")
+			lines.append("")
+			return lines
+
+		pass_count = self._goal_repair_pass_count()
+		lines: List[str] = []
+		query_goal_calls: Tuple[str, ...]
+		if track_runtime_failures and query_goals:
+			query_goal_calls = ("!runtime_execute_from_1",)
+		else:
+			query_goal_calls = self._render_retry_query_goal_calls(query_goals)
+		for pass_index in range(0, pass_count + 1):
+			success_context = (
+				f"{goal_context} & not runtime_pass_failed"
+				if goal_context and track_runtime_failures
+				else goal_context
+				if goal_context
+				else "not runtime_pass_failed"
+			)
+			lines.append(f"+!finish_or_retry_{pass_index} : {success_context} <-")
+			lines.extend(self._indent_body(['.print("execute success")']))
+			lines.append("")
+			if pass_index >= pass_count:
+				lines.append(f"+!finish_or_retry_{pass_index} : true <-")
+				lines.extend(self._indent_body(['.print("execute failed")', ".stopMAS"]))
+				lines.append("")
+				continue
+			next_pass = pass_index + 1
+			lines.append(f"+!finish_or_retry_{pass_index} : true <-")
+			pass_body: List[str] = [
+				f'.print("runtime query pass ", {next_pass})',
+			]
+			if track_runtime_failures:
+				pass_body.extend(
+					[
+						"if (runtime_pass_failed) { -runtime_pass_failed }",
+						"!runtime_clear_local_repair_state",
+						".abolish(blocked_runtime_choice(_))",
+						".abolish(runtime_backtracked_choice(_, _))",
+					],
+				)
+				if query_goals:
+					pass_body.append("!runtime_clear_query_progress_from_1")
+			pass_body.extend(query_goal_calls or ("true",))
+			pass_body.append(f"!finish_or_retry_{next_pass}")
+			lines.extend(self._indent_body(pass_body))
+			lines.append("")
 		return lines
+
+	@staticmethod
+	def _goal_repair_pass_count() -> int:
+		raw_value = os.getenv("JASON_RUNTIME_GOAL_REPAIR_PASSES", "").strip()
+		if not raw_value:
+			return 3
+		try:
+			return max(1, int(raw_value))
+		except ValueError:
+			return 3
 
 	def _render_retry_query_goal_plans(
 		self,
@@ -1037,45 +1076,19 @@ class JasonRunner:
 			lines.append("")
 		for index in range(1, query_goal_count + 1):
 			goal_name = f"runtime_clear_query_goal_{index}"
-			for predicate in (
-				"runtime_query_goal_completed",
-				"runtime_active_query_goal",
-			):
-				belief = self._call(predicate, (str(index),))
-				lines.append(f"+!{goal_name} : {belief} <-")
-				lines.extend(
-					self._indent_body(
-						(
-							f"-{belief}",
-							f"!{goal_name}",
-						),
-					),
-				)
-				lines.append("")
-			for predicate in (
-				"runtime_last_query_choice_frame",
-				"runtime_query_choice_frame",
-				"runtime_last_query_choice",
-				"runtime_query_choice",
-			):
-				args = (
-					(str(index), "SEQUENCE", "CHOICE")
-					if predicate.endswith("_frame")
-					else (str(index), "CHOICE")
-				)
-				belief = self._call(predicate, args)
-				lines.append(f"+!{goal_name} : {belief} <-")
-				lines.extend(
-					self._indent_body(
-						(
-							f"-{belief}",
-							f"!{goal_name}",
-						),
-					),
-				)
-				lines.append("")
 			lines.append(f"+!{goal_name} : true <-")
-			lines.extend(self._indent_body(("true",)))
+			lines.extend(
+				self._indent_body(
+					(
+						f".abolish(runtime_query_goal_completed({index}))",
+						f".abolish(runtime_active_query_goal({index}))",
+						f".abolish(runtime_last_query_choice_frame({index}, _, _))",
+						f".abolish(runtime_query_choice_frame({index}, _, _))",
+						f".abolish(runtime_last_query_choice({index}, _))",
+						f".abolish(runtime_query_choice({index}, _))",
+					),
+				),
+			)
 			lines.append("")
 		return lines
 
