@@ -339,7 +339,7 @@ class JasonRunner:
 		method_trace, method_trace_original_count, method_trace_truncated = (
 			self._cap_method_trace_records(raw_method_trace)
 		)
-		failed_goals = self._extract_failed_goals(stdout)
+		observed_failed_goals = self._extract_failed_goals(stdout)
 		goal_repair_pass_count = self._extract_goal_repair_pass_count(stdout)
 		timing_profile["output_processing_seconds"] = (
 			time.perf_counter() - output_processing_start
@@ -417,6 +417,10 @@ class JasonRunner:
 			exit_code,
 			timed_out,
 			environment_result,
+		)
+		failed_goals = [] if is_success else observed_failed_goals
+		artifacts["recovered_failed_goals"] = (
+			observed_failed_goals if is_success else []
 		)
 		timing_profile["total_seconds"] = time.perf_counter() - total_start
 		result_payload = JasonValidationResult(
@@ -656,6 +660,7 @@ class JasonRunner:
 				plan_library=plan_library,
 				action_schemas=action_schemas,
 				allow_repair=failure_repair_enabled,
+				query_goal_count=len(query_goals),
 			),
 			"",
 			"/* Execution Entry */",
@@ -702,10 +707,15 @@ class JasonRunner:
 		repair_enabled: bool = False,
 	) -> Tuple[str, ...]:
 		if repair_enabled:
+			query_execution = (
+				("!runtime_execute_from_1",)
+				if query_goals
+				else self._render_retry_query_goal_calls(query_goals)
+			)
 			return (
 				'.print("execute start")',
 				".perceive",
-				*self._render_retry_query_goal_calls(query_goals),
+				*query_execution,
 				"!finish_or_retry_0",
 				".stopMAS",
 			)
@@ -763,10 +773,12 @@ class JasonRunner:
 			method_library=method_library,
 			action_schemas=action_schemas,
 		)
-		for index, goal_call in enumerate(self._render_query_goal_calls(query_goals), start=1):
+		query_goal_calls = self._render_query_goal_calls(query_goals)
+		for index, goal_call in enumerate(query_goal_calls, start=1):
 			goal_name = f"runtime_query_goal_{index}"
 			marker = f"runtime_query_goal_completed({index})"
 			mark_goal = f"runtime_mark_query_goal_{index}"
+			checkpoint = f"runtime_query_checkpoint({index})"
 			context_alternatives = completion_contexts[index - 1] if index - 1 < len(completion_contexts) else ()
 			if context_alternatives:
 				for context in context_alternatives:
@@ -784,7 +796,8 @@ class JasonRunner:
 			lines.extend(
 				self._indent_body(
 					(
-						f"runtime_snapshot({index})",
+						f"runtime_snapshot({checkpoint})",
+						f"runtime_set_active_query_goal({index})",
 						goal_call,
 						f"!{mark_goal}",
 					),
@@ -795,7 +808,7 @@ class JasonRunner:
 			lines.extend(
 				self._indent_body(
 					(
-						f"runtime_commit({index})",
+						f"runtime_clear_active_query_goal({index})",
 						f"+{marker}",
 					),
 				),
@@ -805,8 +818,10 @@ class JasonRunner:
 			lines.extend(
 				self._indent_body(
 					(
-						f"runtime_restore({index})",
+						f"runtime_restore({checkpoint})",
 						".perceive",
+						f"runtime_clear_active_query_goal({index})",
+						".fail",
 					),
 				),
 			)
@@ -815,12 +830,140 @@ class JasonRunner:
 			lines.extend(
 				self._indent_body(
 					(
-						f"runtime_restore({index})",
+						f"runtime_restore({checkpoint})",
 						".perceive",
-						"+runtime_pass_failed",
+						f"runtime_clear_active_query_goal({index})",
+						".fail",
 					),
 				),
 			)
+			lines.append("")
+		if query_goal_calls:
+			lines.extend(self._render_runtime_query_driver_plans(len(query_goal_calls)))
+			lines.extend(self._render_runtime_local_repair_cleanup_plans())
+			lines.extend(self._render_runtime_query_cleanup_plans(len(query_goal_calls)))
+		return lines
+
+	def _render_runtime_query_driver_plans(self, query_goal_count: int) -> List[str]:
+		if query_goal_count <= 0:
+			return []
+		lines: List[str] = ["/* Runtime Query Driver */"]
+		lines.append(f"+!runtime_execute_from_{query_goal_count + 1} : true <-")
+		lines.extend(self._indent_body(("true",)))
+		lines.append("")
+		for index in range(1, query_goal_count + 1):
+			lines.append(f"+!runtime_execute_from_{index} : true <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f"!runtime_query_goal_{index}",
+						f"!runtime_execute_from_{index + 1}",
+					),
+				),
+			)
+			lines.append("")
+			for target_index in range(index - 1, 0, -1):
+				checkpoint = f"runtime_query_checkpoint({target_index})"
+				lines.append(
+					f"-!runtime_execute_from_{index} : "
+					f"runtime_last_query_choice({target_index}, CHOICE) "
+					f"& not runtime_backtracked_choice({target_index}, CHOICE) <-",
+				)
+				lines.extend(
+					self._indent_body(
+						(
+							f'.print("runtime query backtrack ", {index}, " -> ", {target_index}, " ", CHOICE)',
+							f"runtime_restore({checkpoint})",
+							".perceive",
+							f"+runtime_backtracked_choice({target_index}, CHOICE)",
+							"+blocked_runtime_choice(CHOICE)",
+							"!runtime_clear_local_repair_state",
+							f"!runtime_clear_query_progress_from_{target_index}",
+							f"!runtime_execute_from_{target_index}",
+							"!finish_or_retry_0",
+							".stopMAS",
+						),
+					),
+				)
+				lines.append("")
+			lines.append(f"-!runtime_execute_from_{index} : true <-")
+			lines.extend(
+				self._indent_body(
+					(
+						f'.print("runtime query branch exhausted ", {index})',
+						"+runtime_pass_failed",
+						".fail",
+					),
+				),
+			)
+			lines.append("")
+		return lines
+
+	def _render_runtime_local_repair_cleanup_plans(self) -> List[str]:
+		lines = ["/* Runtime Local Repair Cleanup */"]
+		cleanup_statements = [
+			".abolish(runtime_reported_failure(_))",
+		]
+		for predicate in (
+			"blocked_runtime_method",
+			"active_runtime_method",
+			"runtime_current_method",
+		):
+			for arity in range(3, 12):
+				args = ", ".join("_" for _index in range(arity))
+				cleanup_statements.append(f".abolish({predicate}({args}))")
+		lines.append("+!runtime_clear_local_repair_state : true <-")
+		lines.extend(self._indent_body(cleanup_statements))
+		lines.append("")
+		return lines
+
+	def _render_runtime_query_cleanup_plans(self, query_goal_count: int) -> List[str]:
+		lines: List[str] = ["/* Runtime Query Cleanup */"]
+		for start_index in range(1, query_goal_count + 1):
+			lines.append(f"+!runtime_clear_query_progress_from_{start_index} : true <-")
+			lines.extend(
+				self._indent_body(
+					tuple(
+						f"!runtime_clear_query_goal_{index}"
+						for index in range(start_index, query_goal_count + 1)
+					),
+				),
+			)
+			lines.append("")
+		for index in range(1, query_goal_count + 1):
+			goal_name = f"runtime_clear_query_goal_{index}"
+			for predicate in (
+				"runtime_query_goal_completed",
+				"runtime_active_query_goal",
+			):
+				belief = self._call(predicate, (str(index),))
+				lines.append(f"+!{goal_name} : {belief} <-")
+				lines.extend(
+					self._indent_body(
+						(
+							f"-{belief}",
+							f"!{goal_name}",
+						),
+					),
+				)
+				lines.append("")
+			for predicate in (
+				"runtime_last_query_choice",
+				"runtime_query_choice",
+			):
+				belief = self._call(predicate, (str(index), "CHOICE"))
+				lines.append(f"+!{goal_name} : {belief} <-")
+				lines.extend(
+					self._indent_body(
+						(
+							f"-{belief}",
+							f"!{goal_name}",
+						),
+					),
+				)
+				lines.append("")
+			lines.append(f"+!{goal_name} : true <-")
+			lines.extend(self._indent_body(("true",)))
 			lines.append("")
 		return lines
 
@@ -1905,6 +2048,7 @@ class JasonRunner:
 		plan_library: PlanLibrary | None = None,
 		action_schemas: Sequence[Dict[str, Any]] = (),
 		allow_repair: bool = False,
+		query_goal_count: int = 0,
 	) -> List[str]:
 		lines = ["/* Failure Handlers */"]
 		seen_triggers: set[str] = set()
@@ -2021,16 +2165,50 @@ class JasonRunner:
 						),
 					)
 					lines.append("")
-			lines.append(f"-!{trigger} : true <-")
-			lines.extend(
-				self._indent_body(
-					[
-						f'.print("runtime goal failed ", {fail_term})',
-						".fail",
-					],
-				),
-			)
-			lines.append("")
+			if allow_repair:
+				reported_failure = self._call("runtime_reported_failure", (fail_term,))
+				for query_goal_index in range(max(0, query_goal_count), 0, -1):
+					lines.append(
+						f"-!{trigger} : runtime_active_query_goal({query_goal_index}) <-",
+					)
+					lines.extend(
+						self._indent_body(
+							[
+								(
+									f"if (not {reported_failure}) "
+									f"{{ +{reported_failure}; "
+									f'.print("runtime goal failed ", {fail_term}) }}'
+								),
+								f".fail_goal(runtime_execute_from_{query_goal_index})",
+							],
+						),
+					)
+					lines.append("")
+				lines.append(f"-!{trigger} : true <-")
+				lines.extend(
+					self._indent_body(
+						[
+							(
+								f"if (not {reported_failure}) "
+								f"{{ +{reported_failure}; "
+								f'.print("runtime goal failed ", {fail_term}) }}'
+							),
+							".fail",
+						],
+					),
+				)
+				lines.append("")
+			else:
+				lines.append(f"-!{trigger} : true <-")
+				lines.extend(
+					self._indent_body(
+						[
+							f'.print("runtime goal failed ", {fail_term})',
+							".fail",
+						],
+					),
+				)
+				lines.append("")
 		return lines
 
 	def _runtime_caller_signatures(
@@ -3447,12 +3625,22 @@ class JasonRunner:
 					args=trigger_args,
 					binding_term=binding_term,
 				)
+				choice_term = self._runtime_method_choice_term(
+					method_identity=method_identity,
+					task_name=task_name,
+					args=trigger_args,
+					binding_term=binding_term,
+				)
 				head_line = self._append_asl_method_context_parts(
 					head_line,
-					(f"not {blocked_method}",),
+					(
+						f"not {blocked_method}",
+						f"not blocked_runtime_choice({choice_term})",
+					),
 				)
 				active_line = f"\t+{active_method};"
 				snapshot_line = f"\truntime_snapshot({method_snapshot});"
+				choice_line = f"\truntime_record_query_choice({choice_term});"
 				body_lines = self._mark_runtime_current_method_before_calls(
 					body_lines,
 					current_method,
@@ -3474,6 +3662,7 @@ class JasonRunner:
 			if active_line:
 				prefix_lines.append(active_line)
 				prefix_lines.append(snapshot_line)
+				prefix_lines.append(choice_line)
 			instrumented_chunks.append("\n".join([*prefix_lines, *body_lines]))
 
 		instrumented_section = "\n\n".join([header, *instrumented_chunks]).rstrip() + "\n\n"
@@ -3533,6 +3722,24 @@ class JasonRunner:
 				self._asl_string(method_identity),
 				self._asl_atom_or_string(self._sanitize_name(task_name)),
 				*args,
+				binding_term,
+			),
+		)
+
+	def _runtime_method_choice_term(
+		self,
+		*,
+		method_identity: str,
+		task_name: str,
+		args: Sequence[str],
+		binding_term: str,
+	) -> str:
+		return self._call(
+			"runtime_method_choice",
+			(
+				self._asl_string(method_identity),
+				self._asl_atom_or_string(self._sanitize_name(task_name)),
+				self._call("runtime_args", tuple(args)),
 				binding_term,
 			),
 		)
@@ -3838,6 +4045,7 @@ public class {self.environment_class_name} extends Environment {{
 	private final Set<String> world = new LinkedHashSet<>();
 	private final Map<String, ActionSchema> actions = new HashMap<>();
 	private final Map<String, Set<String>> snapshots = new HashMap<>();
+	private String activeQueryGoalIndex = null;
 
 	@Override
 	public synchronized void init(String[] args) {{
@@ -3894,8 +4102,32 @@ public class {self.environment_class_name} extends Environment {{
 			!"runtime_snapshot".equals(functor)
 			&& !"runtime_restore".equals(functor)
 			&& !"runtime_commit".equals(functor)
+			&& !"runtime_set_active_query_goal".equals(functor)
+			&& !"runtime_clear_active_query_goal".equals(functor)
+			&& !"runtime_record_query_choice".equals(functor)
 		) {{
 			return false;
+		}}
+		if ("runtime_set_active_query_goal".equals(functor)) {{
+			clearActiveQueryGoalFacts();
+			String index = action.getArity() == 0 ? "0" : canonical(action.getTerm(0).toString());
+			activeQueryGoalIndex = index;
+			world.add("runtime_active_query_goal(" + index + ")");
+			syncPercepts();
+			System.out.println("runtime env active query goal " + index);
+			return true;
+		}}
+		if ("runtime_clear_active_query_goal".equals(functor)) {{
+			clearActiveQueryGoalFacts();
+			activeQueryGoalIndex = null;
+			syncPercepts();
+			String index = action.getArity() == 0 ? "all" : canonical(action.getTerm(0).toString());
+			System.out.println("runtime env clear active query goal " + index);
+			return true;
+		}}
+		if ("runtime_record_query_choice".equals(functor)) {{
+			recordRuntimeQueryChoice(action);
+			return true;
 		}}
 		String key = snapshotKey(action);
 		if ("runtime_snapshot".equals(functor)) {{
@@ -3917,6 +4149,22 @@ public class {self.environment_class_name} extends Environment {{
 		snapshots.remove(key);
 		System.out.println("runtime env commit " + key);
 		return true;
+	}}
+
+	private void clearActiveQueryGoalFacts() {{
+		world.removeIf(fact -> fact.startsWith("runtime_active_query_goal("));
+	}}
+
+	private void recordRuntimeQueryChoice(Structure action) {{
+		if (activeQueryGoalIndex == null || action.getArity() == 0) {{
+			return;
+		}}
+		String choice = action.getTerm(0).toString();
+		String lastPrefix = "runtime_last_query_choice(" + activeQueryGoalIndex + ",";
+		world.removeIf(fact -> fact.startsWith(lastPrefix));
+		world.add(lastPrefix + choice + ")");
+		world.add("runtime_query_choice(" + activeQueryGoalIndex + "," + choice + ")");
+		syncPercepts();
 	}}
 
 	private String snapshotKey(Structure action) {{

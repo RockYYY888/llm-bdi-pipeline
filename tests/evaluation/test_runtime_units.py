@@ -1638,16 +1638,19 @@ def test_jason_runner_wraps_query_goals_without_whole_query_retries() -> None:
 	assert "+!finish_or_retry_0 : true <-" in runtime_program
 	assert "+!execute_query_pass_1 : true <-" not in runtime_program
 	assert "runtime query pass" not in runtime_program
+	assert "!runtime_execute_from_1;" in execute_section
 	assert "!runtime_query_goal_1;" in runtime_program
 	assert "+!runtime_query_goal_1 : done(a) <-" in runtime_program
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" not in runtime_program
 	assert "+!runtime_query_goal_1 : runtime_pass_failed <-" in runtime_program
 	assert "-!runtime_query_goal_1 : true <-" in runtime_program
 	assert "+!runtime_mark_query_goal_1 : not runtime_pass_failed <-" in runtime_program
-	assert "runtime_snapshot(1);" in runtime_program
-	assert "runtime_commit(1);" in runtime_program
-	assert "runtime_restore(1);" in runtime_program
-	assert ".perceive." in runtime_program
+	assert "runtime_snapshot(runtime_query_checkpoint(1));" in runtime_program
+	assert "runtime_set_active_query_goal(1);" in runtime_program
+	assert "runtime_clear_active_query_goal(1);" in runtime_program
+	assert "runtime_commit(runtime_query_checkpoint(1));" not in runtime_program
+	assert "runtime_restore(runtime_query_checkpoint(1));" in runtime_program
+	assert ".perceive;" in runtime_program
 	assert "!task_a(a);" in runtime_program
 	assert "runtime_pass_failed" in runtime_program
 	assert runner._extract_goal_repair_pass_count(runtime_program) == 0
@@ -1908,7 +1911,8 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	child_handlers = runtime_program.split("-!child(X)")
 	child_active_handler = child_handlers[1].split("\n\n", maxsplit=1)[0]
 	child_parent_caller_handler = child_handlers[2].split("\n\n", maxsplit=1)[0]
-	child_fallback_handler = child_handlers[3].split("\n\n", maxsplit=1)[0]
+	child_query_fallback_handler = child_handlers[3].split("\n\n", maxsplit=1)[0]
+	child_fallback_handler = child_handlers[4].split("\n\n", maxsplit=1)[0]
 	assert "!finish_or_retry_0" in runtime_program
 	assert "+!finish_or_retry_0 : not runtime_pass_failed <-" in runtime_program
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
@@ -1933,7 +1937,113 @@ def test_jason_runner_retries_runtime_failures_without_problem_goal_context() ->
 	)
 	assert ".succeed_goal(parent(X))." in child_parent_caller_handler
 	assert "runtime_current_method(METHOD, child, X, BINDING)" not in child_parent_caller_handler
+	assert "runtime_active_query_goal(1)" in child_query_fallback_handler
+	assert ".fail_goal(runtime_execute_from_1)." in child_query_fallback_handler
+	assert "if (not runtime_reported_failure(fail_goal(child, X)))" in child_fallback_handler
+	assert runtime_program.count("-!child(X)") == 4
 	assert ".fail." in child_fallback_handler
+
+
+def test_jason_runner_adds_query_level_chronological_backtracking() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!first(X) : ready(X) <-
+	true.
+
++!second(X) : ready(X) <-
+	true.
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(name="first", parameters=("x",), is_primitive=False),
+				HTNTask(name="second", parameters=("x",), is_primitive=False),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m-first",
+					task_name="first",
+					parameters=("?x",),
+					task_args=("?x",),
+				),
+				HTNMethod(
+					method_name="m-second",
+					task_name="second",
+					parameters=("?x",),
+					task_args=("?x",),
+				),
+			],
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=(
+			{"task_name": "first", "args": ["a"]},
+			{"task_name": "second", "args": ["b"]},
+		),
+		goal_facts=(),
+	)
+
+	assert "+!runtime_execute_from_1 : true <-" in runtime_program
+	assert "+!runtime_execute_from_2 : true <-" in runtime_program
+	assert "-!runtime_execute_from_2 : runtime_last_query_choice(1, CHOICE)" in runtime_program
+	assert "runtime_restore(runtime_query_checkpoint(1));" in runtime_program
+	assert "+runtime_backtracked_choice(1, CHOICE);" in runtime_program
+	assert "+blocked_runtime_choice(CHOICE);" in runtime_program
+	assert "!runtime_clear_local_repair_state;" in runtime_program
+	assert ".abolish(blocked_runtime_method(_, _, _))" in runtime_program
+	assert "!runtime_clear_query_progress_from_1;" in runtime_program
+	assert "!runtime_execute_from_1;" in runtime_program
+	assert "!finish_or_retry_0;" in runtime_program
+	assert ".stopMAS." in runtime_program
+
+
+def test_jason_runner_records_domain_agnostic_runtime_method_choices() -> None:
+	runner = JasonRunner()
+	runtime_program = runner._build_runner_asl(
+		agentspeak_code="""
+/* Initial Beliefs */
+
+/* Primitive Action Plans */
+
+/* HTN Method Plans */
++!move_abs(R, T) : at(R, F) <-
+	true.
+""".strip(),
+		method_library=HTNMethodLibrary(
+			compound_tasks=[
+				HTNTask(name="move_abs", parameters=("r", "t"), is_primitive=False),
+			],
+			primitive_tasks=[],
+			methods=[
+				HTNMethod(
+					method_name="m-move",
+					task_name="move_abs",
+					parameters=("?r", "?f", "?t"),
+					task_args=("?r", "?t"),
+				),
+			],
+		),
+		seed_facts=(),
+		runtime_objects=(),
+		object_types={},
+		type_parent_map={},
+		query_goals=({"task_name": "move_abs", "args": ["r1", "l2"]},),
+		goal_facts=(),
+	)
+
+	choice = 'runtime_method_choice("m-move", move_abs, runtime_args(R, T), runtime_binding(F))'
+	assert f"not blocked_runtime_choice({choice})" in runtime_program
+	assert f"runtime_record_query_choice({choice});" in runtime_program
+	assert "+!runtime_record_query_choice" not in runtime_program
+	assert "runtime_last_query_choice(1, CHOICE)" in runtime_program
 
 
 def test_jason_runner_extracts_only_committed_snapshot_actions() -> None:
