@@ -14,6 +14,7 @@ from tests.support.plan_library_evaluation_support import (
 	GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET,
 	BENCHMARK_EVALUATION_DOMAIN_SOURCE,
 	BENCHMARK_EVALUATION_LIBRARY_SOURCE,
+	GENERATED_LIBRARY_ARTIFACT_REQUIRED_FILES,
 	_classify_evaluation_failure,
 	_compact_failure_signature,
 	_extract_failure_signature,
@@ -36,11 +37,72 @@ from evaluation.artifacts import TemporalGroundingResult
 from temporal_specification import TemporalSpecificationRecord
 
 
+def _write_generated_library_artifact_files(artifact_root: Path) -> None:
+	artifact_root.mkdir(parents=True, exist_ok=True)
+	for file_name in GENERATED_LIBRARY_ARTIFACT_REQUIRED_FILES:
+		(artifact_root / file_name).write_text("{}", encoding="utf-8")
+
+
 def test_evaluation_benchmark_runtime_defaults_pin_benchmark_domain_source() -> None:
 	env = apply_evaluation_runtime_defaults({})
 
 	assert env["EVALUATION_DOMAIN_SOURCE"] == BENCHMARK_EVALUATION_DOMAIN_SOURCE
 	assert env["EVALUATION_DOMAIN_SOURCE"] == "benchmark"
+
+
+def test_generated_library_artifact_reuses_only_complete_cached_bundle(
+	tmp_path: Path,
+	monkeypatch,
+) -> None:
+	artifact_root = tmp_path / "generated_masked" / "blocksworld"
+	_write_generated_library_artifact_files(artifact_root)
+
+	def fail_if_called(domain_key: str) -> dict[str, object]:
+		raise AssertionError(f"unexpected generated rebuild for {domain_key}")
+
+	monkeypatch.setattr(
+		benchmark_support,
+		"GENERATED_MASKED_DOMAIN_BUILDS_DIR",
+		tmp_path / "generated_masked",
+	)
+	monkeypatch.setattr(benchmark_support, "run_generated_domain_build", fail_if_called)
+
+	assert (
+		benchmark_support.ensure_generated_library_artifact("blocksworld")
+		== artifact_root.resolve()
+	)
+
+
+def test_generated_library_artifact_rebuilds_incomplete_cached_bundle(
+	tmp_path: Path,
+	monkeypatch,
+) -> None:
+	artifact_root = tmp_path / "generated_masked" / "blocksworld"
+	artifact_root.mkdir(parents=True)
+	(artifact_root / "method_library.json").write_text("{}", encoding="utf-8")
+	calls: list[str] = []
+
+	def fake_run_generated_domain_build(domain_key: str) -> dict[str, object]:
+		calls.append(domain_key)
+		_write_generated_library_artifact_files(artifact_root)
+		return {"success": True, "artifact_root": artifact_root}
+
+	monkeypatch.setattr(
+		benchmark_support,
+		"GENERATED_MASKED_DOMAIN_BUILDS_DIR",
+		tmp_path / "generated_masked",
+	)
+	monkeypatch.setattr(
+		benchmark_support,
+		"run_generated_domain_build",
+		fake_run_generated_domain_build,
+	)
+
+	assert (
+		benchmark_support.ensure_generated_library_artifact("blocksworld")
+		== artifact_root.resolve()
+	)
+	assert calls == ["blocksworld"]
 
 
 def test_full_benchmark_domain_launcher_forwards_selected_query_ids(

@@ -53,6 +53,18 @@ BENCHMARK_EVALUATION_RUNTIME_BACKEND = "jason"
 GOAL_GROUNDING_PROVIDER_UNAVAILABLE_BUCKET = "goal_grounding_provider_unavailable"
 OFFICIAL_LIBRARY_TRANSLATION_VERSION = "official_method_direct_query_runtime_v17"
 OFFICIAL_LIBRARY_ARTIFACT_CACHE: Dict[str, Path] = {}
+GENERATED_LIBRARY_ARTIFACT_REQUIRED_FILES = (
+	"artifact_metadata.json",
+	"query_sequence.json",
+	"temporal_specifications.json",
+	"method_library.json",
+	"plan_library.json",
+	"plan_library.asl",
+	"translation_coverage.json",
+	"library_validation.json",
+	"method_synthesis_metadata.json",
+	"masked_domain.hddl",
+)
 COMPACT_RESULT_KEYS = frozenset({"success", "step", "error", "failure_class", "log_path"})
 EXECUTION_SUMMARY_KEYS = (
 	"timestamp",
@@ -353,15 +365,34 @@ def _verification_mode_from_execution_summary(execution_summary: Dict[str, Any])
 	return str(metadata.get("verification_mode") or "")
 
 
+def _missing_generated_library_artifact_files(artifact_root: Path) -> tuple[str, ...]:
+	root = Path(artifact_root)
+	return tuple(
+		file_name
+		for file_name in GENERATED_LIBRARY_ARTIFACT_REQUIRED_FILES
+		if not (root / file_name).is_file()
+	)
+
+
+def _generated_library_artifact_is_complete(artifact_root: Path) -> bool:
+	return not _missing_generated_library_artifact_files(Path(artifact_root))
+
+
 def ensure_generated_library_artifact(domain_key: str) -> Path:
 	artifact_root = GENERATED_MASKED_DOMAIN_BUILDS_DIR / domain_key
-	method_library_path = artifact_root / "method_library.json"
-	if method_library_path.exists():
-		return artifact_root
+	if _generated_library_artifact_is_complete(artifact_root):
+		return artifact_root.resolve()
 	build_report = run_generated_domain_build(domain_key)
 	if not build_report.get("success"):
 		raise RuntimeError(f"Method-library generation failed for {domain_key}: {build_report}")
-	return Path(build_report["artifact_root"]).resolve()
+	rebuild_root = Path(build_report["artifact_root"]).resolve()
+	missing_files = _missing_generated_library_artifact_files(rebuild_root)
+	if missing_files:
+		raise RuntimeError(
+			"Generated plan-library artifact is incomplete after rebuild for "
+			f"{domain_key}: missing {', '.join(missing_files)}",
+		)
+	return rebuild_root
 
 
 def ensure_official_library_artifact(domain_key: str) -> Path:
