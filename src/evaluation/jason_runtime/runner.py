@@ -624,16 +624,18 @@ class JasonRunner:
 			object_types=object_types or {},
 			type_parent_map=type_parent_map or {},
 		)
-		runtime_ready_code = self._inject_runtime_reachability_beliefs(
-			runtime_ready_code,
-			reachability_facts=self._runtime_reachability_facts(
-				seed_facts=seed_facts,
-				runtime_objects=runtime_objects,
-				object_types=object_types or {},
-				type_parent_map=type_parent_map or {},
-				action_schemas=action_schemas,
-			),
-		)
+		transition_projection_enabled = self._runtime_transition_projection_enabled()
+		if transition_projection_enabled:
+			runtime_ready_code = self._inject_runtime_reachability_beliefs(
+				runtime_ready_code,
+				reachability_facts=self._runtime_reachability_facts(
+					seed_facts=seed_facts,
+					runtime_objects=runtime_objects,
+					object_types=object_types or {},
+					type_parent_map=type_parent_map or {},
+					action_schemas=action_schemas,
+				),
+			)
 		environment_ready_code = self._rewrite_primitive_wrappers_for_environment(runtime_ready_code)
 		method_goal_ready_code = self._rewrite_method_primitive_actions_to_goals(
 			environment_ready_code,
@@ -658,15 +660,16 @@ class JasonRunner:
 			type_parent_map=type_parent_map or {},
 			enable_blocked_goal_guards=failure_repair_enabled,
 		)
-		lowered_code = self._insert_runtime_reachability_guards(
-			lowered_code,
-			method_library=method_library,
-			action_schemas=action_schemas,
-			seed_facts=seed_facts,
-			runtime_objects=runtime_objects,
-			object_types=object_types or {},
-			type_parent_map=type_parent_map or {},
-		)
+		if transition_projection_enabled:
+			lowered_code = self._insert_runtime_reachability_guards(
+				lowered_code,
+				method_library=method_library,
+				action_schemas=action_schemas,
+				seed_facts=seed_facts,
+				runtime_objects=runtime_objects,
+				object_types=object_types or {},
+				type_parent_map=type_parent_map or {},
+			)
 		lines = [
 			lowered_code.rstrip(),
 			"",
@@ -1293,6 +1296,13 @@ class JasonRunner:
 		if not raw_value:
 			return True
 		if raw_value in {"0", "false", "no", "off"}:
+			return False
+		return raw_value in {"1", "true", "yes", "on"}
+
+	@staticmethod
+	def _runtime_transition_projection_enabled() -> bool:
+		raw_value = os.getenv("JASON_RUNTIME_TRANSITION_PROJECTION", "").strip().lower()
+		if not raw_value:
 			return False
 		return raw_value in {"1", "true", "yes", "on"}
 

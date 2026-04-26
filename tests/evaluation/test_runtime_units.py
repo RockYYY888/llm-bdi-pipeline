@@ -1808,9 +1808,9 @@ def test_jason_runner_does_not_treat_consumed_preconditions_as_completion_contex
 	assert "+!runtime_query_goal_1 : runtime_query_goal_completed(1) <-" in runtime_program
 
 
-def test_jason_runner_adds_domain_agnostic_reachability_guards() -> None:
+def _build_reachability_projection_runtime_program() -> str:
 	runner = JasonRunner()
-	runtime_program = runner._build_runner_asl(
+	return runner._build_runner_asl(
 		agentspeak_code="""
 /* Initial Beliefs */
 
@@ -1906,6 +1906,24 @@ def test_jason_runner_adds_domain_agnostic_reachability_guards() -> None:
 		query_goals=({"task_name": "deliver", "args": ["package-0", "loc-b"]},),
 		goal_facts=(),
 	)
+
+
+def test_jason_runner_keeps_transition_projection_disabled_by_default(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.delenv("JASON_RUNTIME_TRANSITION_PROJECTION", raising=False)
+	runtime_program = _build_reachability_projection_runtime_program()
+
+	assert 'runtime_reachable("truck-0", "loc-b").' not in runtime_program
+	assert "runtime_path_navigate" not in runtime_program
+	assert "?runtime_reachable(V, L);" not in runtime_program
+
+
+def test_jason_runner_adds_domain_agnostic_reachability_guards_when_enabled(
+	monkeypatch: pytest.MonkeyPatch,
+) -> None:
+	monkeypatch.setenv("JASON_RUNTIME_TRANSITION_PROJECTION", "1")
+	runtime_program = _build_reachability_projection_runtime_program()
 
 	assert 'runtime_reachable("truck-0", "loc-b").' in runtime_program
 	assert 'runtime_reachable("package-0", "loc-b").' not in runtime_program
