@@ -2111,12 +2111,27 @@ def test_jason_runner_adds_query_level_chronological_backtracking() -> None:
 
 	assert "+!runtime_execute_from_1 : true <-" in runtime_program
 	assert "+!runtime_execute_from_2 : true <-" in runtime_program
+	assert "-!runtime_execute_from_1 : pipeline.choose_runtime_choice(1, 1, CHOICE)" in (
+		runtime_program
+	)
 	assert "-!runtime_execute_from_1 : runtime_last_query_choice(1, CHOICE)" in runtime_program
 	assert "-!runtime_execute_from_1 : runtime_query_choice(1, CHOICE)" in runtime_program
+	assert "-!runtime_execute_from_2 : pipeline.choose_runtime_choice(2, 2, CHOICE)" in (
+		runtime_program
+	)
 	assert "-!runtime_execute_from_2 : runtime_last_query_choice(2, CHOICE)" in runtime_program
 	assert "-!runtime_execute_from_2 : runtime_query_choice(2, CHOICE)" in runtime_program
+	assert "-!runtime_execute_from_2 : pipeline.choose_runtime_choice(2, 1, CHOICE)" in (
+		runtime_program
+	)
 	assert "-!runtime_execute_from_2 : runtime_last_query_choice(1, CHOICE)" in runtime_program
 	assert "-!runtime_execute_from_2 : runtime_query_choice(1, CHOICE)" in runtime_program
+	assert "+!runtime_backtrack_from_2 : pipeline.choose_runtime_choice(2, 2, CHOICE)" in (
+		runtime_program
+	)
+	assert "+!runtime_backtrack_from_2 : pipeline.choose_runtime_choice(2, 1, CHOICE)" in (
+		runtime_program
+	)
 	assert "+!runtime_backtrack_from_2 : runtime_last_query_choice(2, CHOICE)" in runtime_program
 	assert "+!runtime_backtrack_from_2 : runtime_query_choice(1, CHOICE)" in runtime_program
 	assert "+!runtime_backtrack_from_2 : true <-" in runtime_program
@@ -2169,6 +2184,8 @@ def test_jason_runner_records_domain_agnostic_runtime_method_choices() -> None:
 	assert f"not blocked_runtime_choice({choice})" in runtime_program
 	assert f"runtime_record_query_choice({choice});" in runtime_program
 	assert "+!runtime_record_query_choice" not in runtime_program
+	assert "runtime_query_choice_frame(1, SEQUENCE, CHOICE)" in runtime_program
+	assert "runtime_last_query_choice_frame(1, SEQUENCE, CHOICE)" in runtime_program
 	assert "runtime_last_query_choice(1, CHOICE)" in runtime_program
 
 

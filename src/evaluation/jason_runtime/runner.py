@@ -226,6 +226,8 @@ class JasonRunner:
 		env_class_path = output_path / f"{self.environment_class_name}.class"
 		no_ancestor_goal_java_path = output_path / "pipeline" / "no_ancestor_goal.java"
 		no_ancestor_goal_class_path = output_path / "pipeline" / "no_ancestor_goal.class"
+		choose_runtime_choice_java_path = output_path / "pipeline" / "choose_runtime_choice.java"
+		choose_runtime_choice_class_path = output_path / "pipeline" / "choose_runtime_choice.class"
 		stdout_path = output_path / "jason_stdout.txt"
 		stderr_path = output_path / "jason_stderr.txt"
 		action_path_path = output_path / "action_path.txt"
@@ -255,6 +257,7 @@ class JasonRunner:
 			seed_facts=seed_facts,
 		)
 		no_ancestor_goal_source = self._build_no_ancestor_goal_internal_action_source()
+		choose_runtime_choice_source = self._build_choose_runtime_choice_internal_action_source()
 		timing_profile["source_build_seconds"] = time.perf_counter() - source_build_start
 		write_sources_start = time.perf_counter()
 		runtime_plan_projection = _extract_runtime_plan_projection(runner_asl)
@@ -264,6 +267,7 @@ class JasonRunner:
 		env_java_path.write_text(env_source)
 		no_ancestor_goal_java_path.parent.mkdir(parents=True, exist_ok=True)
 		no_ancestor_goal_java_path.write_text(no_ancestor_goal_source)
+		choose_runtime_choice_java_path.write_text(choose_runtime_choice_source)
 		timing_profile["write_sources_seconds"] = time.perf_counter() - write_sources_start
 		compile_start = time.perf_counter()
 		self._compile_environment_java(
@@ -289,6 +293,15 @@ class JasonRunner:
 				metadata={
 					"internal_action_java": str(no_ancestor_goal_java_path),
 					"internal_action_class": str(no_ancestor_goal_class_path),
+				},
+			)
+		needs_choice_stack = "pipeline.choose_runtime_choice(" in runner_asl
+		if needs_choice_stack and not choose_runtime_choice_class_path.exists():
+			raise JasonValidationError(
+				"Jason choice-stack internal action compilation completed but class file is missing.",
+				metadata={
+					"internal_action_java": str(choose_runtime_choice_java_path),
+					"internal_action_class": str(choose_runtime_choice_class_path),
 				},
 			)
 
@@ -879,7 +892,20 @@ class JasonRunner:
 				),
 			)
 			for target_index in range(index, 0, -1):
-				for choice_predicate in ("runtime_last_query_choice", "runtime_query_choice"):
+				lines.append(
+					f"-!runtime_execute_from_{index} : "
+					f"pipeline.choose_runtime_choice({index}, {target_index}, CHOICE) <-",
+				)
+				lines.extend(
+					self._indent_body(
+						self._runtime_query_backtrack_body(
+							source_index=index,
+							target_index=target_index,
+						),
+					),
+				)
+				lines.append("")
+				for choice_predicate in self._runtime_query_choice_predicates():
 					lines.append(
 						f"-!runtime_execute_from_{index} : "
 						f"{choice_predicate}({target_index}, CHOICE) "
@@ -915,7 +941,20 @@ class JasonRunner:
 	) -> List[str]:
 		lines: List[str] = []
 		for target_index in range(source_index, 0, -1):
-			for choice_predicate in ("runtime_last_query_choice", "runtime_query_choice"):
+			lines.append(
+				f"+!{goal_name} : "
+				f"pipeline.choose_runtime_choice({source_index}, {target_index}, CHOICE) <-",
+			)
+			lines.extend(
+				self._indent_body(
+					self._runtime_query_backtrack_body(
+						source_index=source_index,
+						target_index=target_index,
+					),
+				),
+			)
+			lines.append("")
+			for choice_predicate in self._runtime_query_choice_predicates():
 				lines.append(
 					f"+!{goal_name} : {choice_predicate}({target_index}, CHOICE) "
 					f"& not runtime_backtracked_choice({target_index}, CHOICE) <-",
@@ -1014,10 +1053,17 @@ class JasonRunner:
 				)
 				lines.append("")
 			for predicate in (
+				"runtime_last_query_choice_frame",
+				"runtime_query_choice_frame",
 				"runtime_last_query_choice",
 				"runtime_query_choice",
 			):
-				belief = self._call(predicate, (str(index), "CHOICE"))
+				args = (
+					(str(index), "SEQUENCE", "CHOICE")
+					if predicate.endswith("_frame")
+					else (str(index), "CHOICE")
+				)
+				belief = self._call(predicate, args)
 				lines.append(f"+!{goal_name} : {belief} <-")
 				lines.extend(
 					self._indent_body(
@@ -1032,6 +1078,13 @@ class JasonRunner:
 			lines.extend(self._indent_body(("true",)))
 			lines.append("")
 		return lines
+
+	@staticmethod
+	def _runtime_query_choice_predicates() -> Tuple[str, ...]:
+		return (
+			"runtime_last_query_choice",
+			"runtime_query_choice",
+		)
 
 	def _query_goal_completion_contexts(
 		self,
@@ -4142,6 +4195,142 @@ public class no_ancestor_goal extends DefaultInternalAction {
 }
 """.strip() + "\n"
 
+	def _build_choose_runtime_choice_internal_action_source(self) -> str:
+		return """
+package pipeline;
+
+import java.util.HashSet;
+import java.util.Set;
+
+import jason.asSemantics.DefaultInternalAction;
+import jason.asSemantics.TransitionSystem;
+import jason.asSemantics.Unifier;
+import jason.asSyntax.Literal;
+import jason.asSyntax.NumberTerm;
+import jason.asSyntax.Term;
+
+public class choose_runtime_choice extends DefaultInternalAction {
+
+	@Override
+	public Object execute(TransitionSystem ts, Unifier un, Term[] args) throws Exception {
+		if (args.length < 3) {
+			return false;
+		}
+
+		String targetIndex = canonicalTerm(args[1].capply(un));
+		if (targetIndex.isEmpty()) {
+			return false;
+		}
+
+		Term selected = null;
+		long selectedSequence = Long.MIN_VALUE;
+		Set<String> blockedChoices = blockedChoicesForTarget(ts, un, targetIndex);
+
+		ts.getAg().getBB().getLock().lock();
+		try {
+			for (Literal belief : ts.getAg().getBB()) {
+				if (!"runtime_query_choice_frame".equals(belief.getFunctor()) || belief.getArity() != 3) {
+					continue;
+				}
+				if (!targetIndex.equals(canonicalTerm(belief.getTerm(0).capply(un)))) {
+					continue;
+				}
+				Term choice = belief.getTerm(2).capply(un);
+				if (blockedChoices.contains(choice.toString())) {
+					continue;
+				}
+				long sequence = sequenceValue(belief.getTerm(1).capply(un));
+				if (sequence >= selectedSequence) {
+					selectedSequence = sequence;
+					selected = choice;
+				}
+			}
+			if (selected == null) {
+				selected = latestUnblockedLegacyChoice(ts, un, targetIndex, blockedChoices);
+			}
+		} finally {
+			ts.getAg().getBB().getLock().unlock();
+		}
+
+		return selected != null && un.unifies(args[2], selected);
+	}
+
+	private Set<String> blockedChoicesForTarget(TransitionSystem ts, Unifier un, String targetIndex) {
+		Set<String> blockedChoices = new HashSet<>();
+		ts.getAg().getBB().getLock().lock();
+		try {
+			for (Literal belief : ts.getAg().getBB()) {
+				if ("blocked_runtime_choice".equals(belief.getFunctor()) && belief.getArity() == 1) {
+					blockedChoices.add(belief.getTerm(0).capply(un).toString());
+					continue;
+				}
+				if (!"runtime_backtracked_choice".equals(belief.getFunctor()) || belief.getArity() != 2) {
+					continue;
+				}
+				if (!targetIndex.equals(canonicalTerm(belief.getTerm(0).capply(un)))) {
+					continue;
+				}
+				blockedChoices.add(belief.getTerm(1).capply(un).toString());
+			}
+		} finally {
+			ts.getAg().getBB().getLock().unlock();
+		}
+		return blockedChoices;
+	}
+
+	private Term latestUnblockedLegacyChoice(
+		TransitionSystem ts,
+		Unifier un,
+		String targetIndex,
+		Set<String> blockedChoices
+	) {
+		Term selected = null;
+		for (Literal belief : ts.getAg().getBB()) {
+			if (!"runtime_query_choice".equals(belief.getFunctor()) || belief.getArity() != 2) {
+				continue;
+			}
+			if (!targetIndex.equals(canonicalTerm(belief.getTerm(0).capply(un)))) {
+				continue;
+			}
+			Term choice = belief.getTerm(1).capply(un);
+			if (blockedChoices.contains(choice.toString())) {
+				continue;
+			}
+			selected = choice;
+		}
+		return selected;
+	}
+
+	private long sequenceValue(Term term) throws Exception {
+		if (term instanceof NumberTerm) {
+			return (long) ((NumberTerm) term).solve();
+		}
+		String text = canonicalTerm(term);
+		if (text.endsWith(".0")) {
+			text = text.substring(0, text.length() - 2);
+		}
+		return Long.parseLong(text);
+	}
+
+	private String canonicalTerm(Term term) {
+		return canonicalText(term == null ? "" : term.toString());
+	}
+
+	private String canonicalText(String rawValue) {
+		String value = rawValue == null ? "" : rawValue.trim();
+		if (value.length() >= 2) {
+			boolean quoted =
+				(value.startsWith("\\\"") && value.endsWith("\\\""))
+				|| (value.startsWith("'") && value.endsWith("'"));
+			if (quoted) {
+				value = value.substring(1, value.length() - 1);
+			}
+		}
+		return value;
+	}
+}
+""".strip() + "\n"
+
 	def _build_environment_java_source(
 		self,
 		*,
@@ -4245,6 +4434,7 @@ public class {self.environment_class_name} extends Environment {{
 	private final Map<String, ActionSchema> actions = new HashMap<>();
 	private final Map<String, Set<String>> snapshots = new HashMap<>();
 	private String activeQueryGoalIndex = null;
+	private long runtimeChoiceSequence = 0L;
 
 	@Override
 	public synchronized void init(String[] args) {{
@@ -4369,10 +4559,23 @@ public class {self.environment_class_name} extends Environment {{
 			return;
 		}}
 		String choice = action.getTerm(0).toString();
+		runtimeChoiceSequence += 1L;
 		String lastPrefix = "runtime_last_query_choice(" + activeQueryGoalIndex + ",";
+		String lastFramePrefix = "runtime_last_query_choice_frame(" + activeQueryGoalIndex + ",";
 		world.removeIf(fact -> fact.startsWith(lastPrefix));
+		world.removeIf(fact -> fact.startsWith(lastFramePrefix));
 		world.add(lastPrefix + choice + ")");
 		world.add("runtime_query_choice(" + activeQueryGoalIndex + "," + choice + ")");
+		world.add(lastFramePrefix + runtimeChoiceSequence + "," + choice + ")");
+		world.add(
+			"runtime_query_choice_frame("
+			+ activeQueryGoalIndex
+			+ ","
+			+ runtimeChoiceSequence
+			+ ","
+			+ choice
+			+ ")"
+		);
 		syncPercepts();
 	}}
 
@@ -4445,6 +4648,7 @@ public class {self.environment_class_name} extends Environment {{
 	private void seedInitialFacts() {{
 		world.clear();
 		snapshots.clear();
+		runtimeChoiceSequence = 0L;
 {seed_lines if seed_lines else ""}
 	}}
 
