@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from domain_model import infer_query_domain, load_query_sequence_records
+from domain_model.materialization import write_generated_domain_file
 from method_library.context import MethodLibrarySynthesisContext
 from execution_logging.execution_logger import ExecutionLogger
 from plan_library.orchestrator import PlanLibraryGenerationOrchestrator
@@ -145,7 +146,21 @@ class PlanLibraryGenerationPipeline:
 				},
 			)
 
-			method_validation = self._orchestrator.validate_method_library(method_library)
+			artifact_root = (
+				Path(output_root).expanduser().resolve()
+				if output_root is not None
+				else self._default_artifact_root(query_domain)
+			)
+			generated_domain_outputs = write_generated_domain_file(
+				masked_domain_text=str(masked_domain_inputs["masked_domain_text"]),
+				domain=masked_domain_inputs["masked_domain"],
+				method_library=method_library,
+				output_path=artifact_root / "generated_domain.hddl",
+			)
+			method_validation = self._orchestrator.validate_method_library(
+				method_library,
+				materialized_domain_file=str(generated_domain_outputs["generated_domain_file"]),
+			)
 			library_validation = build_library_validation_record(
 				domain_name=self._context.domain.name,
 				domain=self._context.domain,
@@ -157,11 +172,6 @@ class PlanLibraryGenerationPipeline:
 			if not library_validation.passed:
 				raise RuntimeError(library_validation.failure_reason or "Library validation failed.")
 
-			artifact_root = (
-				Path(output_root).expanduser().resolve()
-				if output_root is not None
-				else self._default_artifact_root(query_domain)
-			)
 			bundle = PlanLibraryArtifactBundle(
 				domain_name=self._context.domain.name,
 				query_sequence=query_sequence,
@@ -181,6 +191,9 @@ class PlanLibraryGenerationPipeline:
 				masked_domain_text=str(masked_domain_inputs["masked_domain_text"]),
 				plan_library_asl_text=plan_library_asl,
 			)
+			artifact_paths["generated_domain"] = str(
+				generated_domain_outputs["generated_domain_file"],
+			)
 			self._context.logger.update_step_artifacts(
 				"method_synthesis",
 				{
@@ -188,6 +201,7 @@ class PlanLibraryGenerationPipeline:
 					"method_synthesis_metadata_file": artifact_paths[
 						"method_synthesis_metadata"
 					],
+					"generated_domain_file": artifact_paths["generated_domain"],
 				},
 			)
 			self._context.logger.update_step_artifacts(
@@ -263,6 +277,7 @@ def _artifact_summary(
 		"library_validation": bundle.library_validation.to_dict(),
 		"artifact_root": bundle.artifact_root,
 		"method_library_file": artifact_paths.get("method_library"),
+		"generated_domain_file": artifact_paths.get("generated_domain"),
 		"plan_library_file": artifact_paths.get("plan_library"),
 		"plan_library_asl_file": artifact_paths.get("plan_library_asl"),
 		"method_synthesis_metadata_file": artifact_paths.get("method_synthesis_metadata"),

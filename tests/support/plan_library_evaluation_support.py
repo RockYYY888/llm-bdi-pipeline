@@ -58,6 +58,7 @@ GENERATED_LIBRARY_ARTIFACT_REQUIRED_FILES = (
 	"query_sequence.json",
 	"temporal_specifications.json",
 	"method_library.json",
+	"generated_domain.hddl",
 	"plan_library.json",
 	"plan_library.asl",
 	"translation_coverage.json",

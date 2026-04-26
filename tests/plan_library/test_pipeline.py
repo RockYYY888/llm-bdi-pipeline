@@ -63,7 +63,7 @@ def test_plan_library_generation_pipeline_persists_chapter4_artifacts(
 		_sample_blocksworld_method_library(),
 		{"model": "test-model", "llm_attempted": False},
 	)
-	pipeline._orchestrator.validate_method_library = lambda _library: {  # type: ignore[method-assign]
+	pipeline._orchestrator.validate_method_library = lambda _library, **_kwargs: {  # type: ignore[method-assign]
 		"layers": {
 			"signature_conformance": {"passed": True, "warnings": []},
 			"typed_structural_soundness": {"passed": True, "warnings": []},
@@ -77,6 +77,7 @@ def test_plan_library_generation_pipeline_persists_chapter4_artifacts(
 	assert result["success"] is True
 	artifact_paths = result["artifact_paths"]
 	assert Path(artifact_paths["masked_domain"]).exists()
+	assert Path(artifact_paths["generated_domain"]).exists()
 	assert Path(artifact_paths["query_sequence"]).exists()
 	assert Path(artifact_paths["temporal_specifications"]).exists()
 	assert Path(artifact_paths["method_library"]).exists()
@@ -127,7 +128,7 @@ def test_plan_library_generation_pipeline_filters_selected_query_ids(
 		)
 
 	pipeline._orchestrator.synthesise_domain_methods = fake_synthesise_domain_methods  # type: ignore[method-assign]
-	pipeline._orchestrator.validate_method_library = lambda _library: {  # type: ignore[method-assign]
+	pipeline._orchestrator.validate_method_library = lambda _library, **_kwargs: {  # type: ignore[method-assign]
 		"layers": {
 			"signature_conformance": {"passed": True, "warnings": []},
 			"typed_structural_soundness": {"passed": True, "warnings": []},
