@@ -117,6 +117,7 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "primitive_action_schemas:" in user_prompt
 	assert "declared_compound_tasks:" in user_prompt
 	assert "<structural_contract>" in user_prompt
+	assert "<causal_executability>" in user_prompt
 	assert (
 		"required_method_task_names: "
 		f"{json.dumps([task.name for task in masked['masked_domain'].tasks])}"
@@ -133,10 +134,15 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "Primitive action names from primitive_action_schemas" in user_prompt
 	assert "Actions are operators, not predicates." in system_prompt
 	assert "M is domain-complete" in system_prompt
+	assert "Constructive methods must be causally executable" in system_prompt
 	assert "Do not copy object constants from temporal specifications into M" in system_prompt
 	assert "If a method has zero or one subtask, ordering must be []." in system_prompt
 	assert 'local pairwise ordering edges only: [["s1", "s2"]].' in system_prompt
 	assert "must be quoted strings" in system_prompt
+	assert "Every positive dynamic precondition" in user_prompt
+	assert "A direct primitive leaf is valid only if" in user_prompt
+	assert "Bind task parameters according to action effect argument positions" in user_prompt
+	assert "Do not require mutually exclusive fluent values in one context" in user_prompt
 	assert "Methods that are not already satisfied must contain real subtasks" in user_prompt
 	assert "primitive leaf methods must include the primitive action itself" in user_prompt
 	assert "Use temporal_specifications as the only task-level supervision" in user_prompt
@@ -146,6 +152,10 @@ def test_domain_prompt_is_query_aligned_and_does_not_leak_official_methods(tmp_p
 	assert "methods.task_name covers every required_method_task_names entry" in user_prompt
 	assert "each ordering edge [before, after] must use two distinct local_step_ids" in user_prompt
 	assert "methods with fewer than two subtasks have empty ordering" in user_prompt
+	assert "local step ids.\n- methods with fewer than two subtasks" in user_prompt
+	assert "local step ids.- methods" not in user_prompt
+	assert "every primitive action precondition is supported" in user_prompt
+	assert "support subgoals precede primitive actions that need their effects" in user_prompt
 	assert "Before emitting JSON, check that:" in user_prompt
 	assert 'ordering must be an array of two-element step-id arrays such as [["s1", "s2"]].' in user_prompt
 	assert "never emit bare tokens" in user_prompt

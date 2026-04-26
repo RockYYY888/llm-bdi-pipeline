@@ -1066,6 +1066,29 @@ def _render_structural_contract_block(domain: Any) -> str:
 	)
 
 
+def _render_causal_executability_contract_block() -> str:
+	return "\n".join(
+		[
+			"primitive_support:",
+			"- For every constructive method, each primitive subtask must be executable "
+			"at its position.",
+			"- Every positive dynamic precondition of a primitive subtask must be "
+			"guaranteed by method context or by an earlier subtask that establishes "
+			"the same literal under the same variable mapping.",
+			"- If a required primitive precondition is not guaranteed, insert an "
+			"earlier compound support subgoal when one exists; otherwise make it an "
+			"explicit method context guard.",
+			"headline_alignment:",
+			"- A direct primitive leaf is valid only if its positive add effects "
+			"establish the compound task headline literal.",
+			"- Bind task parameters according to action effect argument positions; "
+			"use fresh witness variables for non-task action parameters.",
+			"- Do not require mutually exclusive fluent values in one context; use "
+			"transition subtasks instead.",
+		]
+	)
+
+
 def build_domain_htn_system_prompt() -> str:
 	"""System prompt for one-shot domain-complete method synthesis."""
 
@@ -1093,6 +1116,7 @@ def build_domain_htn_system_prompt() -> str:
 		"[[\"s1\", \"s2\"]]. Every endpoint must be a step_id in the same method.\n"
 		"- If a method has zero or one subtask, ordering must be [].\n"
 		"- Empty subtasks are allowed only for already-satisfied guard methods; constructive methods must contain real subtasks.\n"
+		"- Constructive methods must be causally executable: each primitive precondition must be supported by context or earlier subtasks.\n"
 		"- Recursive methods must make progress by changing at least one witness argument or state-support step before recursion.\n"
 		"- All JSON scalar values for names, variables, constants, literals, step ids, and instruction ids must be quoted strings.\n"
 		"\n"
@@ -1125,6 +1149,7 @@ def build_domain_htn_user_prompt(
 	action_schema_block = _render_domain_action_schema_blocks(domain)
 	declared_task_block = _render_declared_compound_task_blocks(domain)
 	structural_contract_block = _render_structural_contract_block(domain)
+	causal_contract_block = _render_causal_executability_contract_block()
 	method_blueprint_block = _render_method_blueprint_blocks(method_blueprints)
 	temporal_specifications = tuple(temporal_specifications or ())
 	domain_summary_block = "\n".join(
@@ -1140,14 +1165,16 @@ def build_domain_htn_user_prompt(
 		[
 			"1. Define exactly the declared compound tasks and a domain-complete set of methods.",
 			"2. Use method_blueprints as compact decomposition evidence, not as permission to invent new symbols.",
-			"3. direct_leaf means one primitive achiever; support_then_leaf means support steps before the final primitive; hierarchical_orchestration means compound delegation or task composition.",
+			"3. direct_leaf means one primitive achiever whose positive add effect establishes the task headline; support_then_leaf means support steps before the final primitive; hierarchical_orchestration means compound delegation or task composition.",
 			"4. Primitive action names from primitive_action_schemas, direct_primitive_achievers, or uncovered_prerequisite_families may appear only in subtasks with kind=primitive.",
 			"5. Compound task names may appear only as method.task_name or subtasks with kind=compound.",
 			"6. Preserve distinct AUX witness roles; bind required witnesses in parameters, context, subtasks, and ordering, but not in task_args.",
-				"7. Methods that are not already satisfied must contain real subtasks; primitive leaf methods must include the primitive action itself.",
+			"7. Methods that are not already satisfied must contain real subtasks; primitive leaf methods must include the primitive action itself.",
 			"8. Use temporal_specifications as the only task-level supervision while keeping methods reusable and variable-parameterized.",
 			"9. Every method must cite one or more source_instruction_ids from temporal_specifications.",
-			"10. Enforce structural_contract exactly; it is part of the output specification.",
+			"10. Enforce causal_executability: primitive preconditions must be context-supported or established by earlier subtasks.",
+			"11. Bind task parameters from headline/effect positions; use fresh typed witnesses for non-task action parameters.",
+			"12. Enforce structural_contract exactly; it is part of the output specification.",
 		]
 	)
 	gate_check_block = "\n".join(
@@ -1161,6 +1188,10 @@ def build_domain_htn_user_prompt(
 			"- each variable has one declared type and compatible arity everywhere;",
 			"- constructive methods have subtasks and every ordering edge references two distinct local step ids.",
 			"- methods with fewer than two subtasks have empty ordering.",
+			"- every primitive action precondition is supported by context or earlier subtasks;",
+			"- each direct primitive leaf establishes the compound task headline;",
+			"- support subgoals precede primitive actions that need their effects;",
+			"- contexts do not require mutually exclusive fluent values.",
 		]
 	)
 	temporal_specifications_block = "\n".join(
@@ -1186,6 +1217,7 @@ def build_domain_htn_user_prompt(
 			temporal_specifications_block or "none",
 		),
 		_format_tagged_block("structural_contract", structural_contract_block),
+		_format_tagged_block("causal_executability", causal_contract_block),
 		_format_tagged_block(
 			"method_blueprints",
 			method_blueprint_block,
