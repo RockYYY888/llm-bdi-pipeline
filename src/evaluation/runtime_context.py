@@ -357,13 +357,11 @@ def planner_action_schemas_for_domain(domain: Any) -> Tuple[Dict[str, Any], ...]
 	schemas = []
 	for action in getattr(domain, "actions", []):
 		parsed = parser.parse_action(action)
-		parameter_types = _hddl_parameter_type_map(getattr(action, "parameters", ()))
 		schemas.append(
 			{
 				"functor": sanitize_name(action.name),
 				"source_name": action.name,
 				"parameters": list(parsed.parameters),
-				"parameter_types": parameter_types,
 				"preconditions": [
 					{
 						"predicate": literal.predicate,
@@ -394,25 +392,6 @@ def planner_action_schemas_for_domain(domain: Any) -> Tuple[Dict[str, Any], ...]
 			},
 		)
 	return tuple(schemas)
-
-
-def _hddl_parameter_type_map(parameters: Sequence[str]) -> Dict[str, str]:
-	typed_parameters: Dict[str, str] = {}
-	for item in parameters or ():
-		text = str(item or "").strip()
-		if not text:
-			continue
-		if "-" not in text:
-			for token in text.split():
-				if token.startswith("?"):
-					typed_parameters.setdefault(token, "object")
-			continue
-		names_text, type_text = text.split("-", 1)
-		type_name = type_text.strip().split()[0] if type_text.strip() else "object"
-		for token in names_text.strip().split():
-			if token.startswith("?"):
-				typed_parameters[token] = type_name
-	return typed_parameters
 
 
 def resolve_evaluation_domain_context(
