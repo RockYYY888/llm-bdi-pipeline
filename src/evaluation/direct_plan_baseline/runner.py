@@ -34,6 +34,7 @@ class DirectPlanBaselineResult:
 	goal_reached: bool
 	success: bool
 	diagnostics: tuple[str, ...]
+	verification_skipped: bool = False
 	error: Optional[str] = None
 
 	def to_dict(self) -> Dict[str, Any]:
@@ -51,6 +52,7 @@ class DirectPlanBaselineResult:
 			"goal_reached": self.goal_reached,
 			"success": self.success,
 			"diagnostics": list(self.diagnostics),
+			"verification_skipped": self.verification_skipped,
 			"error": self.error,
 		}
 
@@ -218,6 +220,7 @@ def run_direct_plan_baseline_case(
 	response_text: Optional[str] = None,
 	generator: Optional[DirectPlanGenerator] = None,
 	verifier: Optional[IPCPlanVerifier] = None,
+	verify: bool = True,
 ) -> DirectPlanBaselineResult:
 	domain = HDDLParser.parse_domain(str(domain_file))
 	problem = HDDLParser.parse_problem(str(problem_file))
@@ -266,6 +269,26 @@ def run_direct_plan_baseline_case(
 		parsed = parse_direct_plan_response(str(response_text or ""))
 		plan_text = materialize_plan_text(parsed["plan_lines"])
 		plan_file.write_text(plan_text)
+		if not verify:
+			result = DirectPlanBaselineResult(
+				domain_key=domain_key,
+				query_id=query_id,
+				problem_file=str(Path(problem_file).resolve()),
+				output_dir=str(query_output_dir),
+				prompt_file=str(prompt_file),
+				raw_response_file=str(raw_response_file),
+				plan_file=str(plan_file),
+				validation_file=str(validation_file),
+				parseable=True,
+				executable=False,
+				goal_reached=False,
+				success=False,
+				diagnostics=tuple(parsed["diagnostics"]),
+				verification_skipped=True,
+				error=None,
+			)
+			validation_file.write_text(json.dumps(result.to_dict(), indent=2))
+			return result
 		verification_result = (verifier or IPCPlanVerifier()).verify_plan_text(
 			domain_file=domain_file,
 			problem_file=problem_file,
