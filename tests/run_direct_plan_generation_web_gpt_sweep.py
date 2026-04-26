@@ -21,7 +21,6 @@ sys.path.insert(0, str(SRC_ROOT))
 from domain_model import load_query_sequence_records
 from evaluation.direct_plan_baseline import (
 	build_direct_plan_system_prompt,
-	build_direct_plan_user_prompt,
 	run_direct_plan_baseline_case,
 )
 from tests.support.plan_library_evaluation_support import (
@@ -29,7 +28,6 @@ from tests.support.plan_library_evaluation_support import (
 	load_domain_query_cases,
 	query_id_sort_key,
 )
-from utils.hddl_parser import HDDLParser
 
 
 RUNS_ROOT = PROJECT_ROOT / "tests" / "generated" / "direct_plan_generation_baseline"
@@ -65,14 +63,13 @@ def _build_prompt(domain_key: str, query_id: str) -> Dict[str, Any]:
 	query_cases = load_domain_query_cases(domain_key)
 	case = query_cases[query_id]
 	temporal_specification = _load_temporal_specifications(domain_key, (query_id,))[query_id]
-	domain = HDDLParser.parse_domain(DOMAIN_FILES[domain_key])
-	problem = HDDLParser.parse_problem(str(case["problem_file"]))
 	system_prompt = build_direct_plan_system_prompt()
-	user_prompt = build_direct_plan_user_prompt(
-		domain=domain,
-		problem=problem,
-		temporal_specification=temporal_specification,
+	user_prompt = _build_compact_web_gpt_user_prompt(
+		domain_file=Path(DOMAIN_FILES[domain_key]),
+		problem_file=Path(str(case["problem_file"])),
+		instruction_id=query_id,
 		instruction=str(case["instruction"]),
+		ltlf_formula=str(getattr(temporal_specification, "ltlf_formula", "") or ""),
 	)
 	return {
 		"id": _case_id(domain_key, query_id),
@@ -84,9 +81,46 @@ def _build_prompt(domain_key: str, query_id: str) -> Dict[str, Any]:
 				user_prompt,
 			],
 		),
+		"system_prompt": system_prompt,
+		"user_prompt": user_prompt,
 		"case": case,
 		"temporal_specification": temporal_specification,
 	}
+
+
+def _build_compact_web_gpt_user_prompt(
+	*,
+	domain_file: Path,
+	problem_file: Path,
+	instruction_id: str,
+	instruction: str,
+	ltlf_formula: str,
+) -> str:
+	return "\n".join(
+		[
+			"TASK: Generate one verifier-readable primitive plan for this single benchmark case.",
+			"Return exactly one minified JSON object with keys plan_lines and diagnostics.",
+			"Each plan_lines item must be '<zero_based_index> <action_name> <arg1> ...'.",
+			"Do not include '==>' or 'root' in plan_lines. Do not emit markdown.",
+			"Use only primitive actions declared in DOMAIN_HDDL and object constants from PROBLEM_HDDL.",
+			"The plan must be executable from the problem initial state and reach the problem goal.",
+			"The action order must satisfy LTLF_SPEC.",
+			f"INSTRUCTION_ID: {instruction_id}",
+			f"QUERY_TEXT_SHA256: {_sha256_text(instruction)}",
+			"LTLF_SPEC:",
+			str(ltlf_formula).strip(),
+			"DOMAIN_HDDL:",
+			domain_file.read_text(),
+			"PROBLEM_HDDL:",
+			problem_file.read_text(),
+		],
+	)
+
+
+def _sha256_text(value: str) -> str:
+	import hashlib
+
+	return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
 
 
 def _write_single_prompt_file(
@@ -226,6 +260,8 @@ def _run_case(
 		output_dir=run_root / domain_key / "query_results" / query_id,
 		response_text=response_text,
 		verify=verify,
+		system_prompt_override=str(prompt_payload["system_prompt"]),
+		user_prompt_override=str(prompt_payload["user_prompt"]),
 	)
 	return {
 		**result.to_dict(),

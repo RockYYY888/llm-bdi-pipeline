@@ -221,11 +221,13 @@ def run_direct_plan_baseline_case(
 	generator: Optional[DirectPlanGenerator] = None,
 	verifier: Optional[IPCPlanVerifier] = None,
 	verify: bool = True,
+	system_prompt_override: Optional[str] = None,
+	user_prompt_override: Optional[str] = None,
 ) -> DirectPlanBaselineResult:
 	domain = HDDLParser.parse_domain(str(domain_file))
 	problem = HDDLParser.parse_problem(str(problem_file))
-	system_prompt = build_direct_plan_system_prompt()
-	user_prompt = build_direct_plan_user_prompt(
+	system_prompt = system_prompt_override or build_direct_plan_system_prompt()
+	user_prompt = user_prompt_override or build_direct_plan_user_prompt(
 		domain=domain,
 		problem=problem,
 		temporal_specification=temporal_specification,
