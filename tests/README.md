@@ -3,7 +3,7 @@
 This directory contains the active regression and benchmark-acceptance checks for the current
 domain-complete pipeline mainline.
 
-## Marker Command
+## Test Command
 
 From the repository root, run:
 

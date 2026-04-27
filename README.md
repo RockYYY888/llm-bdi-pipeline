@@ -35,8 +35,8 @@ stored LTLf records, the Jason runtime source used by the evaluator, and the
 The repository intentionally does not include local `.env` files, API keys,
 generated run outputs under `artifacts/` or `tests/generated/`, or external
 planner/verifier executables. Those outputs are reproducible from the commands
-below, while the external executables must be installed on the marker's
-machine for full planning and verification experiments.
+below, while the external executables must be installed on the local machine
+for full planning and verification experiments.
 
 ## Repository Layout
 
@@ -110,7 +110,7 @@ transport in `src/language_model/openai_compatible.py`. Stage-specific
 environment variables such as `METHOD_SYNTHESIS_MODEL` remain optional
 overrides for experiments.
 
-## Marker Quick Start
+## Quick Start
 
 Use these commands to check the repository from a fresh clone:
 
