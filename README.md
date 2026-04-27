@@ -30,7 +30,9 @@ dissertation evaluation.
 The repository includes the Python implementation, regression tests, supported
 IPC 2020 benchmark domains and problem files, stored benchmark query records,
 stored LTLf records, the Jason runtime source used by the evaluator, and the
-`uv.lock` dependency lock file.
+`uv.lock` dependency lock file. The vendored Jason runtime is pruned to the
+files needed for building and running the evaluator; upstream demos, examples,
+site docs, and upstream test fixtures are not included.
 
 The repository intentionally does not include local `.env` files, API keys,
 generated run outputs under `artifacts/` or `tests/generated/`, or external

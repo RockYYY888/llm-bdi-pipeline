@@ -48,6 +48,12 @@ artifacts/
 tests/generated/
 tests/method_library/generated/
 
+# Jason/Gradle runtime build outputs
+.gradle/
+src/evaluation/jason_runtime/jason_src/.gradle/
+src/evaluation/jason_runtime/jason_src/bin/
+src/evaluation/jason_runtime/jason_src/**/build/
+
 # Temporary files
 *.tmp
 *.bak
