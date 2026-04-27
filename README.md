@@ -133,7 +133,9 @@ uv run python tests/run_direct_plan_generation_api_sweep.py \
 
 ## Toolchains
 
-Full evaluation expects these external tools on `PATH`:
+Unit tests and prompt generation run with only the Python dependencies above.
+Full planning and verification sweeps also expect external executables on
+`PATH`:
 
 - `pandaPIparser`
 - `pandaPIgrounder`
@@ -142,3 +144,41 @@ Full evaluation expects these external tools on `PATH`:
 - Java 17 to 23 for Jason runtime execution
 
 Optional local toolchains can live under `.external/`, which is ignored by git.
+
+### PATH Setup
+
+Install or build the planning tools in any local directory, then add the
+directories that contain the executables to `PATH`. The examples below assume
+local builds under `.external/`, but system-wide install paths work the same
+way.
+
+```bash
+export PANDA_ROOT="$PWD/.external/PandaDealer"
+export LIFTED_LINEAR_ROOT="$PWD/.external/lifted-linear"
+export MONA_ROOT="/opt/homebrew"
+
+export PATH="$PANDA_ROOT/00-parser/build/install/pandaPIparser/bin:$PATH"
+export PATH="$PANDA_ROOT/01-grounder/build/install/pandaPIgrounder/bin:$PATH"
+export PATH="$PANDA_ROOT/02-planner/build/install/pandaPIengine/bin:$PATH"
+export PATH="$LIFTED_LINEAR_ROOT/linearizer/build/install/linearizer/bin:$PATH"
+export PATH="$LIFTED_LINEAR_ROOT/pandaPIengine/build/install/pandaPIengine/bin:$PATH"
+export PATH="$MONA_ROOT/bin:$PATH"
+```
+
+For a persistent shell setup, place the exports in your shell profile, such as
+`~/.zshrc` on zsh. If you use another install layout, replace each path with the
+directory that actually contains the executable.
+
+Verify the runtime tools before running full sweeps:
+
+```bash
+command -v pandaPIparser
+command -v pandaPIgrounder
+command -v pandaPIengine
+command -v mona
+java -version
+```
+
+The commands should print executable paths, and `java -version` should report a
+Java version in the supported range. If a command is missing, update `PATH` and
+open a new shell or run `source ~/.zshrc`.
