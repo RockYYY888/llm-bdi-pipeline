@@ -25,6 +25,19 @@ Jason runtime evaluation, direct final-plan generation baseline, lifted PANDA
 SAT planner reference baseline, and IPC verifier integration used by the
 dissertation evaluation.
 
+## What Is Included
+
+The repository includes the Python implementation, regression tests, supported
+IPC 2020 benchmark domains and problem files, stored benchmark query records,
+stored LTLf records, the Jason runtime source used by the evaluator, and the
+`uv.lock` dependency lock file.
+
+The repository intentionally does not include local `.env` files, API keys,
+generated run outputs under `artifacts/` or `tests/generated/`, or external
+planner/verifier executables. Those outputs are reproducible from the commands
+below, while the external executables must be installed on the marker's
+machine for full planning and verification experiments.
+
 ## Repository Layout
 
 ```text
@@ -59,13 +72,26 @@ track `artifacts/`, `tests/generated/`, `tests/method_library/generated/`,
 
 ## Setup
 
+Prerequisites:
+
+- Python 3.12
+- `uv`
+
 Install dependencies with `uv`:
 
 ```bash
 uv sync
 ```
 
-Prepare API configuration:
+The offline regression suite does not require an API key or external planner
+tools:
+
+```bash
+uv run pytest
+uv run python src/main.py --help
+```
+
+Prepare API configuration only when running live language-model generation:
 
 ```bash
 cp .env.example .env
@@ -84,6 +110,37 @@ transport in `src/language_model/openai_compatible.py`. Stage-specific
 environment variables such as `METHOD_SYNTHESIS_MODEL` remain optional
 overrides for experiments.
 
+## Marker Quick Start
+
+Use these commands to check the repository from a fresh clone:
+
+```bash
+uv sync
+uv run pytest
+```
+
+This validates the checked-in code and data without requiring generated
+outputs, API access, or external planning tools. Tests that need unavailable
+full toolchains are skipped automatically.
+
+To run one live generation path, configure `.env` first, then run:
+
+```bash
+uv run python src/main.py generate-library \
+  --domain-file ./src/domains/blocksworld/domain.hddl \
+  --query-id query_1 \
+  --output-root ./artifacts/plan_library/blocksworld
+```
+
+After that artifact exists, evaluate the same stored benchmark case:
+
+```bash
+uv run python src/main.py evaluate-library \
+  --library-artifact ./artifacts/plan_library/blocksworld \
+  --domain-file ./src/domains/blocksworld/domain.hddl \
+  --query-id query_1
+```
+
 ## Main Commands
 
 Generate or refresh stored LTLf specifications:
@@ -101,7 +158,7 @@ uv run python src/main.py generate-library \
   --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
-Evaluate a stored benchmark case:
+Evaluate a stored benchmark case after generating a library artifact:
 
 ```bash
 uv run python src/main.py evaluate-library \

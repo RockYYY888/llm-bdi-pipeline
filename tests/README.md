@@ -3,6 +3,18 @@
 This directory contains the active regression and benchmark-acceptance checks for the current
 domain-complete pipeline mainline.
 
+## Marker Command
+
+From the repository root, run:
+
+```bash
+uv run pytest
+```
+
+The default suite is designed to pass from a clean checkout with only Python
+dependencies installed. Tests that require unavailable external planner
+toolchains are skipped.
+
 ## Coverage Overview
 
 - `tests/evaluation/test_execution_logger.py`
@@ -19,17 +31,17 @@ domain-complete pipeline mainline.
 ## Recommended Commands
 
 ```bash
-./.venv/bin/pytest -q tests/evaluation/test_execution_logger.py
-./.venv/bin/pytest -q tests/evaluation/test_structure.py
-./.venv/bin/pytest -q tests/official_benchmark/test_ground_truth_baseline_units.py
-./.venv/bin/pytest -q tests/official_benchmark/test_ground_truth_baseline.py -k smoke
-./.venv/bin/python tests/run_official_problem_root_baseline.py --domain blocksworld --run-dir tests/generated/tmp
+uv run pytest -q tests/evaluation/test_execution_logger.py
+uv run pytest -q tests/evaluation/test_structure.py
+uv run pytest -q tests/official_benchmark/test_ground_truth_baseline_units.py
+uv run pytest -q tests/official_benchmark/test_ground_truth_baseline.py -k smoke
+uv run python tests/run_official_problem_root_baseline.py --domain blocksworld --run-dir tests/generated/tmp
 ```
 
 Run the full live acceptance sweep only when doing final validation:
 
 ```bash
-./.venv/bin/python tests/run_official_problem_root_baseline.py
+uv run python tests/run_official_problem_root_baseline.py
 ```
 
 ## Notes
