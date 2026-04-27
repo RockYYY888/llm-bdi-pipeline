@@ -111,9 +111,9 @@ class ManualMethodPatchProvider:
 	"""
 	Write a compact patch prompt and apply a matching response file if present.
 
-	This supports a Web-GPT workflow without changing the automatic API path:
-	the prompt is written to ``<manual_dir>/<query_id>.prompt.txt`` and the
-	response is read from ``<manual_dir>/<query_id>.response.json`` or ``.txt``.
+	This supports offline review without changing the automatic API path: the
+	prompt is written to ``<manual_dir>/<query_id>.prompt.txt`` and the response
+	is read from ``<manual_dir>/<query_id>.response.json`` or ``.txt``.
 	"""
 
 	def __init__(

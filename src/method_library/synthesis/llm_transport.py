@@ -11,6 +11,10 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from language_model import (
+	OPENAI_COMPATIBLE_JSON_PROFILE_NAME,
+	create_openai_compatible_json_completion,
+)
 from method_library.synthesis.schema import HTNMethodLibrary
 from .errors import LLMStreamingResponseError
 
@@ -221,27 +225,23 @@ class MethodSynthesisLLMTransportMixin:
 	):
 		profile = dict(request_profile or {})
 		stream_response = bool(profile.get("stream_response", False))
-		request_kwargs: Dict[str, Any] = {
-			"model": self.model,
-			"messages": [
-				{"role": "system", "content": prompt["system"]},
-				{"role": "user", "content": prompt["user"]},
-			],
-			"temperature": 0.0,
-			"timeout": request_timeout_seconds if request_timeout_seconds is not None else self.timeout,
-			"stream": stream_response,
-		}
-		if max_tokens is not None:
-			request_kwargs["max_tokens"] = max_tokens
-		request_kwargs["response_format"] = {"type": "json_object"}
-		request_kwargs["reasoning_effort"] = profile.get("reasoning_effort", "max")
-		request_kwargs["extra_body"] = {
-			"thinking": {"type": profile.get("thinking_type", "enabled")},
-		}
+		messages = [
+			{"role": "system", "content": prompt["system"]},
+			{"role": "user", "content": prompt["user"]},
+		]
 		return self._run_with_wall_clock_timeout(
 			request_timeout_seconds,
-			lambda: self.client.chat.completions.create(
-				**request_kwargs,
+			lambda: create_openai_compatible_json_completion(
+				self.client,
+				model=self.model,
+				messages=messages,
+				timeout=request_timeout_seconds
+				if request_timeout_seconds is not None
+				else self.timeout,
+				max_tokens=max_tokens,
+				stream=stream_response,
+				reasoning_effort=profile.get("reasoning_effort", "max"),
+				thinking_type=profile.get("thinking_type", "enabled"),
 			),
 		)
 
@@ -252,7 +252,7 @@ class MethodSynthesisLLMTransportMixin:
 	) -> Dict[str, Any]:
 		_ = prompt
 		return {
-			"name": "deepseek_openai_single_pass",
+			"name": OPENAI_COMPATIBLE_JSON_PROFILE_NAME,
 			"stream_response": False,
 			"first_chunk_timeout_seconds": 0.0,
 			"completion_max_tokens": max(int(getattr(self, "max_tokens", 0) or 0), 1),

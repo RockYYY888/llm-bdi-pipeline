@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
+from language_model import create_openai_compatible_client
+from language_model import create_openai_compatible_json_completion
 from utils.config import Config, get_config
 from utils.hddl_parser import HDDLDomain, HDDLParser, HDDLProblem
 from verification.official_plan_verifier import (
@@ -168,30 +170,25 @@ class DirectPlanGenerator:
 		)
 		self.client = None
 		if self.api_key:
-			from openai import OpenAI
-
-			client_kwargs: Dict[str, Any] = {
-				"api_key": self.api_key,
-				"timeout": self.timeout,
-				"max_retries": 0,
-			}
-			if self.base_url:
-				client_kwargs["base_url"] = self.base_url
-			self.client = OpenAI(**client_kwargs)
+			self.client = create_openai_compatible_client(
+				api_key=self.api_key,
+				base_url=self.base_url,
+				timeout=self.timeout,
+				max_retries=0,
+			)
 
 	def generate(self, *, system_prompt: str, user_prompt: str) -> tuple[str, Dict[str, Any]]:
 		if self.client is None:
 			raise ValueError("DIRECT_PLAN_GENERATION_API_KEY is required for API generation.")
 		started_at = time.perf_counter()
-		response = self.client.chat.completions.create(
+		response = create_openai_compatible_json_completion(
+			self.client,
 			model=self.model,
 			messages=[
 				{"role": "system", "content": system_prompt},
 				{"role": "user", "content": user_prompt},
 			],
-			temperature=0.0,
 			max_tokens=self.max_tokens,
-			response_format={"type": "json_object"},
 			timeout=self.timeout,
 		)
 		choice = response.choices[0]

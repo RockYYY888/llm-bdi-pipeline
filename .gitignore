@@ -28,7 +28,6 @@ ENV/
 
 # UV package manager
 .uv/
-uv.lock
 
 # IDEs
 .vscode/
@@ -48,7 +47,6 @@ logs/
 artifacts/
 tests/generated/
 tests/method_library/generated/
-.codex/
 
 # Temporary files
 *.tmp
@@ -77,7 +75,6 @@ dmypy.json
 *.sublime-workspace
 external/
 .external/
-AGENTS.md
 dissertation/
 latex_code/
 tests/logs/

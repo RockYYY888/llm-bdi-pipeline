@@ -1,5 +1,5 @@
 """
-Configuration tests for stage-specific language-model settings.
+Configuration tests for shared and stage-specific language-model settings.
 """
 
 import sys
@@ -14,6 +14,9 @@ from utils.config import Config
 
 def test_stage_specific_generation_config_reads_expected_fields(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("LANGUAGE_MODEL_API_KEY", "sk-shared")
+    monkeypatch.setenv("LANGUAGE_MODEL_MODEL", "provider/shared-model")
+    monkeypatch.setenv("LANGUAGE_MODEL_BASE_URL", "https://api.shared.example/v1")
     monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
     monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
     monkeypatch.setenv("DIRECT_PLAN_GENERATION_API_KEY", "sk-direct")
@@ -37,6 +40,9 @@ def test_stage_specific_generation_config_reads_expected_fields(monkeypatch):
 
     config = Config()
 
+    assert config.language_model_api_key == "sk-shared"
+    assert config.language_model_model == "provider/shared-model"
+    assert config.language_model_base_url == "https://api.shared.example/v1"
     assert config.ltlf_generation_api_key == "sk-ltlf"
     assert config.method_synthesis_api_key == "sk-method"
     assert config.direct_plan_generation_api_key == "sk-direct"
@@ -106,11 +112,40 @@ def test_planning_timeout_defaults_to_large_runtime_budget(monkeypatch):
 
 def test_ltlf_generation_model_defaults_to_deepseek_v4_pro_when_no_env_is_set(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("LANGUAGE_MODEL_MODEL", raising=False)
     monkeypatch.delenv("LTLF_GENERATION_MODEL", raising=False)
 
     config = Config()
 
     assert config.ltlf_generation_model == "deepseek-v4-pro"
+
+
+def test_generation_stages_fall_back_to_shared_language_model_config(monkeypatch):
+    monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("LANGUAGE_MODEL_API_KEY", "sk-shared")
+    monkeypatch.setenv("LANGUAGE_MODEL_MODEL", "provider/shared-model")
+    monkeypatch.setenv("LANGUAGE_MODEL_BASE_URL", "https://api.shared.example/v1")
+    monkeypatch.delenv("LTLF_GENERATION_API_KEY", raising=False)
+    monkeypatch.delenv("METHOD_SYNTHESIS_API_KEY", raising=False)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_API_KEY", raising=False)
+    monkeypatch.delenv("LTLF_GENERATION_MODEL", raising=False)
+    monkeypatch.delenv("METHOD_SYNTHESIS_MODEL", raising=False)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_MODEL", raising=False)
+    monkeypatch.delenv("LTLF_GENERATION_BASE_URL", raising=False)
+    monkeypatch.delenv("METHOD_SYNTHESIS_BASE_URL", raising=False)
+    monkeypatch.delenv("DIRECT_PLAN_GENERATION_BASE_URL", raising=False)
+
+    config = Config()
+
+    assert config.ltlf_generation_api_key == "sk-shared"
+    assert config.method_synthesis_api_key == "sk-shared"
+    assert config.direct_plan_generation_api_key == "sk-shared"
+    assert config.ltlf_generation_model == "provider/shared-model"
+    assert config.method_synthesis_model == "provider/shared-model"
+    assert config.direct_plan_generation_model == "provider/shared-model"
+    assert config.ltlf_generation_base_url == "https://api.shared.example/v1"
+    assert config.method_synthesis_base_url == "https://api.shared.example/v1"
+    assert config.direct_plan_generation_base_url == "https://api.shared.example/v1"
 
 
 def test_ltlf_generation_model_uses_stage_specific_override(monkeypatch):
@@ -124,6 +159,7 @@ def test_ltlf_generation_model_uses_stage_specific_override(monkeypatch):
 
 def test_method_synthesis_model_defaults_to_deepseek_v4_pro(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("LANGUAGE_MODEL_MODEL", raising=False)
     monkeypatch.delenv("METHOD_SYNTHESIS_MODEL", raising=False)
 
     config = Config()
@@ -133,6 +169,7 @@ def test_method_synthesis_model_defaults_to_deepseek_v4_pro(monkeypatch):
 
 def test_direct_plan_generation_model_defaults_to_deepseek_v4_pro(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("LANGUAGE_MODEL_MODEL", raising=False)
     monkeypatch.delenv("DIRECT_PLAN_GENERATION_MODEL", raising=False)
 
     config = Config()
@@ -142,6 +179,7 @@ def test_direct_plan_generation_model_defaults_to_deepseek_v4_pro(monkeypatch):
 
 def test_generation_base_urls_default_to_deepseek_openai_endpoint(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.delenv("LANGUAGE_MODEL_BASE_URL", raising=False)
     monkeypatch.delenv("LTLF_GENERATION_BASE_URL", raising=False)
     monkeypatch.delenv("METHOD_SYNTHESIS_BASE_URL", raising=False)
     monkeypatch.delenv("DIRECT_PLAN_GENERATION_BASE_URL", raising=False)
@@ -153,8 +191,9 @@ def test_generation_base_urls_default_to_deepseek_openai_endpoint(monkeypatch):
     assert config.direct_plan_generation_base_url == "https://api.deepseek.com"
 
 
-def test_method_synthesis_api_key_uses_method_specific_key(monkeypatch):
+def test_method_synthesis_api_key_uses_method_specific_key_before_shared_key(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("LANGUAGE_MODEL_API_KEY", "sk-shared")
     monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
     monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
 
@@ -164,25 +203,27 @@ def test_method_synthesis_api_key_uses_method_specific_key(monkeypatch):
     assert config.ltlf_generation_api_key == "sk-ltlf"
 
 
-def test_method_synthesis_api_key_does_not_fall_back_to_ltlf_generation_key(monkeypatch):
+def test_method_synthesis_api_key_falls_back_to_shared_key_not_ltlf_key(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("LANGUAGE_MODEL_API_KEY", "sk-shared")
     monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
     monkeypatch.delenv("METHOD_SYNTHESIS_API_KEY", raising=False)
 
     config = Config()
 
-    assert config.method_synthesis_api_key is None
+    assert config.method_synthesis_api_key == "sk-shared"
 
 
-def test_direct_plan_generation_api_key_does_not_fall_back_to_other_keys(monkeypatch):
+def test_direct_plan_generation_api_key_falls_back_to_shared_key_not_other_stage_keys(monkeypatch):
     monkeypatch.setattr(Config, "_load_env", lambda self: None)
+    monkeypatch.setenv("LANGUAGE_MODEL_API_KEY", "sk-shared")
     monkeypatch.setenv("LTLF_GENERATION_API_KEY", "sk-ltlf")
     monkeypatch.setenv("METHOD_SYNTHESIS_API_KEY", "sk-method")
     monkeypatch.delenv("DIRECT_PLAN_GENERATION_API_KEY", raising=False)
 
     config = Config()
 
-    assert config.direct_plan_generation_api_key is None
+    assert config.direct_plan_generation_api_key == "sk-shared"
 
 
 def test_dotenv_merge_preserves_explicit_shell_overrides(monkeypatch):

@@ -2759,7 +2759,7 @@ def test_goal_grounding_request_timeout_scales_for_long_explicit_task_sequences(
 	assert NLToLTLfGenerator._suggest_request_timeout(query_text) == 240.0
 
 
-def test_goal_grounding_deepseek_request_profile_uses_configured_json_budget() -> None:
+def test_goal_grounding_openai_compatible_request_profile_uses_configured_json_budget() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,
@@ -2774,7 +2774,7 @@ def test_goal_grounding_deepseek_request_profile_uses_configured_json_budget() -
 
 	profile = generator._goal_grounding_request_profile(messages=messages)
 
-	assert profile["name"] == "deepseek_openai_single_pass"
+	assert profile["name"] == "openai_compatible_json_chat"
 	assert profile["stream_response"] is False
 	assert profile["first_chunk_timeout_seconds"] == 0.0
 	assert profile["completion_max_tokens"] == 12000
@@ -2783,7 +2783,7 @@ def test_goal_grounding_deepseek_request_profile_uses_configured_json_budget() -
 	assert profile["reasoning_effort"] == "high"
 
 
-def test_goal_grounding_chat_completion_uses_deepseek_json_request() -> None:
+def test_goal_grounding_chat_completion_uses_openai_compatible_json_request() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	captured_kwargs: dict[str, object] = {}
 
@@ -2824,7 +2824,7 @@ def test_goal_grounding_chat_completion_uses_deepseek_json_request() -> None:
 	assert captured_kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
-def test_goal_grounding_chat_completion_keeps_json_object_request_on_deepseek_path() -> None:
+def test_goal_grounding_chat_completion_keeps_json_object_request_on_openai_compatible_path() -> None:
 	domain_file = str(PROJECT_ROOT / "src" / "domains" / "blocksworld" / "domain.hddl")
 	generator = NLToLTLfGenerator(
 		domain_file=domain_file,

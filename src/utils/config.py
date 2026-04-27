@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-DEFAULT_GENERATION_BASE_URL = "https://api.deepseek.com"
-DEFAULT_LTLF_GENERATION_MODEL = "deepseek-v4-pro"
-DEFAULT_METHOD_SYNTHESIS_MODEL = "deepseek-v4-pro"
-DEFAULT_DIRECT_PLAN_GENERATION_MODEL = "deepseek-v4-pro"
+DEFAULT_LANGUAGE_MODEL_BASE_URL = "https://api.deepseek.com"
+DEFAULT_LANGUAGE_MODEL_NAME = "deepseek-v4-pro"
+DEFAULT_GENERATION_BASE_URL = DEFAULT_LANGUAGE_MODEL_BASE_URL
+DEFAULT_LTLF_GENERATION_MODEL = DEFAULT_LANGUAGE_MODEL_NAME
+DEFAULT_METHOD_SYNTHESIS_MODEL = DEFAULT_LANGUAGE_MODEL_NAME
+DEFAULT_DIRECT_PLAN_GENERATION_MODEL = DEFAULT_LANGUAGE_MODEL_NAME
 DEFAULT_EVALUATION_DOMAIN_SOURCE = "benchmark"
 DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS = 1000
 DEFAULT_METHOD_SYNTHESIS_TIMEOUT_SECONDS = 2400
@@ -46,17 +48,43 @@ class Config:
 			key, value = line.split("=", 1)
 			os.environ.setdefault(key.strip(), value.strip())
 
+	@staticmethod
+	def _first_env(*names: str, default: Optional[str] = None) -> Optional[str]:
+		for name in names:
+			value = os.getenv(name)
+			if value is not None and value.strip():
+				return value
+		return default
+
+	@property
+	def language_model_api_key(self) -> Optional[str]:
+		return self._first_env("LANGUAGE_MODEL_API_KEY")
+
+	@property
+	def language_model_model(self) -> str:
+		return self._first_env(
+			"LANGUAGE_MODEL_MODEL",
+			default=DEFAULT_LANGUAGE_MODEL_NAME,
+		) or DEFAULT_LANGUAGE_MODEL_NAME
+
+	@property
+	def language_model_base_url(self) -> Optional[str]:
+		return self._first_env(
+			"LANGUAGE_MODEL_BASE_URL",
+			default=DEFAULT_LANGUAGE_MODEL_BASE_URL,
+		)
+
 	@property
 	def ltlf_generation_api_key(self) -> Optional[str]:
-		return os.getenv("LTLF_GENERATION_API_KEY")
+		return self._first_env("LTLF_GENERATION_API_KEY", "LANGUAGE_MODEL_API_KEY")
 
 	@property
 	def method_synthesis_api_key(self) -> Optional[str]:
-		return os.getenv("METHOD_SYNTHESIS_API_KEY")
+		return self._first_env("METHOD_SYNTHESIS_API_KEY", "LANGUAGE_MODEL_API_KEY")
 
 	@property
 	def direct_plan_generation_api_key(self) -> Optional[str]:
-		return os.getenv("DIRECT_PLAN_GENERATION_API_KEY")
+		return self._first_env("DIRECT_PLAN_GENERATION_API_KEY", "LANGUAGE_MODEL_API_KEY")
 
 	@property
 	def ltlf_generation_model(self) -> str:
@@ -65,7 +93,11 @@ class Config:
 
 		This is a distinct pipeline stage from HTN method synthesis.
 		"""
-		return os.getenv("LTLF_GENERATION_MODEL", DEFAULT_LTLF_GENERATION_MODEL)
+		return self._first_env(
+			"LTLF_GENERATION_MODEL",
+			"LANGUAGE_MODEL_MODEL",
+			default=DEFAULT_LTLF_GENERATION_MODEL,
+		) or DEFAULT_LTLF_GENERATION_MODEL
 
 	@property
 	def method_synthesis_model(self) -> str:
@@ -75,16 +107,21 @@ class Config:
 		The domain-complete synthesis path is benchmark-pinned and should remain
 		stable across runs.
 		"""
-		return os.getenv("METHOD_SYNTHESIS_MODEL", DEFAULT_METHOD_SYNTHESIS_MODEL)
+		return self._first_env(
+			"METHOD_SYNTHESIS_MODEL",
+			"LANGUAGE_MODEL_MODEL",
+			default=DEFAULT_METHOD_SYNTHESIS_MODEL,
+		) or DEFAULT_METHOD_SYNTHESIS_MODEL
 
 	@property
 	def direct_plan_generation_model(self) -> str:
 		"""Get the model identifier for direct verifier-plan generation."""
 
-		return os.getenv(
+		return self._first_env(
 			"DIRECT_PLAN_GENERATION_MODEL",
-			DEFAULT_DIRECT_PLAN_GENERATION_MODEL,
-		)
+			"LANGUAGE_MODEL_MODEL",
+			default=DEFAULT_DIRECT_PLAN_GENERATION_MODEL,
+		) or DEFAULT_DIRECT_PLAN_GENERATION_MODEL
 
 	@property
 	def ltlf_generation_timeout(self) -> int:
@@ -148,15 +185,27 @@ class Config:
 
 	@property
 	def ltlf_generation_base_url(self) -> Optional[str]:
-		return os.getenv("LTLF_GENERATION_BASE_URL", DEFAULT_GENERATION_BASE_URL)
+		return self._first_env(
+			"LTLF_GENERATION_BASE_URL",
+			"LANGUAGE_MODEL_BASE_URL",
+			default=DEFAULT_GENERATION_BASE_URL,
+		)
 
 	@property
 	def method_synthesis_base_url(self) -> Optional[str]:
-		return os.getenv("METHOD_SYNTHESIS_BASE_URL", DEFAULT_GENERATION_BASE_URL)
+		return self._first_env(
+			"METHOD_SYNTHESIS_BASE_URL",
+			"LANGUAGE_MODEL_BASE_URL",
+			default=DEFAULT_GENERATION_BASE_URL,
+		)
 
 	@property
 	def direct_plan_generation_base_url(self) -> Optional[str]:
-		return os.getenv("DIRECT_PLAN_GENERATION_BASE_URL", DEFAULT_GENERATION_BASE_URL)
+		return self._first_env(
+			"DIRECT_PLAN_GENERATION_BASE_URL",
+			"LANGUAGE_MODEL_BASE_URL",
+			default=DEFAULT_GENERATION_BASE_URL,
+		)
 
 	@property
 	def ltlf_generation_session_id(self) -> str:

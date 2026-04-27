@@ -21,6 +21,11 @@ from evaluation.goal_grounding.canonical_ordered_formula import (
 	build_unordered_eventuality_formula,
 	ordered_formula_style_prompt_guidance,
 )
+from language_model import (
+	OPENAI_COMPATIBLE_JSON_PROFILE_NAME,
+	create_openai_compatible_client,
+	create_openai_compatible_json_completion,
+)
 from utils.config import DEFAULT_LTLF_GENERATION_MODEL
 from utils.config import DEFAULT_LTLF_GENERATION_SESSION_ID
 from utils.config import DEFAULT_LTLF_GENERATION_TIMEOUT_SECONDS
@@ -123,16 +128,12 @@ class NLToLTLfGenerator:
 			self.domain = HDDLParser.parse_domain(domain_file)
 
 		if api_key:
-			from openai import OpenAI
-
-			client_kwargs: Dict[str, Any] = {
-				"api_key": api_key,
-				"timeout": self.request_timeout,
-				"max_retries": 0,
-			}
-			if base_url:
-				client_kwargs["base_url"] = base_url
-			self.client = OpenAI(**client_kwargs)
+			self.client = create_openai_compatible_client(
+				api_key=api_key,
+				base_url=base_url,
+				timeout=self.request_timeout,
+				max_retries=0,
+			)
 
 	def generate(
 		self,
@@ -876,21 +877,16 @@ class NLToLTLfGenerator:
 		capped_response_max_tokens = self._apply_goal_grounding_provider_token_ceiling(
 			response_max_tokens,
 		)
-		request_kwargs = {
-			"model": self.model,
-			"messages": messages,
-			"temperature": 0.0,
-			"timeout": float(request_timeout or self.request_timeout),
-			"stream": stream_response,
-		}
-		if capped_response_max_tokens is not None:
-			request_kwargs["max_tokens"] = int(capped_response_max_tokens)
-		request_kwargs["response_format"] = {"type": "json_object"}
-		request_kwargs["reasoning_effort"] = profile.get("reasoning_effort", "high")
-		request_kwargs["extra_body"] = {
-			"thinking": {"type": profile.get("thinking_type", "enabled")},
-		}
-		return self.client.chat.completions.create(**request_kwargs)
+		return create_openai_compatible_json_completion(
+			self.client,
+			model=self.model,
+			messages=messages,
+			timeout=float(request_timeout or self.request_timeout),
+			max_tokens=capped_response_max_tokens,
+			stream=stream_response,
+			reasoning_effort=profile.get("reasoning_effort", "high"),
+			thinking_type=profile.get("thinking_type", "enabled"),
+		)
 
 	def _read_response_payload(
 		self,
@@ -966,7 +962,7 @@ class NLToLTLfGenerator:
 	) -> Dict[str, Any]:
 		_ = messages
 		return {
-			"name": "deepseek_openai_single_pass",
+			"name": OPENAI_COMPATIBLE_JSON_PROFILE_NAME,
 			"stream_response": False,
 			"first_chunk_timeout_seconds": 0.0,
 			"completion_max_tokens": max(int(self.response_max_tokens or 0), 1),

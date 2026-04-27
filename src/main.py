@@ -43,7 +43,7 @@ def _require_existing_path(path_text: str | None, *, label: str) -> str:
 
 
 def _has_configured_api_key(api_key: str | None) -> bool:
-	return bool(api_key and api_key.startswith("sk-"))
+	return bool(api_key and api_key.strip())
 
 
 def _require_api_key(
@@ -63,14 +63,15 @@ def _require_api_key(
 	print("1. Copy .env.example to .env:")
 	print("   cp .env.example .env")
 	print("\n2. Edit .env and add your API key:")
-	print(f"   {env_var_name}=sk-proj-your-actual-key-here")
+	print("   LANGUAGE_MODEL_API_KEY=your-api-key")
+	print(f"   # Optional stage-specific override: {env_var_name}=your-api-key")
 	print(
-		f"   LTLF_GENERATION_MODEL={config.ltlf_generation_model}  "
-		"# NL-to-LTLf generation default",
+		f"   LANGUAGE_MODEL_MODEL={config.language_model_model}  "
+		"# shared language-model default",
 	)
 	print(
-		f"   METHOD_SYNTHESIS_MODEL={config.method_synthesis_model}  "
-		"# method library synthesis default",
+		f"   LANGUAGE_MODEL_BASE_URL={config.language_model_base_url}  "
+		"# shared OpenAI-compatible endpoint",
 	)
 	print("\n3. Run the command again")
 	print("\n" + "=" * 80)
@@ -89,7 +90,7 @@ Examples:
   python src/main.py generate-ltlf-dataset --query-domain blocksworld --query-id query_1
   python src/main.py generate-library --domain-file ./src/domains/blocksworld/domain.hddl
   python src/main.py evaluate-library --library-artifact ./artifacts/plan_library/blocksworld --domain-file ./src/domains/blocksworld/domain.hddl --query-id query_1
-  python src/main.py incremental-jason-evaluation --domain-file ./src/domains/blocksworld/domain.hddl --output-root ./artifacts/incremental_jason/blocksworld --query-id query_1 --patch-provider manual
+  python src/main.py incremental-jason-evaluation --domain-file ./src/domains/blocksworld/domain.hddl --output-root ./artifacts/incremental_jason/blocksworld --query-id query_1 --patch-provider api
   python src/main.py evaluate-library --library-artifact ./artifacts/plan_library/blocksworld --domain-file ./src/domains/blocksworld/domain.hddl --problem-file ./src/domains/blocksworld/problems/p01.hddl --instruction "Put block b4 on block b2" --ltlf-formula "do_put_on(b4, b2)"
 		""",
 	)
@@ -225,13 +226,13 @@ Examples:
 		choices=("none", "manual", "api"),
 		default="none",
 		help=(
-			"Patch source after a failed query. 'manual' writes Web-GPT prompts and "
-			"applies matching response files; 'api' uses METHOD_SYNTHESIS_* config."
+			"Patch source after a failed query. 'manual' writes offline prompts and "
+			"applies matching response files; 'api' uses shared language-model config."
 		),
 	)
 	incremental_parser.add_argument(
 		"--manual-patch-dir",
-		help="Directory for manual Web-GPT patch prompts and responses.",
+		help="Directory for manual patch prompts and response files.",
 	)
 	incremental_parser.add_argument(
 		"--max-patch-attempts",

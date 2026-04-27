@@ -1,16 +1,19 @@
-# Chapter 4 Plan-Library Pipeline
+# LLM-BDI Pipeline
 
-This repository now treats the dissertation methodology as the primary implementation contract:
+This repository implements the Chapter 4 plan-library pipeline:
 
-`D^- + L_s -> Φ_s -> M -> S`
+```text
+D^- + L_s -> Phi_s -> M -> S
+```
 
 - `D^-`: masked official HDDL domain with methods removed
 - `L_s`: stored domain-specific query sequence
-- `Φ_s`: validated temporal specifications from `queries_LTLf.json`
-- `M`: synthesized HTN method library
+- `Phi_s`: validated temporal specifications from `queries_LTLf.json`
+- `M`: synthesized Hierarchical Task Network method library
 - `S`: translated AgentSpeak(L) plan library
 
-Grounding, Jason execution, planner runs, and verifier checks are evaluation evidence built on top of `S`. They are no longer the primary generation architecture.
+Grounding, Jason execution, planner runs, and verifier checks are evaluation
+evidence built on top of `S`.
 
 ## Repository Layout
 
@@ -22,80 +25,58 @@ Grounding, Jason execution, planner runs, and verifier checks are evaluation evi
 │   ├── method_library/
 │   ├── plan_library/
 │   ├── evaluation/
-│   ├── compat/
+│   ├── htn_evaluation/
+│   ├── language_model/
 │   ├── planning/
 │   ├── execution_logging/
 │   ├── verification/
 │   ├── domains/
 │   ├── benchmark_data/
 │   └── utils/
-├── tests/
-│   ├── temporal_specification/
-│   ├── plan_library/
-│   ├── evaluation/
-│   ├── support/
-│   └── utils/
-└── TO-DO-LIST.md
+└── tests/
+    ├── temporal_specification/
+    ├── plan_library/
+    ├── evaluation/
+    ├── method_library/
+    ├── official_benchmark/
+    ├── support/
+    └── utils/
 ```
 
-## Main Entry Points
+Generated run outputs are intentionally local-only. The repository does not
+track `artifacts/`, `tests/generated/`, `tests/method_library/generated/`,
+`tmp/`, local thesis material, or environment files.
 
-- command-line entry point:
-  [`src/main.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/main.py)
-- Chapter 4 generation pipeline:
-  [`src/plan_library/pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/plan_library/pipeline.py)
-- evaluation pipeline:
-  [`src/evaluation/pipeline.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/evaluation/pipeline.py)
-- compatibility helpers:
-  [`src/compat/__init__.py`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/compat/__init__.py)
+## Setup
 
-## Persisted Generation Artifacts
-
-`generate-library` persists one paper-aligned bundle:
-
-- `artifact_metadata.json`
-- `masked_domain.hddl`
-- `query_sequence.json`
-- `temporal_specifications.json`
-- `method_library.json`
-- `plan_library.json`
-- `plan_library.asl`
-- `translation_coverage.json`
-- `library_validation.json`
-- `method_synthesis_metadata.json`
-
-`generated_domain.hddl` is no longer a core generation artifact. It is only materialized inside evaluation flows when a legacy planner path requires an HDDL adapter.
-
-## Command-Line Interface
-
-Create the project environment with `uv`:
+Install dependencies with `uv`:
 
 ```bash
-uv venv
 uv sync
 ```
 
-Prepare `.env`:
+Prepare API configuration:
 
 ```bash
 cp .env.example .env
 ```
 
-Minimum configuration for optional LTLf generation and method synthesis:
+Minimum live language-model configuration:
 
 ```bash
-LTLF_GENERATION_API_KEY=...
-LTLF_GENERATION_BASE_URL=https://api.deepseek.com
-LTLF_GENERATION_MODEL=deepseek-v4-pro
-LTLF_GENERATION_SESSION_ID=ltlf-generation
-METHOD_SYNTHESIS_API_KEY=...
-METHOD_SYNTHESIS_BASE_URL=https://api.deepseek.com
-METHOD_SYNTHESIS_MODEL=deepseek-v4-pro
-METHOD_SYNTHESIS_SESSION_ID=method-synthesis
+LANGUAGE_MODEL_API_KEY=...
+LANGUAGE_MODEL_BASE_URL=https://api.deepseek.com
+LANGUAGE_MODEL_MODEL=deepseek-v4-pro
 ```
 
-Generate or refresh the stored LTLf dataset only when `queries_LTLf.json` is absent or
-needs regeneration:
+All live model calls use the shared OpenAI-compatible JSON Chat Completion
+transport in `src/language_model/openai_compatible.py`. Stage-specific
+environment variables such as `METHOD_SYNTHESIS_MODEL` remain optional
+overrides for experiments.
+
+## Main Commands
+
+Generate or refresh stored LTLf specifications:
 
 ```bash
 uv run python src/main.py generate-ltlf-dataset \
@@ -110,7 +91,7 @@ uv run python src/main.py generate-library \
   --domain-file ./src/domains/blocksworld/domain.hddl
 ```
 
-Evaluate a stored benchmark case from `queries_LTLf.json`:
+Evaluate a stored benchmark case:
 
 ```bash
 uv run python src/main.py evaluate-library \
@@ -119,7 +100,7 @@ uv run python src/main.py evaluate-library \
   --query-id query_1
 ```
 
-Evaluate an ad hoc instruction with an explicit LTLf formula:
+Evaluate an ad hoc instruction with an explicit formula:
 
 ```bash
 uv run python src/main.py evaluate-library \
@@ -130,17 +111,29 @@ uv run python src/main.py evaluate-library \
   --ltlf-formula "do_put_on(b4, b2)"
 ```
 
-## Query Dataset
+## Sweep Entry Points
 
-The default stored temporal-specification dataset is:
+Every sweep has a standalone Python entry point:
 
-- [`src/benchmark_data/queries_LTLf.json`](/Users/lyw/Desktop/FYP/llm-bdi-pipeline-dev/src/benchmark_data/queries_LTLf.json)
+- `tests/run_plan_library_evaluation_benchmark.py`
+- `tests/run_official_problem_root_baseline.py`
+- `tests/run_direct_plan_generation_baseline.py`
+- `tests/run_direct_plan_generation_api_sweep.py`
+- `tests/method_library/run_generated_domain_build_sweep.py`
+- `tests/method_library/run_generated_problem_root_baseline.py`
 
-Generation uses this dataset by default, filtered to the selected domain. Stored benchmark evaluation also uses it directly, rather than rerunning live grounding. The `generate-ltlf-dataset` command is an explicit preparation step, not an implicit part of `generate-library`.
+Example:
+
+```bash
+uv run python tests/run_direct_plan_generation_api_sweep.py \
+  --domain blocksworld \
+  --query-id query_1 \
+  --skip-verifier
+```
 
 ## Toolchains
 
-The evaluation path expects:
+Full evaluation expects these external tools on `PATH`:
 
 - `pandaPIparser`
 - `pandaPIgrounder`
@@ -148,4 +141,4 @@ The evaluation path expects:
 - `mona`
 - Java 17 to 23 for Jason runtime execution
 
-Optional local toolchains can live under `.external/`. That directory is treated as local-only and ignored by git.
+Optional local toolchains can live under `.external/`, which is ignored by git.

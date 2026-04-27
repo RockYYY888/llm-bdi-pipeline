@@ -1,7 +1,7 @@
 [project]
 name = "llm-bdi-pipeline"
 version = "0.1.0"
-description = "Add your description here"
+description = "Language-model-assisted BDI plan-library generation and evaluation pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -11,6 +11,38 @@ dependencies = [
     "pyperplan>=2.1",
     "ltlf2dfa>=1.0.2",
 ]
+
+[project.scripts]
+llm-bdi-pipeline = "main:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["main"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+    "compat*",
+    "domain_model*",
+    "evaluation*",
+    "execution_logging*",
+    "htn_evaluation*",
+    "language_model*",
+    "method_library*",
+    "plan_library*",
+    "planning*",
+    "temporal_specification*",
+    "utils*",
+    "verification*",
+]
+
+[tool.setuptools.package-data]
+"*" = ["*.hddl", "*.json", "*.asl", "*.mas2j", "*.properties", "*.jar"]
 
 [dependency-groups]
 dev = [

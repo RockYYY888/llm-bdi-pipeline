@@ -38,6 +38,7 @@ from method_library.validation.minimal_validation import (
 	validate_domain_complete_coverage,
 	validate_minimal_library,
 )
+from language_model import create_openai_compatible_client
 from utils.config import DEFAULT_METHOD_SYNTHESIS_MODEL
 from utils.hddl_condition_parser import HDDLConditionParser
 
@@ -70,21 +71,12 @@ class HTNMethodSynthesizer(
 		self.client = None
 
 		if api_key:
-			from openai import OpenAI
-
-			if base_url:
-				self.client = OpenAI(
-					api_key=api_key,
-					base_url=base_url,
-					timeout=self.timeout,
-					max_retries=0,
-				)
-			else:
-				self.client = OpenAI(
-					api_key=api_key,
-					timeout=self.timeout,
-					max_retries=0,
-				)
+			self.client = create_openai_compatible_client(
+				api_key=api_key,
+				base_url=base_url,
+				timeout=self.timeout,
+				max_retries=0,
+			)
 
 	def synthesize_domain_complete(
 		self,

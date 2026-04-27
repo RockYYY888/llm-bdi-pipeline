@@ -364,7 +364,7 @@ def test_method_synthesis_transport_preserves_configured_output_budget() -> None
 	assert synthesizer._apply_method_synthesis_provider_token_ceiling(144000) == 144000
 
 
-def test_method_synthesis_deepseek_profile_uses_configured_output_budget() -> None:
+def test_method_synthesis_openai_compatible_profile_uses_configured_output_budget() -> None:
 	synthesizer = HTNMethodSynthesizer(
 		model="deepseek-v4-pro",
 		base_url="https://api.deepseek.com",
@@ -375,7 +375,7 @@ def test_method_synthesis_deepseek_profile_uses_configured_output_budget() -> No
 		prompt={"system": "x", "user": "y"},
 	)
 
-	assert profile["name"] == "deepseek_openai_single_pass"
+	assert profile["name"] == "openai_compatible_json_chat"
 	assert profile["stream_response"] is False
 	assert profile["completion_max_tokens"] == 144000
 	assert profile["max_tokens_policy"] == "configured_method_synthesis_max_tokens"
@@ -383,7 +383,7 @@ def test_method_synthesis_deepseek_profile_uses_configured_output_budget() -> No
 	assert profile["reasoning_effort"] == "max"
 
 
-def test_method_synthesis_transport_uses_deepseek_openai_json_request() -> None:
+def test_method_synthesis_transport_uses_openai_compatible_json_request() -> None:
 	captured_kwargs = {}
 
 	class FakeCompletions:
@@ -441,7 +441,7 @@ def test_method_synthesis_transport_create_phase_has_wall_clock_guard() -> None:
 			{"system": "x", "user": "y"},
 			max_tokens=16,
 			request_profile={
-				"name": "deepseek_openai_single_pass",
+				"name": "openai_compatible_json_chat",
 				"stream_response": False,
 				"first_chunk_timeout_seconds": 0.01,
 				"thinking_type": "enabled",
@@ -477,7 +477,7 @@ def test_method_synthesis_transport_enforces_wall_clock_timeout() -> None:
 	assert getattr(exc_info.value, "transport_metadata", {}) == {
 		"llm_request_id": "req_timeout",
 		"llm_response_mode": "non_streaming",
-		"llm_request_profile": "deepseek_openai_single_pass",
+		"llm_request_profile": "openai_compatible_json_chat",
 		"llm_first_chunk_timeout_seconds": 0.0,
 		"llm_completion_max_tokens": 144000,
 		"llm_max_tokens_policy": "configured_method_synthesis_max_tokens",
@@ -724,7 +724,7 @@ def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
 			error.transport_metadata = {
 				"llm_request_id": f"req_retry_{self.call_count}",
 				"llm_response_mode": "non_streaming",
-				"llm_request_profile": "deepseek_openai_single_pass",
+				"llm_request_profile": "openai_compatible_json_chat",
 			}
 			raise error
 
@@ -750,7 +750,7 @@ def test_method_synthesis_retries_stream_failures_with_same_profile() -> None:
 		"req_retry_6",
 	]
 	assert all(
-		attempt["request_profile"] == "deepseek_openai_single_pass"
+		attempt["request_profile"] == "openai_compatible_json_chat"
 		for attempt in metadata["llm_attempt_trace"]
 	)
 
@@ -768,7 +768,7 @@ def test_method_synthesis_retries_then_accepts_successful_response() -> None:
 				error.transport_metadata = {
 					"llm_request_id": f"req_retry_{self.call_count}",
 					"llm_response_mode": "non_streaming",
-					"llm_request_profile": "deepseek_openai_single_pass",
+					"llm_request_profile": "openai_compatible_json_chat",
 				}
 				raise error
 			return (
@@ -777,7 +777,7 @@ def test_method_synthesis_retries_then_accepts_successful_response() -> None:
 				{
 					"llm_request_id": "req_retry_6",
 					"llm_response_mode": "non_streaming",
-					"llm_request_profile": "deepseek_openai_single_pass",
+					"llm_request_profile": "openai_compatible_json_chat",
 				},
 			)
 
