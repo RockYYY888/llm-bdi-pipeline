@@ -1600,6 +1600,10 @@ def test_htn_plan_solve_evidence_drops_large_inline_runtime_payloads(
 
 
 def test_planning_tasks_can_filter_to_one_requested_planner() -> None:
+	if not baseline_support.lifted_linear_toolchain_available():
+		import pytest
+
+		pytest.skip("Lifted Linear/PANDA toolchain is not available.")
 	pipeline = HTNEvaluationPipeline(
 		domain_file=DOMAIN_FILES["transport"],
 		problem_file=str(

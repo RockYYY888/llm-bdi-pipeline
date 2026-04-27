@@ -25,6 +25,7 @@ from htn_evaluation.result_tables import (
 	validate_planner_id,
 	write_domain_results,
 )
+from planning.linearization import LiftedLinearPlanner
 
 from tests.support.plan_library_generation_support import (
 	DOMAIN_FILES,
@@ -38,6 +39,13 @@ from tests.support.plan_library_generation_support import (
 	run_generated_domain_build,
 )
 from tests.support.method_library_validation_support import run_official_domain_gate_preflight
+
+
+def lifted_linear_toolchain_available() -> bool:
+	try:
+		return LiftedLinearPlanner().toolchain_available()
+	except Exception:
+		return False
 
 
 def _load_existing_problem_rows(
