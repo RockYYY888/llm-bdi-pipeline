@@ -152,7 +152,7 @@ class JasonRunner:
 	failed_goal_record_limit = 64
 	runtime_output_artifact_limit_chars = 500_000
 	method_trace_record_limit = 2_000
-	min_java_major = 17
+	min_java_major = 23
 	max_java_major = 23
 	environment_class_name = "JasonPipelineEnvironment"
 
@@ -4975,7 +4975,7 @@ public class {self.environment_class_name} extends Environment {{
 
 		if not supported:
 			raise JasonValidationError(
-				"No supported Java runtime found for Jason execution (requires Java 17-23).",
+				"No supported Java runtime found for Jason execution (requires Java 23).",
 				metadata={"candidates": unsupported},
 			)
 

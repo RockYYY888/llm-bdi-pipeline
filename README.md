@@ -111,9 +111,9 @@ uv run python src/main.py evaluate-library \
   --ltlf-formula "do_put_on(b4, b2)"
 ```
 
-## Sweep Entry Points
+## Experiment Scripts
 
-Every sweep has a standalone Python entry point:
+Longer experiments use standalone Python scripts:
 
 - `tests/run_plan_library_evaluation_benchmark.py`
 - `tests/run_official_problem_root_baseline.py`
@@ -134,42 +134,29 @@ uv run python tests/run_direct_plan_generation_api_sweep.py \
 ## Toolchains
 
 Unit tests and prompt generation run with only the Python dependencies above.
-Full planning and verification sweeps also expect external executables on
-`PATH`:
+Full planning and verification experiments also need these runtime tools:
 
 - `pandaPIparser`
 - `pandaPIgrounder`
 - `pandaPIengine`
 - `mona`
-- Java 17 to 23 for Jason runtime execution
+- Java 23 for Jason runtime execution
 
 Optional local toolchains can live under `.external/`, which is ignored by git.
 
 ### PATH Setup
 
-Install or build the planning tools in any local directory, then add the
-directories that contain the executables to `PATH`. The examples below assume
-local builds under `.external/`, but system-wide install paths work the same
-way.
+Add the directories that contain the required binaries to `PATH`. Replace the
+placeholder paths with your local install locations.
 
 ```bash
-export PANDA_ROOT="$PWD/.external/PandaDealer"
-export LIFTED_LINEAR_ROOT="$PWD/.external/lifted-linear"
-export MONA_ROOT="/opt/homebrew"
-
-export PATH="$PANDA_ROOT/00-parser/build/install/pandaPIparser/bin:$PATH"
-export PATH="$PANDA_ROOT/01-grounder/build/install/pandaPIgrounder/bin:$PATH"
-export PATH="$PANDA_ROOT/02-planner/build/install/pandaPIengine/bin:$PATH"
-export PATH="$LIFTED_LINEAR_ROOT/linearizer/build/install/linearizer/bin:$PATH"
-export PATH="$LIFTED_LINEAR_ROOT/pandaPIengine/build/install/pandaPIengine/bin:$PATH"
-export PATH="$MONA_ROOT/bin:$PATH"
+export JAVA_HOME="/path/to/jdk-23"
+export PATH="$JAVA_HOME/bin:/path/to/pandaPIparser/bin:/path/to/pandaPIgrounder/bin:/path/to/pandaPIengine/bin:/path/to/mona/bin:$PATH"
 ```
 
-For a persistent shell setup, place the exports in your shell profile, such as
-`~/.zshrc` on zsh. If you use another install layout, replace each path with the
-directory that actually contains the executable.
+For zsh, put these two lines in `~/.zshrc` and run `source ~/.zshrc`.
 
-Verify the runtime tools before running full sweeps:
+Verify the setup before running full experiments:
 
 ```bash
 command -v pandaPIparser
@@ -179,6 +166,5 @@ command -v mona
 java -version
 ```
 
-The commands should print executable paths, and `java -version` should report a
-Java version in the supported range. If a command is missing, update `PATH` and
-open a new shell or run `source ~/.zshrc`.
+Each `command -v` call should print a path, and `java -version` should report
+Java 23. If anything is missing, update `PATH` and reload your shell.
