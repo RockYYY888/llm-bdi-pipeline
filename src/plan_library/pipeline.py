@@ -1,5 +1,5 @@
 """
-Plan-library generation pipeline aligned with Chapter 4.
+Plan-library generation pipeline for the dissertation workflow.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from .validation import build_library_validation_record
 
 
 class PlanLibraryGenerationPipeline:
-	"""Generate method library M and AgentSpeak(L) plan library S from Chapter 4 inputs."""
+	"""Generate method library M and AgentSpeak(L) plan library S from workflow inputs."""
 
 	def __init__(
 		self,

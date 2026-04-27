@@ -8,7 +8,7 @@ from plan_library import PlanLibraryArtifactBundle, load_plan_library_artifact_b
 def bundle_to_legacy_domain_library_artifact(
 	library_artifact,
 ):
-	"""Convert a Chapter 4 plan-library bundle into the legacy method-library artifact."""
+	"""Convert a plan-library bundle into the legacy method-library artifact."""
 
 	bundle = load_plan_library_artifact_bundle(library_artifact)
 	if not isinstance(bundle, PlanLibraryArtifactBundle):

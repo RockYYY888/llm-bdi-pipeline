@@ -1,5 +1,5 @@
 """
-Artifact persistence for Chapter 4 plan-library bundles.
+Artifact persistence for generated plan-library bundles.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .models import LibraryValidationRecord, PlanLibrary, TranslationCoverage
 
 @dataclass(frozen=True)
 class PlanLibraryArtifactBundle:
-	"""Persisted Chapter 4 artifact bundle for one generated plan library."""
+	"""Persisted artifact bundle for one generated plan library."""
 
 	domain_name: str
 	query_sequence: Sequence[QueryInstructionRecord]

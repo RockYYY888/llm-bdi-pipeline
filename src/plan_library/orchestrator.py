@@ -1,5 +1,5 @@
 """
-Method-library synthesis orchestration for the Chapter 4 plan-library pipeline.
+Method-library synthesis orchestration for the plan-library workflow.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from method_library.validation import MethodLibraryValidator
 
 
 class PlanLibraryGenerationOrchestrator:
-	"""Own the Chapter 4 generation steps up to method-library validation."""
+	"""Own the generation steps up to method-library validation."""
 
 	def __init__(self, pipeline_context: MethodLibrarySynthesisContext) -> None:
 		self.context = pipeline_context

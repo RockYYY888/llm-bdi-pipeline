@@ -1095,7 +1095,7 @@ def build_domain_htn_system_prompt() -> str:
 	return (
 		"ROLE:\n"
 		"Generate a typed symbolic Hierarchical Task Network method library M for "
-		"Chapter 4 AgentSpeak(L) plan-library construction.\n"
+		"AgentSpeak(L) plan-library construction for the dissertation workflow.\n"
 		"\n"
 		"OBJECTIVE:\n"
 		"Infer reusable domain-level decompositions over the masked HDDL domain D^- "

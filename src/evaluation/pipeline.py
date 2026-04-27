@@ -1,5 +1,5 @@
 """
-Plan-library evaluation pipeline aligned with Chapter 4 artifact reuse and Chapter 5 evidence collection.
+Plan-library evaluation pipeline for artifact reuse and benchmark evidence collection.
 """
 
 from __future__ import annotations

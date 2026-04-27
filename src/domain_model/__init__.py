@@ -1,5 +1,5 @@
 """
-Chapter 4 domain-model exports.
+Domain-model exports for the plan-library workflow.
 """
 
 from .masking import (

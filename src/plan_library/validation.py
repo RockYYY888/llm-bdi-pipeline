@@ -1,5 +1,5 @@
 """
-Plan-library structural validation aligned with Chapter 4.
+Plan-library structural validation.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def build_library_validation_record(
 	translation_coverage: TranslationCoverage,
 	method_validation: Dict[str, Any] | None,
 ) -> LibraryValidationRecord:
-	"""Build the Chapter 4 validation record for a generated plan library."""
+	"""Build the validation record for a generated plan library."""
 
 	plan_validation = validate_plan_library_structure(
 		domain=domain,
@@ -71,7 +71,7 @@ def validate_plan_library_structure(
 	translation_coverage: TranslationCoverage,
 	method_validation: Dict[str, Any] | None,
 ) -> PlanLibraryStructuralValidation:
-	"""Validate the generated structured plan library against the Chapter 4 contract."""
+	"""Validate the generated structured plan library against the workflow contract."""
 
 	task_signatures = _symbol_signature_map(
 		getattr(domain, "tasks", ()) or (),
@@ -171,7 +171,7 @@ def validate_plan_library_structure(
 		warnings.append(
 			"HTN step literal/precondition/effect annotations remain auxiliary in the method "
 			"library; the AgentSpeak(L) translation preserves method head, context, subtasks, "
-			"and ordering as specified in Chapter 4.",
+			"and ordering as specified by the workflow contract.",
 		)
 
 	return PlanLibraryStructuralValidation(

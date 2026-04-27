@@ -1,5 +1,5 @@
 """
-Chapter 4 plan-library exports.
+Plan-library exports for the dissertation workflow.
 
 Keep package import side effects minimal so stage modules can import
 plan-library types without triggering the full generation pipeline.

@@ -1,5 +1,5 @@
 """
-Chapter 4 method-library exports.
+Method-library exports for the plan-library workflow.
 
 Keep package import side effects minimal so subprocess spawn can import
 `method_library.synthesis.schema` without pulling in the full method-library synthesis

@@ -1,5 +1,5 @@
 """
-Command-line entry point for the Chapter 4 aligned plan-library pipeline.
+Command-line entry point for the dissertation plan-library workflow.
 """
 
 from __future__ import annotations
@@ -81,8 +81,8 @@ def _require_api_key(
 def build_argument_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 		description=(
-			"Generate and evaluate Chapter 4 plan-library artifacts following the paper pipeline "
-			"D^- + L_s -> Φ_s -> M -> S."
+			"Generate BDI plan libraries from masked HDDL domains and natural-language "
+			"task instructions, then evaluate them with the dissertation benchmark workflow."
 		),
 		formatter_class=argparse.RawDescriptionHelpFormatter,
 		epilog="""
@@ -132,7 +132,7 @@ Examples:
 
 	generate_parser = subparsers.add_parser(
 		"generate-library",
-		help="Generate the Chapter 4 method library M and AgentSpeak(L) plan library S.",
+		help="Generate the method library M and AgentSpeak(L) plan library S.",
 	)
 	generate_parser.add_argument("--domain-file", required=True, help="Path to the HDDL domain file")
 	generate_parser.add_argument(

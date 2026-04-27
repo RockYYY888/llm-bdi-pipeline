@@ -1,5 +1,5 @@
 """
-Query-sequence loading for the Chapter 4 plan-library generation pipeline.
+Query-sequence loading for the plan-library generation workflow.
 """
 
 from __future__ import annotations

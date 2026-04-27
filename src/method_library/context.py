@@ -1,5 +1,5 @@
 """
-Context for Chapter 4 method-library synthesis.
+Context for method-library synthesis.
 
 This module intentionally contains only the state and helpers required by the
 domain-only generation path.
@@ -26,7 +26,7 @@ class TypeResolutionError(RuntimeError):
 
 
 class MethodLibrarySynthesisContext:
-	"""Minimal context object required by Chapter 4 method-library synthesis."""
+	"""Minimal context object required by method-library synthesis."""
 
 	def __init__(self, *, domain_file: str) -> None:
 		if not domain_file:

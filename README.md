@@ -1,6 +1,13 @@
 # LLM-BDI Pipeline
 
-This repository implements the Chapter 4 plan-library pipeline:
+This repository contains the implementation for the dissertation's end-to-end
+LLM-to-BDI plan-library study. It builds reusable BDI plan libraries from
+masked HDDL domains and natural-language task instructions, then evaluates
+those libraries through structural validation, grounding, Jason execution,
+direct plan-generation baselines, and HTN planner reference runs across the
+supported IPC 2020 benchmark domains.
+
+The core generated-library flow is:
 
 ```text
 D^- + L_s -> Phi_s -> M -> S
@@ -12,8 +19,11 @@ D^- + L_s -> Phi_s -> M -> S
 - `M`: synthesized Hierarchical Task Network method library
 - `S`: translated AgentSpeak(L) plan library
 
-Grounding, Jason execution, planner runs, and verifier checks are evaluation
-evidence built on top of `S`.
+Around that flow, the repository also implements the benchmark query protocol,
+language-model transport, generated-library validation, execution logging,
+Jason runtime evaluation, direct final-plan generation baseline, lifted PANDA
+SAT planner reference baseline, and IPC verifier integration used by the
+dissertation evaluation.
 
 ## Repository Layout
 

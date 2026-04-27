@@ -1,5 +1,5 @@
 """
-Structured temporal-specification records used by the Chapter 4 pipeline.
+Structured temporal-specification records used by the plan-library workflow.
 """
 
 from __future__ import annotations
