@@ -1,0 +1,139 @@
+% File: paper.tex
+% AAMAS 2027 paper followed by its technical appendix.
+\documentclass[sigconf,anonymous]{aamas}
+
+\usepackage{graphicx}
+\urlstyle{rm}
+\def\UrlFont{\rm}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{placeins}
+
+\frenchspacing
+\setcounter{secnumdepth}{2}
+
+\makeatletter
+\gdef\@copyrightpermission{
+	\begin{minipage}{0.2\columnwidth}
+		\href{https://creativecommons.org/licenses/by/4.0/}{%
+			\includegraphics[width=0.90\textwidth]{by}}
+	\end{minipage}\hfill
+	\begin{minipage}{0.8\columnwidth}
+		\href{https://creativecommons.org/licenses/by/4.0/}{%
+			This work is licensed under a Creative Commons Attribution
+			International 4.0 License.}
+	\end{minipage}
+	\vspace{5pt}
+}
+\makeatother
+
+\setcopyright{ifaamas}
+\acmConference[AAMAS 2027]{Proc.\@ of the 26th International Conference
+on Autonomous Agents and Multiagent Systems (AAMAS 2027)}{3--7 May 2027}
+{Hanoi, Vietnam}{M.~Baldoni, F.~Fang, W.~Yeoh, N.~Yorke-Smith (eds.)}
+\copyrightyear{2027}
+\acmYear{2027}
+\acmDOI{}
+\acmISBN{}
+\acmSubmissionID{}
+\submissionType{Research Paper Track}
+
+\title{GP2PL: From Generalized Planning Evidence to Certified BDI Plan
+Libraries for Achievement and Temporally Extended Goals}
+\author{Anonymous Authors}
+\affiliation{
+	\institution{Anonymous Institution}
+	\city{Anonymous City}
+	\country{Anonymous Country}}
+\email{anonymous@example.org}
+
+\begin{CCSXML}
+<ccs2012>
+<concept>
+<concept_id>10010147.10010178.10010179.10003352</concept_id>
+<concept_desc>Computing methodologies~Planning and scheduling</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+<concept>
+<concept_id>10010147.10010257.10010293.10010294</concept_id>
+<concept_desc>Computing methodologies~Multi-agent systems</concept_desc>
+<concept_significance>300</concept_significance>
+</concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Computing methodologies~Planning and scheduling}
+\ccsdesc[300]{Computing methodologies~Multi-agent systems}
+\keywords{generalized planning, BDI agents, AgentSpeak(L), plan libraries,
+temporally extended goals}
+
+\begin{abstract}
+Generalized planning learns reusable behavior for problem families, whereas
+Belief--Desire--Intention (BDI) agents execute plan libraries. Connecting
+generalized planning to BDI execution exposes a representation gap:
+singleton-goal evidence may omit modules for subsidiary achievements and does
+not establish sound temporal composition. We introduce GP2PL (Generalized
+Planning to Plan Libraries). Its typed input contract maps controlled
+natural-language requests to bound finite-trace temporal-logic query
+specifications consistent with the planning domain. Its compiler maps
+generalized-planning evidence and action models into certified BDI plan
+libraries. GP2PL validates and lifts evidence, generates schema-derived modules
+for producible goals, selects a compact closed atomic core, and appends
+DFA-guided query controllers without relearning that core. Within the supported
+candidate language and query fragment, GP2PL accepts only branches and
+controllers satisfying its soundness conditions. Atomic coverage averages
+98.7\% across five seeds; all 475 translations are DFA-language equivalent to
+their gold formulas, and all 6,140 admitted temporal executions pass
+validation.
+\end{abstract}
+
+\newcommand{\pddl}{Planning Domain Definition Language}
+\newcommand{\asl}{AgentSpeak(L)}
+\newcommand{\ltlf}{\ensuremath{\mathrm{LTL}_f}}
+\newcommand{\mustadd}{\ensuremath{\mathrm{MustAdd}}}
+\newcommand{\maydelete}{\ensuremath{\mathrm{MayDelete}}}
+\newcommand{\mayadd}{\ensuremath{\mathrm{MayAdd}}}
+\newcommand{\methodname}{GP2PL}
+\newcommand{\resultbest}[1]{\textbf{#1}}
+\newcommand{\resultselected}[1]{\textbf{#1}}
+\newcommand{\selectedmark}{\textsuperscript{\ensuremath{\dagger}}}
+\providecommand{\gpplfigureonepath}{figures/fig1_architecture.png}
+\providecommand{\gpplfiguretwopath}{figures/fig2_compiler_stages.png}
+\providecommand{\gpplatomiccasepath}{figures/fig3_atomic_case.png}
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+\begin{document}
+
+\maketitle
+
+\input{paper/sections/introduction}
+\input{paper/sections/preliminaries}
+\input{paper/sections/problem_definition}
+\input{paper/sections/methodology}
+\input{paper/sections/evaluation}
+\input{paper/sections/related_work}
+\input{paper/sections/conclusion}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\clearpage
+\appendix
+\renewcommand{\thefigure}{S\arabic{figure}}
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thealgorithm}{S\arabic{algorithm}}
+\setcounter{figure}{0}
+\setcounter{table}{0}
+\setcounter{algorithm}{0}
+\section*{Technical Appendix}
+\input{appendix/technical_appendix}
+
+\end{document}

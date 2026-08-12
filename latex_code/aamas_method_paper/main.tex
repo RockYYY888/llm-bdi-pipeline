@@ -1,23 +1,18 @@
 % File: main.tex
-% One-click document: outline, AAMAS 2027 paper, technical appendix.
+% AAMAS 2027 outline followed by the complete paper and technical appendix.
 \documentclass[sigconf,anonymous]{aamas}
 
-\usepackage{graphicx}
-\urlstyle{rm}
-\def\UrlFont{\rm}
 \usepackage{amsmath}
 \usepackage{amsthm}
 \usepackage{booktabs}
 \usepackage{array}
-\usepackage{longtable}
 \usepackage{algorithm}
 \usepackage{algorithmic}
-\usepackage{placeins}
+\usepackage{pdfpages}
 
 \frenchspacing
 \setcounter{secnumdepth}{2}
 
-% AAMAS 2027 copyright block from the official template.
 \makeatletter
 \gdef\@copyrightpermission{
 	\begin{minipage}{0.2\columnwidth}
@@ -70,64 +65,41 @@ Libraries for Achievement and Temporally Extended Goals}
 
 \ccsdesc[500]{Computing methodologies~Planning and scheduling}
 \ccsdesc[300]{Computing methodologies~Multi-agent systems}
-\keywords{generalized planning, BDI agents, AgentSpeak(L), plan libraries,
-temporally extended goals}
 
 \begin{abstract}
-Generalized planning learns reusable behavior for problem families, whereas
-Belief--Desire--Intention (BDI) agents execute plan libraries. Connecting
-generalized planning to BDI execution exposes a representation gap:
-singleton-goal evidence may omit modules for subsidiary achievements and does
-not establish sound temporal composition. We introduce GP2PL (Generalized
-Planning to Plan Libraries). Its typed input contract maps controlled
-natural-language requests to bound finite-trace temporal-logic query
-specifications consistent with the planning domain. Its compiler maps
-generalized-planning evidence and action models into certified BDI plan
-libraries. GP2PL validates and lifts evidence, generates schema-derived modules
-for producible goals, selects a compact closed atomic core, and appends
-DFA-guided query controllers without relearning that core. Within the supported
-candidate language and query fragment, GP2PL accepts only branches and
-controllers satisfying its soundness conditions. Atomic coverage averages
-98.7\% across five seeds; all 475 translations are DFA-language equivalent to
-their gold formulas, and all 6,140 admitted temporal executions pass
-validation.
 \end{abstract}
+
+\keywords{generalized planning, BDI agents, plan libraries, temporal goals}
 
 \newcommand{\pddl}{Planning Domain Definition Language}
 \newcommand{\asl}{AgentSpeak(L)}
 \newcommand{\ltlf}{\ensuremath{\mathrm{LTL}_f}}
-\newcommand{\mustadd}{\ensuremath{\mathrm{MustAdd}}}
-\newcommand{\maydelete}{\ensuremath{\mathrm{MayDelete}}}
-\newcommand{\mayadd}{\ensuremath{\mathrm{MayAdd}}}
-\newcommand{\methodname}{GP2PL}
-\newcommand{\resultbest}[1]{\textbf{#1}}
-\newcommand{\resultselected}[1]{\textbf{#1}}
-\newcommand{\selectedmark}{\textsuperscript{\ensuremath{\dagger}}}
-\providecommand{\gpplfigureonepath}{figures/fig1_architecture.png}
-\providecommand{\gpplfiguretwopath}{figures/fig2_compiler_stages.png}
-\providecommand{\gpplatomiccasepath}{figures/fig3_atomic_case.png}
 \newtheorem{definition}{Definition}
 \newtheorem{assumption}{Assumption}
-\newtheorem{lemma}{Lemma}
-\newtheorem{proposition}{Proposition}
+
+% Register the independently compiled paper sources with latexmk.
+\newread\paperdependency
+\newcommand{\trackpaperdependency}[1]{%
+	\openin\paperdependency=#1\relax
+	\closein\paperdependency}
+\trackpaperdependency{paper.tex}
+\trackpaperdependency{paper/sections/introduction.tex}
+\trackpaperdependency{paper/sections/preliminaries.tex}
+\trackpaperdependency{paper/sections/problem_definition.tex}
+\trackpaperdependency{paper/sections/methodology.tex}
+\trackpaperdependency{paper/sections/evaluation.tex}
+\trackpaperdependency{paper/sections/related_work.tex}
+\trackpaperdependency{paper/sections/conclusion.tex}
+\trackpaperdependency{appendix/technical_appendix.tex}
+\trackpaperdependency{references.bib}
+\trackpaperdependency{figures/fig1_architecture.png}
+\trackpaperdependency{figures/fig2_compiler_stages.png}
+\trackpaperdependency{figures/fig3_atomic_case.png}
 
 \begin{document}
 
-\onecolumn
-\pagenumbering{roman}
-\renewcommand{\thesection}{O\arabic{section}}
-\renewcommand{\thesubsection}{\thesection.\arabic{subsection}}
-\renewcommand{\thesubsubsection}{\thesubsection.\arabic{subsubsection}}
-\renewcommand{\theHsection}{outline.\arabic{section}}
-\renewcommand{\theHsubsection}{outline.\arabic{section}.\arabic{subsection}}
-\renewcommand{\theHsubsubsection}{%
-	outline.\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
-\begin{center}
-	{\LARGE\bfseries Paper Outline}\par
-	\vspace{0.5em}
-	{\Large GP2PL: From Generalized Planning Evidence to Certified BDI Plan
-	Libraries for Achievement and Temporally Extended Goals}
-\end{center}
+\maketitle
+
 \input{outline/sections/introduction}
 \input{outline/sections/preliminaries}
 \input{outline/sections/problem_definition}
@@ -137,46 +109,6 @@ validation.
 \input{outline/sections/conclusion}
 
 \clearpage
-\twocolumn
-\pagenumbering{arabic}
-\setcounter{section}{0}
-\setcounter{subsection}{0}
-\setcounter{figure}{0}
-\setcounter{table}{0}
-\setcounter{equation}{0}
-\renewcommand{\thesection}{\arabic{section}}
-\renewcommand{\thesubsection}{\thesection.\arabic{subsection}}
-\renewcommand{\thesubsubsection}{\thesubsection.\arabic{subsubsection}}
-\renewcommand{\theHsection}{paper.\arabic{section}}
-\renewcommand{\theHsubsection}{paper.\arabic{section}.\arabic{subsection}}
-\renewcommand{\theHsubsubsection}{%
-	paper.\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
-\maketitle
-
-\input{paper/sections/introduction}
-\input{paper/sections/preliminaries}
-\input{paper/sections/problem_definition}
-\input{paper/sections/methodology}
-\input{paper/sections/evaluation}
-\input{paper/sections/related_work}
-\input{paper/sections/conclusion}
-
-\bibliographystyle{ACM-Reference-Format}
-\bibliography{references}
-
-\clearpage
-\appendix
-\renewcommand{\theHsection}{appendix.\Alph{section}}
-\renewcommand{\theHsubsection}{appendix.\Alph{section}.\arabic{subsection}}
-\renewcommand{\theHsubsubsection}{%
-	appendix.\Alph{section}.\arabic{subsection}.\arabic{subsubsection}}
-\renewcommand{\thefigure}{S\arabic{figure}}
-\renewcommand{\thetable}{S\arabic{table}}
-\renewcommand{\thealgorithm}{S\arabic{algorithm}}
-\setcounter{figure}{0}
-\setcounter{table}{0}
-\setcounter{algorithm}{0}
-\section*{Technical Appendix}
-\input{appendix/technical_appendix}
+\includepdf[pages=-,pagecommand={}]{build/paper.pdf}
 
 \end{document}

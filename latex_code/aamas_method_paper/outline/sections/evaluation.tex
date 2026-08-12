@@ -4,9 +4,11 @@
 
 Evaluate the two problems defined in Section~3 separately: generation of a reusable domain-level BDI plan library and reuse of that library for subsequent goal queries.
 
-Use 16 PDDL domains covering classical STRIPS behaviour, bounded-integer resources, and domains that require reusable subsidiary-goal structure.
+Use 16 PDDL domains covering classical STRIPS, integer resources, and
+reusable subsidiary-goal structure.
 
-Use the twelve MOOSE benchmark domains together with Blocksworld Clear, Blocksworld On, Blocksworld Tower, and Depots to test both domains already well covered by generalized-planning evidence and domains where additional reusable behaviour is required.
+Use the twelve MOOSE domains plus Blocksworld Clear, On, Tower, and Depots to
+cover strong existing evidence and cases requiring additional behaviour.
 
 Preserve the established train/test splits for the benchmark domains and use deterministic splits for the additional domains.
 
@@ -20,7 +22,8 @@ Render the resulting plans in AgentSpeak(L), execute them with Jason, and indepe
 
 Use LTLf2DFA with MONA to construct the DFAs used for query-specific temporal execution and semantic comparison.
 
-Use GPT-5.5 with deterministic decoding for the controlled natural-language translation study and allow retries only for structured, model-correctable translation errors.
+Use deterministic GPT-5.5 decoding for controlled-language translation; retry
+only structured, model-correctable errors.
 
 Use a common 1,800-second execution limit when computing temporal runtime and PAR-2 results.
 
@@ -83,13 +86,15 @@ Report the complete per-domain results across all five evidence seeds so that cr
 
 Use the per-domain results to show which domains are consistently solved across evidence seeds and which remain sensitive to the generalized-planning evidence.
 
-Analyse Logistics as a case where seed-dependent reusable macros interact with cyclic producer dependencies that the current domain-derived construction cannot always replace.
+Analyse Logistics, where seed-dependent macros interact with cyclic producer
+dependencies that domain-derived construction cannot always replace.
 
 Analyse Depots as a case requiring nested selection of reusable support resources beyond the currently supported resource structure.
 
 Report the scale of the generated libraries by showing the amount of generalized-planning evidence, domain-derived candidates, and selected BDI plans for each domain.
 
-\textbf{Table caption:} Per-domain plan-library construction scale, showing training and held-out instances, generalized-planning evidence candidates, domain-derived candidates, and selected BDI plan branches.
+\textbf{Table caption:} Per-domain construction scale: training and held-out
+instances, evidence and domain-derived candidates, and selected BDI branches.
 
 Compare Full GP2PL with raw MOOSE behaviour separately on the original MOOSE benchmark and on the four additional domains.
 

@@ -3,9 +3,9 @@
 
 \subsection{Planning Domains and Generalized Evidence}
 
-The domain language is typed STRIPS PDDL with a bounded-integer resource fragment
-\cite{FikesNilsson1971STRIPS,McDermott1998PDDL,FoxLong2003PDDL21}. A domain is
-$D=\langle\mathcal{P},\mathcal{F},\mathcal{A},\mathcal{T}\rangle$ with predicate
+The domain language is typed STRIPS PDDL with bounded-integer resources
+\cite{FikesNilsson1971STRIPS,McDermott1998PDDL,FoxLong2003PDDL21}. A domain
+$D=\langle\mathcal{P},\mathcal{F},\mathcal{A},\mathcal{T}\rangle$ has predicate
 schemas, integer-valued resource functions, action schemas, and a type
 hierarchy; a state $s=(s_{\mathcal P},s_{\mathcal F})$ combines Boolean and
 integer valuations under the standard add/delete successor. The numeric
@@ -70,8 +70,11 @@ Both goal classes use the same automata path. For
 $\varphi_q\in\Phi_{\mathrm{ach}}$, the completion embedding is $F\varphi_q$; a
 TEG is unchanged. Following automata-theoretic planning
 \cite{DeGiacomoRubin2018AutomataFOND}, we construct the deterministic finite
-automaton (DFA) for this execution formula
-$\mathcal D_q=\langle Q_q^{\mathrm{dfa}},2^{AP_q},\delta_q,q_q^0,F_q\rangle$
+automaton (DFA)
+\[
+\mathcal D_q=\langle Q_q^{\mathrm{dfa}},2^{AP_q},\delta_q,q_q^0,F_q\rangle
+\]
+for this execution formula
 with LTLf2DFA and MONA \cite{Fuggitti2020LTLf2DFA,Henriksen1995MONA}, and a
 valuation map $\mathit{val}_q$ interprets a PDDL state over $AP_q$. For
 automaton state $z$, let $d_q(z)$ be the shortest directed-path length to
@@ -85,8 +88,8 @@ $\chi$ has normal form
 \qquad
 \mathcal O_\chi=\langle P_\chi^+,P_\chi^-\rangle,
 \]
-where the signed transition obligation $\mathcal O_\chi$ separates positive
-achievements from atoms that must remain absent. DFA-derived Boolean alternatives
+where $\mathcal O_\chi$ separates positive achievements from atoms that must
+remain absent. DFA-derived Boolean alternatives
 are retained as separate conjunctive guard records, while the runtime monitor
 evaluates the complete transition relation. The certification vocabulary
 distinguishes four terms.

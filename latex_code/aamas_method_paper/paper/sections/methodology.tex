@@ -64,12 +64,14 @@ targets in $E$.
 The finite grammar $\mathfrak G$ contains constructors: producer,
 regression, recursion, precondition repair, resource discharge, and numeric
 progress. For Boolean and numeric targets, $\textsc{LiftSchemas}$ computes
-$\mathcal C_D(E)=
-\operatorname{Inst}_D(\mathfrak G,T_D(E),T_D^{\mathbb Z}(E))$,
+\[
+\mathcal C_D(E)=
+\operatorname{Inst}_D(\mathfrak G,T_D(E),T_D^{\mathbb Z}(E)),
+\]
 using only typed schemas and effects from $D$, then alpha-normalizes each
-variable-level branch.
-For target set $T$, the producer--precondition graph
-$\mathcal G_D^{\mathrm{prod}}(T)$ has an edge $p\rightarrow r$ when a producer
+branch.
+For target set $T$, graph $\mathcal G_D^{\mathrm{prod}}(T)$ has edge
+$p\rightarrow r$ when a producer
 for $p$ has a positive dynamic precondition with predicate $r$.
 Backward STRIPS regression
 \cite{Fikes1972GeneralizedRobotPlans,Alcazar2013Regression,Chen2026Moose}
@@ -88,13 +90,13 @@ sort-membership tests appear only in plan contexts.
 
 \subsubsection{Candidate Certification}
 
-Symbolic progression proves preconditions and target achievement and yields each
-candidate's conditional module-completion summary $\Sigma_b$, with Boolean
+Symbolic progression proves preconditions and target achievement. It yields
+each candidate's completion summary $\Sigma_b$, with Boolean
 projections $\mustadd_b$, $\mayadd_b$, and $\maydelete_b$, any exact
 constant-integer delta, and a keyed resource-mode transition. The $\mustadd_b$
 facts hold after every feasible completion; $\mayadd_b$ and $\maydelete_b$
-overapproximate possible effects. Let $\operatorname{Cert}_D(b)$ be the
-branch-certification predicate: it holds exactly when typed binding, symbolic
+overapproximate possible effects. The branch predicate
+$\operatorname{Cert}_D(b)$ holds exactly when typed binding, symbolic
 executability, target achievement, and every applicable constructor-specific
 progress or resource condition have valid witnesses. The selected core must
 additionally satisfy the set-level condition
@@ -109,7 +111,7 @@ $\mathcal R$ type-unifies with a selected trigger under $D$'s type hierarchy.
 Requiring $\operatorname{Closed}_D(\mathcal M_D)$ is a set-level Clingo
 obligation that proves call resolution, not universal branch applicability.
 
-\paragraph{Well-founded recursive progress.}
+\paragraph{Recursive progress.}
 A same-predicate recursive branch $b$ requires a ranking function
 $\rho_b:\operatorname{States}(D)\rightarrow\mathbb N$, either a non-negative
 global relation count or an anchor-local count
@@ -298,9 +300,9 @@ recursion uses its ranking and preparation rechecks the producer context.
 \hfill$\square$ This establishes local soundness, not
 reachable-state coverage.
 
-\paragraph{Certified-candidate-set optimality.}
+\paragraph{Selection optimality.}
 
-\textbf{Proposition 2.} For the grounded feasible-core selection instance, a
+\textbf{Proposition 2.} For a grounded feasible-core selection instance, a
 Clingo optimum $\mathcal M_D$ belongs to $\mathfrak F_{D,E}$ and minimizes the
 declared lexicographic cost over that feasible family. The result does not imply
 complete candidate generation or optimality over all AgentSpeak programs.
