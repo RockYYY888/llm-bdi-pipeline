@@ -1,0 +1,201 @@
+\section{Preliminaries}
+
+\subsection{BDI Agents and Plan Libraries}
+
+[inline def] Represent a BDI achievement plan as
+\[
+r \;=\; +!p(\bar X):C \leftarrow b_1;\ldots;b_m,
+\]
+where \(+!p(\bar X)\) is the achievement-goal event handled by the plan,
+\(C\) is its applicability context, and
+\(\beta_r=\langle b_1,\ldots,b_m\rangle\) is its plan body.
+
+[inline def] Let each body step \(b_i\) be either a primitive domain action
+or a subsidiary achievement-goal call \( !q(\bar Y) \).
+
+[inline def] Define a BDI plan library
+\[
+\mathcal L=\{r_1,\ldots,r_k\}
+\]
+as a finite set of BDI plans available to the agent.
+
+[inline def] Let a grounding substitution \(\theta\) map plan variables to
+type-compatible domain objects, and write \(r\theta\) for the corresponding
+ground instance of plan \(r\).
+
+[inline def] Call \(r\) parameterised when it contains variables that can be
+grounded to different domain objects, rather than being tied to one particular
+planning instance.
+
+[inline def] Define a plan \(r\theta\) as applicable in state \(s\) when its
+grounded context holds, written
+\[
+s \models C\theta.
+\]
+
+[inline def] Define a subsidiary call \( !q(\bar Y) \) as invoking an
+applicable plan in \(\mathcal L\) whose triggering achievement goal
+type-compatibly matches \(q(\bar Y)\).
+
+
+\subsection{STRIPS Planning and Generalized Planning}
+
+[formal def] Define the supported planning domain as a typed STRIPS domain
+with bounded-integer resources,
+\[
+D=\langle \mathcal P,\mathcal F,\mathcal A,\mathcal T\rangle,
+\]
+where \(\mathcal P\) is a finite set of predicate schemas,
+\(\mathcal F\) is a finite set of integer-valued resource functions,
+\(\mathcal A\) is a finite set of action schemas, and
+\(\mathcal T\) is a type hierarchy.
+Ordinary typed STRIPS is obtained when \(\mathcal F=\emptyset\).
+
+[inline def] Let each grounded action \(a\) have Boolean preconditions
+\(\operatorname{Pre}(a)\), add effects \(\operatorname{Add}(a)\), and delete
+effects \(\operatorname{Del}(a)\), together with the supported bounded-integer
+conditions and constant updates when numeric resources are present.
+
+[formal def] Define a state as
+\[
+s=(s_{\mathcal P},s_{\mathcal F}),
+\]
+where \(s_{\mathcal P}\) is the set of true grounded predicate atoms and
+\(s_{\mathcal F}\) assigns an integer value to each grounded resource function.
+
+[inline def] Define a grounded action \(a\) as applicable in \(s\) when its
+Boolean and numeric preconditions hold, and denote the resulting deterministic
+state by
+\[
+\gamma_D(s,a).
+\]
+For the Boolean component,
+\[
+\gamma_D(s,a)_{\mathcal P}
+=
+\bigl(s_{\mathcal P}\setminus\operatorname{Del}(a)\bigr)
+\cup \operatorname{Add}(a).
+\]
+
+[formal def] Define a planning instance as
+\[
+I=\langle D,O_I,s_I^0,G_I\rangle,
+\]
+where \(O_I\) is a finite set of typed objects,
+\(s_I^0\) is the initial state, and
+\(G_I\) is an achievement condition.
+
+[inline def] Define a classical plan as a sequence of grounded actions
+\[
+\pi=\langle a_1,\ldots,a_n\rangle
+\]
+such that every \(a_i\) is applicable in
+\[
+s_{i-1},
+\qquad
+s_i=\gamma_D(s_{i-1},a_i),
+\]
+and the final state satisfies the goal,
+\[
+s_n\models G_I.
+\]
+
+[inline def] Define a generalized-planning task as
+\[
+\mathcal G=\langle D,\mathcal I\rangle,
+\]
+where
+\[
+\mathcal I=\{I_1,\ldots,I_k\}
+\]
+is a family of planning instances sharing the same domain \(D\).
+
+[inline def] Define a generalized plan as a single parameterised policy or
+program intended to provide reusable behaviour across the instances in
+\(\mathcal I\), rather than a separate grounded action sequence for each
+instance.
+
+
+\subsection{Achievement and Temporally Extended Goals}
+
+[formal def] Define a finite execution trace as
+\[
+\xi=s_0s_1\ldots s_n,
+\]
+where \(s_i\) is the state observed after the \(i\)-th environment-changing
+action.
+
+[inline def] Let \(AP\) be a finite set of state propositions, where each
+\(a\in AP\) denotes either a grounded predicate condition or a supported
+integer-equality condition.
+
+[formal def] Define the supported goal language \(\Phi\) by
+\[
+\begin{aligned}
+\ell &::= a \mid \neg a,\\
+\varphi &::= \ell
+          \mid (\varphi\land\varphi)
+          \mid X\varphi
+          \mid F\varphi
+          \mid (\varphi U\varphi),
+          \qquad a\in AP.
+\end{aligned}
+\]
+Here \(X\) denotes strong next, \(F\) denotes eventually, and \(U\) denotes
+strong until; negation is restricted to atomic propositions.
+
+[formal def] Define finite-trace satisfaction for
+\(0\leq i\leq n\) by
+\[
+\begin{aligned}
+\xi,i\models a
+&\iff a\text{ holds in }s_i,\\
+\xi,i\models\neg a
+&\iff a\text{ does not hold in }s_i,\\
+\xi,i\models\varphi\land\psi
+&\iff \xi,i\models\varphi
+    \text{ and }\xi,i\models\psi,\\
+\xi,i\models X\varphi
+&\iff i<n
+    \text{ and }\xi,i+1\models\varphi,\\
+\xi,i\models F\varphi
+&\iff \exists j\in[i,n]\;:\;\xi,j\models\varphi,\\
+\xi,i\models\varphi U\psi
+&\iff
+\exists j\in[i,n]\;:\;
+\xi,j\models\psi
+\text{ and }
+\forall k\in[i,j)\; \xi,k\models\varphi.
+\end{aligned}
+\]
+
+[formal def] Define the achievement-goal fragment
+\[
+\Phi_{\mathrm{ach}}\subset\Phi
+\]
+by
+\[
+\psi ::= \ell \mid (\psi\land\psi).
+\]
+
+[inline def] Define an achievement goal as
+\[
+\varphi\in\Phi_{\mathrm{ach}},
+\]
+and say that a terminating execution
+\(\xi=s_0\ldots s_n\) satisfies the achievement goal when
+\[
+\xi,n\models\varphi.
+\]
+
+[inline def] Define the temporally extended goal fragment as
+\[
+\Phi_{\mathrm{teg}}
+=
+\Phi\setminus\Phi_{\mathrm{ach}},
+\]
+and say that an execution trace \(\xi\) satisfies a TEG
+\(\varphi\in\Phi_{\mathrm{teg}}\) when
+\[
+\xi,0\models\varphi.
+\]

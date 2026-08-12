@@ -109,7 +109,7 @@ this selection obligation.
 
 ## Canonical Formal Notation
 
-The manuscript, supplement, figures, and paper-facing reports use one symbol
+The manuscript, appendix, figures, and paper-facing reports use one symbol
 for each semantic object:
 
 - `D=<P,F,A,T>` is the typed planning domain; a problem instance is
@@ -204,8 +204,9 @@ provider, optimizer, rendering language, and interpreter. Paths, worker
 scheduling, hashes, and command-line details belong in reproducibility material,
 not in the statement of the method.
 
-The canonical technical supplement is
-`latex_code/aamas_method_paper/technical_appendix.tex`. It contains the formal
+The canonical technical appendix is
+`latex_code/aamas_method_paper/appendix/technical_appendix.tex`; the root
+`main.tex` includes it after the paper references. It contains the formal
 definitions, assumptions, complete proofs, theory-to-code map, data appendix,
 source provenance, experimental parameters, hardware/software environment,
 distributional statistics, and claim-to-test map. The versioned public evidence
@@ -228,24 +229,20 @@ GP2PL source code is released under Apache-2.0, and original GP2PL temporal
 annotations, specifications, generated libraries, and result records are
 released under CC BY 4.0. Third-party PDDL and MOOSE materials retain upstream
 terms and are reconstructed from pinned sources. They must not be represented
-as GP2PL-licensed data. The reproducibility checklist scopes source-code
-availability to every GP2PL-authored implementation, preprocessing, execution,
-and analysis file, all of which is included and Apache-2.0 licensed. Public
+as GP2PL-licensed data. Every GP2PL-authored implementation, preprocessing,
+execution, and analysis file is included and Apache-2.0 licensed. Public
 third-party dependencies are cited and fetched at pinned revisions under their
-own terms; they are not omissions from the authored code appendix. All novel
+own terms. All novel
 GP2PL data, including the sealed construction audit withheld from the translation
 model during inference, is included in the public CC BY 4.0 release. Therefore
 no experimental dataset remains non-public.
 
 The camera-ready public repository is
 `https://github.com/daidaibunny/gp2pl`. The anonymous submission and technical
-supplement must not expose this identifying URL. The main LaTeX source therefore
+appendix must not expose this identifying URL. The main LaTeX source therefore
 keeps the repository paragraph behind a camera-ready-only conditional. Review
-material uses an anonymized code-and-data archive. Checklist answers are changed
-to `yes` only when the paper, technical supplement, or submitted archive contains
-the corresponding evidence. The statistical-significance answer is `yes` only
-in the precise sense that the manuscript makes no untested inferential claim:
-fixed-release differences remain descriptive, and any future improvement claim
+material uses an anonymized code-and-data archive.
+Fixed-release differences remain descriptive, and any future improvement claim
 is gated on the registered paired five-seed analysis.
 
 This repository no longer builds a universal generalized planner and no longer
@@ -508,7 +505,7 @@ domains are heterogeneous and the core claims concern exact valid-case counts,
 library structure, and effects of certification checks rather than one shared
 continuous difficulty axis. `scripts/generate_aaai_figures.py` may still regenerate the
 former three-panel view from the complete frozen
-`paired_ablation_results.json` as a supplementary diagnostic plot. Dirty
+`paired_ablation_results.json` as a appendix diagnostic plot. Dirty
 revisions, incomplete seed/domain/variant matrices, unpaired hashes, or protocol
 mismatches produce a diagnostic instead of a PNG. The manuscript label for
 `validated_evidence_adapter` remains `Evidence Only`.
@@ -519,16 +516,16 @@ Its temporal half embeds a compact MONA DFA for one bound Blocks World query,
 the certificates for one singleton and one conjunctive progress guard, their
 query-local repair controllers, and the shared dispatcher. This concrete chain
 prevents the DFA-guided compiler from being represented only by unexplained
-process boxes. Supplementary Figure S1 separately shows execution of the
+process boxes. Appendix Figure S1 separately shows execution of the
 selected variable-level atomic core on an unseen Blocks stack beside the formal
 feasible-core definition; the main paper keeps one forward pointer after
 feasible-core optimization. Main-paper results use exact generated
 tables; per-profile, per-domain, per-seed, runtime, and diagnostic views belong
-in the Technical Supplement. The main paper reports the identical 740
+in the Technical Appendix. The main paper reports the identical 740
 added-domain seed--case comparison with Raw MOOSE and the 492 Boolean temporal
 queries accepted by the direct FOND4LTLf adapter; unsupported inputs remain
 separate. The complete scope-separated MOOSE, LAMA, MRP+HJ, FOND4LTLf, and
-TIDE matrix remains in the Technical Supplement as per-domain
+TIDE matrix remains in the Technical Appendix as per-domain
 `valid/supported` cells. A dash denotes only an entirely unsupported domain;
 supported failures remain in the denominator. This avoids a cross-scope
 ranking in the main paper. TIDE admits all 868 Boolean

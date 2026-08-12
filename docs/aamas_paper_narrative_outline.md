@@ -1,7 +1,7 @@
-# AAAI Paper Narrative Outline
+# AAMAS 2027 Paper Narrative Outline
 
 This document is the normative narrative and result-integration plan for the
-AAAI manuscript under `latex_code/aamas_method_paper/`. It must remain aligned
+AAMAS 2027 manuscript under `latex_code/aamas_method_paper/`. It must remain aligned
 with the implementation-facing decisions in
 [`research_pipeline_decisions.md`](research_pipeline_decisions.md) and the
 temporal-input contract in [`input_design.md`](input_design.md). Whenever a
@@ -130,10 +130,10 @@ Do not use the ambiguous phrases `schema closure`, `candidate space`,
 `existential preparation projection`, `whole-guard helper`, or bare `repair
 tree` in the method exposition.
 
-## AAAI Narrative Alignment
+## Narrative Alignment
 
-The narrative follows three accepted AAAI generalized-planning papers rather
-than treating the manuscript as a software-module report.
+The narrative follows established generalized-planning papers rather than
+treating the manuscript as a software-module report.
 
 - [Bonet, Frances, and Geffner, AAAI-19](https://doi.org/10.1609/aaai.v33i01.33012703)
   moves from a representation problem to formal semantics, a computational
@@ -210,9 +210,9 @@ problem, define a concept, state a method, justify a design choice, present
 evidence, or delimit a claim. Prefer concrete subjects and causal transitions
 over inventories of implementation components. Terms such as `hash-locked`,
 source revision, byte digest, and internal run identifier are transient
-execution bookkeeping: omit them from the manuscript, Technical Supplement,
+execution bookkeeping: omit them from the manuscript, Technical Appendix,
 and public result release. The Abstract and Introduction follow the narrative
-cadence of accepted AAAI planning papers: problem, limitation of existing
+cadence of established planning papers: problem, limitation of existing
 representations, central idea, guarantee, and empirical result.
 
 Apply citations at the sentence or tightly coupled claim cluster they support.
@@ -221,7 +221,7 @@ and baseline protocols require a verified primary source. GP2PL definitions,
 algorithms, theorems, and measured results instead point to the relevant
 internal figure, table, proposition, appendix, or released file; do not use
 an adjacent prior-work citation to imply that a new GP2PL claim is inherited.
-The abstract remains citation-free under the AAAI convention, but every
+The abstract remains citation-free under the conference convention, but every
 externally attributable claim must be supported when it first appears in the
 main text.
 
@@ -293,14 +293,13 @@ software components.
    `Q_q` to the maintained library. Introduce the Blocks running example only
    in Figure 2 and the method, where its rules carry explanatory value.
 5. Present the input boundary, two-stage compiler, and four contributions in a
-   continuous paragraph. An itemized contribution list is not forbidden by the
-   AAAI template, but prose better matches this paper's short causal argument.
+   continuous paragraph. Prose better matches this paper's short causal argument.
 6. Preview the evaluation design without endpoint values; headline results
    belong in the Abstract, Evaluation, and Conclusion.
 7. End with the supported-fragment boundary rather than universal-planning or
    full-LTLf claims.
 
-### 2. Problem Formulation and Foundations
+### 2. Preliminaries
 
 Define only concepts used by the algorithms:
 
@@ -317,7 +316,13 @@ Define only concepts used by the algorithms:
   as its evaluated interpreter, without claiming portability to unevaluated BDI
   languages;
 - the atemporal achievement fragment, its canonical completion embedding, and
-  temporally extended LTLf formulae with their deterministic finite automata;
+  temporally extended LTLf formulae with their deterministic finite automata.
+
+### 3. Problem Definition
+
+Define the two compilation problems and their shared maintained-library
+invariant:
+
 - the domain-compilation input `(D, I_train, E)` and atomic-core output `M_D`;
 - the per-query input `(M_D, hat(tau)_q)`, where
   `hat(tau)_q=(tau_q,theta_q)`, and query-plan output `Q_q`; and
@@ -331,33 +336,9 @@ including `+!g_query` and `+!g_query_trans_1`. Appending it changes
 one maintained library, not separately maintained files. State the allowed
 output vocabulary and supported temporal fragment in this section.
 
-### 3. Related Work and Positioning
+### 4. Methodology
 
-Place Related Work after the problem formulation and before the method. AAAI
-does not prescribe one location, and MOOSE places it near the end, but this
-paper connects three communities whose boundaries should be clear before the
-compiler is introduced. Organize the section by representation gap:
-
-1. generalized planning, MOOSE, feature policies, sketches, and direct
-   program-generating systems such as LMPlan and GenePlan;
-2. policy reuse and solver-backed compact rule selection;
-3. procedural BDI plan libraries, AgentSpeak declarative goal patterns, plan
-   failure, and definite/possible effect summaries for goal interference;
-4. temporally extended BDI goals, LTLf-to-DFA synthesis, product compilation
-   such as FOND4LTLf, and automaton-trace search such as TIDE; and
-5. natural-language-to-temporal-logic and planning-constraint translation,
-   structured prompt programming, prompt-based semantic-parser robustness, and
-   GP2PL's typed, externally bound translation contract and benchmark.
-
-End with the exact novelty boundary: MOOSE goal regression, Clingo solving,
-AgentSpeak semantics, conditional effect summaries for BDI goal interference,
-and LTLf-to-DFA translation are prior work. The contribution is a typed,
-externally bound translation contract and benchmark plus their connection to a
-certificate-carrying compiler that derives summaries from generalized-planning
-evidence and PDDL schemas, constructs executable domain modules, and composes
-query-local controllers.
-
-### 4. Certified Atomic Core Compilation
+#### Certified Atomic Core Compilation
 
 Open with the two certification boundaries, then present the query-independent
 post-evidence domain compiler. Its candidate and witness representation is
@@ -406,10 +387,9 @@ compiler-certification stage.
 
 Detailed witness definitions may remain in the main paper when required to
 understand a contribution. Long proof steps and secondary implementation cases
-belong in supplementary material so that final results fit the seven-page AAAI
-technical-content limit.
+belong in the Technical Appendix so that the main paper fits the AAMAS limit.
 
-### 5. Certified Query Compilation
+#### Certified Query Compilation
 
 This section covers the query-specific path from a controlled-language request
 to plans `Q_q` over the selected atomic core `M_D`. First define the frozen
@@ -421,7 +401,7 @@ boundary fixed in Sec. 2:
 `widehat tau_q`, `Phi_ach`, `Phi_syn`, `Phi_bench`,
 `Phi_cert(D,M_D)`, `val_q`, and the
 deterministic automaton. Keep the full eight-key schema, prompt, and
-formula-to-DFA construction details in the Technical Supplement; keep controlled
+formula-to-DFA construction details in the Technical Appendix; keep controlled
 utterances, profile sampling, and translation equivalence in Experimental
 Evaluation. State once that an
 atemporal achievement formula `psi` is canonically embedded as `F(psi)` before
@@ -464,13 +444,13 @@ the same real LTLf2DFA/MONA path; this is not a second controller fast path.
    leaves, and completion rechecking in the main method. Keep the flat-control
    comparison in Evaluation
    and the full construction algorithm and continuation-cost explanation in the
-   Technical Supplement.
+   Technical Appendix.
 9. Append the resulting query-local plans to the maintained library without
    changing `M_D`. State the primitive-step observation boundary and completion
    retry condition in the method; place suffix-safety and monitor-fidelity proofs
-   in Conditional Guarantees and the Technical Supplement.
+   in Conditional Guarantees and the Technical Appendix.
 
-### 6. Conditional Guarantees
+#### Conditional Guarantees
 
 Keep guarantees separate from algorithm exposition, following the MOOSE
 presentation.
@@ -508,7 +488,7 @@ Every theorem must state its assumptions next to the claim. Do not elevate
 candidate-generation completeness, arbitrary AgentSpeak optimality, arbitrary
 DFA strategy synthesis, or primitive-state safety to a theorem.
 
-### 7. Experimental Evaluation
+### 5. Experimental Evaluation
 
 The evaluation must match the paper's actual contribution: MOOSE is one
 instantiated Evidence Module provider, while the proposed method contains the
@@ -542,7 +522,7 @@ structure; the atomic table reports coverage, branch count, and library size as
 mean plus or minus sample standard deviation across five seeds. Second,
 full-system prose reports five-seed selected-controller temporal validation.
 Third, concise external-reference prose places those results in context, while
-the complete scope-separated table remains in the Technical Supplement. Do not
+the complete scope-separated table remains in the Technical Appendix. Do not
 add a dashboard-style empirical figure that duplicates exact endpoint values.
 
 The registered atomic comparison is cumulative and paired on one exact
@@ -600,9 +580,9 @@ profiles, states that the original PDDL achievement goal is ignored, records
 that every selected query has a legal witness, and gives the 1,228-query /
 475-input scale. Rollout depth, event extraction, profile/signature balancing,
 typed lifting, rendering, deduplication, and deterministic tie-breaking belong
-only in Technical Supplement, Sec. 4.1.
+only in Technical Appendix, Sec. 4.1.
 
-Technical Supplement, Sec. 4.1 must define the construction record
+Technical Appendix, Sec. 4.1 must define the construction record
 `B_i=<D,P_i,q_i,T_i,theta_i,pi_i>`, the event extraction rules, all five formula
 profiles and their witness conditions, nontriviality filters, typed lifting,
 deterministic selection, public/private boundary, and complete-input
@@ -614,7 +594,7 @@ Keep protocol facts in one place. The Evaluation body defines paired inputs,
 atomic and temporal success, and denominator handling exactly once. Result
 captions retain only the experimental unit, non-obvious column definitions, and
 visual emphasis notation; they do not restate those protocol definitions.
-Consolidate main-to-supplement pointers at the end of the protocol and external
+Consolidate main-to-appendix pointers at the end of the protocol and external
 reference discussion rather than repeating one after every paragraph.
 
 
@@ -622,10 +602,10 @@ The main benchmark section records all 16 domain families, the split
 provenance, and the independent five-seed design. Its scientific purpose is to
 estimate variation caused by MOOSE's randomized goal-order sampling. Exact
 memory limits, timeouts, and worker configuration belong in the Technical
-Supplement. Run identifiers remain only in transient local logs. Every seed is
+Appendix. Run identifiers remain only in transient local logs. Every seed is
 compiled and evaluated
 independently; report the mean and sample standard deviation in the main paper,
-and preserve every individual result in the supplement. Never union evidence or
+and preserve every individual result in the appendix. Never union evidence or
 select a best seed. Concurrent launch is only an experiment-orchestration throughput
 choice, and contended wall time is not a method result. Cross-seed
 Jason/VAL runs remain sequential while per-test validation is parallel within
@@ -740,7 +720,7 @@ The final paper must distinguish:
 
 The natural-language front end is GP2PL's typed input contribution and uses one
 frozen full prompt configuration. The
-technical supplement must reproduce a semantically complete paper-facing
+technical appendix must reproduce a semantically complete paper-facing
 template containing the public PDDL catalogue, atom-table contract,
 externally-bound parameter contract, allowed operator fragment, normal forms,
 schematic examples, exact eight-key JSON output, public user payload, and
@@ -773,7 +753,30 @@ commit `67b82843`: 14/14 direct-semantics-versus-MONA cases and 2/2 zero-action
 Jason/PDDL-replay/DFA integration cases pass. Keep its 16 cases separate from
 the 1,228 benchmark denominator.
 
-### 8. Conclusion and Future Work
+### 6. Related Work
+
+Place Related Work after the evaluation. Organize it by representation gap:
+
+1. generalized planning, MOOSE, feature policies, sketches, and direct
+   program-generating systems such as LMPlan and GenePlan;
+2. policy reuse and solver-backed compact rule selection;
+3. procedural BDI plan libraries, AgentSpeak declarative goal patterns, plan
+   failure, and definite/possible effect summaries for goal interference;
+4. temporally extended BDI goals, LTLf-to-DFA synthesis, product compilation
+   such as FOND4LTLf, and automaton-trace search such as TIDE; and
+5. natural-language-to-temporal-logic and planning-constraint translation,
+   structured prompt programming, prompt-based semantic-parser robustness, and
+   GP2PL's typed, externally bound translation contract and benchmark.
+
+End with the exact novelty boundary: MOOSE goal regression, Clingo solving,
+AgentSpeak semantics, conditional effect summaries for BDI goal interference,
+and LTLf-to-DFA translation are prior work. The contribution is a typed,
+externally bound translation contract and benchmark plus their connection to a
+certificate-carrying compiler that derives summaries from generalized-planning
+evidence and PDDL schemas, constructs executable domain modules, and composes
+query-local controllers.
+
+### 7. Conclusion and Future Work
 
 The merged section first answers three questions: what representation gap was
 closed, why the output can be executed by a BDI agent, and which temporal goals
@@ -782,7 +785,7 @@ are certified. Do not repeat the implementation inventory.
 Compress the main-paper limitations into one short sentence for each claim
 boundary: evidence-provider and candidate-grammar scope; temporal-dataset and
 admitted-query scope; and incomplete strategy synthesis. Preserve the detailed
-rejection categories and implemented bounds in the Technical Supplement.
+rejection categories and implemented bounds in the Technical Appendix.
 
 Name unmeasured extensions as future work rather than implied evidence:
 scaling with generated candidate-set size, action-quality or repair-overhead
@@ -796,26 +799,26 @@ is sealed first. Describe this as scaling evidence acquisition and domain
 onboarding, not as expanding the supported PDDL-times-LTLf fragment, proving
 representative sampling, or changing any certification criterion.
 
-## Supplementary and Public Code-and-Data Contract
+## Technical Appendix and Public Code-and-Data Contract
 
-The standalone source
-`latex_code/aamas_method_paper/technical_appendix.tex` is the canonical
-technical appendix. It contains the full formal definitions, assumptions,
+The source
+`latex_code/aamas_method_paper/appendix/technical_appendix.tex` is the canonical
+technical appendix included after the references. It contains the full formal definitions, assumptions,
 proofs of every proposition, theory-to-code map, novel-data description,
 the witness-backed TEG construction algorithm and registered search bounds,
 the frozen natural-language-to-LTLf prompt template, external-data provenance,
 final parameter table, development value ranges, hardware/software
-specification, distributional statistics, and checklist explanations. The main
+specification, and distributional statistics. The main
 paper remains self-contained and includes the essential proof ideas required
 to assess the contribution.
 
-Cross-document references in the main paper use explicit textual locations,
-such as `Technical Supplement, Sec. 4.2`; they are not bibliography citations.
+References from the main paper use explicit textual locations,
+such as `Technical Appendix, Sec. 4.2`; they are not bibliography citations.
 Keep Sec. 1 for definitions and assumptions, Sec. 2 for complete proofs,
 Sec. 4.2 for the frozen prompt, Sec. 4.3 for benchmark provenance, and
-Secs. 5.2--5.3 for parameters and reporting. Do not use a vague `the
-supplement`, an external web link, or a fragile cross-PDF LaTeX reference. The
-main paper must remain self-contained when the supplement is not consulted.
+Secs. 5.2--5.3 for parameters and reporting. Do not use a vague `the appendix`
+or an external web link. The main paper must remain self-contained when the
+appendix is not consulted.
 
 The versioned public evidence is split into:
 
@@ -830,21 +833,19 @@ The versioned public evidence is split into:
 GP2PL code uses Apache-2.0 and original GP2PL data uses CC BY 4.0. External PDDL
 and MOOSE materials retain upstream rights. Three public benchmark repositories
 and MOOSE do not expose an explicit license; they must be fetched at pinned
-commits and cannot be represented as GP2PL-licensed source. Checklist code
-availability concerns the complete GP2PL-authored source, which is included and
-Apache-2.0 licensed. Third-party dependencies are separately cited, pinned, and
+commits and cannot be represented as GP2PL-licensed source. The complete
+GP2PL-authored source is included and Apache-2.0 licensed. Third-party dependencies are separately cited, pinned, and
 retrieved under upstream terms. All novel GP2PL data is publicly released under
 CC BY 4.0, including the construction audit that was sealed from the translation
 model during inference, so no experimental dataset remains non-public.
 
-AAAI review is double blind and forbids pointers to identifiable web material.
+AAMAS review is double blind and forbids pointers to identifiable web material.
 The submission therefore uses an anonymized code-and-data archive and keeps the
 named repository link disabled. The camera-ready conditional enables
 `https://github.com/daidaibunny/gp2pl`. Never expose that URL in the anonymous
-PDF or supplementary review PDF.
+PDF or appendix review material.
 
-Checklist answers may change to `yes` only when the corresponding evidence is
-present in the paper, appendix, or submitted archive. Atomic and temporal
+Atomic and temporal
 coverage, PAR-2, action count, and size remain descriptive because cases share
 domain-level libraries and temporal inputs. Report paired counts and
 domain/profile concentration without case-level p-values; the Balanced
@@ -857,7 +858,7 @@ than forcing every result into a chart. Figure 1 is the single-column framework
 overview on the first page. Figure 2 is a full-width, domain-independent view
 inside the two compiler stages; its right panel embeds the concrete DFA-guided
 tower-query construction so that the temporal compiler is not an unexplained
-process box. Supplementary Figure S1 is a single-column Blocks World execution
+process box. Appendix Figure S1 is a single-column Blocks World execution
 case placed after the formal feasible-core definition. The main paper retains
 one sentence after feasible-core optimization that directs readers to this
 recursive derivation on an unseen stack configuration.
@@ -869,12 +870,12 @@ the supported-fragment, candidate-constructor, paired atomic, paired temporal,
 compact five-seed, and same-scope evidence-to-library tables; fixed-core
 temporal totals remain in prose.
 Per-profile, per-domain, per-seed, runtime-distribution, and diagnostic views
-belong in the Technical Supplement, together with the complete
+belong in the Technical Appendix, together with the complete
 scope-separated external-reference matrix.
 
 ### Figure Production Handoff Contract
 
-Main Figures 1--2 and Supplementary Figures S1--S2 are conceptual. Their
+Main Figures 1--2 and Appendix Figures S1--S2 are conceptual. Their
 labels and examples below come from the implemented architecture, evidence, and
 domain schemas, not from estimated experimental measurements. Experimental
 numbers enter the manuscript only through deterministic tables generated from
@@ -892,30 +893,30 @@ Canvas, PowerPoint, Python, and export settings:
 - Main Figure 1 uses the approved 2558-by-1256, 330-DPI PNG and is inserted at
   3.25 inches wide (approximately 1.60 inches high). Main Figure 2 uses a
   13.333-by-4.2-inch PowerPoint export canvas and is inserted at 7.0 inches
-  wide. Supplementary Figure S1 uses the approved 1381-by-778, 330-DPI PNG and
-  is inserted at one column. Supplementary Figure S2 uses a 13.333-by-5.333-inch
+  wide. Appendix Figure S1 uses the approved 1381-by-778, 330-DPI PNG and
+  is inserted at one column. Appendix Figure S2 uses a 13.333-by-5.333-inch
   PowerPoint canvas. Figure 1 retains its supplied alpha channel and must be
   verified on the paper's white page; generated conceptual figures use a white
   opaque background.
 - Use Arial Regular 18 pt for labels and panel headings, and Courier New Regular
   18 pt for domain schemas, AgentSpeak, formulas encoded as text, and data
   field names. Do not use bold text inside any figure. These fonts become at
-  least 9 pt after scaling to their final AAAI dimensions.
+  least 9 pt after scaling to their final AAMAS dimensions.
 - Use square or 0.06-inch-corner rectangles. Do not use shadows, gradients,
   three-dimensional effects, icons, decorative illustrations, or screenshots.
 - Main Figure 1 is the approved, version-controlled raster asset
   `fig1_architecture.png`; its SHA-256 identity is enforced by the method-figure
-  generator and tests. Supplementary Figure S1 is the approved supplied raster
-  asset `fig3_atomic_case.png`. Figure 2 and Supplementary Figure S2 may share
+  generator and tests. Appendix Figure S1 is the approved supplied raster
+  asset `fig3_atomic_case.png`. Figure 2 and Appendix Figure S2 may share
   the editable source deck `aaai_method_figures_source.pptx`, with exactly one
   figure per slide.
 - Main figure files are `fig1_architecture.png` and
-  `fig2_compiler_stages.pdf`. Supplementary figure files are
+  `fig2_compiler_stages.pdf`. Appendix figure files are
   `fig3_atomic_case.png` and the planned `figS2_dfa_controller.pdf`; all live under
   `latex_code/aamas_method_paper/figures/` when delivered.
 - Embed fonts in vector PDFs, crop to the slide boundary, and verify all text at
-  its final include width. Do not rasterize Figure 2 or Supplementary Figure S2,
-  and do not resample or recompress the locked Figure 1 and Supplementary
+  its final include width. Do not rasterize Figure 2 or Appendix Figure S2,
+  and do not resample or recompress the locked Figure 1 and Appendix
   Figure S1 PNGs.
 
 Use this exact color palette. Text is always `#1A1A1A` unless the fill is the
@@ -976,7 +977,7 @@ this preserves editable routing when a label changes.
 
 Use a single-column `figure[htbp]` in the first page's right column. Place its
 source after the domain-independent evidence definition and compilation gap and
-before the temporal-goal motivation. In the AAAI two-column layout, this leaves
+before the temporal-goal motivation. In the AAMAS two-column layout, this leaves
 the abstract and opening domain-compilation motivation in the left column while
 the overview occupies the top of the right column without forced placement. Insert the approved
 `fig1_architecture.png` at `\columnwidth` and its native aspect ratio; do not
@@ -1054,13 +1055,13 @@ Approved caption:
 > yields DFA-guided repair and dispatch plans that extend the maintained library
 > without relearning the core.
 
-Supplementary Figure S1 separately illustrates a compositional derivation
+Appendix Figure S1 separately illustrates a compositional derivation
 available in the selected atomic core.
 
-### Supplementary Figure S1: Selected Atomic-Core Compositional Derivation
+### Appendix Figure S1: Selected Atomic-Core Compositional Derivation
 
 Place this single-column figure after the formal feasible-core definition in the
-Technical Supplement. The main paper retains only a one-sentence pointer after
+Technical Appendix. The main paper retains only a one-sentence pointer after
 Feasible-Core Optimization. The figure demonstrates the result of Figure 2(a),
 rather than repeating candidate construction:
 
@@ -1086,9 +1087,9 @@ Approved caption:
 > actions. Disequality guards inactive under the shown binding are omitted. The
 > figure demonstrates derivation availability, not runtime branch priority.
 
-### Supplementary Figure S2: DFA Transition Compilation and Runtime Monitoring
+### Appendix Figure S2: DFA Transition Compilation and Runtime Monitoring
 
-Place this full-width figure in the technical supplement beside the formal
+Place this full-width figure in the technical appendix beside the formal
 transition-compilation rules. Use four panels. The decoded MONA example is
 `phi = F(on(A,B) & on(B,C) & not holding(A))`. Define the complete progress
 guard once as `G`; all subsequent labels refer to that same guard. This is a
@@ -1188,7 +1189,7 @@ All helper names in panel (c) omit the common prefix
 `g_query_17_trans_1_` only to remain legible; print this note in gray 18 pt at
 `x=65,y=95,w=10,h=3`, to the right of the singleton inset. Draft caption:
 
-> **Supplementary Figure S2: Preservation-safe compilation of one DFA progress
+> **Appendix Figure S2: Preservation-safe compilation of one DFA progress
 > transition.**
 > Conditional module-completion summaries induce a threat-induced precedence
 > relation over signed guard obligations. A balanced binary transition-repair
@@ -1244,7 +1245,7 @@ Panel (a), `Atomic coverage by domain`:
   implying significance.
 - The frozen release currently yields five differing domains and 11 unchanged
   domains, all at 100 percent. The exact per-seed domain distribution remains
-  in the generated Technical Supplement table.
+  in the Technical Appendix table.
 
 Panel (b), `Blocksworld Tower time-to-valid-trace`:
 
@@ -1299,7 +1300,7 @@ multi-asset `aaai_figure_manifest.json` only after recording their dimensions,
 data sources, and embedded fonts. Any font substitution is a release blocker.
 
 Use the first two LaTeX placements in the main paper and the atomic-case
-placement in the Technical Supplement. The supplement prefixes figure numbers
+placement in the Technical Appendix. The appendix prefixes figure numbers
 with `S`:
 
 ```latex
@@ -1326,7 +1327,7 @@ with `S`:
   \IfFileExists{\gpplatomiccasepath}{
     \includegraphics[width=\columnwidth]{\gpplatomiccasepath}
   }{<single-column placeholder>}
-  \caption{<approved Supplementary Figure S1 caption from this outline>}
+  \caption{<approved Appendix Figure S1 caption from this outline>}
   \label{fig:atomic-case}
 \end{figure}
 ```
@@ -1414,7 +1415,7 @@ The main paper reports the Raw MOOSE versus Full GP2PL result on the identical
 table. This comparison concerns provider execution versus the final library on
 a narrower paired scope, rather than compiler variants over all 16 domains. Keep
 MOOSE, Raw MOOSE extension, LAMA, MRP+HJ, FOND4LTLf + LAMA, and TIDE + LAMA in a separate
-Technical-Supplement per-domain reference table. Each cell is
+Technical-Appendix per-domain reference table. Each cell is
 `valid/supported`; use `--` only when a method declares the entire domain
 unsupported, never for a supported planning or compilation failure. Keep
 aggregate PAR-2 in the accompanying prose, and do not mix external output
@@ -1423,7 +1424,7 @@ completed outcome matrix gives
 LAMA 591/868, MRP+HJ 253/360, FOND4LTLf plus LAMA 298/492 on its supported
 subset, and TIDE plus LAMA 675/868 on all Boolean inputs. Their 736 and 360
 unsupported inputs remain separate. Retain every row in
-the Technical Supplement; moving the matrix out of the main paper changes
+the Technical Appendix; moving the matrix out of the main paper changes
 placement, not the registered comparison protocol.
 
 Generate the compiler ablation tables with
@@ -1461,11 +1462,10 @@ second main-paper robustness table that repeats the Full GP2PL coverage cell.
 Main prose retains only the nonduplicate facts that 14 of 16 domains complete
 under every seed and that all registered structural challenges pass.
 
-The Technical Supplement contains `result_five_seed_atomic_domain_table.tex`,
-with raw Seed 0--4 counts and one combined mean $\pm$ sample-standard-deviation
-coverage column. It also contains `result_domain_table.tex`, explicitly
-labelled as the common seed-0 input table for the paired temporal ablation. The
-selected temporal method's five-seed result is reported separately.
+The Technical Appendix contains the raw Seed 0--4 counts and one combined mean
+$\pm$ sample-standard-deviation coverage column. It also contains the common
+seed-0 input table for the paired temporal ablation. The selected temporal
+method's five-seed result is reported separately.
 
 ### Main Five-Seed Temporal Summary
 
@@ -1475,14 +1475,14 @@ the selected controller must complete all five seed-specific executions, pass
 neutral-goal VAL, and be accepted by both DFA trace oracles. Report the pooled
 denominator, all-seed query count, and seed-level PAR-2 variation. Keep the five
 per-profile rows and pooled runtime/action distributions in the Technical
-Supplement.
+Technical Appendix.
 
 ### Failure and Rejection Reporting
 
 The main paper keeps the atomic compiler table and reports five-seed temporal
 totals and scope-qualified external-reference endpoints in prose. The Technical
-Supplement and machine-readable result release preserve all raw domain--seed,
-per-profile, paired-input, and external-reference values. The supplementary release should always
+Appendix and machine-readable result release preserve all raw domain--seed,
+per-profile, paired-input, and external-reference values. The release should always
 keep translation errors, schema validation
 errors, unsupported DFA structure, certification rejection, Jason failure,
 timeout, VAL failure, and DFA-trace rejection as separate statuses. A failed or
@@ -1492,18 +1492,17 @@ Main-paper result prose reports scientific aggregates, cross-seed variation,
 domain-level concentration of failures, causal interpretation, and the claim
 boundary. Do not repeat every seed's raw numerator, timeout/exit status, worker
 count, or individual case identifier in the main paper. Worker and resource
-details remain in the Technical Supplement; source hashes and run identifiers
+details remain in the Technical Appendix; source hashes and run identifiers
 do not. A concrete failure mode
 may remain in the main paper when it explains a method limitation, but express
 it at the level of the missing witness or hypothesis-class boundary rather
 than as runner bookkeeping.
 
-### AAAI Figure and Table Style Contract
+### AAMAS Figure and Table Style Contract
 
-- Use the official AAAI-27 author kit files `aaai2027.sty` and
-  `aaai2027.bst` without locally redefining margins, fonts, caption spacing,
-  or bibliography style. The style loads its required fonts; do not add legacy
-  `times`, `helvet`, or `courier` packages.
+- Use the official AAMAS 2027 author kit files `aamas.cls` and
+  `ACM-Reference-Format.bst` without locally redefining margins, fonts, caption
+  spacing, or bibliography style.
 - In manuscript prose, use the Author Kit's normal Times-like roman text for
   ordinary technical terms, including producer, regression, recursion,
   precondition repair, resource discharge, and numeric progress. Write cited
@@ -1526,7 +1525,7 @@ than as runner bookkeeping.
 - A caption must define the population/denominator, aggregation over seeds, and
   every abbreviation needed to read the visual independently. State a time
   limit only when it is visually encoded or necessary to interpret coverage;
-  exact resource configuration otherwise belongs in the Technical Supplement.
+  exact resource configuration otherwise belongs in the Technical Appendix.
   The body explains interpretation rather than restating every cell.
 - Use `booktabs` and no vertical rules or colored table cells. Bold marks a
   genuine tied-best comparable result. Blue bold may identify the selected
@@ -1542,7 +1541,7 @@ than as runner bookkeeping.
 - Use a colorblind-safe palette and redundant shape/line encodings. Figure text
   and mathematical symbols must remain readable in grayscale; never convey a
   certification or failure state by color alone.
-- Conceptual Figure 2 and Supplementary Figures S1--S2 may be authored in
+- Conceptual Figure 2 and Appendix Figures S1--S2 may be authored in
   PowerPoint and exported as vector PDF. Any optional diagnostic plot must be
   regenerated by its checked-in script from frozen records and must not be
   promoted to a main-paper result figure.
@@ -1561,7 +1560,7 @@ The agent that receives the final TEG run must:
 5. add failure categories and representative counterexamples, not only total
    coverage;
 6. update the Abstract, Introduction contribution summary, Evaluation,
-   Conclusion and Future Work, reproducibility checklist, and this outline in
+   Conclusion and Future Work, Technical Appendix, and this outline in
    one coherent change;
 7. preserve the supported-fragment and primitive-step observation assumptions even
    if an empirical case happens to pass outside them.
@@ -1607,12 +1606,9 @@ The following result insertions are complete:
 
 The remaining submission tasks are:
 
-1. full or supplementary proofs for any claim stronger than the current proof
+1. full or appendix proofs for any claim stronger than the current proof
    sketches; and
-2. final camera-ready author and code-and-data metadata. The current compiled draft
-   uses seven technical-content pages, followed by references. Under the
-   AAAI-27 submission instructions, the reproducibility checklist is compiled
-   and uploaded separately rather than appended to the main-paper PDF.
+2. final camera-ready author and code-and-data metadata.
 
 The five-seed public evaluation release records the declared protocol and every one of the
 6,140 seed--case outcomes. Timing is not reported because the runs overlapped
@@ -1625,7 +1621,7 @@ atomic generation time from provisional diagnostic logs.
 
 ## Page Budget and Maintenance
 
-AAAI allows seven technical-content pages under the current author-kit rules.
+AAMAS 2027 allows eight main-paper pages followed by unrestricted references.
 Use the following target allocation:
 
 | Content | Target pages |
@@ -1639,7 +1635,7 @@ Use the following target allocation:
 | Related work, conclusion, and future work | 0.5 |
 
 When results are inserted, compress detailed certification prose into tables and
-move long proofs to supplementary material before removing definitions or
+move long proofs to Technical Appendix before removing definitions or
 failure boundaries. The paper source, this outline, and both normative research
 design documents must never disagree about architecture, terminology, or
 supported capabilities.

@@ -34,7 +34,7 @@ DEFAULT_RELEASE_PAIRED_RESULT = (
 )
 DEFAULT_LATEX_MACROS_FILE = (
 	PROJECT_ROOT
-	/ "latex_code/aamas_method_paper/sections/result_comparison_macros.tex"
+	/ "artifacts/evaluation_tables/result_comparison_macros.tex"
 )
 EXPECTED_SEEDS = (0, 1, 2, 3, 4)
 EXPECTED_CASE_COUNT = 1228

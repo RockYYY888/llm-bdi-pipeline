@@ -1,0 +1,33 @@
+\section{Problem Definition}
+\label{sec:problem-definition}
+
+\subsection{Atomic-Core Compilation}
+
+Given $D$, training instances $\mathcal{I}_{\mathrm{train}}$, and normalized
+singleton-goal evidence $E$, atomic compilation produces the certified atomic
+module core $\mathcal{M}_D$, whose query-independent branches are triggered by
+singleton achievements.
+
+\subsection{Query Compilation}
+
+For a validated bound query
+$\widehat\tau_q=(\tau_q,\theta_q)$ whose binding maps each parameter to a
+type-compatible object, query compilation takes $\mathcal D_q$ and
+$\mathcal M_D$ and produces $\mathcal Q_q$: top-level, DFA-dispatch, and
+transition-repair plans. A conjunctive guard is compiled into a certified
+serialization of signed atomic obligations, not into a trigger in
+$\mathcal M_D$. For appended queries $q_1,\ldots,q_k$, the one maintained domain
+library is
+\[
+\mathcal{L}_D^{[0]}=\mathcal{M}_D,
+\qquad
+\mathcal{L}_D^{[k]}=
+\mathcal{M}_D\cup\bigcup_{i=1}^{k}\mathcal{Q}_{q_i}.
+\]
+Thus $\mathcal M_D$ is the stable core of $\mathcal L_D^{[k]}$, not a
+second persisted library, and appending $\mathcal Q_{q_i}$ neither reconstructs
+nor reoptimizes the atomic core. Throughout, calligraphic symbols denote the
+finite programs, candidate sets, automata, plan sets, and libraries defined
+above; $b$ denotes one candidate branch, $e$ one normalized evidence rule, and
+$\chi$ one DFA transition guard. The Technical Appendix formalizes the
+supported-fragment assumptions and acceptance boundary.

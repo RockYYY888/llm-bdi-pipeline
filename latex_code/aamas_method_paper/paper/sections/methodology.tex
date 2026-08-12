@@ -1,7 +1,10 @@
-\section{Certified Atomic Core Compilation}
+\section{Methodology}
 \label{sec:method}
 
-\subsection{Certification Boundaries}
+\subsection{Certified Atomic-Core Compilation}
+\label{sec:atomic-core-compilation}
+
+\subsubsection{Certification Boundaries}
 
 GP2PL separates deterministic input validation from two compiler certification
 stages. Atomic compilation checks every candidate branch locally through
@@ -16,11 +19,11 @@ DFA progress guard $\chi$; it neither reopens atomic selection nor relearns
 $\mathcal M_D$.
 
 After these obligations are certified, rendering preserves each selected trigger,
-context, ordered body, and internal-call edge. The Technical Supplement
+context, ordered body, and internal-call edge. The Technical Appendix
 formalizes the constructors and accept/reject boundary, proves the
 soundness and monitor claims, and provides pseudocode (Secs.~1--3).
 
-\subsection{Evidence Normalization and Lifting}
+\subsubsection{Evidence Normalization and Lifting}
 
 Figure~\ref{fig:compiler-stages}(a) summarizes the query-independent path from
 raw evidence through canonical lifting and certified candidate selection to
@@ -33,12 +36,13 @@ one goal atom with a PDDL action macro, numeric effects, and provenance.
 Every symbol and arity must occur in $D$. Canonical lifting normalizes a policy
 already generalized by the provider rather than inferring one from ground
 plans; it consistently renames variables while preserving shared-variable
-structure and declared constants (Technical Supplement, Sec.~1). Atomic evidence is
+structure and declared constants (Technical Appendix,
+Sec.~\ref{app:formal-framework}). Atomic evidence is
 restricted to positive singleton achievements;
 negative literals remain guard conditions and do not induce synthetic atomic
 goals.
 
-\subsection{Action-Schema Candidate Generation}
+\subsubsection{Action-Schema Candidate Generation}
 
 Candidate generation extends evidence goals to every schema-producible target,
 including signatures required by internal calls but absent from provider
@@ -82,7 +86,7 @@ candidate language is not complete for PDDL planning: some valid plans may lie
 outside $\mathfrak G$. PDDL types constrain unification, and rendered
 sort-membership tests appear only in plan contexts.
 
-\subsection{Candidate Certification}
+\subsubsection{Candidate Certification}
 
 Symbolic progression proves preconditions and target achievement and yields each
 candidate's conditional module-completion summary $\Sigma_b$, with Boolean
@@ -138,14 +142,15 @@ a dependency rank $\kappa_{\mathcal M}$ that strictly decreases along every
 selected call edge; same-predicate recursion instead requires its own relational
 ranking witness.
 
-\subsection{Feasible-Core Optimization}
+\subsubsection{Feasible-Core Optimization}
 
 Validated evidence macros and certified action-schema-derived candidates enter
 one Clingo answer-set optimization problem
 \cite{Gebser2018Clingo}. Evidence rules induce coverage obligations
 $\operatorname{covers}_D(b,e)$, and nonrecursive schema branches induce
 $\operatorname{realizes}_D(b,c)$. Both require alpha-equivalent triggers and an
-equivalent or no-weaker completion contract; the Technical Supplement, Sec.~1,
+equivalent or no-weaker completion contract; the Technical Appendix,
+Sec.~\ref{app:formal-framework},
 defines their admissible alternatives.
 Define
 \begin{align*}
@@ -175,12 +180,12 @@ $\mathcal M_D$; the claim is global only within
 $\mathcal C^{\checkmark}_{D,E}$, not over ungenerated programs.
 
 A concrete Blocks World derivation through the selected atomic core appears in
-the Technical Supplement, Fig.~S1.
+the Technical Appendix, Fig.~S1.
 
-\section{Certified Query Compilation}
+\subsection{Certified Query Compilation}
 \label{sec:temporal-composition}
 
-\subsection{Controlled Natural-Language Translation}
+\subsubsection{Controlled Natural-Language Translation}
 
 A frozen language-model prompt receives one controlled natural-language request,
 its declared typed parameters and constraints, and the public PDDL catalogue. The
@@ -193,7 +198,8 @@ atom tables, and altered parameter constraints; it neither grounds parameters
 nor selects actions or objects. Query invocation supplies $\theta_q$. For
 offline evaluation, a hidden gold formula enables exact finite-trace language
 equivalence; it is not an online input. The complete prompt and structured output
-contract appear in the Technical Supplement, Sec.~4. Figure~\ref{fig:compiler-stages}(b)
+contract appear in the Technical Appendix, Sec.~\ref{app:translation-prompt}.
+Figure~\ref{fig:compiler-stages}(b)
 follows the validated execution formula through its MONA DFA, progress-edge
 certification, query-local repair controllers, and top-level dispatcher to
 $\mathcal Q_q$. GP2PL uses $F\varphi_q$ for achievement queries and $\varphi_q$
@@ -217,7 +223,7 @@ this certificate cannot be constructed, compilation rejects the progress edge;
 otherwise $\boldsymbol\ell_\chi$ is rendered as the balanced binary
 transition-repair tree of Sec.~\ref{sec:balanced-trees}.
 
-\subsection{Summaries and Preservation Portfolios}
+\subsubsection{Summaries and Preservation Portfolios}
 
 A relational fixed point over selected calls computes each branch summary
 $\Sigma_b$, following the definite/potential effect distinction in BDI
@@ -241,7 +247,7 @@ establishes the entire guard, is callable from every positive occurrence it
 establishes, and retains every query variable. Compilation rejects the edge if
 no such joint branch exists.
 
-\subsection{Numeric and Joint-Guard Certification}
+\subsubsection{Numeric and Joint-Guard Certification}
 
 Numeric obligations reuse the same certification machinery. A positive
 integer equality is achieved by a complete constant-delta action: a unit delta
@@ -255,7 +261,7 @@ ordering missing preconditions before bounded target distance. Strong-Until
 source invariants are the signed literals common to every non-progress
 self-loop guard and are preserved until progress.
 
-\subsection{Balanced Binary Transition-Repair Trees}
+\subsubsection{Balanced Binary Transition-Repair Trees}
 \label{sec:balanced-trees}
 
 For query $q$, let $\mathcal R_{q_s,\chi}$ denote the plans for one source-state
@@ -275,7 +281,7 @@ local quantities by two.
 Appending $\mathcal Q_q$ leaves $\mathcal M_D$ unchanged. Query-local goals are
 control symbols; only primitive PDDL actions change the observed state.
 
-\section{Conditional Guarantees}
+\subsection{Conditional Guarantees}
 \label{sec:guarantees}
 
 These guarantees apply only to accepted branches, cores, and query controllers;

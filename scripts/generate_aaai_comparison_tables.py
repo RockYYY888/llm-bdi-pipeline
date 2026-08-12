@@ -16,7 +16,7 @@ from typing import Mapping
 from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "latex_code/aamas_method_paper/sections"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "artifacts/evaluation_tables"
 DEFAULT_PUBLISHED_MOOSE_REFERENCE = (
 	PROJECT_ROOT
 	/ "paper_artifacts/gp2pl_evaluation/v1/moose_published_reference.json"

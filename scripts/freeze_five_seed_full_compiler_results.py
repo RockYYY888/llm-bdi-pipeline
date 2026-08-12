@@ -24,7 +24,7 @@ DEFAULT_OUTPUT_JSON = (
 	PROJECT_ROOT
 	/ "paper_artifacts/gp2pl_evaluation/v1/five_seed_full_compiler_summary.json"
 )
-DEFAULT_LATEX_OUTPUT_DIR = PROJECT_ROOT / "latex_code/aamas_method_paper/sections"
+DEFAULT_LATEX_OUTPUT_DIR = PROJECT_ROOT / "artifacts/evaluation_tables"
 EXPECTED_SEEDS = (0, 1, 2, 3, 4)
 REGISTERED_VALIDATION_WORKERS = 8
 REGISTERED_JASON_TIMEOUT_SECONDS = 1800

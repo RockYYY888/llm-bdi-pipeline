@@ -35,8 +35,8 @@ DFA language equivalence; temporal success requires compilation, Jason,
 neutral-goal VAL, and acceptance by both DFAs. Every failure remains in the
 denominator. Comparisons are paired by held-out identifier, averaging seeded
 atomic outcomes within identifiers before inference. Construction details,
-limits, costs, and inference rules appear in the Technical Supplement,
-Secs.~4--5.
+limits, costs, and inference rules appear in the Technical Appendix,
+Secs.~\ref{app:data}--\ref{app:reproducibility}.
 
 \subsection{Paired Component Ablations}
 \label{sec:paired-ablation-results}
@@ -49,7 +49,28 @@ maximum-cardinality feasible subset. Full GP2PL applies lexicographic Clingo
 selection to the same candidates. The rows isolate target expansion, recursive
 generation, and compact selection.
 
-\input{sections/result_atomic_comparison_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrr}
+\toprule
+Method & Valid (\%) & Branches & KiB \\
+\midrule
+Evidence Only & 88.3 $\pm$ 1.2 & 835.0 $\pm$ 15.8 & 488.3 $\pm$ 8.3 \\
+Direct Producers & 88.3 $\pm$ 1.2 & 1153.0 $\pm$ 15.8 & 549.2 $\pm$ 8.3 \\
+Maximum Feasible & \resultbest{98.7 $\pm$ 1.3} & 1533.0 $\pm$ 15.8 &
+645.9 $\pm$ 8.3 \\
+\resultselected{Full GP2PL}\selectedmark & \resultbest{98.7 $\pm$ 1.3} &
+\resultselected{1499.0 $\pm$ 15.8} & \resultselected{635.1 $\pm$ 8.3} \\
+\bottomrule
+\end{tabular}
+\caption{Paired atomic compiler ablation over 6,140 held-out seed--cases.
+All entries are mean $\pm$ sample SD across five evidence seeds; Branches and
+KiB are per-seed totals over 16 libraries. Bold marks tied best coverage and
+the smaller selected core; $\dagger$ marks the selected method.}
+\label{tab:atomic-comparison}
+\end{table}
 
 Direct Producers, Maximum Feasible, and Full GP2PL cover all 73 producible
 targets under every seed (365 seed--target obligations); Evidence Only covers
@@ -61,10 +82,10 @@ yields the smaller certified core.
 On the four added families under matched evidence seeds, Full GP2PL raises
 VAL-valid coverage from Raw MOOSE's 15.8\% to 97.3\% over 740 held-out
 seed--cases \cite{Chen2025MooseExtended}. Full GP2PL is complete on 14 of 16
-domains under every seed, and all \ChallengeSuccessCount{}/\ChallengeCaseCount{}
+domains under every seed, and all 13/13
 registered structural challenges pass. Complete per-domain seed counts,
-challenge definitions, and failure analysis appear in the Technical Supplement,
-Sec.~5.3.
+challenge definitions, and failure analysis appear in the Technical Appendix,
+Sec.~\ref{app:reproducibility}.
 
 \paragraph{Temporal composition.}
 Unprotected Serialization omits completion-effect analysis. Module-Return
@@ -73,7 +94,27 @@ checks the DFA only after an atomic module finishes all primitive actions;
 Certified Balanced checks after every primitive action. All share the
 automaton, library, and monitor.
 
-\input{sections/result_temporal_comparison_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Method & Valid & PAR-2 s & Plans & Fan-out \\
+\midrule
+Unprotected Serialization & 1113/1228 & 342.0 & 7 & 3 \\
+Module-Return Monitor & 1212/1228 & 53.1 & 13 & 2 \\
+\resultselected{Certified Balanced}\selectedmark & \resultbest{1228/1228} &
+5.6 & 13 & \resultselected{2} \\
+\bottomrule
+\end{tabular}
+\caption{Paired temporal compiler ablation over 1,228 queries. PAR-2 charges
+failures twice the 1,800-second limit. Plans is median controller size and
+Fan-out is the maximum number of sibling plans sharing one repair trigger.
+Bold marks best coverage and the selected structural bound; $\dagger$ marks
+Balanced as the selected method. Selection is structural, not runtime-based.}
+\label{tab:temporal-comparison}
+\end{table}
 
 Certified Balanced gains 9.36 points over Unprotected Serialization
 (Table~\ref{tab:temporal-comparison}); 113 of 115 gains are in bounded-integer
@@ -82,33 +123,31 @@ supports monitoring after every primitive action.
 
 \subsection{End-to-End Temporal Validation}
 \label{sec:end-to-end-results}
-All \TranslationEquivalentCount{}/\TranslationInputCount{} translated
+All 475/475 translated
 specifications are DFA-language equivalent to their gold formulas. Across five
 independently compiled atomic-core sets, Certified Balanced validates all
-\TemporalCrossSeedValidCount{} admitted executions
-(\TemporalCrossSeedQueryCount{} queries under each seed), and no admitted query
+6,140 admitted executions
+(1,228 queries under each seed), and no admitted query
 changes outcome across seeds. Primitive-action counts are invariant across seeds, and mean per-seed
-PAR-2 is \TemporalCrossSeedMeanParTwoSeconds{} $\pm$
-\TemporalCrossSeedParTwoSDSeconds{} seconds. Breakdowns by temporal profile,
-runtime, and trace length appear in the Technical Supplement, Sec.~5.3.
+PAR-2 is 5.36 $\pm$ 0.27 seconds. Breakdowns by temporal profile,
+runtime, and trace length appear in the Technical Appendix,
+Sec.~\ref{app:reproducibility}.
 
 \paragraph{External task references.}
 The two external temporal references use LAMA as their backend; FOND4LTLf
 and TIDE are end-to-end task references rather than GP2PL compiler ablations.
 On the same achievement corpus, LAMA validates
-\ExternalLAMAValidCount{}/\ExternalLAMACaseCount{} classical instances and
+591/868 classical instances and
 ENHSP MRP+HJ validates
-\ExternalMRPHJValidCount{}/\ExternalMRPHJCaseCount{} bounded-integer instances
+253/360 bounded-integer instances
 \cite{RichterWestphal2010LAMA,Scala2020NumericSubgoaling}; Full GP2PL averages
-\AtomicFiveSeedMeanSuccessPercent{}\% across all 1,228 held-out cases. Among the
+98.68\% across all 1,228 held-out cases. Among the
 Boolean temporal queries admitted by FOND4LTLf, GP2PL validates all
-\ExternalDirectSupportedCount{}, whereas FOND4LTLf validates
-\ExternalDirectValidCount{}/\ExternalDirectSupportedCount{} (PAR-2
-\ExternalDirectParTwoSeconds{} seconds) \cite{DeGiacomoFuggitti2021FOND4LTLf}.
-The other \ExternalDirectUnsupportedCount{} queries are outside FOND4LTLf's declared
+492, whereas FOND4LTLf validates
+298/492 (PAR-2 1457.5 seconds) \cite{DeGiacomoFuggitti2021FOND4LTLf}.
+The other 736 queries are outside FOND4LTLf's declared
 scope. TIDE validates
-\ExternalTIDEValidCount{}/\ExternalTIDESupportedCount{} Boolean queries (PAR-2
-\ExternalTIDEParTwoSeconds{} seconds); the \ExternalTIDEUnsupportedCount{}
+675/868 Boolean queries (PAR-2 821.0 seconds); the 360
 numeric queries are outside TIDE's scope \cite{Suprun2026TIDE}. Complete
-scope-separated results and protocols appear in the Technical Supplement,
-Sec.~5.3.
+scope-separated results and protocols appear in the Technical Appendix,
+Sec.~\ref{app:reproducibility}.

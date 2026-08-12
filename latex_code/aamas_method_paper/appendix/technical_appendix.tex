@@ -502,6 +502,8 @@ atomic-core slice. The first transition expands an internal achievement without
 changing the PDDL state; subsequent transitions execute schema actions.
 Disequality guards inactive under the shown binding are omitted. The figure
 demonstrates derivation availability, not runtime branch priority.}
+\Description{Blocks World derivation showing an internal achievement expansion
+followed by schema actions that establish the selected atomic target.}
 \label{fig:atomic-case}
 \end{figure}
 \FloatBarrier
@@ -1723,23 +1725,107 @@ success count together with its cross-seed descriptive statistic.
 Table~\ref{tab:domain-results} records the common seed-0 inputs used by the
 paired controller ablation.
 
-\input{sections/result_five_seed_atomic_domain_table}
+\begin{table*}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Domain & Test & Seed 0 & Seed 1 & Seed 2 & Seed 3 & Seed 4 & Coverage (\%) \\
+\midrule
+barman & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+blocksworld-clear & 30 & 30 & 30 & 30 & 30 & 30 & 100.0 $\pm$ 0.0 \\
+blocksworld-on & 30 & 30 & 30 & 30 & 30 & 30 & 100.0 $\pm$ 0.0 \\
+blocksworld-tower & 77 & 77 & 77 & 77 & 77 & 77 & 100.0 $\pm$ 0.0 \\
+depots & 11 & 9 & 7 & 6 & 6 & 7 & 63.6 $\pm$ 11.1 \\
+ferry & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+gripper & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+logistics & 90 & 88 & 85 & 54 & 72 & 90 & 86.4 $\pm$ 16.7 \\
+miconic & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+numeric-ferry & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+numeric-miconic & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+numeric-minecraft & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+numeric-transport & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+rovers & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+satellite & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+transport & 90 & 90 & 90 & 90 & 90 & 90 & 100.0 $\pm$ 0.0 \\
+\bottomrule
+\end{tabular}
+\caption{Complete Full GP2PL atomic held-out successes by independent MOOSE
+goal-order seed. Coverage is mean $\pm$ sample standard deviation across five
+evidence seeds, with one core compiled per domain and seed; no evidence is
+pooled and no best seed is selected.}
+\label{tab:five-seed-atomic-domains}
+\end{table*}
 
-\input{sections/result_domain_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{2.0pt}
+\begin{tabular}{lrrrrr}
+\toprule
+Domain & Tr/Te & E/S & Sel. & E2E & s \\
+\midrule
+barman & 30/90 & 176/277 & 441 & 90/90 & 11.3 \\
+blocksworld-clear & 120/30 & 7/30 & 34 & 30/30 & 3.9 \\
+blocksworld-on & 150/30 & 53/30 & 80 & 30/30 & 3.7 \\
+blocksworld-tower & 25/77 & 179/29 & 205 & 77/77 & 7.1 \\
+depots & 11/11 & 176/156 & 323 & 11/11 & 13.1 \\
+ferry & 20/90 & 5/17 & 21 & 90/90 & 4.2 \\
+gripper & 3/90 & 4/25 & 26 & 90/90 & 4.4 \\
+logistics & 30/90 & 87/28 & 111 & 90/90 & 8.4 \\
+miconic & 30/90 & 11/10 & 20 & 90/90 & 5.2 \\
+numeric-ferry & 10/90 & 5/13 & 17 & 90/90 & 5.9 \\
+numeric-miconic & 30/90 & 11/16 & 26 & 90/90 & 5.3 \\
+numeric-minecraft & 2/90 & 17/5 & 22 & 90/90 & 4.3 \\
+numeric-transport & 10/90 & 5/13 & 16 & 90/90 & 5.2 \\
+rovers & 99/90 & 90/40 & 127 & 90/90 & 9.7 \\
+satellite & 99/90 & 15/26 & 40 & 90/90 & 5.6 \\
+transport & 20/90 & 5/15 & 18 & 90/90 & 4.2 \\
+\bottomrule
+\end{tabular}
+\caption{Per-domain seed-0 inputs for the paired controller ablation. Tr/Te
+denotes train/test instances; E/S denotes evidence/schema candidates; Sel.
+denotes selected branches; E2E requires Jason, neutral-goal VAL, and both DFA
+checks; s is median wall-clock seconds per query.}
+\label{tab:domain-results}
+\end{table}
 
 The selected controller validates
-\TemporalCrossSeedValidCount{}/\TemporalCrossSeedEvaluationCount{} executions:
-all \TemporalCrossSeedQueryCount{} queries succeed for all
-\TemporalCrossSeedCount{} seeds, with no seed-sensitive case. Action count is
+6,140/6,140 executions: all 1,228 queries succeed for all five seeds, with no
+seed-sensitive case. Action count is
 invariant across seeds for every query. Mean per-seed PAR-2 is
-\TemporalCrossSeedMeanParTwoSeconds{} $\pm$
-\TemporalCrossSeedParTwoSDSeconds{} seconds. The profile decomposition,
+5.36 $\pm$ 0.27 seconds. The profile decomposition,
 per-domain Raw MOOSE extension results, and complete scope-separated external
 references refine this aggregate result.
 The profile table reports the paired-run query partition per seed; the
 cross-seed selected-controller matrix repeats that partition without failures.
 
-\input{sections/result_profile_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{1.7pt}
+\begin{tabular}{lrrrr}
+\toprule
+Profile & DFA equiv. & E2E valid & Med. act. & Med. s \\
+\midrule
+Ordered-3 & 137/137 & 272/272 & 3 & 5.4 \\
+Ordered-2 & 136/136 & 273/273 & 2 & 5.6 \\
+Strong Until & 119/119 & 275/275 & 1 & 5.4 \\
+Conjunction & 19/19 & 137/137 & 1 & 5.4 \\
+Conj.+negation & 64/64 & 271/271 & 1 & 5.6 \\
+\midrule
+All & 475/475 & 1,228/1,228 & 2 & 5.5 \\
+\bottomrule
+\end{tabular}
+\caption{Translation and execution by temporal profile. DFA equiv. counts the
+475 distinct translation inputs whose gold and predicted DFAs have the same
+finite-trace language. E2E valid counts all 1,228 admitted bound queries per
+seed and requires controller compilation, Jason completion, neutral-goal VAL,
+and acceptance by both DFA trace oracles. Medians are primitive actions and
+wall-clock seconds for the paired run.}
+\label{tab:profile-results}
+\end{table}
 
 The MOOSE reference uses two predeclared, disjoint scopes. For the twelve
 original domains, it reports the five-model mean from Table~4 of arXiv
@@ -1752,43 +1838,99 @@ over 740 evaluations; seed-level valid counts are 26, 23, 23, 25, and 20.
 Published MOOSE time and memory are not combined with local PAR-2 because the
 coverage protocol permits different worker isolation.
 
-\input{sections/result_moose_reference_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{1.5pt}
+\begin{tabular}{lrr}
+\toprule
+Scope & Valid/seed & Coverage (\%) \\
+\midrule
+\multicolumn{3}{l}{\textbf{Reported} (MOOSE Table~4)} \\
+Original 12 domains & 1079.6/1,080 & 99.96 \\
+\midrule
+\multicolumn{3}{l}{\textbf{Measured} (local five seeds)} \\
+GP2PL-added 4 & 23.4 $\pm$ 2.3/148 & 15.81 $\pm$ 1.56 \\
+\quad Blocks Clear & 7.0 $\pm$ 0.0/30 & 23.33 $\pm$ 0.00 \\
+\quad Blocks On & 2.0 $\pm$ 0.0/30 & 6.67 $\pm$ 0.00 \\
+\quad Blocks Tower & 6.0 $\pm$ 1.7/77 & 7.79 $\pm$ 2.25 \\
+\quad Depots & 8.4 $\pm$ 1.1/11 & 76.36 $\pm$ 10.37 \\
+\bottomrule
+\end{tabular}
+\caption{Raw MOOSE coverage under the declared source split. The Reported row
+is copied from Table~4 of the five-seed MOOSE extended paper
+\cite{Chen2025MooseExtended}; the Measured rows are mean $\pm$ sample standard
+deviation over five local evidence seeds. The scopes are disjoint, and no
+cross-hardware runtime comparison is made.}
+\label{tab:moose-reference}
+\end{table}
 
-\input{sections/result_external_reference_table}
+\begin{table*}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{3.2pt}
+\begin{tabular}{lrrrrr}
+\toprule
+& \multicolumn{3}{c}{Achievement task} & \multicolumn{2}{c}{Temporal task} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-6}
+Domain & MOOSE & LAMA & MRP+HJ & FOND4LTLf & TIDE \\
+\midrule
+barman & 90/90$^{\mathrm{R}}$ & 49/90 & -- & 71/90 & 63/90 \\
+blocksworld-clear & 7/30$^{\mathrm{M}}$ & 26/30 & -- & 0/19 & 30/30 \\
+blocksworld-on & 2/30$^{\mathrm{M}}$ & 30/30 & -- & 0/18 & 30/30 \\
+blocksworld-tower & 6/77$^{\mathrm{M}}$ & 61/77 & -- & 67/77 & 77/77 \\
+depots & 8.4/11$^{\mathrm{M}}$ & 9/11 & -- & 0/11 & 11/11 \\
+ferry & 90/90$^{\mathrm{R}}$ & 64/90 & -- & 12/16 & 70/90 \\
+gripper & 90/90$^{\mathrm{R}}$ & 60/90 & -- & 0/51 & 68/90 \\
+logistics & 89.6/90$^{\mathrm{R}}$ & 60/90 & -- & 15/16 & 69/90 \\
+miconic & 90/90$^{\mathrm{R}}$ & 65/90 & -- & 24/28 & 70/90 \\
+numeric-ferry & 90/90$^{\mathrm{R}}$ & -- & 60/90 & -- & -- \\
+numeric-miconic & 90/90$^{\mathrm{R}}$ & -- & 66/90 & -- & -- \\
+numeric-minecraft & 90/90$^{\mathrm{R}}$ & -- & 64/90 & -- & -- \\
+numeric-transport & 90/90$^{\mathrm{R}}$ & -- & 63/90 & -- & -- \\
+rovers & 90/90$^{\mathrm{R}}$ & 45/90 & -- & 16/27 & 55/90 \\
+satellite & 90/90$^{\mathrm{R}}$ & 68/90 & -- & 41/49 & 75/90 \\
+transport & 90/90$^{\mathrm{R}}$ & 54/90 & -- & 52/90 & 57/90 \\
+\bottomrule
+\end{tabular}
+\caption{Per-domain external task references. Entries are valid/supported; --
+means that the method declares the entire domain unsupported. Planning failures,
+compiler failures, and timeouts remain in the supported denominator. FOND4LTLf
+and TIDE use LAMA. MOOSE values are five-seed means: $^{\mathrm{R}}$ denotes
+values reported in Table~4 of MOOSE \cite{Chen2025MooseExtended}, and
+$^{\mathrm{M}}$ denotes the measured extension in
+Table~\ref{tab:moose-reference}.}
+\label{tab:external-references}
+\end{table*}
 
 \paragraph{Instance-planner outcomes.}
 The remaining matrices are recorded in
 \texttt{external\_reference\_results.json}. Unsupported inputs remain explicit
 rather than being counted as planning failures.
-LAMA validates \ExternalLAMAValidCount{}/\ExternalLAMACaseCount{} classical
+LAMA validates 591/868 classical
 instances, while MRP+HJ validates
-\ExternalMRPHJValidCount{}/\ExternalMRPHJCaseCount{} numeric instances. Their
-PAR-2 values are \ExternalLAMAParTwoSeconds{} and
-\ExternalMRPHJParTwoSeconds{} seconds. These rows cover disjoint fragments and
+253/360 numeric instances. Their PAR-2 values are 1178.4 and 1127.4 seconds.
+These rows cover disjoint fragments and
 are interpreted within scope rather than as a same-instance ranking. LAMA has
 249 planner failures, 24 timeouts, and four \texttt{no\_plan} records; MRP+HJ
 has 23 planner failures and 84 timeouts. The four LAMA \texttt{no\_plan} cases
 have initially true goals, but the nonempty-plan wrapper does not credit a
 zero-action solution, making the reported LAMA result conservative by four.
 
-FOND4LTLf with LAMA supports \ExternalDirectSupportedCount{} of
-\ExternalDirectTotalCaseCount{} temporal queries and validates
-\ExternalDirectValidCount{}. The remaining
-\ExternalDirectUnsupportedCount{} inputs are unsupported rather than planner
+FOND4LTLf with LAMA supports 492 of 1,228 temporal queries and validates 298.
+The remaining 736 inputs are unsupported rather than planner
 failures: 360 are numeric and 376 have identifiers rejected by the adapter
 encoding. Among supported inputs, 85 are planner failures and 109 compiler
-failures; supported-set PAR-2 is \ExternalDirectParTwoSeconds{} seconds. The
+failures; supported-set PAR-2 is 1457.5 seconds. The
 identifier boundary belongs to the adapter rather than \ltlf{} semantics.
 
-TIDE with LAMA supports all \ExternalTIDESupportedCount{} Boolean queries and
-validates \ExternalTIDEValidCount{}, with 188 \texttt{no\_plan} outcomes and
-five timeouts. Its \ExternalTIDEUnsupportedCount{} numeric inputs comprise 207
+TIDE with LAMA supports all 868 Boolean queries and validates 675, with 188
+\texttt{no\_plan} outcomes and five timeouts. Its 360 numeric inputs comprise 207
 numeric formulas and 153 numeric PDDL problems; supported-set PAR-2 is
-\ExternalTIDEParTwoSeconds{} seconds.
+821.0 seconds.
 
 The achievement and FOND4LTLf matrices used 20 case workers and TIDE used 12.
-The \ExternalAchievementRepairCount{} achievement and
-\ExternalDirectRepairCount{} temporal infrastructure failures were rerun with
+The nine achievement and 46 temporal infrastructure failures were rerun with
 one worker under the same inputs, tool versions, limits, and validation
 contract. Equivalent hardware and exclusion of queue waiting keep these records
 eligible for PAR-2. Only infrastructure failures are replaceable; all method
@@ -1815,7 +1957,7 @@ admissible substitutes.
 All five seeded runs use the same benchmark case set and declared compiler
 configuration. Timing is excluded from cross-method speed and
 significance claims because the sequential runs overlapped unrelated machine
-workloads. A supplementary diagnostic plot may report the descriptive,
+workloads. An appendix diagnostic plot may report the descriptive,
 within-method cumulative distribution of Jason subprocess
 \texttt{run\_seconds}; it excludes queue waiting and VAL time, keeps failures
 in the denominator, and is not evidence of superiority over another planner.
@@ -1842,36 +1984,71 @@ The completed paired release is
 \texttt{paper\_artifacts/gp2pl\_evaluation/v1/}
 \texttt{paired\_ablation\_results.json}. It contains 24,560 portable atomic
 outcomes (1,228 cases, four variants, and five seeds), 4,912 portable temporal
-ablation outcomes, \TemporalCrossSeedEvaluationCount{} selected-controller
+ablation outcomes, 6,140 selected-controller
 cross-seed outcomes, and the 13 challenge outcomes.
 Machine-local paths and transient logs are excluded; the report below is
 computed from the recorded outcomes.
 
-\input{sections/result_atomic_comparison_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrr}
+\toprule
+Method & Valid (\%) & Branches & KiB \\
+\midrule
+Evidence Only & 88.3 $\pm$ 1.2 & 835.0 $\pm$ 15.8 & 488.3 $\pm$ 8.3 \\
+Direct Producers & 88.3 $\pm$ 1.2 & 1153.0 $\pm$ 15.8 & 549.2 $\pm$ 8.3 \\
+Maximum Feasible & \resultbest{98.7 $\pm$ 1.3} & 1533.0 $\pm$ 15.8 &
+645.9 $\pm$ 8.3 \\
+\resultselected{Full GP2PL}\selectedmark & \resultbest{98.7 $\pm$ 1.3} &
+\resultselected{1499.0 $\pm$ 15.8} & \resultselected{635.1 $\pm$ 8.3} \\
+\bottomrule
+\end{tabular}
+\caption{Paired atomic compiler ablation over 6,140 held-out seed--cases.
+Entries are mean $\pm$ sample SD across five evidence seeds.}
+\label{tab:atomic-comparison-appendix}
+\end{table}
 
 Direct Producers and Maximum Feasible have
-\AtomicDirectToMaximumRightOnlyValidCount{} seed--case outcomes favoring
+640 seed--case outcomes favoring
 Maximum Feasible and none favoring Direct Producers. Aggregation within case
 gives 130 nonzero case-level differences, all positive; the two-sided exact
 sign test yields $p=1.47\times10^{-39}$. Maximum Feasible and Full GP2PL have
-identical valid-case sets; Full removes \AtomicFullBranchReduction{} mean
-branches and \AtomicFullLibraryKiBReduction{} mean KiB. Evidence Only and
+identical valid-case sets; Full removes 34 mean branches and 10.8 mean KiB.
+Evidence Only and
 Direct Producers differ on one seed--case outcome in the opposite direction,
 so target completion alone is not claimed to make AgentSpeak plan selection
 monotone.
 
-\input{sections/result_temporal_comparison_table}
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Method & Valid & PAR-2 s & Plans & Fan-out \\
+\midrule
+Unprotected Serialization & 1113/1228 & 342.0 & 7 & 3 \\
+Module-Return Monitor & 1212/1228 & 53.1 & 13 & 2 \\
+\resultselected{Certified Balanced}\selectedmark & \resultbest{1228/1228} &
+5.6 & 13 & \resultselected{2} \\
+\bottomrule
+\end{tabular}
+\caption{Paired temporal compiler ablation over 1,228 bound queries.}
+\label{tab:temporal-comparison-appendix}
+\end{table}
 
 Certified Balanced has 115 cases favoring it over Unprotected Serialization and
 none favoring the unprotected controller. The four numeric domains contribute
 net gains of 25, 28, 29, and 31, and Transport contributes two. Thus 113 of the
 115 gains occur in the bounded-integer subset. Certified Balanced and
 Module-Return Monitor have
-\TemporalBalancedToModuleReturnLeftOnlyValidCount{} discordant cases, all favoring
+16 discordant cases, all favoring
 primitive-step observation. PAR-2 and action counts remain descriptive; no
 continuous-measure superiority claim is made.
 
-Across the \TemporalCrossSeedEvaluationCount{} selected-controller executions,
+Across the 6,140 selected-controller executions,
 runtime has minimum 1.02, first quartile 1.90, median 2.35, third quartile 4.81,
 maximum 66.88, mean 5.36, and sample standard deviation 7.64 seconds.
 Primitive-action count has minimum 1, first quartile 1, median 2, third quartile
@@ -1928,7 +2105,7 @@ matrix.py
 \end{verbatim}
 \endgroup
 
-The fixed evaluation tables are regenerated with the conference-neutral
+The fixed evaluation data are regenerated with the conference-neutral
 generator:
 
 \begingroup
@@ -1943,12 +2120,12 @@ temporal_execution_summary.json" \
   --atomic-library-root \
   "$RELEASE/atomic_libraries" \
   --output-dir \
-  latex_code/aamas_method_paper/sections
+  artifacts/evaluation_tables
 \end{verbatim}
 \endgroup
 
-The independent five-seed Full GP2PL table and compact public record are
-regenerated directly from the five complete Jason/VAL summaries with:
+The independent five-seed Full GP2PL record is regenerated directly from the
+five complete Jason/VAL summaries with:
 
 \begingroup
 \small
@@ -1959,8 +2136,8 @@ compiler_results.py
 \end{verbatim}
 \endgroup
 
-The paired ablation release and both comparison tables are regenerated from the
-completed matrix without rerunning any planner:
+The paired ablation release is regenerated from the completed matrix without
+rerunning any planner:
 
 \begingroup
 \small
@@ -1976,7 +2153,7 @@ results.py
 \end{verbatim}
 \endgroup
 
-The former three-panel empirical view remains reproducible as a supplementary
+The former three-panel empirical view remains reproducible as a diagnostic
 diagnostic plot generated from the frozen paired-ablation result file rather
 than from manually copied table values. It is not included in the main paper;
 the exact endpoint results appear in the generated tables. The release itself
@@ -2009,36 +2186,6 @@ success oracle, changed dimensions, or missing provenance.
 The public release supplies an Apache-2.0 code license, a CC BY 4.0 license for
 original GP2PL data, third-party notices, citation metadata, and a versioned
 release of the novel temporal-goal dataset. During double-blind review, the same
-files are supplied as an anonymized code-and-data appendix and the identifying
-web link is disabled in the main-paper source. All external benchmark inputs are
-publicly retrievable at the cited revisions. No dataset used by the experiments
-remains unavailable; the checklist's universal condition concerning unavailable
-datasets is therefore satisfied, rather than being used to imply that a hidden
-dataset exists.
-
-\section{Reproducibility Checklist}
-\label{app:checklist-explanation}
-
-The main checklist answers ``yes'' when the criterion is satisfied by the main
-paper together with this appendix and the submitted code-and-data archive.
-Specifically, this appendix supplies all formal assumptions and proofs; the
-novel dataset description, complete released records, and CC BY 4.0 license;
-citations, revisions, and deterministic split rules for existing public data;
-all author-created preprocessing, execution, and analysis code; complete
-parameters; hardware and software; distributional statistics; and a
-theory-to-code map.
-
-The availability answers distinguish authored code and data from dependencies.
-Every GP2PL-authored source file needed by the reported experiments is included
-and Apache-2.0 licensed. External tools and benchmark repositories remain
-third-party works: the appendix cites them, records exact revisions, and supplies
-deterministic retrieval scripts without asserting ownership or relicensing them.
-Likewise, the sealed construction audit was unavailable to the translation model
-during inference but is included in the released temporal-goal dataset for
-independent validation. Hence there is no non-public experimental dataset.
-
-The statistical answer is grounded in the frozen paired records. Atomic
-coverage inference uses a two-sided exact sign test over held-out case
-identifiers after within-case aggregation across seeds. Temporal coverage,
-structural equality, and continuous summaries remain descriptive. Complete
-per-instance outcomes are available for independent reanalysis.
+files are supplied anonymously and the identifying web link is disabled in the
+paper source. All external benchmark inputs are publicly retrievable at the
+cited revisions.

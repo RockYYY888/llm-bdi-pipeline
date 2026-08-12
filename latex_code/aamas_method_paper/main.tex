@@ -1,27 +1,97 @@
 % File: main.tex
-\documentclass[letterpaper]{article}
-\usepackage[submission]{aaai2027}
-\usepackage[hyphens]{url}
+% One-click document: outline, AAMAS 2027 paper, technical appendix.
+\documentclass[sigconf,anonymous]{aamas}
+
 \usepackage{graphicx}
 \urlstyle{rm}
 \def\UrlFont{\rm}
-\usepackage{natbib}
-\usepackage{caption}
 \usepackage{amsmath}
-\usepackage{amssymb}
+\usepackage{amsthm}
 \usepackage{booktabs}
 \usepackage{array}
+\usepackage{longtable}
 \usepackage{algorithm}
 \usepackage{algorithmic}
+\usepackage{placeins}
 
 \frenchspacing
-\pdfinfo{/TemplateVersion (2027.1)}
 \setcounter{secnumdepth}{2}
+
+% AAMAS 2027 copyright block from the official template.
+\makeatletter
+\gdef\@copyrightpermission{
+	\begin{minipage}{0.2\columnwidth}
+		\href{https://creativecommons.org/licenses/by/4.0/}{%
+			\includegraphics[width=0.90\textwidth]{by}}
+	\end{minipage}\hfill
+	\begin{minipage}{0.8\columnwidth}
+		\href{https://creativecommons.org/licenses/by/4.0/}{%
+			This work is licensed under a Creative Commons Attribution
+			International 4.0 License.}
+	\end{minipage}
+	\vspace{5pt}
+}
+\makeatother
+
+\setcopyright{ifaamas}
+\acmConference[AAMAS 2027]{Proc.\@ of the 26th International Conference
+on Autonomous Agents and Multiagent Systems (AAMAS 2027)}{3--7 May 2027}
+{Hanoi, Vietnam}{M.~Baldoni, F.~Fang, W.~Yeoh, N.~Yorke-Smith (eds.)}
+\copyrightyear{2027}
+\acmYear{2027}
+\acmDOI{}
+\acmISBN{}
+\acmSubmissionID{}
+\submissionType{Research Paper Track}
 
 \title{GP2PL: From Generalized Planning Evidence to Certified BDI Plan
 Libraries for Achievement and Temporally Extended Goals}
-\author{Anonymous Submission}
-\affiliations{}
+\author{Anonymous Authors}
+\affiliation{
+	\institution{Anonymous Institution}
+	\city{Anonymous City}
+	\country{Anonymous Country}}
+\email{anonymous@example.org}
+
+\begin{CCSXML}
+<ccs2012>
+<concept>
+<concept_id>10010147.10010178.10010179.10003352</concept_id>
+<concept_desc>Computing methodologies~Planning and scheduling</concept_desc>
+<concept_significance>500</concept_significance>
+</concept>
+<concept>
+<concept_id>10010147.10010257.10010293.10010294</concept_id>
+<concept_desc>Computing methodologies~Multi-agent systems</concept_desc>
+<concept_significance>300</concept_significance>
+</concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Computing methodologies~Planning and scheduling}
+\ccsdesc[300]{Computing methodologies~Multi-agent systems}
+\keywords{generalized planning, BDI agents, AgentSpeak(L), plan libraries,
+temporally extended goals}
+
+\begin{abstract}
+Generalized planning learns reusable behavior for problem families, whereas
+Belief--Desire--Intention (BDI) agents execute plan libraries. Connecting
+generalized planning to BDI execution exposes a representation gap:
+singleton-goal evidence may omit modules for subsidiary achievements and does
+not establish sound temporal composition. We introduce GP2PL (Generalized
+Planning to Plan Libraries). Its typed input contract maps controlled
+natural-language requests to bound finite-trace temporal-logic query
+specifications consistent with the planning domain. Its compiler maps
+generalized-planning evidence and action models into certified BDI plan
+libraries. GP2PL validates and lifts evidence, generates schema-derived modules
+for producible goals, selects a compact closed atomic core, and appends
+DFA-guided query controllers without relearning that core. Within the supported
+candidate language and query fragment, GP2PL accepts only branches and
+controllers satisfying its soundness conditions. Atomic coverage averages
+98.7\% across five seeds; all 475 translations are DFA-language equivalent to
+their gold formulas, and all 6,140 admitted temporal executions pass
+validation.
+\end{abstract}
 
 \newcommand{\pddl}{Planning Domain Definition Language}
 \newcommand{\asl}{AgentSpeak(L)}
@@ -35,141 +105,78 @@ Libraries for Achievement and Temporally Extended Goals}
 \newcommand{\selectedmark}{\textsuperscript{\ensuremath{\dagger}}}
 \providecommand{\gpplfigureonepath}{figures/fig1_architecture.png}
 \providecommand{\gpplfiguretwopath}{figures/fig2_compiler_stages.png}
-\newif\ifgpplpublicrelease
-% Keep false for anonymous review; set true only in the camera-ready source.
-\gpplpublicreleasefalse
-\newcommand{\gpplreleaseurl}{https://github.com/daidaibunny/gp2pl}
-
-\input{sections/result_macros}
-\input{sections/result_five_seed_atomic_macros}
-\input{sections/result_moose_reference_macros}
-\input{sections/result_external_reference_macros}
-\input{sections/result_comparison_macros}
+\providecommand{\gpplatomiccasepath}{figures/fig3_atomic_case.png}
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
 
 \begin{document}
+
+\onecolumn
+\pagenumbering{roman}
+\renewcommand{\thesection}{O\arabic{section}}
+\renewcommand{\thesubsection}{\thesection.\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\thesubsection.\arabic{subsubsection}}
+\renewcommand{\theHsection}{outline.\arabic{section}}
+\renewcommand{\theHsubsection}{outline.\arabic{section}.\arabic{subsection}}
+\renewcommand{\theHsubsubsection}{%
+	outline.\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
+\begin{center}
+	{\LARGE\bfseries Paper Outline}\par
+	\vspace{0.5em}
+	{\Large GP2PL: From Generalized Planning Evidence to Certified BDI Plan
+	Libraries for Achievement and Temporally Extended Goals}
+\end{center}
+\input{outline/sections/introduction}
+\input{outline/sections/preliminaries}
+\input{outline/sections/problem_definition}
+\input{outline/sections/methodology}
+\input{outline/sections/evaluation}
+\input{outline/sections/related_work}
+\input{outline/sections/conclusion}
+
+\clearpage
+\twocolumn
+\pagenumbering{arabic}
+\setcounter{section}{0}
+\setcounter{subsection}{0}
+\setcounter{figure}{0}
+\setcounter{table}{0}
+\setcounter{equation}{0}
+\renewcommand{\thesection}{\arabic{section}}
+\renewcommand{\thesubsection}{\thesection.\arabic{subsection}}
+\renewcommand{\thesubsubsection}{\thesubsection.\arabic{subsubsection}}
+\renewcommand{\theHsection}{paper.\arabic{section}}
+\renewcommand{\theHsubsection}{paper.\arabic{section}.\arabic{subsection}}
+\renewcommand{\theHsubsubsection}{%
+	paper.\arabic{section}.\arabic{subsection}.\arabic{subsubsection}}
 \maketitle
 
-\begin{abstract}
-Generalized planning learns reusable behavior for problem families, whereas
-Belief--Desire--Intention (BDI) agents execute plan libraries. Connecting
-generalized planning to BDI execution exposes a representation gap:
-singleton-goal evidence may omit modules for subsidiary achievements and does
-not establish sound temporal composition. We
-introduce
-\methodname{} (Generalized Planning to Plan Libraries). Its typed input
-contract maps controlled natural-language requests to bound
-\ltlf{} query specifications consistent with the planning domain. Its compiler
-maps generalized-planning evidence and
-PDDL action models into certified BDI plan libraries. GP2PL validates and lifts
-evidence, generates schema-derived modules for producible goals, selects a
-compact closed atomic core, and appends DFA-guided query controllers without
-relearning that core. Within the supported candidate language and query fragment,
-GP2PL accepts only branches and controllers satisfying its soundness conditions.
-Atomic coverage averages 98.7\% across five seeds; all 475 translations are
-DFA-language equivalent to their gold formulas, and all 6,140 admitted temporal
-executions pass validation.
-\end{abstract}
+\input{paper/sections/introduction}
+\input{paper/sections/preliminaries}
+\input{paper/sections/problem_definition}
+\input{paper/sections/methodology}
+\input{paper/sections/evaluation}
+\input{paper/sections/related_work}
+\input{paper/sections/conclusion}
 
-\section{Introduction}
-
-Classical STRIPS planning computes an action sequence for one grounded problem
-\cite{FikesNilsson1971STRIPS}; generalized planning amortizes this effort by learning
-reusable behavior for a family of related problems
-\cite{Srivastava2011DirectedSearch,Chen2026Moose}. Belief--Desire--Intention
-(BDI) agents encode reusable behavior in plan libraries that connect events and
-belief contexts to actions and subsidiary goals
-\cite{Rao1996AgentSpeak,MeneguzziDeSilva2015PlanningBDI}. Traditionally,
-developers supply these libraries by encoding domain-specific behavior and
-anticipating applicable situations before deployment, creating a substantial
-knowledge-engineering burden
-\cite{Meneguzzi2004PropositionalPlanning,MeneguzziDeSilva2015PlanningBDI}.
-Generalized-planning evidence offers a basis for automating this construction.
-Given a planning domain $D$ and training instances
-$\mathcal I_{\mathrm{train}}$, an external generalized-planning backend produces
-raw singleton-goal policy evidence $\mathcal E_{\mathrm{raw}}$. This evidence
-encodes procedures for individual achievements under particular conditions,
-but need not provide the callable, context-indexed subsidiary modules or
-composition guarantees required by an executable BDI library.
-
-GP2PL addresses this representation gap as shown in
-Figure~\ref{fig:architecture}. It compiles the evidence once into a certified,
-reusable atomic module core, then reuses that core when compiling each bound
-query into the same maintained library. A query may be an achievement
-condition or a temporally extended goal (TEG) \cite{Hindriks2009TemporalGoals}.
-A bound query assigns each parameter a type-compatible domain object at invocation;
-no quantification is implied.
-
-\begin{figure}[htbp]
-\centering
-\IfFileExists{\gpplfigureonepath}{%
-\includegraphics[width=\columnwidth]{\gpplfigureonepath}%
-}{%
-\fbox{\parbox[c][1.40in][c]{0.92\columnwidth}{\centering
-Figure 1 artwork placeholder\\[5pt]
-Single-column GP2PL overview\\
-Domain compilation $+$ query-specific compilation}}
-}
-\caption{GP2PL separates reusable domain compilation from query-specific
-temporal compilation. A domain model, training instances, and singleton-goal
-evidence are compiled once into a reusable atomic core; each bound query adds
-query-local plans to the sole maintained library without relearning the core.}
-\label{fig:architecture}
-\end{figure}
-
-\begin{figure*}[t!]
-\centering
-\IfFileExists{\gpplfiguretwopath}{%
-\includegraphics[width=\textwidth]{\gpplfiguretwopath}%
-}{%
-\fbox{\parbox[c][2.75in][c]{0.96\textwidth}{\centering
-Figure 2 artwork placeholder\\[8pt]
-(a) Query-independent atomic-core compiler\qquad
-(b) Bound query $\rightarrow$ DFA guard $\rightarrow$ certified repair tree}}
-}
-\caption{The two GP2PL compiler stages. (a) A domain and normalized
-singleton-goal evidence yield a certified atomic core. (b) A bound query yields
-DFA-guided repair and dispatch plans that extend the maintained library.}
-\label{fig:compiler-stages}
-\end{figure*}
-
-GP2PL connects language-to-logic translation, generalized policies, answer-set
-optimization, AgentSpeak semantics, and \ltlf{} automata to produce one
-maintained library. Its four contributions are: a compiler that lifts incomplete
-singleton-goal evidence into a compact, internally closed atomic core; a
-certificate system for schema executability
-and achievement, recursive
-progress, target-preserving resource discharge, and preservation-safe temporal
-composition; a typed translation contract mapping controlled language to
-bound achievement and TEG specifications, evaluated by exact finite-trace
-language equivalence on a TEG benchmark; and a DFA-guided query compiler
-that appends query-local controllers to the maintained BDI library without
-relearning the core.
-
-\input{sections/background}
-\input{sections/related_work}
-\input{sections/method}
-\input{sections/evaluation}
-
-\FloatBarrier
-\section{Conclusion and Future Work}
-
-GP2PL translates controlled natural-language requests with typed parameters into
-parametric \ltlf{} query specifications and compiles generalized-planning
-evidence with PDDL schemas into a closed atomic core. Certified DFA controllers
-then extend the same maintained BDI plan library for achievement and temporally
-extended goals without relearning the core.
-Future work should study unrestricted PDDL--\ltlf{} strategy synthesis, richer
-PDDL models with numeric, conditional, and durative effects, and scalable
-certificate discovery for larger candidate spaces.
-When a new domain lacks instances, parameterized PDDL generators can supply
-reproducible training data for evidence learning \cite{Bacchus2001AIPS00}.
-
-\ifgpplpublicrelease
-\paragraph{Code and data availability.}
-Code, proofs, fixed evaluation records, and the versioned GP2PL temporal-goal
-dataset are available at \url{\gpplreleaseurl}.
-\fi
-
+\bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
+
+\clearpage
+\appendix
+\renewcommand{\theHsection}{appendix.\Alph{section}}
+\renewcommand{\theHsubsection}{appendix.\Alph{section}.\arabic{subsection}}
+\renewcommand{\theHsubsubsection}{%
+	appendix.\Alph{section}.\arabic{subsection}.\arabic{subsubsection}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thealgorithm}{S\arabic{algorithm}}
+\setcounter{figure}{0}
+\setcounter{table}{0}
+\setcounter{algorithm}{0}
+\section*{Technical Appendix}
+\input{appendix/technical_appendix}
 
 \end{document}

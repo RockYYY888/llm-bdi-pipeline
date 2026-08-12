@@ -1,0 +1,183 @@
+\section{Evaluation}
+
+\subsection{Experimental Setup}
+
+Evaluate the two problems defined in Section~3 separately: generation of a reusable domain-level BDI plan library and reuse of that library for subsequent goal queries.
+
+Use 16 PDDL domains covering classical STRIPS behaviour, bounded-integer resources, and domains that require reusable subsidiary-goal structure.
+
+Use the twelve MOOSE benchmark domains together with Blocksworld Clear, Blocksworld On, Blocksworld Tower, and Depots to test both domains already well covered by generalized-planning evidence and domains where additional reusable behaviour is required.
+
+Preserve the established train/test splits for the benchmark domains and use deterministic splits for the additional domains.
+
+Use MOOSE as the generalized-planning backend and generate singleton-goal evidence with goal size \(1\) and three goal permutations for each training instance.
+
+Repeat evidence generation with five fixed seeds \(0,\ldots,4\), compile each seed independently, and never pool evidence or select a best seed.
+
+Use Clingo to implement the compact library selection described in Section~4 and compare it with a maximum-feasible selection over the same generated candidate space.
+
+Render the resulting plans in AgentSpeak(L), execute them with Jason, and independently validate the primitive-action traces with VAL.
+
+Use LTLf2DFA with MONA to construct the DFAs used for query-specific temporal execution and semantic comparison.
+
+Use GPT-5.5 with deterministic decoding for the controlled natural-language translation study and allow retries only for structured, model-correctable translation errors.
+
+Use a common 1,800-second execution limit when computing temporal runtime and PAR-2 results.
+
+Construct the temporal benchmark independently from the original PDDL achievement goals so that temporal evaluation introduces new execution requirements rather than restating the held-out benchmark goal.
+
+Generate temporal specifications from legal witness traces and instantiate five registered profiles: \(F(A\land B)\), \(F(A\land\neg B)\), \(F(A\land X(F(B)))\), \(F(A\land X(F(B\land X(F(C)))))\), and \(A\,U\,B\).
+
+Lift grounded witness conditions to typed query parameters and render the resulting specifications into controlled natural language without using a language model during benchmark construction.
+
+Deduplicate identical complete translation inputs while retaining their distinct problem bindings, producing 475 translation inputs and 1,228 bound temporal queries.
+
+\textbf{Table caption:} Temporal-goal benchmark profiles, their intended temporal structure, and the grounded witness condition required for constructing each profile.
+
+[inline def] Define \emph{achievement validity} as successful Jason execution followed by VAL acceptance with respect to the original held-out achievement goal.
+
+[inline def] Define \emph{domain-goal coverage} as the proportion of achievement-goal templates in \(\Gamma_D\) supported by at least one type-compatible plan in the generated library.
+
+[inline def] Define \emph{translation correctness} as exact finite-trace language equivalence between the DFA of the translated specification and the DFA of its hidden reference specification.
+
+[inline def] Define \emph{temporal validity} as successful query compilation and Jason execution followed by independent PDDL replay, neutral-goal VAL acceptance, and acceptance of the resulting trace by both the translated and reference DFAs.
+
+[inline def] Define \emph{PAR-2} as the mean execution time with every failed or timed-out case charged twice the 1,800-second limit.
+
+Keep compilation failures, planning failures, execution failures, and timeouts in the denominator of the corresponding supported task.
+
+Treat held-out problem identifiers rather than individual seed executions as the statistical units for the paired achievement comparison, aggregating outcomes across seeds before applying a two-sided exact sign test.
+
+Treat the temporal ablation as a paired descriptive comparison because queries are clustered by domain and multiple bound queries may share one translated specification.
+
+Evaluate cross-seed robustness separately by repeating the selected query-realisation method over all five independently generated domain libraries.
+
+
+\subsection{Reusable Plan-Library Generation}
+
+Compare four variants to separate the contribution of generalized-planning evidence, domain-derived goal completion, reusable subsidiary behaviour, and compact library selection.
+
+[inline def] Define \emph{Evidence Only} as the BDI library obtained only from validated generalized-planning evidence.
+
+[inline def] Define \emph{Direct Producers} as Evidence Only augmented with reusable one-action plans for producible achievement-goal templates.
+
+[inline def] Define \emph{Maximum Feasible} as the complete generated candidate space with the largest feasible set of reusable plans retained.
+
+[inline def] Define \emph{Full GP2PL} as the same candidate space followed by the Clingo selection used to obtain a smaller library while preserving the required goal coverage and internal closure.
+
+Compare the four variants using held-out achievement validity, domain-goal coverage, selected plan branches, and serialized library size.
+
+\textbf{Table caption:} Paired ablation of reusable BDI plan-library generation over 6,140 held-out seed--cases, reporting achievement validity, selected plan branches, and serialized library size across five independent evidence seeds.
+
+Use Evidence Only versus Direct Producers to determine whether expanding the supported goal interface with direct action producers is sufficient to improve held-out execution.
+
+Use Direct Producers versus Maximum Feasible to determine whether reusable subsidiary and recursive behaviour is necessary beyond direct goal production.
+
+Use Maximum Feasible versus Full GP2PL to isolate the effect of compact Clingo selection because both variants use the same generated candidate space.
+
+Report producible-goal coverage alongside held-out validity to distinguish supporting more achievement-goal templates from successfully composing them in unseen instances.
+
+Report the complete per-domain results across all five evidence seeds so that cross-seed variation is visible rather than hidden inside the aggregate result.
+
+\textbf{Table caption:} Full GP2PL held-out achievement success by domain and independent generalized-planning evidence seed, with mean and sample standard deviation across the five generated libraries.
+
+Use the per-domain results to show which domains are consistently solved across evidence seeds and which remain sensitive to the generalized-planning evidence.
+
+Analyse Logistics as a case where seed-dependent reusable macros interact with cyclic producer dependencies that the current domain-derived construction cannot always replace.
+
+Analyse Depots as a case requiring nested selection of reusable support resources beyond the currently supported resource structure.
+
+Report the scale of the generated libraries by showing the amount of generalized-planning evidence, domain-derived candidates, and selected BDI plans for each domain.
+
+\textbf{Table caption:} Per-domain plan-library construction scale, showing training and held-out instances, generalized-planning evidence candidates, domain-derived candidates, and selected BDI plan branches.
+
+Compare Full GP2PL with raw MOOSE behaviour separately on the original MOOSE benchmark and on the four additional domains.
+
+\textbf{Table caption:} Raw MOOSE held-out achievement coverage on the original benchmark domains and on the four GP2PL-added domains under the declared data splits.
+
+Use the original-domain comparison to show that GP2PL retains strong behaviour when generalized-planning evidence already provides broad held-out coverage.
+
+Use the four added domains to test whether completing the reusable plan library extends execution beyond the behaviour directly available from generalized planning.
+
+Report the registered structural challenge cases as targeted stress tests for binding, recursive preparation, resource use, numeric progress, temporal interference, and invariance under symbol and parameter renaming.
+
+Use these challenge cases to expose specific implementation boundaries without treating finite tests as substitutes for the formal properties stated earlier.
+
+
+\subsection{Natural-Language Goal Translation}
+
+Evaluate the natural-language interface independently from BDI execution so that translation correctness is not inferred from successful downstream execution.
+
+Provide the language model only with the controlled-language request, the public domain vocabulary, typed parameters, and binding constraints.
+
+Keep the hidden reference formula, concrete object binding, temporal profile, and witness trace unavailable to the language model.
+
+Require the model to produce a parameterised goal specification in the supported language \(\Phi\) without selecting actions, objects, or BDI plans.
+
+Compare each translated temporal specification with its hidden reference using exact DFA-language equivalence rather than formula-string equality.
+
+Report translation results separately for conjunction, conjunction with negation, ordered two-milestone, ordered three-milestone, and strong-Until queries.
+
+Avoid interpreting performance on this controlled benchmark as unrestricted natural-language semantic parsing.
+
+
+\subsection{Query-Specific Goal Realisation}
+
+Evaluate whether the generated domain-level library can realise new temporal queries without regenerating its reusable domain plans.
+
+Use the same domain library, bound query, and DFA across each paired temporal variant so that the comparison isolates query-specific coordination.
+
+[inline def] Define \emph{Unprotected Serialization} as sequentially invoking the required reusable achievement plans without accounting for how one plan may affect conditions required by another.
+
+[inline def] Define \emph{Module-Return Monitor} as using effect-aware plan ordering while updating DFA progress only after a reusable achievement plan returns.
+
+[inline def] Define \emph{Full GP2PL} as using the same effect-aware plan ordering while updating DFA progress after every successful primitive domain action.
+
+Use Unprotected Serialization versus the effect-aware variants to determine whether independently correct reusable plans can be safely combined without considering their interactions.
+
+Use Module-Return Monitor versus Full GP2PL to determine whether observing temporal progress only at plan boundaries is sufficient.
+
+[inline def] Define \emph{controller size} as the number of query-specific BDI plans in \(\mathcal{Q}_q\).
+
+[inline def] Define \emph{trigger fan-out} as the maximum number of query-specific plans sharing the same BDI trigger.
+
+Compare temporal validity, PAR-2, controller size, and trigger fan-out across the three variants.
+
+\textbf{Table caption:} Paired ablation of query-specific temporal-goal realisation over the 1,228 bound queries, reporting valid executions, PAR-2, query-controller size, and trigger fan-out.
+
+Analyse the failures of Unprotected Serialization to determine where interaction between reused achievement plans prevents temporal-goal satisfaction.
+
+Separate Boolean and bounded-integer domains to show where effect-aware composition contributes most strongly.
+
+Analyse the queries recovered by primitive-action monitoring to show when temporal progress occurs inside a reusable achievement plan before that plan returns.
+
+Treat runtime and controller-size differences as descriptive and use the ablation primarily to test the correctness role of effect-aware composition and primitive-step monitoring.
+
+Report end-to-end results by temporal profile to connect translation correctness with successful execution of the corresponding bound queries.
+
+\textbf{Table caption:} Natural-language translation and end-to-end execution by temporal-goal profile, reporting DFA-language equivalence, valid bound-query executions, primitive-action counts, and execution time.
+
+Repeat Full GP2PL over all five independently generated domain-library sets to test whether successful query realisation depends on one particular generalized-planning evidence seed.
+
+Analyse cross-seed success, primitive-action counts, and runtime variation while keeping the query-specific compilation procedure unchanged.
+
+Use cross-seed outcome stability to assess whether independently generated reusable libraries provide a stable interface for subsequent goal queries.
+
+
+\subsection{External Task References}
+
+Use external planners as task-level references rather than direct baselines for reusable BDI plan-library generation.
+
+Compare achievement execution with LAMA on the classical domains and ENHSP MRP+HJ on the bounded-integer domains.
+
+Compare temporal execution with FOND4LTLf and TIDE only on the query fragments supported by their evaluated implementations.
+
+Report unsupported inputs separately from planner failures, compiler failures, and timeouts.
+
+\textbf{Table caption:} Per-domain external achievement and temporal planning references, reporting valid cases within each method's supported task scope and distinguishing unsupported inputs from failures.
+
+Use the achievement references to contextualise the difficulty of the held-out planning instances while preserving the distinction between instance-specific planning and reusable BDI plan-library generation.
+
+Use the temporal references to contextualise the temporal-query benchmark while preserving the distinction between standalone temporal planning and query execution through a maintained BDI plan library.
+
+Avoid cross-system runtime superiority claims where the evaluated methods differ in supported domain fragments, output representations, or execution architectures.

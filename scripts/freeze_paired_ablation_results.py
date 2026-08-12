@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_JSON = (
 	PROJECT_ROOT / "paper_artifacts/gp2pl_evaluation/v1/paired_ablation_results.json"
 )
-DEFAULT_LATEX_OUTPUT_DIR = PROJECT_ROOT / "latex_code/aamas_method_paper/sections"
+DEFAULT_LATEX_OUTPUT_DIR = PROJECT_ROOT / "artifacts/evaluation_tables"
 if str(PROJECT_ROOT) not in sys.path:
 	sys.path.insert(0, str(PROJECT_ROOT))
 

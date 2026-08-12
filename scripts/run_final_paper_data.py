@@ -29,7 +29,7 @@ from plan_library.rendering import render_plan_library_asl  # noqa: E402
 
 
 FINAL_PAPER_MANIFEST = PROJECT_ROOT / "paper_artifacts/final_paper_manifest.json"
-FINAL_RESULT_MACROS = PROJECT_ROOT / "latex_code/aamas_method_paper/sections/result_macros.tex"
+FINAL_RESULT_MACROS = PROJECT_ROOT / "artifacts/evaluation_tables/result_macros.tex"
 FINAL_PAPER_MAIN = PROJECT_ROOT / "latex_code/aamas_method_paper/main.tex"
 RESULT_MACRO_START = "% BEGIN GENERATED RESULT MACROS"
 RESULT_MACRO_END = "% END GENERATED RESULT MACROS"
@@ -310,6 +310,7 @@ def format_comparison_latex_macros(comparison: dict[str, object]) -> str:
 
 def _write_result_macros(comparison: dict[str, object]) -> None:
 	macros = format_comparison_latex_macros(comparison)
+	FINAL_RESULT_MACROS.parent.mkdir(parents=True, exist_ok=True)
 	FINAL_RESULT_MACROS.write_text(macros, encoding="utf-8")
 	if not FINAL_PAPER_MAIN.exists():
 		return

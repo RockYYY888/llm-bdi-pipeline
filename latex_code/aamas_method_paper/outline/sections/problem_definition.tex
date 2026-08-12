@@ -1,0 +1,148 @@
+\section{Problem Definition}
+
+\subsection{Reusable BDI Plan-Library Generation}
+
+[inline def] Define an atomic achievement-goal template as a typed,
+parameterised singleton goal
+\[
+g(\bar{X})
+=
+p(X_1:\tau_1,\ldots,X_k:\tau_k),
+\]
+where \(p\) is a predicate of domain \(D\) and each variable \(X_i\)
+has a declared domain type \(\tau_i\).
+
+[inline def] For a type-compatible grounding substitution \(\theta\),
+write
+\[
+g\theta
+\]
+for the corresponding grounded achievement goal.
+
+[inline def] Define the domain goal interface as
+\[
+\Gamma_D=\{g_1,\ldots,g_m\},
+\]
+where each \(g_i\) is an atomic achievement-goal template that the
+generated BDI plan library is required to support.
+
+Distinguish the domain goal interface \(\Gamma_D\) from the goal \(G_I\)
+of a planning instance: \(G_I\) specifies what must be achieved in one
+particular instance, whereas \(\Gamma_D\) specifies the reusable kinds
+of achievement goals supported across instances of domain \(D\).
+
+[formal def] Define a reusable BDI plan-library generation problem as
+\[
+\Pi_{\mathrm{lib}}
+=
+\langle
+D,
+\mathcal{I}_{\mathrm{train}},
+\Gamma_D
+\rangle,
+\]
+where \(D\) is a planning domain,
+\(\mathcal{I}_{\mathrm{train}}\) is a finite set of representative
+planning instances sharing \(D\), and
+\(\Gamma_D\) is the domain goal interface.
+
+[formal def] Define a solution to \(\Pi_{\mathrm{lib}}\) as a finite
+BDI plan library
+\[
+\mathcal{L}_D
+\]
+satisfying the following requirements.
+
+Require goal coverage: for every
+\[
+g\in\Gamma_D,
+\]
+\(\mathcal{L}_D\) contains at least one plan whose triggering
+achievement goal type-compatibly matches \(g\).
+
+Require internal closure: every subsidiary achievement-goal call made
+by a plan in \(\mathcal{L}_D\) type-compatibly matches the trigger of
+some plan in \(\mathcal{L}_D\).
+
+Require achievement correctness: for every generated plan
+\[
+r=+!g(\bar{X}):C\leftarrow\beta,
+\]
+a type-compatible grounding \(\theta\) and a state \(s\) satisfying
+\(C\theta\) admit a valid execution of \(\beta\theta\), and successful
+completion establishes \(g\theta\).
+
+Require reusability: plans in \(\mathcal{L}_D\) are parameterised over
+typed domain objects rather than specialised to objects occurring only
+in \(\mathcal{I}_{\mathrm{train}}\).
+
+Define \(\Pi_{\mathrm{lib}}\) as unsolved when no library satisfying
+these requirements can be generated for \(\Gamma_D\).
+
+
+\subsection{Query-Specific BDI Plan Generation}
+
+[inline def] Define a bound goal query as
+\[
+\widehat{q}
+=
+(\varphi_q,\theta_q),
+\]
+where \(\varphi_q\in\Phi\) is a parameterised achievement or temporally
+extended goal and \(\theta_q\) maps its parameters to type-compatible
+objects in the current domain instance.
+
+[inline def] Write
+\[
+\varphi_q\theta_q
+\]
+for the grounded goal specification obtained from the bound query.
+
+[formal def] Define a query-specific BDI plan-generation problem as
+\[
+\Pi_q
+=
+\langle
+D,
+O,
+s,
+\mathcal{L}_D,
+\widehat{q}
+\rangle,
+\]
+where \(O\) is the set of objects in the current instance,
+\(s\) is its current state,
+\(\mathcal{L}_D\) is an existing reusable domain-level plan library,
+and \(\widehat{q}\) is the bound goal query.
+
+[formal def] Define a solution to \(\Pi_q\) as a finite set of
+query-specific BDI plans
+\[
+\mathcal{Q}_q
+\]
+with a designated top-level goal for executing \(\widehat{q}\).
+
+[inline def] Define the library available for query execution as
+\[
+\mathcal{L}_D^q
+=
+\mathcal{L}_D\cup\mathcal{Q}_q.
+\]
+
+Require query reuse: \(\mathcal{Q}_q\) reuses
+\(\mathcal{L}_D\) without modifying or regenerating its domain-level
+plans.
+
+Require query correctness: successful execution of the top-level query
+goal from \(s\) under \(\mathcal{L}_D^q\) produces a finite execution
+trace \(\xi\) satisfying the grounded goal specification
+\(\varphi_q\theta_q\) under the semantics defined in Section~2.3.
+
+For an achievement query, require the grounded achievement condition
+to hold when execution completes.
+
+For a temporally extended query, require the complete finite execution
+trace to satisfy the grounded temporal specification.
+
+Define \(\Pi_q\) as unsolved when no supported query-specific plan set
+satisfying these requirements can be generated.

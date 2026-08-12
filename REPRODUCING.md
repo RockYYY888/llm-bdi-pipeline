@@ -74,9 +74,10 @@ PYTHONDONTWRITEBYTECODE=1 uv run python \
 ```
 
 The output directory contains `evaluation_results.json`, `result_macros.tex`,
-`result_domain_table.tex`, and `result_profile_table.tex`. The generator rejects
-incomplete or duplicated benchmark case sets and inconsistent semantic outcome
-counts rather than silently producing a partial table.
+`result_domain_table.tex`, and `result_profile_table.tex`. These files are
+generated verification views; the paper tables are maintained inline in its
+seven section sources and Technical Appendix. The generator rejects incomplete
+or duplicated benchmark case sets and inconsistent semantic outcome counts.
 
 ## Registered Experimental Parameters
 
@@ -178,10 +179,10 @@ query succeeds under all five seeds.
 
 Temporal compiler contrasts and five-seed runtime summaries are descriptive;
 the manuscript makes no continuous-measure superiority claim. Atomic coverage
-uses the paired test defined in the Technical Supplement. Documentation alone
+uses the paired test defined in the Technical Appendix. Documentation alone
 does not supply statistical evidence beyond these frozen outcomes.
 
-## Checklist Evidence Map
+## Reproducibility Evidence Map
 
 - All GP2PL-authored experiment, preprocessing, validation, and analysis source
   is included in `src/`, `scripts/`, and `tests/`, with the exact environment in
@@ -199,7 +200,7 @@ does not supply statistical evidence beyond these frozen outcomes.
 
 ## Anonymous Submission and Public Release
 
-AAAI review material must not point to a named public repository. The anonymous
+AAMAS review material must not point to a named public repository. The anonymous
 submission is accompanied by an anonymized code-and-data archive. The
 camera-ready manuscript enables the conditional link to
 <https://github.com/daidaibunny/gp2pl>.

@@ -8,7 +8,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_ROOT = PROJECT_ROOT / "paper_artifacts/gp2pl_evaluation/v1"
 PAPER_RESULT_FILES = (
-	PROJECT_ROOT / "latex_code/aamas_method_paper/sections/evaluation_results.json",
+	PROJECT_ROOT / "paper_artifacts/gp2pl_evaluation/v1/evaluation_results.json",
 	PROJECT_ROOT / "latex_code/aamas_method_paper/figures/fig2_evaluation.diagnostic.json",
 	PROJECT_ROOT / "latex_code/aamas_method_paper/figures/fig2_evaluation.metadata.json",
 	PROJECT_ROOT / "latex_code/aamas_method_paper/figures/fig3_evaluation.metadata.json",

@@ -1,0 +1,60 @@
+\section{Related Work}
+
+\subsection{Plan Generation for BDI Agents}
+
+Review the traditional use of manually specified plan libraries as the
+procedural knowledge used by BDI agents for means--ends reasoning.
+
+Review planning-based approaches that reduce this engineering burden by
+constructing or selecting behaviour when an agent encounters a goal that
+cannot be handled directly by its existing plans.
+
+Discuss approaches that invoke a classical planner during BDI execution
+to obtain a plan for the current state and goal.
+
+Discuss recent work that incorporates generalized planning into BDI
+means--ends reasoning to obtain more general behaviour for goal
+achievement.
+
+Identify the main distinction in when the generated behaviour is used:
+these approaches primarily employ planning as part of reasoning for a
+current goal, whereas GP2PL uses planning knowledge to construct
+domain-level procedural knowledge before later goal invocations.
+
+Identify the main distinction in the generated representation:
+GP2PL produces parameterised and context-sensitive BDI plan templates,
+including reusable subsidiary-goal structure, rather than only a plan
+for one grounded problem instance.
+
+Position GP2PL as generating a reusable BDI plan library that remains
+available across different objects, states, and future goal requests,
+while retaining ordinary BDI plan-library execution.
+
+
+\subsection{Generalized Planning}
+
+Review generalized-planning approaches that generate policies, programs, or reusable subgoal behaviour across families of planning instances.
+
+Position generalized planning as the source of reusable behavioural knowledge used for BDI plan-library generation.
+
+Distinguish standalone generalized policies from BDI libraries containing context-sensitive plans and callable subsidiary goals.
+
+
+\subsection{Temporally Extended Goals}
+
+Review work that gives temporally extended goals explicit semantics in agent programming.
+
+Review planning approaches that compile or search over temporal specifications.
+
+Distinguish complete temporal strategy synthesis from coordinating reusable BDI plans to satisfy an accepted temporal goal.
+
+Position temporal monitoring as a mechanism for controlling execution of the generated BDI library rather than replacing the library with a temporal planner.
+
+
+\subsection{Natural Language for Temporal Goals}
+
+Review approaches that translate natural-language instructions into temporal specifications.
+
+Position natural-language translation as the goal-input interface rather than the central plan-library-generation problem.
+
+Distinguish specification translation from the subsequent generation, composition, and execution of BDI plans.

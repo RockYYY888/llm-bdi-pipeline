@@ -44,7 +44,7 @@ DEFAULT_OUTPUT_JSON = (
 	/ "paper_artifacts/gp2pl_evaluation/v1/"
 	/ "raw_moose_extension_five_seed_summary.json"
 )
-DEFAULT_LATEX_OUTPUT_DIR = PROJECT_ROOT / "latex_code/aamas_method_paper/sections"
+DEFAULT_LATEX_OUTPUT_DIR = PROJECT_ROOT / "artifacts/evaluation_tables"
 DEFAULT_SUMMARY_FILES = {
 	0: (
 		PROJECT_ROOT

@@ -23,7 +23,7 @@ implementation and manuscript:
   semantics. Update it in the same commit whenever an Input schema, parameter
   semantic, DFA capability, query-wrapper contract, or temporal evaluation
   oracle changes.
-- `docs/aaai_paper_narrative_outline.md` is the canonical AAAI manuscript
+- `docs/aamas_paper_narrative_outline.md` is the canonical AAMAS 2027 manuscript
   narrative, section contract, claim boundary, result-insertion contract, and
   page-budget plan. Every paper update must follow this outline. When a better
   writing strategy is adopted, update the outline in the same commit as the
@@ -52,14 +52,14 @@ Clingo, AgentSpeak(L), and Jason are concrete instantiations of those interfaces
 Keep internal paths, command-line options, hashes, worker scheduling, and class
 names in the technical or code-and-data appendix.
 
-The canonical technical supplement is
-`latex_code/aamas_method_paper/technical_appendix.tex`. Public reproducibility
+The canonical technical appendix is
+`latex_code/aamas_method_paper/appendix/technical_appendix.tex`. Public reproducibility
 evidence lives under `paper_artifacts/temporal_goal_benchmark/v1`,
 `paper_artifacts/temporal_semantic_conformance/v1`, and
 `paper_artifacts/gp2pl_evaluation/v1`. GP2PL code uses Apache-2.0 and original
 GP2PL data uses CC BY 4.0; third-party PDDL and MOOSE files retain upstream
 terms and must be fetched at pinned revisions. The camera-ready public repository
-is `https://github.com/daidaibunny/gp2pl`, but anonymous AAAI paper and supplement
+is `https://github.com/daidaibunny/gp2pl`, but anonymous AAMAS paper and appendix
 PDFs must not expose that identifying URL. Keep the main-paper artifact statement
 behind the camera-ready-only conditional.
 

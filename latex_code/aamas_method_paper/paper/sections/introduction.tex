@@ -1,0 +1,79 @@
+\section{Introduction}
+
+Classical STRIPS planning computes an action sequence for one grounded problem
+\cite{FikesNilsson1971STRIPS}; generalized planning amortizes this effort by
+learning reusable behavior for a family of related problems
+\cite{Srivastava2011DirectedSearch,Chen2026Moose}. Belief--Desire--Intention
+(BDI) agents encode reusable behavior in plan libraries that connect events and
+belief contexts to actions and subsidiary goals
+\cite{Rao1996AgentSpeak,MeneguzziDeSilva2015PlanningBDI}. Traditionally,
+developers supply these libraries by encoding domain-specific behavior and
+anticipating applicable situations before deployment, creating a substantial
+knowledge-engineering burden
+\cite{Meneguzzi2004PropositionalPlanning,MeneguzziDeSilva2015PlanningBDI}.
+Generalized-planning evidence offers a basis for automating this construction.
+Given a planning domain $D$ and training instances
+$\mathcal I_{\mathrm{train}}$, an external generalized-planning backend produces
+raw singleton-goal policy evidence $\mathcal E_{\mathrm{raw}}$. This evidence
+encodes procedures for individual achievements under particular conditions,
+but need not provide the callable, context-indexed subsidiary modules or
+composition guarantees required by an executable BDI library.
+
+GP2PL addresses this representation gap as shown in
+Figure~\ref{fig:architecture}. It compiles the evidence once into a certified,
+reusable atomic module core, then reuses that core when compiling each bound
+query into the same maintained library. A query may be an achievement
+condition or a temporally extended goal (TEG) \cite{Hindriks2009TemporalGoals}.
+A bound query assigns each parameter a type-compatible domain object at
+invocation; no quantification is implied.
+
+\begin{figure}[htbp]
+\centering
+\IfFileExists{\gpplfigureonepath}{%
+\includegraphics[width=\columnwidth]{\gpplfigureonepath}%
+}{%
+\fbox{\parbox[c][1.40in][c]{0.92\columnwidth}{\centering
+Figure 1 artwork placeholder\\[5pt]
+Single-column GP2PL overview\\
+Domain compilation $+$ query-specific compilation}}
+}
+\caption{GP2PL separates reusable domain compilation from query-specific
+temporal compilation. A domain model, training instances, and singleton-goal
+evidence are compiled once into a reusable atomic core; each bound query adds
+query-local plans to the sole maintained library without relearning the core.}
+\Description{Two-stage overview of GP2PL. Domain inputs compile into a reusable
+atomic core, while a bound temporal query compiles into plans appended to the
+same maintained BDI plan library.}
+\label{fig:architecture}
+\end{figure}
+
+\begin{figure*}[t!]
+\centering
+\IfFileExists{\gpplfiguretwopath}{%
+\includegraphics[width=\textwidth]{\gpplfiguretwopath}%
+}{%
+\fbox{\parbox[c][2.75in][c]{0.96\textwidth}{\centering
+Figure 2 artwork placeholder\\[8pt]
+(a) Query-independent atomic-core compiler\qquad
+(b) Bound query $\rightarrow$ DFA guard $\rightarrow$ certified repair tree}}
+}
+\caption{The two GP2PL compiler stages. (a) A domain and normalized
+singleton-goal evidence yield a certified atomic core. (b) A bound query yields
+DFA-guided repair and dispatch plans that extend the maintained library.}
+\Description{Detailed two-panel compiler diagram. The left panel traces
+evidence and action schemas to a certified atomic core; the right panel traces
+a bound temporal query through a DFA to query-local repair controllers.}
+\label{fig:compiler-stages}
+\end{figure*}
+
+GP2PL connects language-to-logic translation, generalized policies, answer-set
+optimization, AgentSpeak semantics, and \ltlf{} automata to produce one
+maintained library. Its four contributions are: a compiler that lifts incomplete
+singleton-goal evidence into a compact, internally closed atomic core; a
+certificate system for schema executability and achievement, recursive
+progress, target-preserving resource discharge, and preservation-safe temporal
+composition; a typed translation contract mapping controlled language to
+bound achievement and TEG specifications, evaluated by exact finite-trace
+language equivalence on a TEG benchmark; and a DFA-guided query compiler
+that appends query-local controllers to the maintained BDI library without
+relearning the core.

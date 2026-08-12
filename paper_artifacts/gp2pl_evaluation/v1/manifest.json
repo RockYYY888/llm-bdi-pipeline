@@ -54,6 +54,7 @@
     "atomic_libraries/transport/plan_library.asl",
     "atomic_libraries/transport/plan_library.json",
     "certificate_challenge_summary.json",
+    "evaluation_results.json",
     "execution_distribution.json",
     "external_reference_results.json",
     "five_seed_full_compiler_summary.json",

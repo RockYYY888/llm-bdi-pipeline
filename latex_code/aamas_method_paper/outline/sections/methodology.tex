@@ -1,0 +1,242 @@
+\section{Methodology}
+
+\subsection{Overview}
+
+Separate GP2PL into domain-level plan-library generation and
+query-specific goal realisation, corresponding to the two problems
+defined in Section~3.
+
+Obtain reusable behavioural evidence from representative planning
+instances and compile it once into a reusable BDI plan library
+\(\mathcal{L}_D\).
+
+Reuse \(\mathcal{L}_D\) for later achievement and temporally extended
+goal queries without regenerating the domain-level plans.
+
+Generate only query-specific coordination plans \(\mathcal{Q}_q\) for
+each new query and execute the query with
+\[
+\mathcal{L}_D^q
+=
+\mathcal{L}_D \cup \mathcal{Q}_q.
+\]
+
+Separate the method accordingly into constructing the reusable
+domain library and generating query-specific behaviour over that
+library.
+
+
+\subsection{From Generalized Behaviour to BDI Plan Candidates}
+
+Use a generalized-planning method to obtain reusable behaviour from
+the training instances \(\mathcal{I}_{\mathrm{train}}\).
+
+[inline def] Represent the resulting generalized-planning evidence as
+a finite set
+\[
+\mathcal{E}
+=
+\{e_1,\ldots,e_n\},
+\]
+where each evidence rule has the form
+\[
+e
+=
+\langle g,C,\beta\rangle.
+\]
+
+Here \(g\) is an atomic achievement-goal template, \(C\) describes the
+conditions under which the behaviour applies, and \(\beta\) is a
+parameterised sequence of domain actions for achieving \(g\).
+
+Normalize the evidence against the domain vocabulary and type
+hierarchy while preserving shared variables and declared constants.
+
+Transform each validated evidence rule into a BDI plan candidate
+\[
+r_e
+=
++!g:C\leftarrow\beta.
+\]
+
+[inline def] Let
+\[
+\mathcal{C}_{E}
+\]
+denote the set of BDI plan candidates obtained directly from
+generalized-planning evidence.
+
+Treat these plans as candidates rather than as the final BDI library,
+because the available evidence may cover only part of the domain goal
+interface \(\Gamma_D\).
+
+
+\subsection{Completing the Reusable Plan Library}
+
+[inline def] Let
+\[
+\Gamma_E
+=
+\{g \mid \langle g,C,\beta\rangle\in\mathcal{E}\}
+\]
+denote the achievement-goal templates directly supported by the
+generalized-planning evidence.
+
+Identify required goal templates
+\[
+g\in\Gamma_D\setminus\Gamma_E
+\]
+that are not directly supported by the available evidence.
+
+Use the domain action model to construct reusable BDI plan candidates
+for these missing achievement goals.
+
+Allow generated plans to invoke subsidiary achievement goals when
+intermediate conditions can themselves be achieved through reusable
+plans.
+
+Combine evidence-derived and domain-derived plans into a common
+candidate space for constructing the domain-level library.
+
+Select a reusable plan library
+\[
+\mathcal{L}_D
+\]
+that covers the required domain goal interface \(\Gamma_D\).
+
+Require every subsidiary achievement-goal call in
+\(\mathcal{L}_D\) to resolve to a type-compatible plan in the same
+library.
+
+Require selected plans to be executable under their stated contexts
+and to establish their declared achievement goals when they complete
+successfully.
+
+Require recursive plan structures to make progress toward completion.
+
+Prefer a compact library when multiple plan collections satisfy the
+same goal-coverage and execution requirements.
+
+Return no library when these requirements cannot be satisfied.
+
+
+\subsection{From Natural-Language Queries to Formal Goals}
+
+Receive a controlled natural-language request together with its declared
+parameters, parameter types, and the domain vocabulary.
+
+Translate the request into a parameterised goal specification
+\[
+\varphi_q\in\Phi,
+\]
+representing either an achievement goal or a temporally extended goal.
+
+Require the translated specification to use only predicates, argument
+types, and temporal operators supported by the domain and the goal
+language defined in Section~2.3.
+
+Require the translated specification to preserve the declared query
+parameters and their typing constraints.
+
+
+At query invocation, apply a type-compatible binding
+\[
+\theta_q
+\]
+that maps the declared parameters to objects in the current problem
+instance.
+
+Obtain the bound query
+\[
+\widehat{q}=(\varphi_q,\theta_q)
+\]
+used by the query-specific goal-realisation stage.
+
+\subsection{Query-Specific Goal Realisation}
+
+Treat achievement and temporally extended goals through the same
+query-realisation process.
+
+[inline def] Define the execution specification for a bound query as
+\[
+\psi_q
+=
+\begin{cases}
+F(\varphi_q\theta_q),
+&
+\varphi_q\in\Phi_{\mathrm{ach}},\\[2mm]
+\varphi_q\theta_q,
+&
+\varphi_q\in\Phi_{\mathrm{teg}}.
+\end{cases}
+\]
+
+Construct a deterministic finite automaton (DFA) for the finite traces
+satisfying \(\psi_q\),
+\[
+\mathcal{D}_q
+=
+\langle
+Q_q^{\mathrm{dfa}},
+2^{AP_q},
+\delta_q,
+q_q^0,
+F_q
+\rangle,
+\]
+where \(Q_q^{\mathrm{dfa}}\) is the set of DFA states,
+\(q_q^0\) is the initial state,
+\(\delta_q\) is the transition function, and
+\(F_q\) is the set of accepting states.
+
+Use the current DFA state to represent the progress already made toward
+satisfying the bound query.
+
+Identify DFA transitions that make progress toward an accepting state.
+
+[inline def] Represent the conditions required for a progress transition
+with guard \(\chi\) as
+\[
+\mathcal{O}_{\chi}
+=
+\langle P_{\chi}^{+},P_{\chi}^{-}\rangle,
+\]
+where \(P_{\chi}^{+}\) contains conditions that must be established and
+\(P_{\chi}^{-}\) contains conditions that must remain false.
+
+Reuse achievement plans from \(\mathcal{L}_D\) to establish the
+positive conditions required by a progress transition.
+
+Treat negative conditions as constraints on execution rather than as
+new negative achievement goals.
+
+Consider the possible effects of selected plans when several conditions
+must hold for the same transition.
+
+Order plan executions when necessary so that achieving a later
+condition does not invalidate conditions established earlier.
+
+Reject a progress transition when its required conditions cannot be
+safely realised using the available domain-level plans.
+
+Generate a finite set of query-specific BDI plans
+\[
+\mathcal{Q}_q
+\]
+that dispatches reusable plans according to the current DFA state and
+the progress transitions available from that state.
+
+Append the query-specific plans to the existing domain library,
+\[
+\mathcal{L}_D^q
+=
+\mathcal{L}_D\cup\mathcal{Q}_q,
+\]
+without modifying or regenerating the reusable plans in
+\(\mathcal{L}_D\).
+
+Update the DFA state as primitive domain actions change the observed
+execution state.
+
+Complete the query successfully only when the DFA reaches an accepting
+state.

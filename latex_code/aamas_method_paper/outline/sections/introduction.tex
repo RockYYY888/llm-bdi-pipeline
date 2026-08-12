@@ -1,0 +1,29 @@
+\section{Introduction}
+
+Introduce BDI agents as a framework in which plan libraries provide the reusable procedural knowledge for achieving goals under different belief contexts.
+
+Explain that BDI plan libraries are traditionally handcrafted by developers who must encode domain behaviour and anticipate applicable contexts, creating a substantial knowledge-engineering burden when adapting agents to new domains.
+
+Relate this engineering burden to the practical difficulty of deploying BDI agents when a sufficiently complete and reliable plan library is not already available.
+
+Distinguish a grounded plan for one planning instance from a reusable BDI plan template that must apply across different objects, states, and future goal invocations.
+
+Explain that generating reusable plan templates is harder than solving one planning instance because applicability conditions, parameters, subsidiary-goal structure, and correctness must remain valid beyond the state in which the plan was generated.
+
+Review existing BDI-planning approaches that invoke planners at runtime or use planning during means--ends reasoning to obtain behaviour for the current goal.
+
+Identify reusable plan-library generation as a different problem because the generated behaviour must remain available inside the BDI agent and support future goal invocations.
+
+Motivate generalized planning as a promising source of reusable behaviour because it generalizes across families of related planning instances rather than solving only one grounded problem.
+
+Identify the remaining gap between generalized-planning behaviour and an executable BDI plan library because the available behaviour may not provide all reusable subsidiary plans required by the agent.
+
+Introduce achievement goals and temporally extended goals as the two classes of user queries supported by the generated plan library.
+
+Introduce controlled natural-language queries as the user-facing way to invoke the generated library for both achievement and temporally extended goals.
+
+Introduce GP2PL as a framework that first transforms generalized-planning behaviour and domain knowledge into a reusable BDI plan library and then reuses that library to handle subsequent user queries.
+
+Present the generation of a reusable and validated BDI plan library from generalized-planning behaviour as the first contribution.
+
+Present a natural-language query interface that reuses the same generated library for both achievement and temporally extended goals as the second contribution.
